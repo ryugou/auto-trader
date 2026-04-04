@@ -13,3 +13,6 @@ rust_decimal = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = "1"
