@@ -1,2 +1,6 @@
 .vibepod/
 .worktrees/
+/target
+.env
+*.swp
+*.swo
