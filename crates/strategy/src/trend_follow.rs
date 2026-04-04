@@ -50,8 +50,8 @@ impl Strategy for TrendFollowV1 {
             return None;
         }
 
-        let sma_short = event.indicators.get("sma_20")?;
-        let sma_long = event.indicators.get("sma_50")?;
+        let sma_short = auto_trader_market::indicators::sma(history, self.ma_short_period)?;
+        let sma_long = auto_trader_market::indicators::sma(history, self.ma_long_period)?;
         let rsi = event.indicators.get("rsi_14")?;
 
         let prev_closes = &history[..history.len() - 1];

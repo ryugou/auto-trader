@@ -1,6 +1,5 @@
-//! Integration test: requires PostgreSQL running on localhost:5432
-//! Run: docker compose up -d db
-//! Then: cargo test --test integration_test
+//! Integration tests for paper trading pipeline.
+//! These tests run in-memory and do not require external services.
 
 use auto_trader_core::event::SignalEvent;
 use auto_trader_core::executor::OrderExecutor;
