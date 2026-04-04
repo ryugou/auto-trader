@@ -6,11 +6,9 @@ pub struct MacroUpdate {
     pub adjustments: std::collections::HashMap<String, String>,
 }
 
+#[async_trait::async_trait]
 pub trait Strategy: Send + 'static {
     fn name(&self) -> &str;
-    fn on_price(
-        &mut self,
-        event: &PriceEvent,
-    ) -> impl std::future::Future<Output = Option<Signal>> + Send;
+    async fn on_price(&mut self, event: &PriceEvent) -> Option<Signal>;
     fn on_macro_update(&mut self, update: &MacroUpdate);
 }
