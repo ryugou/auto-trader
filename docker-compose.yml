@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: auto-trader
+      POSTGRES_PASSWORD: auto-trader
+      POSTGRES_DB: auto_trader
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auto-trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  auto-trader:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CONFIG_PATH: /app/config/default.toml
+      OANDA_API_KEY: ${OANDA_API_KEY}
+      OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID}
+      RUST_LOG: info
+    volumes:
+      - ./config:/app/config:ro
+
+volumes:
+  pgdata:
