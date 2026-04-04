@@ -101,6 +101,7 @@ struct TradeRow {
     exit_reason: Option<String>,
     mode: String,
     status: String,
+    #[allow(dead_code)]
     created_at: DateTime<Utc>,
 }
 

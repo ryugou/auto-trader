@@ -1,5 +1,4 @@
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 
 pub fn sma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     if prices.len() < period {
@@ -48,6 +47,7 @@ pub fn rsi(prices: &[Decimal], period: usize) -> Option<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::prelude::ToPrimitive;
     use rust_decimal_macros::dec;
 
     #[test]
