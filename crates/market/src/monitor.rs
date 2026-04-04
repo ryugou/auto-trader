@@ -31,7 +31,13 @@ impl MarketMonitor {
             for pair in &self.pairs {
                 match self.fetch_and_emit(pair).await {
                     Ok(()) => {}
-                    Err(e) => tracing::error!("monitor error for {pair}: {e}"),
+                    Err(e) => {
+                        if self.tx.is_closed() {
+                            tracing::info!("price channel closed, stopping monitor");
+                            return Ok(());
+                        }
+                        tracing::error!("monitor error for {pair}: {e}");
+                    }
                 }
             }
         }

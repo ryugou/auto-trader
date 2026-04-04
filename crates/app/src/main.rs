@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("OANDA_API_KEY must be set");
     let account_id = std::env::var("OANDA_ACCOUNT_ID")
         .unwrap_or_else(|_| config.oanda.account_id.clone());
-    let oanda = OandaClient::new(&config.oanda.api_url, &account_id, &api_key);
+    let oanda = OandaClient::new(&config.oanda.api_url, &account_id, &api_key)?;
 
     // Market monitor
     let pairs: Vec<Pair> = config.pairs.active.iter().map(|s| Pair::new(s)).collect();

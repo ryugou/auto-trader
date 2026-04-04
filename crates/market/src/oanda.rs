@@ -32,21 +32,20 @@ struct OandaCandleMid {
 }
 
 impl OandaClient {
-    pub fn new(base_url: &str, account_id: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, account_id: &str, api_key: &str) -> anyhow::Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "Authorization",
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))?,
         );
         let client = reqwest::Client::builder()
             .default_headers(headers)
-            .build()
-            .unwrap();
-        Self {
+            .build()?;
+        Ok(Self {
             client,
             base_url: base_url.to_string(),
             account_id: account_id.to_string(),
-        }
+        })
     }
 
     pub async fn get_candles(
@@ -110,10 +109,24 @@ impl OandaClient {
 
         let prices = resp["prices"]
             .as_array()
-            .ok_or_else(|| anyhow::anyhow!("no prices in response"))?;
-        let mid = &prices[0];
-        let bid = Decimal::from_str(mid["bids"][0]["price"].as_str().unwrap_or("0"))?;
-        let ask = Decimal::from_str(mid["asks"][0]["price"].as_str().unwrap_or("0"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing prices array in OANDA pricing response"))?;
+        let mid = prices
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("empty prices array in OANDA pricing response"))?;
+
+        let bid_str = mid["bids"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|b| b["price"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing bid price in OANDA pricing response"))?;
+        let ask_str = mid["asks"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|a| a["price"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing ask price in OANDA pricing response"))?;
+
+        let bid = Decimal::from_str(bid_str)?;
+        let ask = Decimal::from_str(ask_str)?;
         Ok((bid + ask) / Decimal::from(2))
     }
 }
