@@ -1,0 +1,1 @@
+/workspace/target/debug/libauto_trader_executor.rlib: /workspace/crates/core/src/config.rs /workspace/crates/core/src/event.rs /workspace/crates/core/src/executor.rs /workspace/crates/core/src/lib.rs /workspace/crates/core/src/strategy.rs /workspace/crates/core/src/types.rs /workspace/crates/executor/src/lib.rs

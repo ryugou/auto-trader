@@ -1,0 +1,13 @@
+[package]
+name = "auto-trader-db"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+auto-trader-core = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
