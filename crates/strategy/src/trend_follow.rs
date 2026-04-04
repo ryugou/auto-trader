@@ -154,4 +154,58 @@ mod tests {
         let event = make_price_event("EUR_USD", dec!(1.10), HashMap::new());
         assert!(strat.on_price(&event).await.is_none());
     }
+
+    #[tokio::test]
+    async fn golden_cross_with_custom_ma_periods() {
+        // ma_short=3, ma_long=5 (non-default) to verify configurable periods work
+        let mut strat = TrendFollowV1::new(
+            "test".to_string(), 3, 5, dec!(70), vec![Pair::new("USD_JPY")],
+        );
+
+        // Feed 6 flat prices to fill history (need ma_long+1=6)
+        for _ in 0..6 {
+            let event = make_price_event("USD_JPY", dec!(150), HashMap::new());
+            assert!(strat.on_price(&event).await.is_none());
+        }
+
+        // 7th price: spike up to trigger golden cross
+        // prev: sma_3=150, sma_5=150 (equal)
+        // curr: sma_3=(150+150+160)/3≈153.33, sma_5=(150+150+150+150+160)/5=152
+        // golden_cross: prev_short<=prev_long && curr_short>curr_long = true
+        let mut indicators = HashMap::new();
+        indicators.insert("rsi_14".to_string(), dec!(50)); // RSI below threshold
+        let event = make_price_event("USD_JPY", dec!(160), indicators);
+        let signal = strat.on_price(&event).await;
+
+        assert!(signal.is_some(), "should emit Long signal on golden cross with custom MA periods");
+        let signal = signal.unwrap();
+        assert_eq!(signal.direction, Direction::Long);
+        assert_eq!(signal.strategy_name, "test");
+    }
+
+    #[tokio::test]
+    async fn death_cross_with_custom_ma_periods() {
+        let mut strat = TrendFollowV1::new(
+            "test".to_string(), 3, 5, dec!(70), vec![Pair::new("USD_JPY")],
+        );
+
+        // Feed 6 flat prices
+        for _ in 0..6 {
+            let event = make_price_event("USD_JPY", dec!(150), HashMap::new());
+            assert!(strat.on_price(&event).await.is_none());
+        }
+
+        // 7th price: drop to trigger death cross
+        // prev: sma_3=150, sma_5=150 (equal)
+        // curr: sma_3=(150+150+140)/3≈146.67, sma_5=(150+150+150+150+140)/5=148
+        // death_cross: prev_short>=prev_long && curr_short<curr_long = true
+        let mut indicators = HashMap::new();
+        indicators.insert("rsi_14".to_string(), dec!(50)); // RSI above (100-70)=30
+        let event = make_price_event("USD_JPY", dec!(140), indicators);
+        let signal = strat.on_price(&event).await;
+
+        assert!(signal.is_some(), "should emit Short signal on death cross with custom MA periods");
+        let signal = signal.unwrap();
+        assert_eq!(signal.direction, Direction::Short);
+    }
 }
