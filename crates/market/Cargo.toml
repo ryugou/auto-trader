@@ -1,0 +1,18 @@
+[package]
+name = "auto-trader-market"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+auto-trader-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = "1"

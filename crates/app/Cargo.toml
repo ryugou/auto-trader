@@ -1,0 +1,22 @@
+[package]
+name = "auto-trader"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+auto-trader-core = { workspace = true }
+auto-trader-db = { workspace = true }
+auto-trader-market = { workspace = true }
+auto-trader-strategy = { workspace = true }
+auto-trader-executor = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rust_decimal = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = "1"
+chrono = { workspace = true }
+uuid = { workspace = true }

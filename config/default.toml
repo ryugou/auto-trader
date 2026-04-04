@@ -1,0 +1,23 @@
+[oanda]
+api_url = "https://api-fxpractice.oanda.com"
+account_id = ""  # set via OANDA_ACCOUNT_ID env var
+
+[vegapunk]
+endpoint = "http://fuj11-agent-01:3000"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://auto-trader:auto-trader@db:5432/auto_trader"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+active = ["USD_JPY", "EUR_USD"]
+
+[[strategies]]
+name = "trend_follow_v1"
+enabled = true
+mode = "paper"
+pairs = ["USD_JPY"]
+params = { ma_short = 20, ma_long = 50, rsi_threshold = 70 }
