@@ -18,6 +18,7 @@ pub struct SwingLLMv1 {
     gemini_api_key: String,
     gemini_model: String,
     last_check: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    consecutive_failures: HashMap<String, u32>,
     check_interval: chrono::Duration,
     latest_macro: Option<String>,
 }
@@ -46,6 +47,7 @@ impl SwingLLMv1 {
             gemini_api_key,
             gemini_model,
             last_check: HashMap::new(),
+            consecutive_failures: HashMap::new(),
             check_interval: chrono::Duration::hours(4),
             latest_macro: None,
         }
@@ -53,8 +55,21 @@ impl SwingLLMv1 {
 
     fn should_check(&self, pair: &str) -> bool {
         let now = chrono::Utc::now();
-        match self.last_check.get(pair) {
+        let base_ok = match self.last_check.get(pair) {
             Some(last) => now - *last >= self.check_interval,
+            None => true,
+        };
+        if !base_ok {
+            return false;
+        }
+        // Exponential backoff on consecutive failures: 5min, 10min, 20min, ..., capped at 4h
+        let failures = self.consecutive_failures.get(pair).copied().unwrap_or(0);
+        if failures == 0 {
+            return true;
+        }
+        let backoff_mins = (5i64 * 2i64.saturating_pow(failures.min(6) - 1)).min(240);
+        match self.last_check.get(pair) {
+            Some(last) => now - *last >= chrono::Duration::minutes(backoff_mins),
             None => true,
         }
     }
@@ -179,9 +194,17 @@ impl Strategy for SwingLLMv1 {
             .query_vegapunk_and_llm(&event.pair, event.candle.close)
             .await;
 
-        // Update last_check only after successful query to allow retry on failure
-        if result.is_ok() {
-            self.last_check.insert(pair_key, chrono::Utc::now());
+        // Track success/failure for backoff; update last_check on both
+        match &result {
+            Ok(_) => {
+                self.consecutive_failures.remove(&pair_key);
+                self.last_check.insert(pair_key.clone(), chrono::Utc::now());
+            }
+            Err(_) => {
+                let count = self.consecutive_failures.entry(pair_key.clone()).or_insert(0);
+                *count = count.saturating_add(1);
+                self.last_check.insert(pair_key.clone(), chrono::Utc::now());
+            }
         }
 
         match result {

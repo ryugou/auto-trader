@@ -339,24 +339,26 @@ params = { holding_days_max = 14 }
 | 機能 | 状況 | 備考 |
 |------|------|------|
 | OANDA デモ API 接続（価格取得） | ✅ 実装済み | candle 取得 + price 取得 |
-| market-monitor（定期ポーリング + 指標算出） | ✅ 実装済み | SMA/EMA/RSI。candle の DB 保存は **未実装** |
-| strategy-engine（PriceEvent → SignalEvent） | ⚠️ 部分実装 | 基本ディスパッチは動作。**signal conflict rules 未実装**（同一バー相反シグナル無視、close 優先） |
+| market-monitor（定期ポーリング + 指標算出） | ✅ 実装済み | SMA/EMA/RSI + candle DB 保存 |
+| strategy-engine（PriceEvent → SignalEvent） | ✅ 実装済み | ディスパッチ + MacroUpdate broadcast |
 | trend_follow_v1（MA クロス + RSI） | ✅ 実装済み | 回帰テスト付き |
-| swing_llm_v1（Vegapunk + Gemini Flash） | ❌ 未実装 | |
-| paper-trader（模擬取引） | ⚠️ 部分実装 | execute/close_position は動作。**SL/TP 監視・自動決済は未実装**（ポジションが閉じない） |
-| recorder（TradeEvent → PostgreSQL） | ⚠️ 部分実装 | open/close 記録と daily_summary は動作。**max_drawdown 日次計算は未実装** |
-| vegapunk-client（gRPC） | ❌ 未実装 | proto は Vegapunk リポジトリに存在 |
-| macro-analyst（経済指標 + ニュース） | ❌ 未実装 | |
-| backtest（過去データリプレイ） | ❌ 未実装 | |
+| swing_llm_v1（Vegapunk + Gemini Flash） | ✅ 実装済み | failure backoff 付き。デフォルト無効 |
+| paper-trader（模擬取引） | ✅ 実装済み | execute/close_position + SL/TP 自動決済（position_monitor） |
+| recorder（TradeEvent → PostgreSQL） | ✅ 実装済み | open/close 記録 + daily_summary + max_drawdown 日次バッチ |
+| vegapunk-client（gRPC） | ✅ 実装済み | 単一 Channel 共有、connect/search/ingest/feedback/merge |
+| macro-analyst（経済指標 + ニュース） | ✅ 実装済み | ニュース要約 + Vegapunk ingest。カレンダーは stub。デフォルト無効 |
+| backtest（過去データリプレイ） | ✅ 実装済み | DB candle リプレイ + レポート（execution_failures 含む） |
 | dashboard-api + dashboard-ui | ❌ 未実装 | 優先度低。トレードループ稼働後に着手 |
 | docker-compose デプロイ | ✅ 実装済み | Postgres + auto-trader |
 
-### 安定運用に必要な修正（実装済みコンポーネント内）
+### 安定運用に必要な修正（実装済み）
 
-- price_history の無制限成長 → VecDeque で rolling window 化
-- monitor の `candles.last().unwrap()` → panic リスク除去
-- shutdown が abort のみ → graceful drain
-- OANDA クライアントにリトライ・タイムアウト設定
+- ✅ price_history の無制限成長 → VecDeque で rolling window 化
+- ✅ monitor の `candles.last().unwrap()` → panic リスク除去
+- ✅ shutdown が abort のみ → graceful drain（5s タイムアウト付き）
+- ✅ OANDA クライアントにリトライ・タイムアウト設定
+- ✅ 全 HTTP/gRPC クライアントに 30s タイムアウト設定
+- ✅ Gemini API キーを URL からヘッダーに移行
 
 ### 含まない
 

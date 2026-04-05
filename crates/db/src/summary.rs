@@ -46,9 +46,9 @@ pub async fn update_daily_max_drawdown(
         )
         .bind(max_dd)
         .bind(date)
-        .bind(&strategy)
-        .bind(&pair)
-        .bind(&mode)
+        .bind(strategy.as_str())
+        .bind(pair.as_str())
+        .bind(mode.as_str())
         .execute(pool)
         .await?;
 
@@ -68,9 +68,9 @@ pub async fn update_daily_max_drawdown(
                    SET max_drawdown = $8"#,
             )
             .bind(date)
-            .bind(&strategy)
-            .bind(&pair)
-            .bind(&mode)
+            .bind(strategy.as_str())
+            .bind(pair.as_str())
+            .bind(mode.as_str())
             .bind(total_trades as i32)
             .bind(total_wins as i32)
             .bind(total_pnl)

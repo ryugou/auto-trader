@@ -74,7 +74,7 @@ async fn channel_pipeline() {
 }
 
 #[tokio::test]
-async fn sl_tp_auto_close() {
+async fn paper_trader_close_at_sl_price() {
     let trader = PaperTrader::new(dec!(100000), dec!(25));
 
     // Open a long position

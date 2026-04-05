@@ -14,7 +14,10 @@ pub struct EconomicEvent {
 impl EconomicCalendar {
     pub fn new() -> Self {
         Self {
-            _client: reqwest::Client::new(),
+            _client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 

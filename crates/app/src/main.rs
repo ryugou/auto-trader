@@ -98,8 +98,13 @@ async fn main() -> anyhow::Result<()> {
                     .and_then(|v| v.as_integer()).unwrap_or(14) as u32;
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
 
-                let gemini_api_key = std::env::var("GEMINI_API_KEY")
-                    .expect("GEMINI_API_KEY must be set for swing_llm strategy");
+                let gemini_api_key = match std::env::var("GEMINI_API_KEY") {
+                    Ok(value) if !value.trim().is_empty() => value,
+                    _ => {
+                        tracing::warn!("GEMINI_API_KEY not set or empty, skipping strategy: {}", sc.name);
+                        continue;
+                    }
+                };
                 let gemini_config = config.gemini.as_ref()
                     .expect("gemini config required for swing_llm");
 
@@ -160,33 +165,44 @@ async fn main() -> anyhow::Result<()> {
     let macro_rx = macro_tx.subscribe();
     let macro_analyst_handle = if config.macro_analyst.as_ref().is_some_and(|m| m.enabled) {
         let mac = config.macro_analyst.as_ref().unwrap();
-        let gemini_api_key = std::env::var("GEMINI_API_KEY")
-            .expect("GEMINI_API_KEY must be set for macro_analyst");
-        let gemini_config = config.gemini.as_ref()
-            .expect("gemini config required for macro_analyst");
-
-        let mut analyst = auto_trader_macro_analyst::analyst::MacroAnalyst::new(
-            mac.news_sources.clone(),
-            &gemini_config.api_url,
-            &gemini_api_key,
-            &gemini_config.model,
-        ).with_db(pool.clone());
-
-        // Clone from shared Vegapunk channel for macro event ingestion
-        if let Some(base) = &vegapunk_base {
-            let vp_for_macro = auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
-                base, &config.vegapunk.schema,
-            );
-            analyst = analyst.with_vegapunk(vp_for_macro);
-        }
-
-        let news_interval = std::time::Duration::from_secs(mac.news_interval_secs);
-        let macro_tx_clone = macro_tx.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) = analyst.run(macro_tx_clone, news_interval).await {
-                tracing::error!("macro analyst error: {e}");
+        let gemini_api_key = match std::env::var("GEMINI_API_KEY") {
+            Ok(value) if !value.trim().is_empty() => Some(value),
+            _ => {
+                tracing::warn!("GEMINI_API_KEY not set or empty, disabling macro analyst");
+                None
             }
-        }))
+        };
+        let gemini_config = config.gemini.as_ref();
+        match (gemini_api_key, gemini_config) {
+            (Some(_), None) | (None, _) => {
+                tracing::info!("macro analyst: missing GEMINI_API_KEY or gemini config, skipping");
+                None
+            }
+            (Some(api_key), Some(gemini_config)) => {
+                let mut analyst = auto_trader_macro_analyst::analyst::MacroAnalyst::new(
+                    mac.news_sources.clone(),
+                    &gemini_config.api_url,
+                    &api_key,
+                    &gemini_config.model,
+                ).with_db(pool.clone());
+
+                // Clone from shared Vegapunk channel for macro event ingestion
+                if let Some(base) = &vegapunk_base {
+                    let vp_for_macro = auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
+                        base, &config.vegapunk.schema,
+                    );
+                    analyst = analyst.with_vegapunk(vp_for_macro);
+                }
+
+                let news_interval = std::time::Duration::from_secs(mac.news_interval_secs);
+                let macro_tx_clone = macro_tx.clone();
+                Some(tokio::spawn(async move {
+                    if let Err(e) = analyst.run(macro_tx_clone, news_interval).await {
+                        tracing::error!("macro analyst error: {e}");
+                    }
+                }))
+            }
+        }
     } else {
         tracing::info!("macro analyst disabled");
         None
@@ -258,24 +274,27 @@ async fn main() -> anyhow::Result<()> {
             }
             match executor.execute(signal).await {
                 Ok(trade) => {
-                    // Ingest trade decision to Vegapunk
-                    if let Some(vp) = &vegapunk_client_exec {
-                        let mut vp = vp.lock().await;
-                        let direction_str = match trade.direction {
-                            Direction::Long => "ロング",
-                            Direction::Short => "ショート",
-                        };
-                        let text = format!(
-                            "{} {} 判断。trade_id: {}。エントリー価格: {}。SL: {}、TP: {}。戦略: {}",
-                            trade.pair, direction_str,
-                            trade.id, trade.entry_price, trade.stop_loss, trade.take_profit,
-                            trade.strategy_name
-                        );
-                        let channel = format!("{}-trades", trade.pair.0.to_lowercase());
-                        let timestamp = chrono::Utc::now().to_rfc3339();
-                        if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
-                            tracing::warn!("vegapunk ingest failed for trade open: {e}");
-                        }
+                    // Fire-and-forget Vegapunk ingestion (don't block trade execution)
+                    if let Some(vp) = vegapunk_client_exec.clone() {
+                        let trade_clone = trade.clone();
+                        tokio::spawn(async move {
+                            let mut vp = vp.lock().await;
+                            let direction_str = match trade_clone.direction {
+                                Direction::Long => "ロング",
+                                Direction::Short => "ショート",
+                            };
+                            let text = format!(
+                                "{} {} 判断。trade_id: {}。エントリー価格: {}。SL: {}、TP: {}。戦略: {}",
+                                trade_clone.pair, direction_str,
+                                trade_clone.id, trade_clone.entry_price, trade_clone.stop_loss, trade_clone.take_profit,
+                                trade_clone.strategy_name
+                            );
+                            let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
+                            let timestamp = chrono::Utc::now().to_rfc3339();
+                            if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
+                                tracing::warn!("vegapunk ingest failed for trade open: {e}");
+                            }
+                        });
                     }
                     if let Err(e) = trade_tx_clone.send(TradeEvent {
                         trade,
@@ -322,27 +341,30 @@ async fn main() -> anyhow::Result<()> {
                         ).await {
                             tracing::error!("upsert daily summary error: {e}");
                         }
-                        // Ingest trade result to Vegapunk
-                        if let Some(vp) = &vegapunk_client_recorder {
-                            let mut vp = vp.lock().await;
-                            let direction_str = match t.direction {
-                                Direction::Long => "ロング",
-                                Direction::Short => "ショート",
-                            };
-                            let holding = exit_at.signed_duration_since(t.entry_at);
-                            let text = format!(
-                                "{} {} 決済。trade_id: {}。{:?}。PnL: {} pips。保有時間: {}秒。戦略: {}",
-                                t.pair, direction_str,
-                                t.id, exit_reason,
-                                pnl_pips,
-                                holding.num_seconds(),
-                                t.strategy_name,
-                            );
-                            let channel = format!("{}-trades", t.pair.0.to_lowercase());
-                            let timestamp = exit_at.to_rfc3339();
-                            if let Err(e) = vp.ingest_raw(&text, "trade_result", &channel, &timestamp).await {
-                                tracing::warn!("vegapunk ingest failed for trade close: {e}");
-                            }
+                        // Fire-and-forget Vegapunk ingestion (don't block DB recording)
+                        if let Some(vp) = vegapunk_client_recorder.clone() {
+                            let t = t.clone();
+                            tokio::spawn(async move {
+                                let mut vp = vp.lock().await;
+                                let direction_str = match t.direction {
+                                    Direction::Long => "ロング",
+                                    Direction::Short => "ショート",
+                                };
+                                let holding = exit_at.signed_duration_since(t.entry_at);
+                                let text = format!(
+                                    "{} {} 決済。trade_id: {}。{:?}。PnL: {} pips。保有時間: {}秒。戦略: {}",
+                                    t.pair, direction_str,
+                                    t.id, exit_reason,
+                                    pnl_pips,
+                                    holding.num_seconds(),
+                                    t.strategy_name,
+                                );
+                                let channel = format!("{}-trades", t.pair.0.to_lowercase());
+                                let timestamp = exit_at.to_rfc3339();
+                                if let Err(e) = vp.ingest_raw(&text, "trade_result", &channel, &timestamp).await {
+                                    tracing::warn!("vegapunk ingest failed for trade close: {e}");
+                                }
+                            });
                         }
                     }
                 }
