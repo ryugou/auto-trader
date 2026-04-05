@@ -1,3 +1,4 @@
+mod api;
 mod position_monitor;
 
 use auto_trader_core::config::AppConfig;
@@ -16,7 +17,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -210,41 +210,38 @@ async fn main() -> anyhow::Result<()> {
         None,
     ));
 
-    // Paper accounts (crypto) — upsert to DB for FK integrity
+    // Paper accounts — loaded from DB (source of truth)
     // Each account is bound to exactly one strategy.
+    let db_accounts = auto_trader_db::paper_accounts::list_paper_accounts(&pool).await?;
     let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
-        for pac in &config.paper_accounts {
+        for pac in &db_accounts {
             if !registered_strategies.contains(&pac.strategy.as_str()) {
-                tracing::error!(
-                    "paper account '{}' references strategy '{}' which is not registered (check [[strategies]] and enabled flag)",
+                tracing::warn!(
+                    "paper account '{}' references strategy '{}' which is not registered, skipping",
                     pac.name, pac.strategy
                 );
-                anyhow::bail!(
-                    "paper account '{}' references unknown strategy '{}'",
-                    pac.name, pac.strategy
-                );
+                continue;
             }
-            let id = Uuid::new_v4();
-            let db_id = auto_trader_db::paper_accounts::upsert_paper_account(
-                &pool, id, &pac.name, &pac.exchange,
-                pac.initial_balance, pac.leverage, &pac.currency,
-            ).await?;
             let exchange = match pac.exchange.as_str() {
                 "bitflyer_cfd" => Exchange::BitflyerCfd,
                 _ => Exchange::Oanda,
             };
+            // Use current_balance from DB (reflects previous session's P&L)
             let trader = Arc::new(PaperTrader::new(
                 exchange,
-                pac.initial_balance,
+                pac.current_balance,
                 pac.leverage,
-                Some(db_id),
+                Some(pac.id),
             ));
             tracing::info!(
-                "paper account: {} (id={}, strategy={}, balance={}, leverage={})",
-                pac.name, db_id, pac.strategy, pac.initial_balance, pac.leverage
+                "paper account: {} (id={}, strategy={}, balance={} (initial={}), leverage={})",
+                pac.name, pac.id, pac.strategy, pac.current_balance, pac.initial_balance, pac.leverage
             );
             accounts.push((pac.name.clone(), pac.strategy.clone(), trader));
+        }
+        if accounts.is_empty() {
+            tracing::info!("no paper accounts found in DB");
         }
         accounts
     };
@@ -605,6 +602,15 @@ async fn main() -> anyhow::Result<()> {
                         ).await {
                             tracing::error!("update trade error: {e}");
                         }
+                        // Persist balance change to paper_accounts (if applicable)
+                        if let Some(account_id) = t.paper_account_id {
+                            let net_pnl = pnl_amount - t.fees;
+                            if let Err(e) = auto_trader_db::paper_accounts::add_pnl(
+                                &recorder_pool, account_id, net_pnl,
+                            ).await {
+                                tracing::error!("update paper account balance error: {e}");
+                            }
+                        }
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let mode_str = t.mode.as_str();
@@ -712,6 +718,25 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // REST API server
+    let api_pool = pool.clone();
+    let api_handle = tokio::spawn(async move {
+        let app = api::router(api_pool);
+        // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
+        // Otherwise bind to 127.0.0.1 to prevent unauthenticated external access.
+        let bind_addr = if std::env::var("API_TOKEN").is_ok() {
+            "0.0.0.0:3001"
+        } else {
+            "127.0.0.1:3001"
+        };
+        let listener = tokio::net::TcpListener::bind(bind_addr).await
+            .expect("failed to bind API server");
+        tracing::info!("API server listening on {bind_addr}");
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("API server error: {e}");
+        }
+    });
+
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
@@ -731,6 +756,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(h) = macro_analyst_handle {
         h.abort();
     }
+    api_handle.abort();
 
     // Wait for downstream tasks to drain (max 5 seconds)
     let drain_timeout = tokio::time::Duration::from_secs(5);

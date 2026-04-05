@@ -20,8 +20,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub strategies: Vec<StrategyConfig>,
     #[serde(default)]
-    pub paper_accounts: Vec<PaperAccountConfig>,
-    #[serde(default)]
     pub macro_analyst: Option<MacroAnalystConfig>,
     #[serde(default)]
     pub gemini: Option<GeminiConfig>,
@@ -99,21 +97,6 @@ pub struct BitflyerConfig {
 pub struct PairConfig {
     pub price_unit: Decimal,
     pub min_order_size: Decimal,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct PaperAccountConfig {
-    pub name: String,
-    pub exchange: String,
-    pub initial_balance: Decimal,
-    pub leverage: Decimal,
-    pub strategy: String,
-    #[serde(default = "default_currency")]
-    pub currency: String,
-}
-
-fn default_currency() -> String {
-    "JPY".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -216,23 +199,11 @@ name = "crypto_trend_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY"]
-
-[[paper_accounts]]
-name = "crypto_real"
-exchange = "bitflyer_cfd"
-initial_balance = 5233
-leverage = 2
-strategy = "crypto_trend_v1"
-currency = "JPY"
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.bitflyer.as_ref().unwrap().ws_url, "wss://ws.lightstream.bitflyer.com/json-rpc");
         assert_eq!(config.pairs.crypto.as_ref().unwrap().len(), 1);
         assert_eq!(config.pair_config.get("FX_BTC_JPY").unwrap().price_unit.to_string(), "1");
-        assert_eq!(config.paper_accounts.len(), 1);
-        assert_eq!(config.paper_accounts[0].name, "crypto_real");
-        assert_eq!(config.paper_accounts[0].strategy, "crypto_trend_v1");
-        assert_eq!(config.paper_accounts[0].leverage.to_string(), "2");
         assert_eq!(config.position_sizing.as_ref().unwrap().risk_rate.to_string(), "0.02");
     }
 }
