@@ -11,6 +11,10 @@ pub struct AppConfig {
     pub pairs: PairsConfig,
     #[serde(default)]
     pub strategies: Vec<StrategyConfig>,
+    #[serde(default)]
+    pub macro_analyst: Option<MacroAnalystConfig>,
+    #[serde(default)]
+    pub gemini: Option<GeminiConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -33,6 +37,9 @@ pub struct DatabaseConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct MonitorConfig {
     pub interval_secs: u64,
+    /// Number of days to backfill max_drawdown on startup (default: 7).
+    #[serde(default)]
+    pub backfill_days: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -48,6 +55,22 @@ pub struct StrategyConfig {
     pub pairs: Vec<String>,
     #[serde(default)]
     pub params: HashMap<String, toml::Value>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MacroAnalystConfig {
+    pub enabled: bool,
+    /// Reserved for Phase 1 economic calendar integration. Currently unused.
+    pub calendar_interval_secs: u64,
+    pub news_interval_secs: u64,
+    pub news_sources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GeminiConfig {
+    pub model: String,
+    pub api_url: String,
+    // api_key is read from GEMINI_API_KEY env var (1Password + direnv)
 }
 
 impl AppConfig {

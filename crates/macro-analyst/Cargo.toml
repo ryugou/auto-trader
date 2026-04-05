@@ -1,20 +1,18 @@
 [package]
-name = "auto-trader-market"
+name = "auto-trader-macro-analyst"
 version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
 auto-trader-core = { workspace = true }
 auto-trader-db = { workspace = true }
-sqlx = { workspace = true }
+auto-trader-vegapunk = { workspace = true }
 reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-chrono = { workspace = true }
-rust_decimal = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-
-[dev-dependencies]
-rust_decimal_macros = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+feed-rs = "2"
+sqlx = { workspace = true }

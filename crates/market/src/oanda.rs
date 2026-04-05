@@ -40,12 +40,35 @@ impl OandaClient {
         );
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
         Ok(Self {
             client,
             base_url: base_url.to_string(),
             account_id: account_id.to_string(),
         })
+    }
+
+    async fn request_with_retry<T, F, Fut>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match f().await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    tracing::warn!("OANDA request failed (attempt {}): {e}", attempt + 1);
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt as u32))).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap())
     }
 
     pub async fn get_candles(
@@ -58,18 +81,32 @@ impl OandaClient {
             "{}/v3/accounts/{}/instruments/{}/candles",
             self.base_url, self.account_id, pair.0
         );
+        let granularity = granularity.to_string();
+        let count_str = count.to_string();
+        let pair_clone = pair.clone();
+        let client = self.client.clone();
         let resp: CandlesResponse = self
-            .client
-            .get(&url)
-            .query(&[
-                ("granularity", granularity),
-                ("count", &count.to_string()),
-                ("price", "M"),
-            ])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+            .request_with_retry(|| {
+                let url = url.clone();
+                let granularity = granularity.clone();
+                let count_str = count_str.clone();
+                let client = client.clone();
+                async move {
+                    client
+                        .get(&url)
+                        .query(&[
+                            ("granularity", granularity.as_str()),
+                            ("count", count_str.as_str()),
+                            ("price", "M"),
+                        ])
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<CandlesResponse>()
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+            })
             .await?;
 
         let mut candles = Vec::new();
@@ -79,7 +116,7 @@ impl OandaClient {
             }
             let timestamp = DateTime::parse_from_rfc3339(&c.time)?.with_timezone(&Utc);
             candles.push(Candle {
-                pair: pair.clone(),
+                pair: pair_clone.clone(),
                 timeframe: granularity.to_string(),
                 open: Decimal::from_str(&c.mid.o)?,
                 high: Decimal::from_str(&c.mid.h)?,
@@ -97,14 +134,25 @@ impl OandaClient {
             "{}/v3/accounts/{}/pricing",
             self.base_url, self.account_id
         );
+        let instrument = pair.0.clone();
+        let client = self.client.clone();
         let resp: serde_json::Value = self
-            .client
-            .get(&url)
-            .query(&[("instruments", pair.0.as_str())])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+            .request_with_retry(|| {
+                let url = url.clone();
+                let instrument = instrument.clone();
+                let client = client.clone();
+                async move {
+                    client
+                        .get(&url)
+                        .query(&[("instruments", instrument.as_str())])
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+            })
             .await?;
 
         let prices = resp["prices"]

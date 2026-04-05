@@ -11,9 +11,23 @@ url = "postgresql://auto-trader:auto-trader@db:5432/auto_trader"
 
 [monitor]
 interval_secs = 60
+# backfill_days = 7  # startup時にmax_drawdownを再計算する日数（デフォルト: 7）
 
 [pairs]
 active = ["USD_JPY", "EUR_USD"]
+
+[gemini]
+model = "gemini-2.0-flash"
+api_url = "https://generativelanguage.googleapis.com"
+
+[macro_analyst]
+enabled = false
+calendar_interval_secs = 3600
+news_interval_secs = 1800
+news_sources = [
+    "https://www.forexlive.com/feed",
+    "https://www.dailyfx.com/feeds/market-news",
+]
 
 [[strategies]]
 name = "trend_follow_v1"
@@ -21,3 +35,10 @@ enabled = true
 mode = "paper"
 pairs = ["USD_JPY"]
 params = { ma_short = 20, ma_long = 50, rsi_threshold = 70 }
+
+[[strategies]]
+name = "swing_llm_v1"
+enabled = false
+mode = "paper"
+pairs = ["USD_JPY", "EUR_USD"]
+params = { holding_days_max = 14 }

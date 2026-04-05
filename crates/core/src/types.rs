@@ -33,6 +33,22 @@ pub enum TradeMode {
     Backtest,
 }
 
+impl TradeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TradeMode::Live => "live",
+            TradeMode::Paper => "paper",
+            TradeMode::Backtest => "backtest",
+        }
+    }
+}
+
+impl std::fmt::Display for TradeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeStatus {

@@ -25,11 +25,22 @@ impl PaperTrader {
         *self.balance.lock().await
     }
 
-    fn calculate_pnl(direction: Direction, entry: Decimal, exit: Decimal) -> Decimal {
+    fn calculate_price_diff(direction: Direction, entry: Decimal, exit: Decimal) -> Decimal {
         match direction {
             Direction::Long => exit - entry,
             Direction::Short => entry - exit,
         }
+    }
+
+    /// Convert price difference to pips based on pair convention.
+    /// JPY pairs: 1 pip = 0.01, others: 1 pip = 0.0001
+    fn price_diff_to_pips(pair: &Pair, price_diff: Decimal) -> Decimal {
+        let pip_size = if pair.0.contains("JPY") {
+            Decimal::new(1, 2) // 0.01
+        } else {
+            Decimal::new(1, 4) // 0.0001
+        };
+        price_diff / pip_size
     }
 }
 
@@ -83,11 +94,13 @@ impl OrderExecutor for PaperTrader {
             .remove(&uuid)
             .ok_or_else(|| anyhow::anyhow!("position {id} not found"))?;
 
-        let pnl_pips = Self::calculate_pnl(trade.direction, trade.entry_price, exit_price);
+        let price_diff = Self::calculate_price_diff(trade.direction, trade.entry_price, exit_price);
+        let pnl_pips = Self::price_diff_to_pips(&trade.pair, price_diff);
         trade.exit_price = Some(exit_price);
         trade.exit_at = Some(Utc::now());
         trade.pnl_pips = Some(pnl_pips);
-        trade.pnl_amount = Some(pnl_pips * self.leverage);
+        // Paper-only scale: price_diff * leverage. Not real-money P&L (ignores lot size).
+        trade.pnl_amount = Some(price_diff * self.leverage);
         trade.exit_reason = Some(exit_reason);
         trade.status = TradeStatus::Closed;
 
@@ -95,7 +108,7 @@ impl OrderExecutor for PaperTrader {
         *balance += trade.pnl_amount.unwrap_or_default();
 
         tracing::info!(
-            "Paper CLOSE: {} {} pnl={} reason={:?}",
+            "Paper CLOSE: {} {} pnl={} pips reason={:?}",
             trade.strategy_name,
             trade.pair,
             pnl_pips,
@@ -133,13 +146,14 @@ mod tests {
         let positions = trader.open_positions().await.unwrap();
         assert_eq!(positions.len(), 1);
 
+        // USD_JPY: 1 pip = 0.01, so 151.00 - 150.00 = 1.00 = 100 pips
         let closed = trader
             .close_position(&trade.id.to_string(), ExitReason::TpHit, dec!(151.00))
             .await
             .unwrap();
         assert_eq!(closed.status, TradeStatus::Closed);
-        assert_eq!(closed.pnl_pips, Some(dec!(1.00)));
-        assert_eq!(closed.pnl_amount, Some(dec!(25.00)));
+        assert_eq!(closed.pnl_pips, Some(dec!(100))); // 1.00 / 0.01 = 100 pips
+        assert_eq!(closed.pnl_amount, Some(dec!(25.00))); // price_diff * leverage = 1.00 * 25
 
         let positions = trader.open_positions().await.unwrap();
         assert_eq!(positions.len(), 0);
@@ -154,26 +168,45 @@ mod tests {
         signal.direction = Direction::Short;
         let trade = trader.execute(&signal).await.unwrap();
 
+        // USD_JPY: short from 150.00, exit 150.50 = -0.50 price diff = -50 pips
         let closed = trader
             .close_position(&trade.id.to_string(), ExitReason::SlHit, dec!(150.50))
             .await
             .unwrap();
-        assert_eq!(closed.pnl_pips, Some(dec!(-0.50)));
+        assert_eq!(closed.pnl_pips, Some(dec!(-50)));
     }
 
     #[test]
-    fn calculate_pnl_long() {
+    fn calculate_price_diff_long() {
         assert_eq!(
-            PaperTrader::calculate_pnl(Direction::Long, dec!(150), dec!(151)),
+            PaperTrader::calculate_price_diff(Direction::Long, dec!(150), dec!(151)),
             dec!(1)
         );
     }
 
     #[test]
-    fn calculate_pnl_short() {
+    fn calculate_price_diff_short() {
         assert_eq!(
-            PaperTrader::calculate_pnl(Direction::Short, dec!(150), dec!(149)),
+            PaperTrader::calculate_price_diff(Direction::Short, dec!(150), dec!(149)),
             dec!(1)
+        );
+    }
+
+    #[test]
+    fn price_diff_to_pips_jpy_pair() {
+        // USD_JPY: 1.00 price diff = 100 pips
+        assert_eq!(
+            PaperTrader::price_diff_to_pips(&Pair::new("USD_JPY"), dec!(1.00)),
+            dec!(100)
+        );
+    }
+
+    #[test]
+    fn price_diff_to_pips_non_jpy_pair() {
+        // EUR_USD: 0.0050 price diff = 50 pips
+        assert_eq!(
+            PaperTrader::price_diff_to_pips(&Pair::new("EUR_USD"), dec!(0.0050)),
+            dec!(50)
         );
     }
 }

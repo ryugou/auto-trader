@@ -1,0 +1,54 @@
+# Vegapunk schema for FX trading knowledge graph
+# See specs/vegapunk-integration.md for details
+
+nodes:
+  TradeDecision:
+    attributes:
+      pair: { type: string, required: true }
+      direction: { type: string, required: true }
+      entry_price: { type: string }
+      stop_loss: { type: string }
+      take_profit: { type: string }
+      confidence: { type: string }
+      decided_at: { type: string }
+
+  MarketAnalysis:
+    attributes:
+      summary: { type: string, required: true }
+      timeframe: { type: string }
+      analysis_type: { type: string }
+
+  TradeResult:
+    attributes:
+      summary: { type: string, required: true }
+      pnl_pips: { type: string }
+      exit_reason: { type: string }
+      holding_time: { type: string }
+
+  MarketEvent:
+    attributes:
+      summary: { type: string, required: true }
+      event_type: { type: string }
+      impact: { type: string }
+
+  Strategy:
+    attributes:
+      name: { type: string, required: true }
+      description: { type: string }
+      version: { type: string }
+
+edges:
+  BASED_ON: { from: TradeDecision, to: MarketAnalysis }
+  TRIGGERED_BY: { from: TradeDecision, to: MarketEvent }
+  RESULTED_IN: { from: TradeDecision, to: TradeResult }
+  USED_STRATEGY: { from: TradeDecision, to: Strategy }
+  CONTRADICTS: { from: MarketAnalysis, to: MarketAnalysis }
+  SUPERSEDES: { from: TradeDecision, to: TradeDecision }
+
+traceable_pairs:
+  - claim: TradeDecision
+    evidence: MarketAnalysis
+    edge: BASED_ON
+  - claim: TradeDecision
+    evidence: TradeResult
+    edge: RESULTED_IN

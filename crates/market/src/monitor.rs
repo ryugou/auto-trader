@@ -3,6 +3,7 @@ use auto_trader_core::types::Pair;
 use crate::indicators;
 use crate::oanda::OandaClient;
 use rust_decimal::Decimal;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
@@ -12,6 +13,7 @@ pub struct MarketMonitor {
     pairs: Vec<Pair>,
     interval_secs: u64,
     tx: mpsc::Sender<PriceEvent>,
+    pool: Option<PgPool>,
 }
 
 impl MarketMonitor {
@@ -21,7 +23,12 @@ impl MarketMonitor {
         interval_secs: u64,
         tx: mpsc::Sender<PriceEvent>,
     ) -> Self {
-        Self { client, pairs, interval_secs, tx }
+        Self { client, pairs, interval_secs, tx, pool: None }
+    }
+
+    pub fn with_db(mut self, pool: PgPool) -> Self {
+        self.pool = Some(pool);
+        self
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -45,10 +52,19 @@ impl MarketMonitor {
 
     async fn fetch_and_emit(&self, pair: &Pair) -> anyhow::Result<()> {
         let candles = self.client.get_candles(pair, "M5", 100).await?;
-        if candles.is_empty() {
-            return Ok(());
+        let latest = match candles.last() {
+            Some(c) => c.clone(),
+            None => return Ok(()),  // no complete candles
+        };
+
+        // Save candles to DB for backtest data accumulation
+        if let Some(pool) = &self.pool {
+            for candle in &candles {
+                if let Err(e) = auto_trader_db::candles::upsert_candle(pool, candle).await {
+                    tracing::warn!("failed to save candle: {e}");
+                }
+            }
         }
-        let latest = candles.last().unwrap().clone();
         let closes: Vec<Decimal> = candles.iter().map(|c| c.close).collect();
 
         let mut indicators = HashMap::new();
@@ -67,9 +83,9 @@ impl MarketMonitor {
 
         let event = PriceEvent {
             pair: pair.clone(),
+            timestamp: latest.timestamp,
             candle: latest,
             indicators,
-            timestamp: chrono::Utc::now(),
         };
         self.tx.send(event).await?;
         Ok(())

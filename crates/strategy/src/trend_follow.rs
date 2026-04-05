@@ -2,6 +2,7 @@ use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{MacroUpdate, Strategy};
 use auto_trader_core::types::{Direction, Pair, Signal};
 use rust_decimal::Decimal;
+use std::collections::{HashMap, VecDeque};
 
 pub struct TrendFollowV1 {
     name: String,
@@ -9,7 +10,7 @@ pub struct TrendFollowV1 {
     ma_long_period: usize,
     rsi_threshold: Decimal,
     pairs: Vec<Pair>,
-    price_history: std::collections::HashMap<String, Vec<Decimal>>,
+    price_history: HashMap<String, VecDeque<Decimal>>,
 }
 
 impl TrendFollowV1 {
@@ -26,7 +27,7 @@ impl TrendFollowV1 {
             ma_long_period: ma_long,
             rsi_threshold,
             pairs,
-            price_history: std::collections::HashMap::new(),
+            price_history: HashMap::new(),
         }
     }
 }
@@ -44,17 +45,24 @@ impl Strategy for TrendFollowV1 {
 
         let key = event.pair.0.clone();
         let history = self.price_history.entry(key).or_default();
-        history.push(event.candle.close);
+        history.push_back(event.candle.close);
 
-        if history.len() < self.ma_long_period + 1 {
+        // Keep only what we need: ma_long_period + 2 for cross detection
+        let max_len = self.ma_long_period + 2;
+        while history.len() > max_len {
+            history.pop_front();
+        }
+
+        let closes: Vec<Decimal> = history.iter().copied().collect();
+        if closes.len() < self.ma_long_period + 1 {
             return None;
         }
 
-        let sma_short = auto_trader_market::indicators::sma(history, self.ma_short_period)?;
-        let sma_long = auto_trader_market::indicators::sma(history, self.ma_long_period)?;
+        let sma_short = auto_trader_market::indicators::sma(&closes, self.ma_short_period)?;
+        let sma_long = auto_trader_market::indicators::sma(&closes, self.ma_long_period)?;
         let rsi = event.indicators.get("rsi_14")?;
 
-        let prev_closes = &history[..history.len() - 1];
+        let prev_closes = &closes[..closes.len() - 1];
         let prev_sma_short = auto_trader_market::indicators::sma(prev_closes, self.ma_short_period)?;
         let prev_sma_long = auto_trader_market::indicators::sma(prev_closes, self.ma_long_period)?;
 

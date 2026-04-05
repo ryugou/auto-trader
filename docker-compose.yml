@@ -24,9 +24,11 @@ services:
       CONFIG_PATH: /app/config/default.toml
       OANDA_API_KEY: ${OANDA_API_KEY}
       OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
       RUST_LOG: info
     volumes:
       - ./config:/app/config:ro
+    restart: unless-stopped
 
 volumes:
   pgdata:

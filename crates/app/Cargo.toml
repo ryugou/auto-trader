@@ -9,12 +9,15 @@ auto-trader-db = { workspace = true }
 auto-trader-market = { workspace = true }
 auto-trader-strategy = { workspace = true }
 auto-trader-executor = { workspace = true }
+auto-trader-vegapunk = { workspace = true }
+auto-trader-macro-analyst = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 rust_decimal = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = "1"

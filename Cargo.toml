@@ -3,10 +3,13 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/db",
+    "crates/macro-analyst",
     "crates/market",
     "crates/strategy",
     "crates/executor",
     "crates/app",
+    "crates/vegapunk-client",
+    "crates/backtest",
 ]
 
 [workspace.package]
@@ -30,9 +33,17 @@ reqwest = { version = "0.12", features = ["json"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "rust_decimal"] }
 async-trait = "0.1"
 
-# internal
+# gRPC
+tonic = "0.12"
+tonic-build = "0.12"
+prost = "0.13"
+
+# internal crates
 auto-trader-core = { path = "crates/core" }
 auto-trader-db = { path = "crates/db" }
 auto-trader-market = { path = "crates/market" }
 auto-trader-strategy = { path = "crates/strategy" }
 auto-trader-executor = { path = "crates/executor" }
+auto-trader-vegapunk = { path = "crates/vegapunk-client" }
+auto-trader-macro-analyst = { path = "crates/macro-analyst" }
+auto-trader-backtest = { path = "crates/backtest" }
