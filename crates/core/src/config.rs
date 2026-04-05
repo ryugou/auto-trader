@@ -225,6 +225,7 @@ currency = "JPY"
         assert_eq!(config.pair_config.get("FX_BTC_JPY").unwrap().price_unit.to_string(), "1");
         assert_eq!(config.paper_accounts.len(), 1);
         assert_eq!(config.paper_accounts[0].name, "crypto_real");
+        assert_eq!(config.paper_accounts[0].strategy, "crypto_trend_v1");
         assert_eq!(config.paper_accounts[0].leverage.to_string(), "2");
         assert_eq!(config.position_sizing.as_ref().unwrap().risk_rate.to_string(), "0.02");
     }

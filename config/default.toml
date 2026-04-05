@@ -64,8 +64,15 @@ mode = "paper"
 pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
 
-# Crypto paper accounts — each account is bound to exactly one strategy.
-# To test multiple strategies, create separate accounts.
+[[strategies]]
+name = "crypto_trend_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+params = { ma_short = 8, ma_long = 21, rsi_threshold = 75 }
+
+# Crypto paper accounts — each account is bound to one strategy.
+# Multiple accounts can share the same strategy (for comparing different capital amounts).
 [[paper_accounts]]
 name = "crypto_real"
 exchange = "bitflyer_cfd"
