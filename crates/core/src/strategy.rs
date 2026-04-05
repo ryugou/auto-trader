@@ -1,6 +1,7 @@
 use crate::event::PriceEvent;
 use crate::types::Signal;
 
+#[derive(Clone)]
 pub struct MacroUpdate {
     pub summary: String,
     pub adjustments: std::collections::HashMap<String, String>,

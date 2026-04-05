@@ -13,7 +13,7 @@ use auto_trader_strategy::trend_follow::TrendFollowV1;
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,6 +50,21 @@ async fn main() -> anyhow::Result<()> {
     let pairs: Vec<Pair> = config.pairs.active.iter().map(|s| Pair::new(s)).collect();
     let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx.clone())
         .with_db(pool.clone());
+
+    // Vegapunk client (shared, optional — continues without if unavailable)
+    let vegapunk_client: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
+        match auto_trader_vegapunk::client::VegapunkClient::connect(
+            &config.vegapunk.endpoint, &config.vegapunk.schema
+        ).await {
+            Ok(client) => {
+                tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
+                Some(Arc::new(Mutex::new(client)))
+            }
+            Err(e) => {
+                tracing::warn!("vegapunk unavailable (continuing without): {e}");
+                None
+            }
+        };
 
     // Strategy engine
     let mut engine = StrategyEngine::new(signal_tx);
@@ -88,10 +103,26 @@ async fn main() -> anyhow::Result<()> {
                 let gemini_config = config.gemini.as_ref()
                     .expect("gemini config required for swing_llm");
 
-                let vp_config = &config.vegapunk;
-                let vp_client = auto_trader_vegapunk::client::VegapunkClient::connect(
-                    &vp_config.endpoint, &vp_config.schema,
-                ).await?;
+                // Use shared Vegapunk client for swing_llm (optional — degrades gracefully)
+                let vp_client = match &vegapunk_client {
+                    Some(shared) => {
+                        // Create a separate connection for strategy use (needs exclusive &mut)
+                        match auto_trader_vegapunk::client::VegapunkClient::connect(
+                            &config.vegapunk.endpoint, &config.vegapunk.schema,
+                        ).await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::warn!("vegapunk unavailable for {}, skipping strategy: {e}", sc.name);
+                                let _ = shared; // acknowledge shared exists
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!("vegapunk unavailable, skipping strategy: {}", sc.name);
+                        continue;
+                    }
+                };
 
                 engine.add_strategy(
                     Box::new(auto_trader_strategy::swing_llm::SwingLLMv1::new(
@@ -119,20 +150,6 @@ async fn main() -> anyhow::Result<()> {
         Decimal::from(25),
     ));
 
-    // Vegapunk client (optional — continues without if unavailable)
-    let vegapunk_client: Option<Arc<tokio::sync::Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
-        match auto_trader_vegapunk::client::VegapunkClient::connect(
-            &config.vegapunk.endpoint, &config.vegapunk.schema
-        ).await {
-            Ok(client) => {
-                tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
-                Some(Arc::new(tokio::sync::Mutex::new(client)))
-            }
-            Err(e) => {
-                tracing::warn!("vegapunk unavailable (continuing without): {e}");
-                None
-            }
-        };
     let vegapunk_client_exec = vegapunk_client.clone();
     let vegapunk_client_recorder = vegapunk_client.clone();
 
@@ -143,14 +160,71 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Task: Strategy engine (price -> signal) + forward to position monitor
-    let engine_handle = tokio::spawn(async move {
-        while let Some(event) = price_rx.recv().await {
-            // Forward to position monitor
-            if price_monitor_tx.send(event.clone()).await.is_err() {
-                tracing::warn!("position monitor channel closed, SL/TP monitoring stopped");
+    // Task: Macro analyst (news -> summarize -> broadcast to strategies)
+    let (macro_tx, _) = tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
+    let macro_rx = macro_tx.subscribe();
+    let macro_analyst_handle = if config.macro_analyst.as_ref().is_some_and(|m| m.enabled) {
+        let mac = config.macro_analyst.as_ref().unwrap();
+        let gemini_api_key = std::env::var("GEMINI_API_KEY")
+            .expect("GEMINI_API_KEY must be set for macro_analyst");
+        let gemini_config = config.gemini.as_ref()
+            .expect("gemini config required for macro_analyst");
+
+        let mut analyst = auto_trader_macro_analyst::analyst::MacroAnalyst::new(
+            mac.news_sources.clone(),
+            &gemini_config.api_url,
+            &gemini_api_key,
+            &gemini_config.model,
+        ).with_db(pool.clone());
+
+        // Optionally attach Vegapunk for macro event ingestion
+        if let Some(vp) = &vegapunk_client {
+            match auto_trader_vegapunk::client::VegapunkClient::connect(
+                &config.vegapunk.endpoint, &config.vegapunk.schema,
+            ).await {
+                Ok(vp_for_macro) => {
+                    analyst = analyst.with_vegapunk(vp_for_macro);
+                    let _ = vp; // acknowledge shared exists
+                }
+                Err(e) => tracing::warn!("vegapunk unavailable for macro analyst: {e}"),
             }
-            engine.on_price(&event).await;
+        }
+
+        let news_interval = std::time::Duration::from_secs(mac.news_interval_secs);
+        let macro_tx_clone = macro_tx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = analyst.run(macro_tx_clone, news_interval).await {
+                tracing::error!("macro analyst error: {e}");
+            }
+        }))
+    } else {
+        tracing::info!("macro analyst disabled");
+        None
+    };
+
+    // Task: Strategy engine (price -> signal) + forward to position monitor
+    // Also receives macro updates from broadcast channel
+    let engine_handle = tokio::spawn(async move {
+        let mut macro_rx = macro_rx;
+        loop {
+            tokio::select! {
+                price = price_rx.recv() => {
+                    match price {
+                        Some(event) => {
+                            if price_monitor_tx.send(event.clone()).await.is_err() {
+                                tracing::warn!("position monitor channel closed, SL/TP monitoring stopped");
+                            }
+                            engine.on_price(&event).await;
+                        }
+                        None => break, // price channel closed
+                    }
+                }
+                macro_update = macro_rx.recv() => {
+                    if let Ok(update) = macro_update {
+                        engine.on_macro_update(&update);
+                    }
+                }
+            }
         }
     });
 
@@ -276,22 +350,33 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Daily batch (max_drawdown calculation at UTC 0:00)
+    // Initialize with yesterday to process missed day on startup
     let daily_pool = pool.clone();
     let daily_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let mut last_date = chrono::Utc::now().date_naive();
+        let today = chrono::Utc::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+
+        // Backfill yesterday's max_drawdown on startup
+        tracing::info!("daily batch startup: backfilling {yesterday}");
+        if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
+            &daily_pool, yesterday,
+        ).await {
+            tracing::error!("daily batch backfill failed for {yesterday}: {e}");
+        }
+
+        let mut last_date = today;
         loop {
             interval.tick().await;
-            let today = chrono::Utc::now().date_naive();
-            if today != last_date {
-                // Date changed — calculate yesterday's max_drawdown
+            let now_date = chrono::Utc::now().date_naive();
+            if now_date != last_date {
                 tracing::info!("running daily batch for {last_date}");
                 if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
                     &daily_pool, last_date,
                 ).await {
                     tracing::error!("daily batch failed: {e}");
                 }
-                last_date = today;
+                last_date = now_date;
             }
         }
     });
@@ -306,6 +391,9 @@ async fn main() -> anyhow::Result<()> {
     drop(trade_tx); // allow recorder to drain and exit
     monitor_handle.abort();
     daily_handle.abort(); // infinite loop — must abort explicitly
+    if let Some(h) = macro_analyst_handle {
+        h.abort();
+    }
 
     // Wait for downstream tasks to drain (max 5 seconds)
     let drain_timeout = tokio::time::Duration::from_secs(5);

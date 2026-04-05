@@ -1,5 +1,5 @@
 use auto_trader_core::event::{PriceEvent, SignalEvent};
-use auto_trader_core::strategy::Strategy;
+use auto_trader_core::strategy::{MacroUpdate, Strategy};
 use tokio::sync::mpsc;
 
 struct StrategySlot {
@@ -33,8 +33,17 @@ impl StrategyEngine {
                 continue;
             }
             if let Some(signal) = slot.strategy.on_price(event).await {
-                let _ = self.signal_tx.send(SignalEvent { signal }).await;
+                if let Err(e) = self.signal_tx.send(SignalEvent { signal }).await {
+                    tracing::error!("signal channel closed, dropping signal: {e}");
+                }
             }
+        }
+    }
+
+    /// Broadcast MacroUpdate to all strategies.
+    pub fn on_macro_update(&mut self, update: &MacroUpdate) {
+        for slot in &mut self.slots {
+            slot.strategy.on_macro_update(update);
         }
     }
 }

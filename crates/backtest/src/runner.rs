@@ -90,8 +90,12 @@ impl BacktestRunner {
                     p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
                 });
                 if !has_pos {
-                    if let Ok(trade) = trader.execute(&signal).await {
-                        trades.push(trade);
+                    match trader.execute(&signal).await {
+                        Ok(trade) => trades.push(trade),
+                        Err(e) => tracing::warn!(
+                            "backtest execute failed at candle {i} for {}: {e}",
+                            signal.pair
+                        ),
                     }
                 }
             }

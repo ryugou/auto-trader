@@ -36,9 +36,10 @@ async fn paper_trade_roundtrip() {
         .await
         .unwrap();
     assert_eq!(closed.status, TradeStatus::Closed);
-    assert_eq!(closed.pnl_pips.unwrap(), dec!(1.00));
+    // USD_JPY: 1.00 price diff / 0.01 pip size = 100 pips
+    assert_eq!(closed.pnl_pips.unwrap(), dec!(100));
 
-    // Balance updated
+    // Balance: price_diff * leverage = 1.00 * 25 = 25
     assert_eq!(trader.balance().await, dec!(100025));
 }
 
@@ -98,6 +99,6 @@ async fn sl_tp_auto_close() {
     assert_eq!(closed.status, TradeStatus::Closed);
     assert_eq!(closed.exit_reason, Some(ExitReason::SlHit));
     assert_eq!(closed.exit_price, Some(dec!(149.50)));
-    // PnL: (149.50 - 150.00) = -0.50
-    assert_eq!(closed.pnl_pips.unwrap(), dec!(-0.50));
+    // PnL: (149.50 - 150.00) / 0.01 = -50 pips
+    assert_eq!(closed.pnl_pips.unwrap(), dec!(-50));
 }

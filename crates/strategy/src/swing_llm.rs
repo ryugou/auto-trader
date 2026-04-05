@@ -9,8 +9,9 @@ use tokio::sync::Mutex;
 pub struct SwingLLMv1 {
     name: String,
     pairs: Vec<Pair>,
-    _holding_days_max: u32,
+    holding_days_max: u32,
     vegapunk: Mutex<VegapunkClient>,
+    gemini_client: reqwest::Client,
     gemini_api_url: String,
     gemini_api_key: String,
     gemini_model: String,
@@ -29,11 +30,16 @@ impl SwingLLMv1 {
         gemini_api_key: String,
         gemini_model: String,
     ) -> Self {
+        let gemini_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build Gemini HTTP client");
         Self {
             name,
             pairs,
-            _holding_days_max: holding_days_max,
+            holding_days_max,
             vegapunk: Mutex::new(vegapunk),
+            gemini_client,
             gemini_api_url,
             gemini_api_key,
             gemini_model,
@@ -77,7 +83,7 @@ impl SwingLLMv1 {
         let macro_context = self.latest_macro.as_deref().unwrap_or("マクロ情報なし");
         let prompt = format!(
             "あなたはFXスイングトレードの判断AIです。以下の情報からトレード判断をしてください。\n\n\
-             通貨ペア: {}\n現在価格: {}\n\n\
+             通貨ペア: {}\n現在価格: {}\n最大保有日数: {}日\n\n\
              過去の類似判断:\n{}\n\n\
              マクロ環境: {}\n\n\
              回答は必ず以下のJSON形式のみで返してください:\n\
@@ -85,13 +91,11 @@ impl SwingLLMv1 {
              \"sl_pips\": number, \"tp_pips\": number, \"reason\": \"string\"}}",
             pair.0,
             current_price,
+            self.holding_days_max,
             context.join("\n"),
             macro_context,
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
             self.gemini_api_url, self.gemini_model
@@ -101,7 +105,7 @@ impl SwingLLMv1 {
             "contents": [{"parts": [{"text": prompt}]}]
         });
 
-        let resp: serde_json::Value = client
+        let resp: serde_json::Value = self.gemini_client
             .post(&url)
             .header("x-goog-api-key", &self.gemini_api_key)
             .json(&body)

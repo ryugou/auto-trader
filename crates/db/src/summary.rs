@@ -39,7 +39,8 @@ pub async fn update_daily_max_drawdown(
             }
         }
 
-        sqlx::query(
+        // Ensure daily_summary row exists before updating max_drawdown
+        let result = sqlx::query(
             "UPDATE daily_summary SET max_drawdown = $1
              WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND mode = $5",
         )
@@ -50,6 +51,23 @@ pub async fn update_daily_max_drawdown(
         .bind(&mode)
         .execute(pool)
         .await?;
+
+        if result.rows_affected() == 0 {
+            // Row doesn't exist yet — insert with max_drawdown
+            sqlx::query(
+                r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, trade_count, win_count, total_pnl, max_drawdown)
+                   VALUES ($1, $2, $3, $4, 0, 0, 0, $5)
+                   ON CONFLICT (date, strategy_name, pair, mode) DO UPDATE
+                   SET max_drawdown = $5"#,
+            )
+            .bind(date)
+            .bind(&strategy)
+            .bind(&pair)
+            .bind(&mode)
+            .bind(max_dd)
+            .execute(pool)
+            .await?;
+        }
     }
 
     Ok(())

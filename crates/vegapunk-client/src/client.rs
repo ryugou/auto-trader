@@ -1,6 +1,6 @@
 use crate::proto::graph_rag_engine_client::GraphRagEngineClient;
 use crate::proto::*;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 
 pub struct VegapunkClient {
     client: GraphRagEngineClient<Channel>,
@@ -9,7 +9,12 @@ pub struct VegapunkClient {
 
 impl VegapunkClient {
     pub async fn connect(endpoint: &str, schema: &str) -> anyhow::Result<Self> {
-        let client = GraphRagEngineClient::connect(endpoint.to_string()).await?;
+        let channel = Endpoint::from_shared(endpoint.to_string())?
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .connect()
+            .await?;
+        let client = GraphRagEngineClient::new(channel);
         Ok(Self {
             client,
             schema: schema.to_string(),
