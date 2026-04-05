@@ -67,6 +67,19 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Warn if FX strategies are enabled but FX monitor is not running
+    if fx_monitor.is_none() {
+        let has_fx_strategy = config.strategies.iter().any(|s| {
+            s.enabled && (s.name.starts_with("trend_follow") || s.name.starts_with("swing_llm"))
+        });
+        if has_fx_strategy {
+            tracing::warn!(
+                "FX strategies are enabled but FX monitor is not running (OANDA not configured). \
+                 These strategies will not receive price data."
+            );
+        }
+    }
+
     // Vegapunk: single gRPC channel with optional Bearer token auth
     let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
     let vegapunk_base: Option<auto_trader_vegapunk::client::VegapunkClient> =
@@ -182,6 +195,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Collect actually registered strategy names for paper_account validation
+    let registered_strategies: Vec<&str> = engine.registered_names();
+
     // Paper traders: positions are in-memory only (process lifetime = session).
     // On restart, DB may have status='open' trades from previous session.
     // These are NOT restored — the app starts fresh. If position persistence is
@@ -195,9 +211,20 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Paper accounts (crypto) — upsert to DB for FK integrity
-    let paper_accounts: Vec<(String, Arc<PaperTrader>)> = {
+    // Each account is bound to exactly one strategy.
+    let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
         for pac in &config.paper_accounts {
+            if !registered_strategies.contains(&pac.strategy.as_str()) {
+                tracing::error!(
+                    "paper account '{}' references strategy '{}' which is not registered (check [[strategies]] and enabled flag)",
+                    pac.name, pac.strategy
+                );
+                anyhow::bail!(
+                    "paper account '{}' references unknown strategy '{}'",
+                    pac.name, pac.strategy
+                );
+            }
             let id = Uuid::new_v4();
             let db_id = auto_trader_db::paper_accounts::upsert_paper_account(
                 &pool, id, &pac.name, &pac.exchange,
@@ -214,10 +241,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(db_id),
             ));
             tracing::info!(
-                "paper account: {} (id={}, balance={}, leverage={})",
-                pac.name, db_id, pac.initial_balance, pac.leverage
+                "paper account: {} (id={}, strategy={}, balance={}, leverage={})",
+                pac.name, db_id, pac.strategy, pac.initial_balance, pac.leverage
             );
-            accounts.push((pac.name.clone(), trader));
+            accounts.push((pac.name.clone(), pac.strategy.clone(), trader));
         }
         accounts
     };
@@ -348,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Position monitors — crypto (one per paper_account)
     let mut crypto_price_senders: Vec<(String, mpsc::Sender<PriceEvent>)> = Vec::new();
-    for (name, trader) in &paper_accounts {
+    for (name, _strategy, trader) in &paper_accounts {
         let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
         let monitor_trader = trader.clone();
         let monitor_trade_tx = trade_tx.clone();
@@ -408,8 +435,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Signal executor (signal -> trade)
-    // Enforces 1-pair-1-position per strategy at execution time
-    // FX signals → paper_trader, crypto signals → all paper_accounts (with PositionSizer)
+    // Enforces 1-pair-1-position per strategy per account at execution time
+    // FX signals → paper_trader, crypto signals → matching paper_account by strategy name
     let executor = paper_trader.clone();
     let executor_accounts = paper_accounts.clone();
     let executor_sizer = position_sizer.clone();
@@ -425,10 +452,13 @@ async fn main() -> anyhow::Result<()> {
             let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
 
             if is_crypto {
-                // Crypto: dispatch same signal to ALL paper_accounts independently.
-                // Each account runs its own position sizing based on its balance/leverage.
-                // This enables parallel simulation of different capital allocations.
-                for (name, account) in &executor_accounts {
+                // Crypto: dispatch signal only to paper_accounts bound to this strategy.
+                let mut matched = false;
+                for (name, strategy_name, account) in &executor_accounts {
+                    if strategy_name != &signal.strategy_name {
+                        continue;
+                    }
+                    matched = true;
                     let positions = account.open_positions().await.unwrap_or_default();
                     let has_position = positions.iter().any(|p| {
                         p.trade.strategy_name == signal.strategy_name
@@ -493,6 +523,12 @@ async fn main() -> anyhow::Result<()> {
                         }
                         Err(e) => tracing::error!("execute error for account {}: {e}", name),
                     }
+                }
+                if !matched {
+                    tracing::warn!(
+                        "crypto signal from '{}' had no matching paper_account",
+                        signal.strategy_name
+                    );
                 }
             } else {
                 // FX: existing paper_trader
@@ -665,7 +701,7 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             let today = chrono::Utc::now().date_naive();
             if today != last_date {
-                for (name, trader) in &overnight_accounts {
+                for (name, _strategy, trader) in &overnight_accounts {
                     let fees = trader.apply_overnight_fees(fee_rate).await;
                     if fees > Decimal::ZERO {
                         tracing::info!("overnight fee applied: {} = {} JPY", name, fees);
