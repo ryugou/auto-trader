@@ -422,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Signal executor (signal -> trade)
-    // Enforces 1-pair-1-position per strategy at execution time
+    // Enforces 1-pair-1-position per strategy per account at execution time
     // FX signals → paper_trader, crypto signals → matching paper_account by strategy name
     let executor = paper_trader.clone();
     let executor_accounts = paper_accounts.clone();
@@ -440,11 +440,12 @@ async fn main() -> anyhow::Result<()> {
 
             if is_crypto {
                 // Crypto: dispatch signal only to paper_accounts bound to this strategy.
-                let mut dispatched = false;
+                let mut matched = false;
                 for (name, strategy_name, account) in &executor_accounts {
                     if strategy_name != &signal.strategy_name {
                         continue;
                     }
+                    matched = true;
                     let positions = account.open_positions().await.unwrap_or_default();
                     let has_position = positions.iter().any(|p| {
                         p.trade.strategy_name == signal.strategy_name
@@ -477,7 +478,6 @@ async fn main() -> anyhow::Result<()> {
 
                     match account.execute_with_quantity(signal, qty).await {
                         Ok(trade) => {
-                            dispatched = true;
                             if let Some(vp) = vegapunk_client_exec.clone() {
                                 let trade_clone = trade.clone();
                                 tokio::spawn(async move {
@@ -511,7 +511,7 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => tracing::error!("execute error for account {}: {e}", name),
                     }
                 }
-                if !dispatched {
+                if !matched {
                     tracing::warn!(
                         "crypto signal from '{}' had no matching paper_account",
                         signal.strategy_name

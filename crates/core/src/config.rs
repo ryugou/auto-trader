@@ -211,6 +211,12 @@ enabled = true
 mode = "paper"
 pairs = ["USD_JPY"]
 
+[[strategies]]
+name = "crypto_trend_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+
 [[paper_accounts]]
 name = "crypto_real"
 exchange = "bitflyer_cfd"
