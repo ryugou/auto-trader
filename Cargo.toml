@@ -9,6 +9,7 @@ members = [
     "crates/executor",
     "crates/app",
     "crates/vegapunk-client",
+    "crates/backtest",
 ]
 
 [workspace.package]
@@ -45,3 +46,4 @@ auto-trader-strategy = { path = "crates/strategy" }
 auto-trader-executor = { path = "crates/executor" }
 auto-trader-vegapunk = { path = "crates/vegapunk-client" }
 auto-trader-macro-analyst = { path = "crates/macro-analyst" }
+auto-trader-backtest = { path = "crates/backtest" }

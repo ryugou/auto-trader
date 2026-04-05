@@ -119,6 +119,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "auto-trader-backtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "auto-trader-core",
+ "auto-trader-db",
+ "auto-trader-executor",
+ "auto-trader-market",
+ "chrono",
+ "rust_decimal",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "auto-trader-core"
 version = "0.1.0"
 dependencies = [
