@@ -64,6 +64,8 @@ mode = "paper"
 pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
 
+# Crypto paper accounts — each receives the SAME signals independently.
+# This enables parallel simulation with different capital allocations.
 [[paper_accounts]]
 name = "crypto_real"
 exchange = "bitflyer_cfd"

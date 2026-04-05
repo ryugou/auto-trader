@@ -98,7 +98,6 @@ impl BitflyerMonitor {
                 }
             }
         }
-        Ok(())
     }
 
     async fn connect_and_stream(

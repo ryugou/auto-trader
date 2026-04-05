@@ -401,7 +401,9 @@ async fn main() -> anyhow::Result<()> {
             let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
 
             if is_crypto {
-                // Crypto: dispatch to all paper_accounts with PositionSizer
+                // Crypto: dispatch same signal to ALL paper_accounts independently.
+                // Each account runs its own position sizing based on its balance/leverage.
+                // This enables parallel simulation of different capital allocations.
                 for (name, account) in &executor_accounts {
                     let positions = account.open_positions().await.unwrap_or_default();
                     let has_position = positions.iter().any(|p| {
@@ -626,12 +628,22 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Overnight fee (crypto paper accounts)
-    // Apply 0.04%/day fee to open positions at UTC 0:00
+    // Apply 0.04%/day fee to open positions at UTC 0:00.
+    // On startup, apply fee for yesterday to cover missed overnight if process was down.
     let overnight_accounts = paper_accounts.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let mut last_date = chrono::Utc::now().date_naive();
         let fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
+
+        // Startup backfill: apply yesterday's overnight fee if positions are open
+        for (name, trader) in &overnight_accounts {
+            let fees = trader.apply_overnight_fees(fee_rate).await;
+            if fees > Decimal::ZERO {
+                tracing::info!("overnight fee backfill: {} = {} JPY", name, fees);
+            }
+        }
+
+        let mut last_date = chrono::Utc::now().date_naive();
         loop {
             interval.tick().await;
             let today = chrono::Utc::now().date_naive();
