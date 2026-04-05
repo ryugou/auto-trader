@@ -1,6 +1,6 @@
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
-use auto_trader_core::types::{Direction, ExitReason, Pair, Trade};
+use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade};
 use auto_trader_executor::paper::PaperTrader;
 use auto_trader_core::executor::OrderExecutor;
 use crate::report::BacktestReport;
@@ -55,6 +55,7 @@ impl BacktestRunner {
 
             let event = PriceEvent {
                 pair: pair.clone(),
+                exchange: Exchange::Oanda,
                 candle: candle.clone(),
                 indicators,
                 timestamp: candle.timestamp,

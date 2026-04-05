@@ -1,4 +1,4 @@
-use crate::types::{Candle, ExitReason, Pair, Signal, Trade};
+use crate::types::{Candle, Exchange, ExitReason, Pair, Signal, Trade};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct PriceEvent {
     pub pair: Pair,
+    pub exchange: Exchange,
     pub candle: Candle,
     pub indicators: HashMap<String, Decimal>,
     pub timestamp: DateTime<Utc>,

@@ -122,7 +122,7 @@ impl Strategy for TrendFollowV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::Candle;
+    use auto_trader_core::types::{Candle, Exchange};
     use chrono::Utc;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
@@ -130,8 +130,10 @@ mod tests {
     fn make_price_event(pair: &str, close: Decimal, indicators: HashMap<String, Decimal>) -> PriceEvent {
         PriceEvent {
             pair: Pair::new(pair),
+            exchange: Exchange::Oanda,
             candle: Candle {
                 pair: Pair::new(pair),
+                exchange: Exchange::Oanda,
                 timeframe: "M5".to_string(),
                 open: close,
                 high: close,

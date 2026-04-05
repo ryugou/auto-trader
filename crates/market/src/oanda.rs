@@ -1,4 +1,4 @@
-use auto_trader_core::types::{Candle, Pair};
+use auto_trader_core::types::{Candle, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -18,7 +18,7 @@ struct CandlesResponse {
 #[derive(Debug, Deserialize)]
 struct OandaCandle {
     time: String,
-    volume: Option<i32>,
+    volume: Option<u64>,
     mid: OandaCandleMid,
     complete: bool,
 }
@@ -117,6 +117,7 @@ impl OandaClient {
             let timestamp = DateTime::parse_from_rfc3339(&c.time)?.with_timezone(&Utc);
             candles.push(Candle {
                 pair: pair_clone.clone(),
+                exchange: Exchange::Oanda,
                 timeframe: granularity.to_string(),
                 open: Decimal::from_str(&c.mid.o)?,
                 high: Decimal::from_str(&c.mid.h)?,

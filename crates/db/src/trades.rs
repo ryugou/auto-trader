@@ -1,5 +1,5 @@
 use auto_trader_core::types::{
-    Direction, ExitReason, Pair, Trade, TradeMode, TradeStatus,
+    Direction, Exchange, ExitReason, Pair, Trade, TradeMode, TradeStatus,
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -9,19 +9,25 @@ use uuid::Uuid;
 pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
     sqlx::query(
         r#"INSERT INTO trades
-           (id, strategy_name, pair, direction, entry_price, exit_price,
-            stop_loss, take_profit, entry_at, exit_at, pnl_pips, pnl_amount,
+           (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+            stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+            entry_at, exit_at, pnl_pips, pnl_amount,
             exit_reason, mode, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"#,
     )
     .bind(trade.id)
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
+    .bind(trade.exchange.as_str())
     .bind(serde_json::to_string(&trade.direction)?.trim_matches('"'))
     .bind(trade.entry_price)
     .bind(trade.exit_price)
     .bind(trade.stop_loss)
     .bind(trade.take_profit)
+    .bind(trade.quantity)
+    .bind(trade.leverage)
+    .bind(trade.fees)
+    .bind(trade.paper_account_id)
     .bind(trade.entry_at)
     .bind(trade.exit_at)
     .bind(trade.pnl_pips)
@@ -71,8 +77,9 @@ pub async fn get_open_trades(
     pair: &str,
 ) -> anyhow::Result<Vec<Trade>> {
     let rows = sqlx::query_as::<_, TradeRow>(
-        r#"SELECT id, strategy_name, pair, direction, entry_price, exit_price,
-                  stop_loss, take_profit, entry_at, exit_at, pnl_pips, pnl_amount,
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+                  entry_at, exit_at, pnl_pips, pnl_amount,
                   exit_reason, mode, status, created_at
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
@@ -89,11 +96,16 @@ struct TradeRow {
     id: Uuid,
     strategy_name: String,
     pair: String,
+    exchange: String,
     direction: String,
     entry_price: Decimal,
     exit_price: Option<Decimal>,
     stop_loss: Decimal,
     take_profit: Decimal,
+    quantity: Option<Decimal>,
+    leverage: Decimal,
+    fees: Decimal,
+    paper_account_id: Option<Uuid>,
     entry_at: DateTime<Utc>,
     exit_at: Option<DateTime<Utc>>,
     pnl_pips: Option<Decimal>,
@@ -109,6 +121,11 @@ impl TryFrom<TradeRow> for Trade {
     type Error = anyhow::Error;
 
     fn try_from(r: TradeRow) -> anyhow::Result<Self> {
+        let exchange = match r.exchange.as_str() {
+            "oanda" => Exchange::Oanda,
+            "bitflyer_cfd" => Exchange::BitflyerCfd,
+            other => anyhow::bail!("unknown exchange: {other}"),
+        };
         let direction = match r.direction.as_str() {
             "long" => Direction::Long,
             "short" => Direction::Short,
@@ -140,11 +157,16 @@ impl TryFrom<TradeRow> for Trade {
             id: r.id,
             strategy_name: r.strategy_name,
             pair: Pair::new(&r.pair),
+            exchange,
             direction,
             entry_price: r.entry_price,
             exit_price: r.exit_price,
             stop_loss: r.stop_loss,
             take_profit: r.take_profit,
+            quantity: r.quantity,
+            leverage: r.leverage,
+            fees: r.fees,
+            paper_account_id: r.paper_account_id,
             entry_at: r.entry_at,
             exit_at: r.exit_at,
             pnl_pips: r.pnl_pips,
