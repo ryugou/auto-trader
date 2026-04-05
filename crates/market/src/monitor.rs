@@ -48,7 +48,10 @@ impl MarketMonitor {
         if candles.is_empty() {
             return Ok(());
         }
-        let latest = candles.last().unwrap().clone();
+        let latest = match candles.last() {
+            Some(c) => c.clone(),
+            None => return Ok(()),  // empty after filtering incomplete candles
+        };
         let closes: Vec<Decimal> = candles.iter().map(|c| c.close).collect();
 
         let mut indicators = HashMap::new();

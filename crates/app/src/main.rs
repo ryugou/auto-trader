@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Market monitor
     let pairs: Vec<Pair> = config.pairs.active.iter().map(|s| Pair::new(s)).collect();
-    let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx);
+    let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx.clone());
 
     // Strategy engine
     let mut engine = StrategyEngine::new(signal_tx);
@@ -172,12 +172,20 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down...");
+    tracing::info!("shutting down... draining channels");
 
+    // Drop senders to signal downstream tasks to finish
+    drop(price_tx);
     monitor_handle.abort();
-    engine_handle.abort();
-    executor_handle.abort();
-    recorder_handle.abort();
 
+    // Wait for downstream tasks to drain (max 5 seconds)
+    let drain_timeout = tokio::time::Duration::from_secs(5);
+    let _ = tokio::time::timeout(drain_timeout, async {
+        let _ = engine_handle.await;
+        let _ = executor_handle.await;
+        let _ = recorder_handle.await;
+    }).await;
+
+    tracing::info!("shutdown complete");
     Ok(())
 }
