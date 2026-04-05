@@ -64,13 +64,14 @@ mode = "paper"
 pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
 
-# Crypto paper accounts — each receives the SAME signals independently.
-# This enables parallel simulation with different capital allocations.
+# Crypto paper accounts — each account is bound to exactly one strategy.
+# To test multiple strategies, create separate accounts.
 [[paper_accounts]]
 name = "crypto_real"
 exchange = "bitflyer_cfd"
 initial_balance = 5233
 leverage = 2
+strategy = "crypto_trend_v1"
 currency = "JPY"
 
 [[paper_accounts]]
@@ -78,4 +79,5 @@ name = "crypto_100k"
 exchange = "bitflyer_cfd"
 initial_balance = 100000
 leverage = 2
+strategy = "crypto_trend_v1"
 currency = "JPY"

@@ -107,6 +107,7 @@ pub struct PaperAccountConfig {
     pub exchange: String,
     pub initial_balance: Decimal,
     pub leverage: Decimal,
+    pub strategy: String,
     #[serde(default = "default_currency")]
     pub currency: String,
 }
@@ -215,6 +216,7 @@ name = "crypto_real"
 exchange = "bitflyer_cfd"
 initial_balance = 5233
 leverage = 2
+strategy = "crypto_trend_v1"
 currency = "JPY"
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();

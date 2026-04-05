@@ -195,7 +195,8 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Paper accounts (crypto) — upsert to DB for FK integrity
-    let paper_accounts: Vec<(String, Arc<PaperTrader>)> = {
+    // Each account is bound to exactly one strategy.
+    let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
         for pac in &config.paper_accounts {
             let id = Uuid::new_v4();
@@ -214,10 +215,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(db_id),
             ));
             tracing::info!(
-                "paper account: {} (id={}, balance={}, leverage={})",
-                pac.name, db_id, pac.initial_balance, pac.leverage
+                "paper account: {} (id={}, strategy={}, balance={}, leverage={})",
+                pac.name, db_id, pac.strategy, pac.initial_balance, pac.leverage
             );
-            accounts.push((pac.name.clone(), trader));
+            accounts.push((pac.name.clone(), pac.strategy.clone(), trader));
         }
         accounts
     };
@@ -348,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Position monitors — crypto (one per paper_account)
     let mut crypto_price_senders: Vec<(String, mpsc::Sender<PriceEvent>)> = Vec::new();
-    for (name, trader) in &paper_accounts {
+    for (name, _strategy, trader) in &paper_accounts {
         let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
         let monitor_trader = trader.clone();
         let monitor_trade_tx = trade_tx.clone();
@@ -425,10 +426,11 @@ async fn main() -> anyhow::Result<()> {
             let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
 
             if is_crypto {
-                // Crypto: dispatch same signal to ALL paper_accounts independently.
-                // Each account runs its own position sizing based on its balance/leverage.
-                // This enables parallel simulation of different capital allocations.
-                for (name, account) in &executor_accounts {
+                // Crypto: dispatch signal only to the paper_account bound to this strategy.
+                for (name, strategy_name, account) in &executor_accounts {
+                    if strategy_name != &signal.strategy_name {
+                        continue;
+                    }
                     let positions = account.open_positions().await.unwrap_or_default();
                     let has_position = positions.iter().any(|p| {
                         p.trade.strategy_name == signal.strategy_name
@@ -665,7 +667,7 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             let today = chrono::Utc::now().date_naive();
             if today != last_date {
-                for (name, trader) in &overnight_accounts {
+                for (name, _strategy, trader) in &overnight_accounts {
                     let fees = trader.apply_overnight_fees(fee_rate).await;
                     if fees > Decimal::ZERO {
                         tracing::info!("overnight fee applied: {} = {} JPY", name, fees);
