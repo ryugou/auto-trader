@@ -40,7 +40,9 @@ impl StrategyEngine {
         }
     }
 
-    /// Broadcast MacroUpdate to all strategies.
+    /// Broadcast MacroUpdate to all strategies, including disabled ones.
+    /// Disabled strategies don't emit signals but still maintain macro context
+    /// so they are ready if re-enabled without missing accumulated state.
     pub fn on_macro_update(&mut self, update: &MacroUpdate) {
         for slot in &mut self.slots {
             slot.strategy.on_macro_update(update);

@@ -11,6 +11,7 @@ url = "postgresql://auto-trader:auto-trader@db:5432/auto_trader"
 
 [monitor]
 interval_secs = 60
+# backfill_days = 7  # startup時にmax_drawdownを再計算する日数（デフォルト: 7）
 
 [pairs]
 active = ["USD_JPY", "EUR_USD"]

@@ -60,6 +60,7 @@ pub struct StrategyConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct MacroAnalystConfig {
     pub enabled: bool,
+    /// Reserved for Phase 1 economic calendar integration. Currently unused.
     pub calendar_interval_secs: u64,
     pub news_interval_secs: u64,
     pub news_sources: Vec<String>,
