@@ -11,6 +11,10 @@ pub struct AppConfig {
     pub pairs: PairsConfig,
     #[serde(default)]
     pub strategies: Vec<StrategyConfig>,
+    #[serde(default)]
+    pub macro_analyst: Option<MacroAnalystConfig>,
+    #[serde(default)]
+    pub gemini: Option<GeminiConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -48,6 +52,20 @@ pub struct StrategyConfig {
     pub pairs: Vec<String>,
     #[serde(default)]
     pub params: HashMap<String, toml::Value>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MacroAnalystConfig {
+    pub enabled: bool,
+    pub calendar_interval_secs: u64,
+    pub news_interval_secs: u64,
+    pub news_sources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GeminiConfig {
+    pub model: String,
+    pub api_url: String,
 }
 
 impl AppConfig {

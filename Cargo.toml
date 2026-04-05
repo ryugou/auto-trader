@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/db",
+    "crates/macro-analyst",
     "crates/market",
     "crates/strategy",
     "crates/executor",
@@ -43,3 +44,4 @@ auto-trader-market = { path = "crates/market" }
 auto-trader-strategy = { path = "crates/strategy" }
 auto-trader-executor = { path = "crates/executor" }
 auto-trader-vegapunk = { path = "crates/vegapunk-client" }
+auto-trader-macro-analyst = { path = "crates/macro-analyst" }
