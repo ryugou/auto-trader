@@ -713,7 +713,7 @@ async fn main() -> anyhow::Result<()> {
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:3001").await.unwrap();
-        tracing::info!("API server listening on 0.0.0.0:3001");
+        tracing::info!("API server listening on 127.0.0.1:3001");
         axum::serve(listener, app).await.unwrap();
     });
 
