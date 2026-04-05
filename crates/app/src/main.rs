@@ -105,8 +105,13 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                let gemini_config = config.gemini.as_ref()
-                    .expect("gemini config required for swing_llm");
+                let gemini_config = match config.gemini.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        tracing::warn!("gemini config missing, skipping strategy: {}", sc.name);
+                        continue;
+                    }
+                };
 
                 // Clone from shared Vegapunk channel (no new TCP connection)
                 let vp_client = match &vegapunk_base {
