@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
     // Drop senders to signal downstream tasks to finish
     drop(price_tx);
     monitor_handle.abort();
+    daily_handle.abort(); // infinite loop — must abort explicitly
 
     // Wait for downstream tasks to drain (max 5 seconds)
     let drain_timeout = tokio::time::Duration::from_secs(5);
@@ -254,7 +255,6 @@ async fn main() -> anyhow::Result<()> {
         let _ = pos_monitor_handle.await;
         let _ = executor_handle.await;
         let _ = recorder_handle.await;
-        let _ = daily_handle.await;
     }).await;
 
     tracing::info!("shutdown complete");
