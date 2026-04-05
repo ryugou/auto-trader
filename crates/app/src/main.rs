@@ -235,8 +235,8 @@ async fn main() -> anyhow::Result<()> {
                 Some(pac.id),
             ));
             tracing::info!(
-                "paper account: {} (id={}, strategy={}, balance={}, leverage={})",
-                pac.name, pac.id, pac.strategy, pac.initial_balance, pac.leverage
+                "paper account: {} (id={}, strategy={}, balance={} (initial={}), leverage={})",
+                pac.name, pac.id, pac.strategy, pac.current_balance, pac.initial_balance, pac.leverage
             );
             accounts.push((pac.name.clone(), pac.strategy.clone(), trader));
         }

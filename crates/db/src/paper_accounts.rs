@@ -110,12 +110,16 @@ pub async fn update_paper_account(
 }
 
 /// Add a P&L delta to current_balance (positive or negative).
+/// Returns error if the account does not exist.
 pub async fn add_pnl(pool: &PgPool, id: Uuid, pnl_delta: Decimal) -> anyhow::Result<()> {
-    sqlx::query("UPDATE paper_accounts SET current_balance = current_balance + $2, updated_at = NOW() WHERE id = $1")
+    let result = sqlx::query("UPDATE paper_accounts SET current_balance = current_balance + $2, updated_at = NOW() WHERE id = $1")
         .bind(id)
         .bind(pnl_delta)
         .execute(pool)
         .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("paper account {id} not found when updating balance");
+    }
     Ok(())
 }
 

@@ -33,19 +33,19 @@ async fn auth_middleware(
     api_token: Option<String>,
     req: Request,
     next: Next,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> axum::response::Response {
     if let Some(expected) = &api_token {
         let auth = req.headers()
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
         match auth {
-            Some(token) if token == expected => Ok(next.run(req).await),
-            _ => Err(StatusCode::UNAUTHORIZED),
+            Some(token) if token == expected => next.run(req).await,
+            _ => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
         }
     } else {
         // No API_TOKEN configured — allow all (dev mode)
-        Ok(next.run(req).await)
+        next.run(req).await
     }
 }
 
