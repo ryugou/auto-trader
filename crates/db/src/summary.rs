@@ -21,10 +21,9 @@ pub async fn update_daily_max_drawdown(
     .await?;
 
     // Group by (strategy, pair, mode, exchange, paper_account_id) and calculate max drawdown per group
-    let mut groups: std::collections::HashMap<
-        (String, String, String, String, Option<Uuid>),
-        Vec<Decimal>,
-    > = std::collections::HashMap::new();
+    type GroupKey = (String, String, String, String, Option<Uuid>);
+    let mut groups: std::collections::HashMap<GroupKey, Vec<Decimal>> =
+        std::collections::HashMap::new();
     for (strategy, pair, mode, exchange, paper_account_id, pnl) in rows {
         groups
             .entry((strategy, pair, mode, exchange, paper_account_id))
@@ -96,6 +95,7 @@ pub async fn update_daily_max_drawdown(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_daily_summary(
     pool: &PgPool,
     date: NaiveDate,

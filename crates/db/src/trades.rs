@@ -45,6 +45,7 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_trade_closed(
     pool: &PgPool,
     id: Uuid,
