@@ -2,6 +2,59 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
+pub async fn update_daily_max_drawdown(
+    pool: &PgPool,
+    date: NaiveDate,
+) -> anyhow::Result<()> {
+    // Get all closed trades for the date, ordered by exit_at
+    let rows: Vec<(String, String, String, Decimal)> = sqlx::query_as(
+        "SELECT strategy_name, pair, mode, pnl_amount
+         FROM trades
+         WHERE status = 'closed' AND DATE(exit_at) = $1
+         ORDER BY exit_at ASC",
+    )
+    .bind(date)
+    .fetch_all(pool)
+    .await?;
+
+    // Group by (strategy, pair, mode) and calculate max drawdown per group
+    let mut groups: std::collections::HashMap<(String, String, String), Vec<Decimal>> =
+        std::collections::HashMap::new();
+    for (strategy, pair, mode, pnl) in rows {
+        groups.entry((strategy, pair, mode)).or_default().push(pnl);
+    }
+
+    for ((strategy, pair, mode), pnls) in groups {
+        let mut peak = Decimal::ZERO;
+        let mut equity = Decimal::ZERO;
+        let mut max_dd = Decimal::ZERO;
+        for pnl in pnls {
+            equity += pnl;
+            if equity > peak {
+                peak = equity;
+            }
+            let dd = peak - equity;
+            if dd > max_dd {
+                max_dd = dd;
+            }
+        }
+
+        sqlx::query(
+            "UPDATE daily_summary SET max_drawdown = $1
+             WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND mode = $5",
+        )
+        .bind(max_dd)
+        .bind(date)
+        .bind(&strategy)
+        .bind(&pair)
+        .bind(&mode)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
 pub async fn upsert_daily_summary(
     pool: &PgPool,
     date: NaiveDate,

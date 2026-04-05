@@ -16,6 +16,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 rust_decimal = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = "1"

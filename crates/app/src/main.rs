@@ -217,6 +217,27 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: Daily batch (max_drawdown calculation at UTC 0:00)
+    let daily_pool = pool.clone();
+    let daily_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        let mut last_date = chrono::Utc::now().date_naive();
+        loop {
+            interval.tick().await;
+            let today = chrono::Utc::now().date_naive();
+            if today != last_date {
+                // Date changed — calculate yesterday's max_drawdown
+                tracing::info!("running daily batch for {last_date}");
+                if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
+                    &daily_pool, last_date,
+                ).await {
+                    tracing::error!("daily batch failed: {e}");
+                }
+                last_date = today;
+            }
+        }
+    });
+
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
@@ -233,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = pos_monitor_handle.await;
         let _ = executor_handle.await;
         let _ = recorder_handle.await;
+        let _ = daily_handle.await;
     }).await;
 
     tracing::info!("shutdown complete");
