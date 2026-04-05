@@ -71,7 +71,7 @@ impl MacroAnalyst {
                 }
 
                 if let Some(pool) = &self.pool {
-                    let _ = auto_trader_db::macro_events::insert_macro_event(
+                    if let Err(e) = auto_trader_db::macro_events::insert_macro_event(
                         pool,
                         &summary,
                         "news",
@@ -79,7 +79,10 @@ impl MacroAnalyst {
                         chrono::Utc::now(),
                         Some(&item.source),
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::warn!("failed to insert macro event: {e}");
+                    }
                 }
 
                 let update = MacroUpdate {

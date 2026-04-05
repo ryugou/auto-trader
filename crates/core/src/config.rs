@@ -66,6 +66,7 @@ pub struct MacroAnalystConfig {
 pub struct GeminiConfig {
     pub model: String,
     pub api_url: String,
+    // api_key is read from GEMINI_API_KEY env var (1Password + direnv)
 }
 
 impl AppConfig {
