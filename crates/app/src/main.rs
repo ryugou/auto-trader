@@ -58,10 +58,12 @@ async fn main() -> anyhow::Result<()> {
     let monitor = MarketMonitor::new(oanda, fx_pairs, config.monitor.interval_secs, price_tx.clone())
         .with_db(pool.clone());
 
-    // Vegapunk: single gRPC channel, multiple clients share it
+    // Vegapunk: single gRPC channel with optional Bearer token auth
+    let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
     let vegapunk_base: Option<auto_trader_vegapunk::client::VegapunkClient> =
         match auto_trader_vegapunk::client::VegapunkClient::connect(
-            &config.vegapunk.endpoint, &config.vegapunk.schema
+            &config.vegapunk.endpoint, &config.vegapunk.schema,
+            vegapunk_auth_token.as_deref(),
         ).await {
             Ok(client) => {
                 tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
