@@ -1,6 +1,8 @@
 FROM rust:1.85-bookworm AS builder
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY proto/ proto/
 COPY crates/ crates/
 COPY migrations/ migrations/
 RUN cargo build --release --bin auto-trader

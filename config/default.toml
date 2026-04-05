@@ -19,6 +19,15 @@ active = ["USD_JPY", "EUR_USD"]
 model = "gemini-2.0-flash"
 api_url = "https://generativelanguage.googleapis.com"
 
+[macro_analyst]
+enabled = true
+calendar_interval_secs = 3600
+news_interval_secs = 1800
+news_sources = [
+    "https://www.forexlive.com/feed",
+    "https://www.dailyfx.com/feeds/market-news",
+]
+
 [[strategies]]
 name = "trend_follow_v1"
 enabled = true
