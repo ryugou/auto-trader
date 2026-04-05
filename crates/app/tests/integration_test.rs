@@ -71,3 +71,33 @@ async fn channel_pipeline() {
     assert_eq!(received.signal.pair, Pair::new("USD_JPY"));
     assert_eq!(received.signal.direction, Direction::Long);
 }
+
+#[tokio::test]
+async fn sl_tp_auto_close() {
+    let trader = PaperTrader::new(dec!(100000), dec!(25));
+
+    // Open a long position
+    let signal = Signal {
+        strategy_name: "test".to_string(),
+        pair: Pair::new("USD_JPY"),
+        direction: Direction::Long,
+        entry_price: dec!(150.00),
+        stop_loss: dec!(149.50),
+        take_profit: dec!(151.00),
+        confidence: 0.8,
+        timestamp: Utc::now(),
+    };
+    let trade = trader.execute(&signal).await.unwrap();
+    assert_eq!(trade.status, TradeStatus::Open);
+
+    // SL hit: close at stop_loss price
+    let closed = trader
+        .close_position(&trade.id.to_string(), ExitReason::SlHit, dec!(149.50))
+        .await
+        .unwrap();
+    assert_eq!(closed.status, TradeStatus::Closed);
+    assert_eq!(closed.exit_reason, Some(ExitReason::SlHit));
+    assert_eq!(closed.exit_price, Some(dec!(149.50)));
+    // PnL: (149.50 - 150.00) = -0.50
+    assert_eq!(closed.pnl_pips.unwrap(), dec!(-0.50));
+}

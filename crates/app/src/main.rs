@@ -1,3 +1,5 @@
+mod position_monitor;
+
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
 use auto_trader_core::executor::OrderExecutor;
@@ -31,8 +33,9 @@ async fn main() -> anyhow::Result<()> {
     let pool = create_pool(&config.database.url).await?;
     tracing::info!("database connected");
 
-    // Channels
+    // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
+    let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
     let (signal_tx, mut signal_rx) = mpsc::channel::<SignalEvent>(256);
     let (trade_tx, mut trade_rx) = mpsc::channel::<TradeEvent>(256);
 
@@ -93,11 +96,24 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Task: Strategy engine (price -> signal)
+    // Task: Strategy engine (price -> signal) + forward to position monitor
     let engine_handle = tokio::spawn(async move {
         while let Some(event) = price_rx.recv().await {
+            // Forward to position monitor
+            let _ = price_monitor_tx.send(event.clone()).await;
             engine.on_price(&event).await;
         }
+    });
+
+    // Task: Position monitor (price -> SL/TP check -> close)
+    let pos_monitor_executor = paper_trader.clone();
+    let pos_monitor_trade_tx = trade_tx.clone();
+    let pos_monitor_handle = tokio::spawn(async move {
+        position_monitor::run_position_monitor(
+            pos_monitor_executor,
+            price_monitor_rx,
+            pos_monitor_trade_tx,
+        ).await;
     });
 
     // Task: Signal executor (signal -> trade)
@@ -182,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
     let drain_timeout = tokio::time::Duration::from_secs(5);
     let _ = tokio::time::timeout(drain_timeout, async {
         let _ = engine_handle.await;
+        let _ = pos_monitor_handle.await;
         let _ = executor_handle.await;
         let _ = recorder_handle.await;
     }).await;
