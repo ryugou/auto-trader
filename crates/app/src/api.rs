@@ -11,6 +11,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Paper accounts REST API.
+/// Changes via this API modify the DB only. The trading pipeline reads accounts
+/// at startup, so API changes take effect on next restart.
 pub fn router(pool: PgPool) -> Router {
     let api_token = std::env::var("API_TOKEN").ok();
     Router::new()

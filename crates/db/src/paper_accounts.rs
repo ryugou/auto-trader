@@ -109,6 +109,16 @@ pub async fn update_paper_account(
     Ok(account)
 }
 
+/// Add a P&L delta to current_balance (positive or negative).
+pub async fn add_pnl(pool: &PgPool, id: Uuid, pnl_delta: Decimal) -> anyhow::Result<()> {
+    sqlx::query("UPDATE paper_accounts SET current_balance = current_balance + $2, updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .bind(pnl_delta)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn delete_paper_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
     let result = sqlx::query("DELETE FROM paper_accounts WHERE id = $1")
         .bind(id)

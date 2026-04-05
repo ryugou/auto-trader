@@ -602,6 +602,15 @@ async fn main() -> anyhow::Result<()> {
                         ).await {
                             tracing::error!("update trade error: {e}");
                         }
+                        // Persist balance change to paper_accounts (if applicable)
+                        if let Some(account_id) = t.paper_account_id {
+                            let net_pnl = pnl_amount - t.fees;
+                            if let Err(e) = auto_trader_db::paper_accounts::add_pnl(
+                                &recorder_pool, account_id, net_pnl,
+                            ).await {
+                                tracing::error!("update paper account balance error: {e}");
+                            }
+                        }
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let mode_str = t.mode.as_str();
@@ -713,9 +722,16 @@ async fn main() -> anyhow::Result<()> {
     let api_pool = pool.clone();
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_pool);
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await
-            .expect("failed to bind API server to 0.0.0.0:3001");
-        tracing::info!("API server listening on 0.0.0.0:3001");
+        // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
+        // Otherwise bind to 127.0.0.1 to prevent unauthenticated external access.
+        let bind_addr = if std::env::var("API_TOKEN").is_ok() {
+            "0.0.0.0:3001"
+        } else {
+            "127.0.0.1:3001"
+        };
+        let listener = tokio::net::TcpListener::bind(bind_addr).await
+            .expect("failed to bind API server");
+        tracing::info!("API server listening on {bind_addr}");
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!("API server error: {e}");
         }
