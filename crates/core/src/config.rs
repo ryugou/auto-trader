@@ -5,7 +5,8 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-    pub oanda: OandaConfig,
+    #[serde(default)]
+    pub oanda: Option<OandaConfig>,
     #[serde(default)]
     pub bitflyer: Option<BitflyerConfig>,
     pub vegapunk: VegapunkConfig,
@@ -160,7 +161,7 @@ pairs = ["USD_JPY"]
 params = { ma_short = 20, ma_long = 50 }
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.oanda.api_url, "https://api-fxpractice.oanda.com");
+        assert_eq!(config.oanda.as_ref().unwrap().api_url, "https://api-fxpractice.oanda.com");
         assert_eq!(config.strategies.len(), 1);
         assert_eq!(config.strategies[0].name, "trend_follow_v1");
         assert_eq!(config.pairs.active, vec!["USD_JPY"]);
