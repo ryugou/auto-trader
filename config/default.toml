@@ -15,9 +15,20 @@ interval_secs = 60
 [pairs]
 active = ["USD_JPY", "EUR_USD"]
 
+[gemini]
+model = "gemini-2.0-flash"
+api_url = "https://generativelanguage.googleapis.com"
+
 [[strategies]]
 name = "trend_follow_v1"
 enabled = true
 mode = "paper"
 pairs = ["USD_JPY"]
 params = { ma_short = 20, ma_long = 50, rsi_threshold = 70 }
+
+[[strategies]]
+name = "swing_llm_v1"
+enabled = true
+mode = "paper"
+pairs = ["USD_JPY", "EUR_USD"]
+params = { holding_days_max = 14 }

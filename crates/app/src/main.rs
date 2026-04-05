@@ -78,6 +78,35 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
+            name if name.starts_with("swing_llm") => {
+                let holding_days_max = sc.params.get("holding_days_max")
+                    .and_then(|v| v.as_integer()).unwrap_or(14) as u32;
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+
+                let gemini_api_key = std::env::var("GEMINI_API_KEY")
+                    .expect("GEMINI_API_KEY must be set for swing_llm strategy");
+                let gemini_config = config.gemini.as_ref()
+                    .expect("gemini config required for swing_llm");
+
+                let vp_config = &config.vegapunk;
+                let vp_client = auto_trader_vegapunk::client::VegapunkClient::connect(
+                    &vp_config.endpoint, &vp_config.schema,
+                ).await?;
+
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::swing_llm::SwingLLMv1::new(
+                        sc.name.clone(),
+                        pairs,
+                        holding_days_max,
+                        vp_client,
+                        gemini_config.api_url.clone(),
+                        gemini_api_key,
+                        gemini_config.model.clone(),
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
             other => {
                 tracing::warn!("unknown strategy: {other}, skipping");
             }
