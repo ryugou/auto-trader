@@ -36,11 +36,14 @@ impl VegapunkClient {
             .await?;
 
         let interceptor = AuthInterceptor {
-            token: auth_token.map(|t| {
-                format!("Bearer {t}")
-                    .parse::<MetadataValue<tonic::metadata::Ascii>>()
-                    .expect("invalid auth token")
-            }),
+            token: match auth_token {
+                Some(t) => Some(
+                    format!("Bearer {t}")
+                        .parse::<MetadataValue<tonic::metadata::Ascii>>()
+                        .map_err(|e| anyhow::anyhow!("invalid VEGAPUNK_AUTH_TOKEN: {e}"))?,
+                ),
+                None => None,
+            },
         };
 
         let client = GraphRagEngineClient::with_interceptor(channel.clone(), interceptor.clone());

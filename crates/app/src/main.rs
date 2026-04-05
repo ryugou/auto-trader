@@ -67,6 +67,19 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Warn if FX strategies are enabled but FX monitor is not running
+    if fx_monitor.is_none() {
+        let has_fx_strategy = config.strategies.iter().any(|s| {
+            s.enabled && (s.name.starts_with("trend_follow") || s.name.starts_with("swing_llm"))
+        });
+        if has_fx_strategy {
+            tracing::warn!(
+                "FX strategies are enabled but FX monitor is not running (OANDA not configured). \
+                 These strategies will not receive price data."
+            );
+        }
+    }
+
     // Vegapunk: single gRPC channel with optional Bearer token auth
     let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
     let vegapunk_base: Option<auto_trader_vegapunk::client::VegapunkClient> =
