@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn paper_trade_roundtrip() {
-    let trader = PaperTrader::new(dec!(100000), dec!(25));
+    let trader = PaperTrader::new(dec!(100000), dec!(25), None);
 
     let signal = Signal {
         strategy_name: "test".to_string(),
@@ -75,7 +75,7 @@ async fn channel_pipeline() {
 
 #[tokio::test]
 async fn paper_trader_close_at_sl_price() {
-    let trader = PaperTrader::new(dec!(100000), dec!(25));
+    let trader = PaperTrader::new(dec!(100000), dec!(25), None);
 
     // Open a long position
     let signal = Signal {

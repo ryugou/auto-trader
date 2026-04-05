@@ -152,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
     let paper_trader = Arc::new(PaperTrader::new(
         Decimal::from(100_000),
         Decimal::from(25),
+        None,
     ));
 
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
