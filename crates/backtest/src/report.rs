@@ -20,7 +20,7 @@ impl BacktestReport {
             .collect();
 
         let total_trades = closed.len();
-        let wins = closed.iter().filter(|t| t.pnl_pips.unwrap_or_default() > Decimal::ZERO).count();
+        let wins = closed.iter().filter(|t| t.pnl_amount.unwrap_or_default() > Decimal::ZERO).count();
         let losses = total_trades - wins;
         let win_rate = if total_trades > 0 { wins as f64 / total_trades as f64 } else { 0.0 };
 

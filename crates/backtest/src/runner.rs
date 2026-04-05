@@ -6,7 +6,6 @@ use auto_trader_core::executor::OrderExecutor;
 use crate::report::BacktestReport;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 pub struct BacktestRunner {
     pool: sqlx::PgPool,
@@ -35,7 +34,7 @@ impl BacktestRunner {
             anyhow::bail!("no candle data for {} {}", pair, timeframe);
         }
 
-        let trader = Arc::new(PaperTrader::new(initial_balance, leverage));
+        let trader = PaperTrader::new(initial_balance, leverage);
         let mut trades: Vec<Trade> = Vec::new();
 
         // Replay candles chronologically
