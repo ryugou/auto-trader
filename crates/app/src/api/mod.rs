@@ -1,4 +1,5 @@
 mod accounts;
+pub(crate) mod filters;
 
 use axum::extract::Request;
 use axum::http::StatusCode;
