@@ -2,6 +2,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct DashboardFilter {
     pub exchange: Option<String>,
     pub paper_account_id: Option<Uuid>,

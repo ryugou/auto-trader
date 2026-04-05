@@ -719,9 +719,15 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // REST API server
-    let api_pool = pool.clone();
+    let api_state = api::AppState {
+        pool: pool.clone(),
+        paper_traders: paper_accounts
+            .iter()
+            .map(|(name, _strategy, trader)| (name.clone(), trader.clone()))
+            .collect(),
+    };
     let api_handle = tokio::spawn(async move {
-        let app = api::router(api_pool);
+        let app = api::router(api_state);
         // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
         // Otherwise bind to 127.0.0.1 to prevent unauthenticated external access.
         let bind_addr = if std::env::var("API_TOKEN").is_ok() {
