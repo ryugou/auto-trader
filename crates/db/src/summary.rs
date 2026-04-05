@@ -24,12 +24,12 @@ pub async fn update_daily_max_drawdown(
         groups.entry((strategy, pair, mode)).or_default().push(pnl);
     }
 
-    for ((strategy, pair, mode), pnls) in groups {
+    for ((strategy, pair, mode), pnls) in &groups {
         let mut peak = Decimal::ZERO;
         let mut equity = Decimal::ZERO;
         let mut max_dd = Decimal::ZERO;
         for pnl in pnls {
-            equity += pnl;
+            equity += *pnl;
             if equity > peak {
                 peak = equity;
             }
@@ -53,17 +53,27 @@ pub async fn update_daily_max_drawdown(
         .await?;
 
         if result.rows_affected() == 0 {
-            // Row doesn't exist yet — insert with max_drawdown
+            // Row doesn't exist yet — compute actual totals from trades
+            let (total_trades, total_wins, total_pnl): (i64, i64, Decimal) = pnls.iter().fold(
+                (0i64, 0i64, Decimal::ZERO),
+                |(count, wins, pnl_sum), pnl| {
+                    let win = if *pnl > Decimal::ZERO { 1 } else { 0 };
+                    (count + 1, wins + win, pnl_sum + *pnl)
+                },
+            );
             sqlx::query(
                 r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, trade_count, win_count, total_pnl, max_drawdown)
-                   VALUES ($1, $2, $3, $4, 0, 0, 0, $5)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                    ON CONFLICT (date, strategy_name, pair, mode) DO UPDATE
-                   SET max_drawdown = $5"#,
+                   SET max_drawdown = $8"#,
             )
             .bind(date)
             .bind(&strategy)
             .bind(&pair)
             .bind(&mode)
+            .bind(total_trades as i32)
+            .bind(total_wins as i32)
+            .bind(total_pnl)
             .bind(max_dd)
             .execute(pool)
             .await?;

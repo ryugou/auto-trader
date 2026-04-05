@@ -220,8 +220,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 macro_update = macro_rx.recv() => {
-                    if let Ok(update) = macro_update {
-                        engine.on_macro_update(&update);
+                    match macro_update {
+                        Ok(update) => engine.on_macro_update(&update),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("macro broadcast lagged, skipped {n} updates");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::info!("macro broadcast channel closed");
+                        }
                     }
                 }
             }
@@ -317,10 +323,12 @@ async fn main() -> anyhow::Result<()> {
                         let mode_str = serde_json::to_string(&t.mode).unwrap_or_default();
                         let mode_str = mode_str.trim_matches('"');
                         let win = if pnl_pips > Decimal::ZERO { 1 } else { 0 };
-                        let _ = auto_trader_db::summary::upsert_daily_summary(
+                        if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool, date, &t.strategy_name, &t.pair.0,
                             mode_str, 1, win, pnl_amount,
-                        ).await;
+                        ).await {
+                            tracing::error!("upsert daily summary error: {e}");
+                        }
                         // Ingest trade result to Vegapunk
                         if let Some(vp) = &vegapunk_client_recorder {
                             let mut vp = vp.lock().await;
