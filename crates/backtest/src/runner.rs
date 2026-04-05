@@ -26,7 +26,7 @@ impl BacktestRunner {
     ) -> anyhow::Result<BacktestReport> {
         // Load candles from DB — get_candles returns DESC order, reverse for chronological
         let mut candles = auto_trader_db::candles::get_candles(
-            &self.pool, &pair.0, timeframe, 10000
+            &self.pool, "oanda", &pair.0, timeframe, 10000
         ).await?;
         candles.reverse(); // chronological order
 

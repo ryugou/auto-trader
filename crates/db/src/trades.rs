@@ -53,11 +53,12 @@ pub async fn update_trade_closed(
     pnl_pips: Decimal,
     pnl_amount: Decimal,
     exit_reason: ExitReason,
+    fees: Decimal,
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"UPDATE trades
            SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
-               exit_reason = $6, status = 'closed'
+               exit_reason = $6, fees = $7, status = 'closed'
            WHERE id = $1"#,
     )
     .bind(id)
@@ -66,6 +67,7 @@ pub async fn update_trade_closed(
     .bind(pnl_pips)
     .bind(pnl_amount)
     .bind(serde_json::to_string(&exit_reason).unwrap_or_default().trim_matches('"'))
+    .bind(fees)
     .execute(pool)
     .await?;
     Ok(())

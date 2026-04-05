@@ -47,8 +47,12 @@ async fn main() -> anyhow::Result<()> {
     let oanda = OandaClient::new(&config.oanda.api_url, &account_id, &api_key)?;
 
     // Market monitor
-    let pairs: Vec<Pair> = config.pairs.active.iter().map(|s| Pair::new(s)).collect();
-    let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx.clone())
+    let fx_pairs: Vec<Pair> = if !config.pairs.active.is_empty() {
+        config.pairs.active.iter().map(|s| Pair::new(s)).collect()
+    } else {
+        config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
+    };
+    let monitor = MarketMonitor::new(oanda, fx_pairs, config.monitor.interval_secs, price_tx.clone())
         .with_db(pool.clone());
 
     // Vegapunk: single gRPC channel, multiple clients share it
@@ -332,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
                         (t.exit_price, t.exit_at, t.pnl_pips, t.pnl_amount, t.exit_reason)
                     {
                         if let Err(e) = auto_trader_db::trades::update_trade_closed(
-                            &recorder_pool, t.id, exit_price, exit_at, pnl_pips, pnl_amount, exit_reason,
+                            &recorder_pool, t.id, exit_price, exit_at, pnl_pips, pnl_amount, exit_reason, t.fees,
                         ).await {
                             tracing::error!("update trade error: {e}");
                         }
@@ -342,7 +346,8 @@ async fn main() -> anyhow::Result<()> {
                         let win = if pnl_pips > Decimal::ZERO { 1 } else { 0 };
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool, date, &t.strategy_name, &t.pair.0,
-                            mode_str, 1, win, pnl_amount,
+                            mode_str, t.exchange.as_str(), t.paper_account_id,
+                            1, win, pnl_amount,
                         ).await {
                             tracing::error!("upsert daily summary error: {e}");
                         }
