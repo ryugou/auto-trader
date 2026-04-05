@@ -24,6 +24,11 @@ impl StrategyEngine {
         self.slots.push(StrategySlot { strategy, mode });
     }
 
+    /// Returns names of all registered strategies.
+    pub fn registered_names(&self) -> Vec<&str> {
+        self.slots.iter().map(|s| s.strategy.name()).collect()
+    }
+
     /// Dispatch PriceEvent to all enabled strategies.
     /// 1-pair-1-position constraint is enforced at the executor level (main.rs),
     /// not here. The engine simply forwards all signals.

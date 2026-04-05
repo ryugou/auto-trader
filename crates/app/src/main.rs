@@ -182,11 +182,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Collect registered strategy names for paper_account validation
-    let registered_strategies: Vec<String> = config.strategies.iter()
-        .filter(|s| s.enabled)
-        .map(|s| s.name.clone())
-        .collect();
+    // Collect actually registered strategy names for paper_account validation
+    let registered_strategies: Vec<&str> = engine.registered_names();
 
     // Paper traders: positions are in-memory only (process lifetime = session).
     // On restart, DB may have status='open' trades from previous session.
@@ -205,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
     let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
         for pac in &config.paper_accounts {
-            if !registered_strategies.contains(&pac.strategy) {
+            if !registered_strategies.contains(&pac.strategy.as_str()) {
                 tracing::error!(
                     "paper account '{}' references strategy '{}' which is not registered (check [[strategies]] and enabled flag)",
                     pac.name, pac.strategy
