@@ -4,6 +4,8 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::str::FromStr;
 
+use crate::provider::MarketDataProvider;
+
 pub struct OandaClient {
     client: reqwest::Client,
     base_url: String,
@@ -177,5 +179,21 @@ impl OandaClient {
         let bid = Decimal::from_str(bid_str)?;
         let ask = Decimal::from_str(ask_str)?;
         Ok((bid + ask) / Decimal::from(2))
+    }
+}
+
+#[async_trait::async_trait]
+impl MarketDataProvider for OandaClient {
+    async fn get_candles(
+        &self,
+        pair: &Pair,
+        timeframe: &str,
+        count: u32,
+    ) -> anyhow::Result<Vec<Candle>> {
+        self.get_candles(pair, timeframe, count).await
+    }
+
+    async fn get_latest_price(&self, pair: &Pair) -> anyhow::Result<Decimal> {
+        self.get_latest_price(pair).await
     }
 }
