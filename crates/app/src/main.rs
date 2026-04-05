@@ -171,7 +171,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Paper trader (FX)
+    // Paper traders: positions are in-memory only (process lifetime = session).
+    // On restart, DB may have status='open' trades from previous session.
+    // These are NOT restored — the app starts fresh. If position persistence is
+    // needed, load open trades from DB on startup and reconstruct PaperTrader state.
+    // For now, stale DB records can be cleaned up manually or ignored.
     let paper_trader = Arc::new(PaperTrader::new(
         Exchange::Oanda,
         Decimal::from(100_000),
@@ -629,20 +633,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
-    // On startup, apply fee for yesterday to cover missed overnight if process was down.
+    // Note: Positions are in-memory only — on restart they are lost, so startup
+    // backfill is not meaningful. If positions are persisted to DB in the future,
+    // track last_fee_date per account and backfill missed days on startup.
     let overnight_accounts = paper_accounts.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
-
-        // Startup backfill: apply yesterday's overnight fee if positions are open
-        for (name, trader) in &overnight_accounts {
-            let fees = trader.apply_overnight_fees(fee_rate).await;
-            if fees > Decimal::ZERO {
-                tracing::info!("overnight fee backfill: {} = {} JPY", name, fees);
-            }
-        }
-
         let mut last_date = chrono::Utc::now().date_naive();
         loop {
             interval.tick().await;
