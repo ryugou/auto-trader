@@ -220,7 +220,12 @@ async fn main() -> anyhow::Result<()> {
     let risk_rate = config
         .position_sizing
         .as_ref()
-        .map(|ps| ps.risk_rate)
+        .map(|ps| {
+            if ps.method != "risk_based" {
+                tracing::warn!("position_sizing.method='{}' is not supported, using risk_based", ps.method);
+            }
+            ps.risk_rate
+        })
         .unwrap_or(Decimal::new(2, 2)); // default 0.02
     let position_sizer = Arc::new(PositionSizer::new(risk_rate, min_order_sizes));
 
