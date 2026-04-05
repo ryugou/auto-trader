@@ -13,6 +13,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +49,13 @@ pub fn router(state: AppState) -> Router {
             let token = api_token.clone();
             auth_middleware(token, req, next)
         }))
+        .fallback_service(ServeDir::new("dashboard-ui/dist"))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state)
 }
 
