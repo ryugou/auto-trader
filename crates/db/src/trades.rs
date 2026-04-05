@@ -51,7 +51,7 @@ pub async fn update_trade_closed(
     id: Uuid,
     exit_price: Decimal,
     exit_at: DateTime<Utc>,
-    pnl_pips: Decimal,
+    pnl_pips: Option<Decimal>,
     pnl_amount: Decimal,
     exit_reason: ExitReason,
     fees: Decimal,

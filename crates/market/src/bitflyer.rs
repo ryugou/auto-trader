@@ -6,7 +6,6 @@ use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -26,11 +25,11 @@ struct TickerParams {
 struct TickerMessage {
     product_code: String,
     #[allow(dead_code)]
-    best_bid: f64,
+    best_bid: Decimal,
     #[allow(dead_code)]
-    best_ask: f64,
-    ltp: f64,
-    volume: f64,
+    best_ask: Decimal,
+    ltp: Decimal,
+    volume: Decimal,
     timestamp: String,
 }
 
@@ -77,8 +76,14 @@ impl BitflyerMonitor {
         loop {
             match self.connect_and_stream(&mut builders, &mut closes_map).await {
                 Ok(()) => {
-                    tracing::info!("bitflyer websocket closed normally");
-                    break;
+                    if self.tx.is_closed() {
+                        tracing::info!("price channel closed, stopping bitflyer monitor");
+                        return Ok(());
+                    }
+                    // Normal close — reconnect (server can close gracefully)
+                    tracing::info!("bitflyer websocket closed normally, reconnecting");
+                    backoff_secs = 1;
+                    continue;
                 }
                 Err(e) => {
                     if self.tx.is_closed() {
@@ -135,8 +140,8 @@ impl BitflyerMonitor {
                 continue;
             };
 
-            let price = Decimal::from_str(&format!("{}", ticker.ltp))?;
-            let size = Decimal::from_str(&format!("{}", ticker.volume))?;
+            let price = ticker.ltp;
+            let size = ticker.volume;
             let ts = chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?
                 .with_timezone(&chrono::Utc);
 

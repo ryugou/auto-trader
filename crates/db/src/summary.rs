@@ -71,24 +71,44 @@ pub async fn update_daily_max_drawdown(
                     (count + 1, wins + win, pnl_sum + *pnl)
                 },
             );
-            sqlx::query(
-                r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, paper_account_id, trade_count, win_count, total_pnl, max_drawdown)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                   ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
-                   SET max_drawdown = $10"#,
-            )
-            .bind(date)
-            .bind(strategy.as_str())
-            .bind(pair.as_str())
-            .bind(mode.as_str())
-            .bind(exchange.as_str())
-            .bind(*paper_account_id)
-            .bind(total_trades as i32)
-            .bind(total_wins as i32)
-            .bind(total_pnl)
-            .bind(max_dd)
-            .execute(pool)
-            .await?;
+            if let Some(account_id) = paper_account_id {
+                sqlx::query(
+                    r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, paper_account_id, trade_count, win_count, total_pnl, max_drawdown)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                       ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
+                       SET max_drawdown = $10"#,
+                )
+                .bind(date)
+                .bind(strategy.as_str())
+                .bind(pair.as_str())
+                .bind(mode.as_str())
+                .bind(exchange.as_str())
+                .bind(account_id)
+                .bind(total_trades as i32)
+                .bind(total_wins as i32)
+                .bind(total_pnl)
+                .bind(max_dd)
+                .execute(pool)
+                .await?;
+            } else {
+                sqlx::query(
+                    r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, trade_count, win_count, total_pnl, max_drawdown)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                       ON CONFLICT (date, strategy_name, pair, mode, exchange) WHERE paper_account_id IS NULL DO UPDATE
+                       SET max_drawdown = $9"#,
+                )
+                .bind(date)
+                .bind(strategy.as_str())
+                .bind(pair.as_str())
+                .bind(mode.as_str())
+                .bind(exchange.as_str())
+                .bind(total_trades as i32)
+                .bind(total_wins as i32)
+                .bind(total_pnl)
+                .bind(max_dd)
+                .execute(pool)
+                .await?;
+            }
         }
     }
 

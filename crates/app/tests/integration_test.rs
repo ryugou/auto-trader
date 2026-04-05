@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn paper_trade_roundtrip() {
-    let trader = PaperTrader::new(dec!(100000), dec!(25), None);
+    let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
 
     let signal = Signal {
         strategy_name: "test".to_string(),
@@ -76,7 +76,7 @@ async fn channel_pipeline() {
 
 #[tokio::test]
 async fn paper_trader_close_at_sl_price() {
-    let trader = PaperTrader::new(dec!(100000), dec!(25), None);
+    let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
 
     // Open a long position
     let signal = Signal {
@@ -106,7 +106,7 @@ async fn paper_trader_close_at_sl_price() {
 
 #[tokio::test]
 async fn crypto_paper_trade_with_quantity() {
-    let trader = PaperTrader::new(dec!(100000), dec!(2), Some(Uuid::new_v4()));
+    let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
 
     let signal = Signal {
         strategy_name: "crypto_trend_v1".to_string(),
@@ -136,7 +136,7 @@ async fn crypto_paper_trade_with_quantity() {
 
 #[tokio::test]
 async fn overnight_fee_deducted() {
-    let trader = PaperTrader::new(dec!(100000), dec!(2), Some(Uuid::new_v4()));
+    let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
 
     let signal = Signal {
         strategy_name: "crypto_trend_v1".to_string(),

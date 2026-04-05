@@ -3,7 +3,7 @@ mod position_monitor;
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
 use auto_trader_core::executor::OrderExecutor;
-use auto_trader_core::types::{Direction, Pair};
+use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_db::pool::create_pool;
 use auto_trader_executor::paper::PaperTrader;
 use auto_trader_executor::position_sizer::PositionSizer;
@@ -173,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Paper trader (FX)
     let paper_trader = Arc::new(PaperTrader::new(
+        Exchange::Oanda,
         Decimal::from(100_000),
         Decimal::from(25),
         None,
@@ -187,7 +188,12 @@ async fn main() -> anyhow::Result<()> {
                 &pool, id, &pac.name, &pac.exchange,
                 pac.initial_balance, pac.leverage, &pac.currency,
             ).await?;
+            let exchange = match pac.exchange.as_str() {
+                "bitflyer_cfd" => Exchange::BitflyerCfd,
+                _ => Exchange::Oanda,
+            };
             let trader = Arc::new(PaperTrader::new(
+                exchange,
                 pac.initial_balance,
                 pac.leverage,
                 Some(db_id),
@@ -532,16 +538,15 @@ async fn main() -> anyhow::Result<()> {
                     if let (Some(exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
                         (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
                     {
-                        let pnl_pips = t.pnl_pips.unwrap_or(Decimal::ZERO);
                         if let Err(e) = auto_trader_db::trades::update_trade_closed(
-                            &recorder_pool, t.id, exit_price, exit_at, pnl_pips, pnl_amount, exit_reason, t.fees,
+                            &recorder_pool, t.id, exit_price, exit_at, t.pnl_pips, pnl_amount, exit_reason, t.fees,
                         ).await {
                             tracing::error!("update trade error: {e}");
                         }
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let mode_str = t.mode.as_str();
-                        let win = if pnl_pips > Decimal::ZERO { 1 } else { 0 };
+                        let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool, date, &t.strategy_name, &t.pair.0,
                             mode_str, t.exchange.as_str(), t.paper_account_id,
@@ -559,11 +564,14 @@ async fn main() -> anyhow::Result<()> {
                                     Direction::Short => "ショート",
                                 };
                                 let holding = exit_at.signed_duration_since(t.entry_at);
+                                let pnl_display = t.pnl_pips
+                                    .map(|p| format!("{p} pips"))
+                                    .unwrap_or_else(|| format!("{pnl_amount} JPY"));
                                 let text = format!(
-                                    "[{}] {} {} 決済。trade_id: {}。{:?}。PnL: {} pips。保有時間: {}秒。戦略: {}",
+                                    "[{}] {} {} 決済。trade_id: {}。{:?}。PnL: {}。保有時間: {}秒。戦略: {}",
                                     t.exchange, t.pair, direction_str,
                                     t.id, exit_reason,
-                                    pnl_pips,
+                                    pnl_display,
                                     holding.num_seconds(),
                                     t.strategy_name,
                                 );

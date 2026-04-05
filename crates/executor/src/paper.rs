@@ -9,15 +9,22 @@ use uuid::Uuid;
 pub struct PaperTrader {
     balance: Mutex<Decimal>,
     positions: Mutex<HashMap<Uuid, Trade>>,
+    exchange: Exchange,
     leverage: Decimal,
     paper_account_id: Option<Uuid>,
 }
 
 impl PaperTrader {
-    pub fn new(initial_balance: Decimal, leverage: Decimal, paper_account_id: Option<Uuid>) -> Self {
+    pub fn new(
+        exchange: Exchange,
+        initial_balance: Decimal,
+        leverage: Decimal,
+        paper_account_id: Option<Uuid>,
+    ) -> Self {
         Self {
             balance: Mutex::new(initial_balance),
             positions: Mutex::new(HashMap::new()),
+            exchange,
             leverage,
             paper_account_id,
         }
@@ -44,7 +51,7 @@ impl PaperTrader {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
             pair: signal.pair.clone(),
-            exchange: Exchange::BitflyerCfd,
+            exchange: self.exchange,
             direction: signal.direction,
             entry_price: signal.entry_price,
             exit_price: None,
@@ -115,14 +122,14 @@ impl OrderExecutor for PaperTrader {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
             pair: signal.pair.clone(),
-            exchange: Exchange::Oanda,
+            exchange: self.exchange,
             direction: signal.direction,
             entry_price: signal.entry_price,
             exit_price: None,
             stop_loss: signal.stop_loss,
             take_profit: signal.take_profit,
             quantity: None,
-            leverage: Decimal::ONE,
+            leverage: self.leverage,
             fees: Decimal::ZERO,
             paper_account_id: None,
             entry_at: Utc::now(),
@@ -216,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_and_close_position() {
-        let trader = PaperTrader::new(dec!(100000), dec!(25), None);
+        let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
         let trade = trader.execute(&test_signal()).await.unwrap();
         assert_eq!(trade.status, TradeStatus::Open);
         assert_eq!(trade.mode, TradeMode::Paper);
@@ -241,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn short_position_pnl() {
-        let trader = PaperTrader::new(dec!(100000), dec!(25), None);
+        let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
         let mut signal = test_signal();
         signal.direction = Direction::Short;
         let trade = trader.execute(&signal).await.unwrap();
@@ -290,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn crypto_position_with_quantity() {
-        let trader = PaperTrader::new(dec!(100000), dec!(2), Some(Uuid::new_v4()));
+        let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
         let signal = Signal {
             strategy_name: "crypto_trend_v1".to_string(),
             pair: Pair::new("FX_BTC_JPY"),
@@ -322,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn overnight_fee() {
-        let trader = PaperTrader::new(dec!(100000), dec!(2), Some(Uuid::new_v4()));
+        let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
         let signal = Signal {
             strategy_name: "crypto_trend_v1".to_string(),
             pair: Pair::new("FX_BTC_JPY"),

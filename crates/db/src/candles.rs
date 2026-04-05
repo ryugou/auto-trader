@@ -46,7 +46,7 @@ pub async fn get_candles(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|r| r.into()).collect())
+    rows.into_iter().map(|r| r.try_into()).collect()
 }
 
 #[derive(sqlx::FromRow)]
@@ -62,13 +62,16 @@ struct CandleRow {
     timestamp: DateTime<Utc>,
 }
 
-impl From<CandleRow> for Candle {
-    fn from(r: CandleRow) -> Self {
+impl TryFrom<CandleRow> for Candle {
+    type Error = anyhow::Error;
+
+    fn try_from(r: CandleRow) -> anyhow::Result<Self> {
         let exchange = match r.exchange.as_str() {
+            "oanda" => Exchange::Oanda,
             "bitflyer_cfd" => Exchange::BitflyerCfd,
-            _ => Exchange::Oanda,
+            other => anyhow::bail!("unknown exchange: {other}"),
         };
-        Candle {
+        Ok(Candle {
             pair: Pair::new(&r.pair),
             exchange,
             timeframe: r.timeframe,
@@ -78,6 +81,6 @@ impl From<CandleRow> for Candle {
             close: r.close,
             volume: r.volume.map(|v| v as u64),
             timestamp: r.timestamp,
-        }
+        })
     }
 }

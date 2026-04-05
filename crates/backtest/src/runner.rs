@@ -34,7 +34,7 @@ impl BacktestRunner {
             anyhow::bail!("no candle data for {} {}", pair, timeframe);
         }
 
-        let trader = PaperTrader::new(initial_balance, leverage, None);
+        let trader = PaperTrader::new(Exchange::Oanda, initial_balance, leverage, None);
         let mut trades: Vec<Trade> = Vec::new();
         let mut execution_failures: usize = 0;
 
