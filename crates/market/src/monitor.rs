@@ -83,9 +83,9 @@ impl MarketMonitor {
 
         let event = PriceEvent {
             pair: pair.clone(),
+            timestamp: latest.timestamp,
             candle: latest,
             indicators,
-            timestamp: chrono::Utc::now(),
         };
         self.tx.send(event).await?;
         Ok(())

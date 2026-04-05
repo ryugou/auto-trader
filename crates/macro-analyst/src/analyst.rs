@@ -12,6 +12,7 @@ pub struct MacroAnalyst {
     summarizer: GeminiSummarizer,
     vegapunk: Option<VegapunkClient>,
     pool: Option<PgPool>,
+    seen_titles: std::collections::HashSet<String>,
 }
 
 impl MacroAnalyst {
@@ -27,6 +28,7 @@ impl MacroAnalyst {
             summarizer: GeminiSummarizer::new(gemini_api_url, gemini_api_key, gemini_model),
             vegapunk: None,
             pool: None,
+            seen_titles: std::collections::HashSet::new(),
         }
     }
 
@@ -51,6 +53,10 @@ impl MacroAnalyst {
 
             let news_items = self.news.fetch_latest().await;
             for item in &news_items {
+                // Skip already-processed items (dedup by title)
+                if !self.seen_titles.insert(item.title.clone()) {
+                    continue;
+                }
                 let combined = format!("{}: {}", item.title, item.description);
                 let summary = match self.summarizer.summarize_for_fx(&combined).await {
                     Ok(s) => s,

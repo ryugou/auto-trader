@@ -6,11 +6,13 @@ pub async fn update_daily_max_drawdown(
     pool: &PgPool,
     date: NaiveDate,
 ) -> anyhow::Result<()> {
-    // Get all closed trades for the date, ordered by exit_at
+    // Get all closed trades for the UTC date, ordered by exit_at
     let rows: Vec<(String, String, String, Decimal)> = sqlx::query_as(
         "SELECT strategy_name, pair, mode, pnl_amount
          FROM trades
-         WHERE status = 'closed' AND DATE(exit_at) = $1
+         WHERE status = 'closed'
+           AND exit_at >= ($1::date AT TIME ZONE 'UTC')
+           AND exit_at < (($1::date + INTERVAL '1 day') AT TIME ZONE 'UTC')
          ORDER BY exit_at ASC",
     )
     .bind(date)
