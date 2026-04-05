@@ -407,10 +407,7 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     let balance = account.balance().await;
-                    let leverage = account
-                        .account_id()
-                        .map(|_| Decimal::from(2)) // leverage from account config
-                        .unwrap_or(Decimal::ONE);
+                    let leverage = account.leverage();
                     let quantity = executor_sizer.calculate_quantity(
                         &signal.pair,
                         balance,

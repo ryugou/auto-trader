@@ -27,6 +27,10 @@ impl PaperTrader {
         self.paper_account_id
     }
 
+    pub fn leverage(&self) -> Decimal {
+        self.leverage
+    }
+
     pub async fn balance(&self) -> Decimal {
         *self.balance.lock().await
     }
