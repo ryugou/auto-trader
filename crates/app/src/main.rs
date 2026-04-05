@@ -48,7 +48,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Market monitor
     let pairs: Vec<Pair> = config.pairs.active.iter().map(|s| Pair::new(s)).collect();
-    let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx.clone());
+    let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx.clone())
+        .with_db(pool.clone());
 
     // Strategy engine
     let mut engine = StrategyEngine::new(signal_tx);
