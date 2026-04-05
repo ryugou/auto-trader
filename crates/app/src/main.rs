@@ -343,9 +343,11 @@ async fn main() -> anyhow::Result<()> {
                 price = price_rx.recv() => {
                     match price {
                         Some(event) => {
-                            // Forward to FX position monitor
-                            if price_monitor_tx.send(event.clone()).await.is_err() {
-                                tracing::warn!("FX position monitor channel closed");
+                            // Forward to FX position monitor (FX events only)
+                            if event.exchange == auto_trader_core::types::Exchange::Oanda {
+                                if price_monitor_tx.send(event.clone()).await.is_err() {
+                                    tracing::warn!("FX position monitor channel closed");
+                                }
                             }
                             // Forward to crypto position monitors (crypto events only)
                             if event.exchange == auto_trader_core::types::Exchange::BitflyerCfd {
