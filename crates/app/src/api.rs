@@ -1,8 +1,9 @@
 use auto_trader_db::paper_accounts::{
     self, CreatePaperAccount, PaperAccount, UpdatePaperAccount,
 };
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -11,13 +12,38 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub fn router(pool: PgPool) -> Router {
+    let api_token = std::env::var("API_TOKEN").ok();
     Router::new()
         .route("/api/paper-accounts", get(list).post(create))
         .route(
             "/api/paper-accounts/{id}",
             get(get_one).put(update).delete(remove),
         )
+        .layer(middleware::from_fn(move |req, next| {
+            let token = api_token.clone();
+            auth_middleware(token, req, next)
+        }))
         .with_state(pool)
+}
+
+async fn auth_middleware(
+    api_token: Option<String>,
+    req: Request,
+    next: Next,
+) -> Result<impl IntoResponse, StatusCode> {
+    if let Some(expected) = &api_token {
+        let auth = req.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match auth {
+            Some(token) if token == expected => Ok(next.run(req).await),
+            _ => Err(StatusCode::UNAUTHORIZED),
+        }
+    } else {
+        // No API_TOKEN configured — allow all (dev mode)
+        Ok(next.run(req).await)
+    }
 }
 
 struct ApiError(StatusCode, String);
@@ -30,9 +56,9 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        // Try to downcast to sqlx error for specific handling
-        if let Some(db_err) = e.downcast_ref::<sqlx::Error>() {
-            if let sqlx::Error::Database(pg_err) = db_err {
+        // Walk the error chain to find sqlx::Error at any depth
+        for cause in e.chain() {
+            if let Some(sqlx::Error::Database(pg_err)) = cause.downcast_ref::<sqlx::Error>() {
                 return match pg_err.code().as_deref() {
                     Some("23505") => ApiError(StatusCode::CONFLICT, "duplicate name".to_string()),
                     Some("23503") => ApiError(StatusCode::CONFLICT, "account has related trades, cannot delete".to_string()),

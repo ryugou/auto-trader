@@ -227,9 +227,10 @@ async fn main() -> anyhow::Result<()> {
                 "bitflyer_cfd" => Exchange::BitflyerCfd,
                 _ => Exchange::Oanda,
             };
+            // Use current_balance from DB (reflects previous session's P&L)
             let trader = Arc::new(PaperTrader::new(
                 exchange,
-                pac.initial_balance,
+                pac.current_balance,
                 pac.leverage,
                 Some(pac.id),
             ));
@@ -712,9 +713,12 @@ async fn main() -> anyhow::Result<()> {
     let api_pool = pool.clone();
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_pool);
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await
+            .expect("failed to bind API server to 0.0.0.0:3001");
         tracing::info!("API server listening on 0.0.0.0:3001");
-        axum::serve(listener, app).await.unwrap();
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("API server error: {e}");
+        }
     });
 
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");

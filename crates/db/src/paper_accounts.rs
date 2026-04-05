@@ -117,13 +117,3 @@ pub async fn delete_paper_account(pool: &PgPool, id: Uuid) -> anyhow::Result<boo
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn list_by_exchange(pool: &PgPool, exchange: &str) -> anyhow::Result<Vec<PaperAccount>> {
-    let accounts = sqlx::query_as::<_, PaperAccount>(
-        "SELECT id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, created_at, updated_at
-         FROM paper_accounts WHERE exchange = $1 ORDER BY created_at ASC",
-    )
-    .bind(exchange)
-    .fetch_all(pool)
-    .await?;
-    Ok(accounts)
-}
