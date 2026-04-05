@@ -182,6 +182,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Collect registered strategy names for paper_account validation
+    let registered_strategies: Vec<String> = config.strategies.iter()
+        .filter(|s| s.enabled)
+        .map(|s| s.name.clone())
+        .collect();
+
     // Paper traders: positions are in-memory only (process lifetime = session).
     // On restart, DB may have status='open' trades from previous session.
     // These are NOT restored — the app starts fresh. If position persistence is
@@ -199,6 +205,16 @@ async fn main() -> anyhow::Result<()> {
     let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
         for pac in &config.paper_accounts {
+            if !registered_strategies.contains(&pac.strategy) {
+                tracing::error!(
+                    "paper account '{}' references strategy '{}' which is not registered (check [[strategies]] and enabled flag)",
+                    pac.name, pac.strategy
+                );
+                anyhow::bail!(
+                    "paper account '{}' references unknown strategy '{}'",
+                    pac.name, pac.strategy
+                );
+            }
             let id = Uuid::new_v4();
             let db_id = auto_trader_db::paper_accounts::upsert_paper_account(
                 &pool, id, &pac.name, &pac.exchange,
@@ -410,7 +426,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Signal executor (signal -> trade)
     // Enforces 1-pair-1-position per strategy at execution time
-    // FX signals → paper_trader, crypto signals → all paper_accounts (with PositionSizer)
+    // FX signals → paper_trader, crypto signals → matching paper_account by strategy name
     let executor = paper_trader.clone();
     let executor_accounts = paper_accounts.clone();
     let executor_sizer = position_sizer.clone();
