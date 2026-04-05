@@ -6,14 +6,17 @@ use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Pair};
 use auto_trader_db::pool::create_pool;
 use auto_trader_executor::paper::PaperTrader;
+use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
 use auto_trader_strategy::engine::StrategyEngine;
 use auto_trader_strategy::trend_follow::TrendFollowV1;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -142,18 +145,72 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
+            name if name.starts_with("crypto_trend") => {
+                let ma_short = sc.params.get("ma_short")
+                    .and_then(|v| v.as_integer()).unwrap_or(8) as usize;
+                let ma_long = sc.params.get("ma_long")
+                    .and_then(|v| v.as_integer()).unwrap_or(21) as usize;
+                let rsi_thresh = sc.params.get("rsi_threshold")
+                    .and_then(|v| v.as_integer()).unwrap_or(75);
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::crypto_trend::CryptoTrendV1::new(
+                        sc.name.clone(),
+                        ma_short,
+                        ma_long,
+                        Decimal::from(rsi_thresh),
+                        pairs,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
             other => {
                 tracing::warn!("unknown strategy: {other}, skipping");
             }
         }
     }
 
-    // Paper trader
+    // Paper trader (FX)
     let paper_trader = Arc::new(PaperTrader::new(
         Decimal::from(100_000),
         Decimal::from(25),
         None,
     ));
+
+    // Paper accounts (crypto)
+    let paper_accounts: Vec<(String, Arc<PaperTrader>)> = {
+        let mut accounts = Vec::new();
+        for pac in &config.paper_accounts {
+            let id = Uuid::new_v4();
+            let trader = Arc::new(PaperTrader::new(
+                pac.initial_balance,
+                pac.leverage,
+                Some(id),
+            ));
+            tracing::info!(
+                "paper account: {} (balance={}, leverage={})",
+                pac.name,
+                pac.initial_balance,
+                pac.leverage
+            );
+            accounts.push((pac.name.clone(), trader));
+        }
+        accounts
+    };
+
+    // PositionSizer for crypto
+    let min_order_sizes: HashMap<Pair, Decimal> = config
+        .pair_config
+        .iter()
+        .map(|(k, v)| (Pair::new(k), v.min_order_size))
+        .collect();
+    let risk_rate = config
+        .position_sizing
+        .as_ref()
+        .map(|ps| ps.risk_rate)
+        .unwrap_or(Decimal::new(2, 2)); // default 0.02
+    let position_sizer = Arc::new(PositionSizer::new(risk_rate, min_order_sizes));
 
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
@@ -169,6 +226,34 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("monitor error: {e}");
         }
     });
+
+    // bitFlyer monitor (crypto)
+    let bitflyer_handle = if let Some(bf_config) = &config.bitflyer {
+        let crypto_pairs: Vec<Pair> = config
+            .pairs
+            .crypto
+            .as_ref()
+            .map(|v| v.iter().map(|s| Pair::new(s)).collect())
+            .unwrap_or_default();
+        if !crypto_pairs.is_empty() {
+            let bf_monitor = auto_trader_market::bitflyer::BitflyerMonitor::new(
+                &bf_config.ws_url,
+                crypto_pairs,
+                "M5",
+                price_tx.clone(),
+            )
+            .with_db(pool.clone());
+            Some(tokio::spawn(async move {
+                if let Err(e) = bf_monitor.run().await {
+                    tracing::error!("bitflyer monitor error: {e}");
+                }
+            }))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
     let (macro_tx, _) = tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
@@ -265,55 +350,140 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Signal executor (signal -> trade)
     // Enforces 1-pair-1-position per strategy at execution time
+    // FX signals → paper_trader, crypto signals → all paper_accounts (with PositionSizer)
     let executor = paper_trader.clone();
+    let executor_accounts = paper_accounts.clone();
+    let executor_sizer = position_sizer.clone();
     let trade_tx_clone = trade_tx.clone();
+    let crypto_pairs_set: Vec<String> = config
+        .pairs
+        .crypto
+        .clone()
+        .unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
-            // Check 1-pair-1-position constraint per strategy
-            let positions = executor.open_positions().await.unwrap_or_default();
-            let has_position = positions.iter().any(|p| {
-                p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
-            });
-            if has_position {
-                tracing::debug!(
-                    "skipping signal: {} already has open position for {}",
-                    signal.strategy_name, signal.pair
-                );
-                continue;
-            }
-            match executor.execute(signal).await {
-                Ok(trade) => {
-                    // Fire-and-forget Vegapunk ingestion (don't block trade execution)
-                    if let Some(vp) = vegapunk_client_exec.clone() {
-                        let trade_clone = trade.clone();
-                        tokio::spawn(async move {
-                            let mut vp = vp.lock().await;
-                            let direction_str = match trade_clone.direction {
-                                Direction::Long => "ロング",
-                                Direction::Short => "ショート",
-                            };
-                            let text = format!(
-                                "{} {} 判断。trade_id: {}。エントリー価格: {}。SL: {}、TP: {}。戦略: {}",
-                                trade_clone.pair, direction_str,
-                                trade_clone.id, trade_clone.entry_price, trade_clone.stop_loss, trade_clone.take_profit,
-                                trade_clone.strategy_name
-                            );
-                            let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
-                            let timestamp = chrono::Utc::now().to_rfc3339();
-                            if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
-                                tracing::warn!("vegapunk ingest failed for trade open: {e}");
-                            }
-                        });
+            let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
+
+            if is_crypto {
+                // Crypto: dispatch to all paper_accounts with PositionSizer
+                for (name, account) in &executor_accounts {
+                    let positions = account.open_positions().await.unwrap_or_default();
+                    let has_position = positions.iter().any(|p| {
+                        p.trade.strategy_name == signal.strategy_name
+                            && p.trade.pair == signal.pair
+                    });
+                    if has_position {
+                        tracing::debug!(
+                            "skipping signal: {} already has open position for {} in account {}",
+                            signal.strategy_name, signal.pair, name
+                        );
+                        continue;
                     }
-                    if let Err(e) = trade_tx_clone.send(TradeEvent {
-                        trade,
-                        action: TradeAction::Opened,
-                    }).await {
-                        tracing::error!("trade channel send failed (trade may not be recorded): {e}");
+
+                    let balance = account.balance().await;
+                    let leverage = account
+                        .account_id()
+                        .map(|_| Decimal::from(2)) // leverage from account config
+                        .unwrap_or(Decimal::ONE);
+                    let quantity = executor_sizer.calculate_quantity(
+                        &signal.pair,
+                        balance,
+                        signal.entry_price,
+                        signal.stop_loss,
+                        leverage,
+                    );
+                    let Some(qty) = quantity else {
+                        tracing::info!(
+                            "position sizing rejected signal for account {}: {} {}",
+                            name, signal.strategy_name, signal.pair
+                        );
+                        continue;
+                    };
+
+                    match account.execute_with_quantity(signal, qty).await {
+                        Ok(trade) => {
+                            if let Some(vp) = vegapunk_client_exec.clone() {
+                                let trade_clone = trade.clone();
+                                tokio::spawn(async move {
+                                    let mut vp = vp.lock().await;
+                                    let direction_str = match trade_clone.direction {
+                                        Direction::Long => "ロング",
+                                        Direction::Short => "ショート",
+                                    };
+                                    let text = format!(
+                                        "[{}] {} {} 判断。trade_id: {}。エントリー価格: {}。qty: {}。SL: {}、TP: {}。戦略: {}",
+                                        trade_clone.exchange, trade_clone.pair, direction_str,
+                                        trade_clone.id, trade_clone.entry_price,
+                                        trade_clone.quantity.map(|q| q.to_string()).unwrap_or_default(),
+                                        trade_clone.stop_loss, trade_clone.take_profit,
+                                        trade_clone.strategy_name
+                                    );
+                                    let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
+                                    let timestamp = chrono::Utc::now().to_rfc3339();
+                                    if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
+                                        tracing::warn!("vegapunk ingest failed for trade open: {e}");
+                                    }
+                                });
+                            }
+                            if let Err(e) = trade_tx_clone.send(TradeEvent {
+                                trade,
+                                action: TradeAction::Opened,
+                            }).await {
+                                tracing::error!("trade channel send failed (trade may not be recorded): {e}");
+                            }
+                        }
+                        Err(e) => tracing::error!("execute error for account {}: {e}", name),
                     }
                 }
-                Err(e) => tracing::error!("execute error: {e}"),
+            } else {
+                // FX: existing paper_trader
+                let positions = executor.open_positions().await.unwrap_or_default();
+                let has_position = positions.iter().any(|p| {
+                    p.trade.strategy_name == signal.strategy_name
+                        && p.trade.pair == signal.pair
+                });
+                if has_position {
+                    tracing::debug!(
+                        "skipping signal: {} already has open position for {}",
+                        signal.strategy_name, signal.pair
+                    );
+                    continue;
+                }
+                match executor.execute(signal).await {
+                    Ok(trade) => {
+                        if let Some(vp) = vegapunk_client_exec.clone() {
+                            let trade_clone = trade.clone();
+                            tokio::spawn(async move {
+                                let mut vp = vp.lock().await;
+                                let direction_str = match trade_clone.direction {
+                                    Direction::Long => "ロング",
+                                    Direction::Short => "ショート",
+                                };
+                                let text = format!(
+                                    "[{}] {} {} 判断。trade_id: {}。エントリー価格: {}。qty: {}。SL: {}、TP: {}。戦略: {}",
+                                    trade_clone.exchange, trade_clone.pair, direction_str,
+                                    trade_clone.id, trade_clone.entry_price,
+                                    trade_clone.quantity.map(|q| q.to_string()).unwrap_or_default(),
+                                    trade_clone.stop_loss, trade_clone.take_profit,
+                                    trade_clone.strategy_name
+                                );
+                                let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
+                                let timestamp = chrono::Utc::now().to_rfc3339();
+                                if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
+                                    tracing::warn!("vegapunk ingest failed for trade open: {e}");
+                                }
+                            });
+                        }
+                        if let Err(e) = trade_tx_clone.send(TradeEvent {
+                            trade,
+                            action: TradeAction::Opened,
+                        }).await {
+                            tracing::error!("trade channel send failed (trade may not be recorded): {e}");
+                        }
+                    }
+                    Err(e) => tracing::error!("execute error: {e}"),
+                }
             }
         }
     });
@@ -363,8 +533,8 @@ async fn main() -> anyhow::Result<()> {
                                 };
                                 let holding = exit_at.signed_duration_since(t.entry_at);
                                 let text = format!(
-                                    "{} {} 決済。trade_id: {}。{:?}。PnL: {} pips。保有時間: {}秒。戦略: {}",
-                                    t.pair, direction_str,
+                                    "[{}] {} {} 決済。trade_id: {}。{:?}。PnL: {} pips。保有時間: {}秒。戦略: {}",
+                                    t.exchange, t.pair, direction_str,
                                     t.id, exit_reason,
                                     pnl_pips,
                                     holding.num_seconds(),
@@ -420,6 +590,28 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: Overnight fee (crypto paper accounts)
+    // Apply 0.04%/day fee to open positions at UTC 0:00
+    let overnight_accounts = paper_accounts.clone();
+    let overnight_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        let mut last_date = chrono::Utc::now().date_naive();
+        let fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
+        loop {
+            interval.tick().await;
+            let today = chrono::Utc::now().date_naive();
+            if today != last_date {
+                for (name, trader) in &overnight_accounts {
+                    let fees = trader.apply_overnight_fees(fee_rate).await;
+                    if fees > Decimal::ZERO {
+                        tracing::info!("overnight fee applied: {} = {} JPY", name, fees);
+                    }
+                }
+                last_date = today;
+            }
+        }
+    });
+
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
@@ -429,6 +621,10 @@ async fn main() -> anyhow::Result<()> {
     drop(price_tx);
     drop(trade_tx); // allow recorder to drain and exit
     monitor_handle.abort();
+    if let Some(h) = bitflyer_handle {
+        h.abort();
+    }
+    overnight_handle.abort();
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();
