@@ -149,12 +149,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "auto-trader-core",
+ "auto-trader-db",
  "chrono",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
 ]
