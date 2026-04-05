@@ -75,5 +75,6 @@ params = { ma_short = 8, ma_long = 21, rsi_threshold = 75 }
 # Initial accounts are seeded by migration. Use the REST API to manage:
 #   GET    /api/paper-accounts
 #   POST   /api/paper-accounts
-#   PUT    /api/paper-accounts/:id
-#   DELETE /api/paper-accounts/:id
+#   GET    /api/paper-accounts/{id}
+#   PUT    /api/paper-accounts/{id}
+#   DELETE /api/paper-accounts/{id}

@@ -30,14 +30,17 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        let msg = e.to_string();
-        if msg.contains("duplicate key") || msg.contains("unique constraint") {
-            ApiError(StatusCode::CONFLICT, msg)
-        } else if msg.contains("foreign key") || msg.contains("violates foreign key") {
-            ApiError(StatusCode::CONFLICT, "account has related trades, cannot delete".to_string())
-        } else {
-            ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        // Try to downcast to sqlx error for specific handling
+        if let Some(db_err) = e.downcast_ref::<sqlx::Error>() {
+            if let sqlx::Error::Database(pg_err) = db_err {
+                return match pg_err.code().as_deref() {
+                    Some("23505") => ApiError(StatusCode::CONFLICT, "duplicate name".to_string()),
+                    Some("23503") => ApiError(StatusCode::CONFLICT, "account has related trades, cannot delete".to_string()),
+                    _ => ApiError(StatusCode::INTERNAL_SERVER_ERROR, "database error".to_string()),
+                };
+            }
         }
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
     }
 }
 

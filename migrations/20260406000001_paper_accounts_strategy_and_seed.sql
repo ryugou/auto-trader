@@ -1,4 +1,6 @@
--- Add strategy column to paper_accounts
+-- Add strategy column to paper_accounts.
+-- DEFAULT '' is for DDL only — existing rows (if any) get empty strategy
+-- and will be skipped at startup with a warning. Intended for fresh DBs.
 ALTER TABLE paper_accounts ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT '';
 
 -- Seed initial paper accounts
