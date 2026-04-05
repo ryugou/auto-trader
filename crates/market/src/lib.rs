@@ -1,3 +1,4 @@
+pub mod bitflyer;
 pub mod candle_builder;
 pub mod indicators;
 pub mod monitor;

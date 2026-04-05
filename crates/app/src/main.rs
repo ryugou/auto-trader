@@ -178,21 +178,23 @@ async fn main() -> anyhow::Result<()> {
         None,
     ));
 
-    // Paper accounts (crypto)
+    // Paper accounts (crypto) — upsert to DB for FK integrity
     let paper_accounts: Vec<(String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
         for pac in &config.paper_accounts {
             let id = Uuid::new_v4();
+            let db_id = auto_trader_db::paper_accounts::upsert_paper_account(
+                &pool, id, &pac.name, &pac.exchange,
+                pac.initial_balance, pac.leverage, &pac.currency,
+            ).await?;
             let trader = Arc::new(PaperTrader::new(
                 pac.initial_balance,
                 pac.leverage,
-                Some(id),
+                Some(db_id),
             ));
             tracing::info!(
-                "paper account: {} (balance={}, leverage={})",
-                pac.name,
-                pac.initial_balance,
-                pac.leverage
+                "paper account: {} (id={}, balance={}, leverage={})",
+                pac.name, db_id, pac.initial_balance, pac.leverage
             );
             accounts.push((pac.name.clone(), trader));
         }
@@ -303,7 +305,34 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Task: Strategy engine (price -> signal) + forward to position monitor
+    // Task: Position monitor — FX (price -> SL/TP check -> close)
+    let pos_monitor_executor = paper_trader.clone();
+    let pos_monitor_trade_tx = trade_tx.clone();
+    let pos_monitor_handle = tokio::spawn(async move {
+        position_monitor::run_position_monitor(
+            pos_monitor_executor,
+            price_monitor_rx,
+            pos_monitor_trade_tx,
+        ).await;
+    });
+
+    // Task: Position monitors — crypto (one per paper_account)
+    let mut crypto_price_senders: Vec<(String, mpsc::Sender<PriceEvent>)> = Vec::new();
+    for (name, trader) in &paper_accounts {
+        let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
+        let monitor_trader = trader.clone();
+        let monitor_trade_tx = trade_tx.clone();
+        crypto_price_senders.push((name.clone(), crypto_price_tx));
+        tokio::spawn(async move {
+            position_monitor::run_position_monitor(
+                monitor_trader,
+                crypto_price_rx,
+                monitor_trade_tx,
+            ).await;
+        });
+    }
+
+    // Task: Strategy engine (price -> signal) + forward to position monitors
     // Also receives macro updates from broadcast channel.
     // Design note: select! is unbiased here. Macro updates arrive at ~30min intervals,
     // so starvation of the price path is not a practical concern in Phase 0.
@@ -314,8 +343,15 @@ async fn main() -> anyhow::Result<()> {
                 price = price_rx.recv() => {
                     match price {
                         Some(event) => {
+                            // Forward to FX position monitor
                             if price_monitor_tx.send(event.clone()).await.is_err() {
-                                tracing::warn!("position monitor channel closed, SL/TP monitoring stopped");
+                                tracing::warn!("FX position monitor channel closed");
+                            }
+                            // Forward to crypto position monitors
+                            for (name, tx) in &crypto_price_senders {
+                                if tx.send(event.clone()).await.is_err() {
+                                    tracing::warn!("crypto position monitor closed for {name}");
+                                }
                             }
                             engine.on_price(&event).await;
                         }
@@ -335,17 +371,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-    });
-
-    // Task: Position monitor (price -> SL/TP check -> close)
-    let pos_monitor_executor = paper_trader.clone();
-    let pos_monitor_trade_tx = trade_tx.clone();
-    let pos_monitor_handle = tokio::spawn(async move {
-        position_monitor::run_position_monitor(
-            pos_monitor_executor,
-            price_monitor_rx,
-            pos_monitor_trade_tx,
-        ).await;
     });
 
     // Task: Signal executor (signal -> trade)
@@ -503,9 +528,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TradeAction::Closed { .. } => {
                     let t = &trade_event.trade;
-                    if let (Some(exit_price), Some(exit_at), Some(pnl_pips), Some(pnl_amount), Some(exit_reason)) =
-                        (t.exit_price, t.exit_at, t.pnl_pips, t.pnl_amount, t.exit_reason)
+                    if let (Some(exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
+                        (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
                     {
+                        let pnl_pips = t.pnl_pips.unwrap_or(Decimal::ZERO);
                         if let Err(e) = auto_trader_db::trades::update_trade_closed(
                             &recorder_pool, t.id, exit_price, exit_at, pnl_pips, pnl_amount, exit_reason, t.fees,
                         ).await {

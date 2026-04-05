@@ -108,24 +108,47 @@ pub async fn upsert_daily_summary(
     win_count_delta: i32,
     pnl_delta: Decimal,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, paper_account_id, trade_count, win_count, total_pnl)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-           ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
-           SET trade_count = daily_summary.trade_count + $7,
-               win_count = daily_summary.win_count + $8,
-               total_pnl = daily_summary.total_pnl + $9"#,
-    )
-    .bind(date)
-    .bind(strategy_name)
-    .bind(pair)
-    .bind(mode)
-    .bind(exchange)
-    .bind(paper_account_id)
-    .bind(trade_count_delta)
-    .bind(win_count_delta)
-    .bind(pnl_delta)
-    .execute(pool)
-    .await?;
+    if let Some(account_id) = paper_account_id {
+        // Crypto path: paper_account_id is NOT NULL, use main UNIQUE constraint
+        sqlx::query(
+            r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, paper_account_id, trade_count, win_count, total_pnl)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
+               SET trade_count = daily_summary.trade_count + $7,
+                   win_count = daily_summary.win_count + $8,
+                   total_pnl = daily_summary.total_pnl + $9"#,
+        )
+        .bind(date)
+        .bind(strategy_name)
+        .bind(pair)
+        .bind(mode)
+        .bind(exchange)
+        .bind(account_id)
+        .bind(trade_count_delta)
+        .bind(win_count_delta)
+        .bind(pnl_delta)
+        .execute(pool)
+        .await?;
+    } else {
+        // FX path: paper_account_id IS NULL, use partial unique index
+        sqlx::query(
+            r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, trade_count, win_count, total_pnl)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (date, strategy_name, pair, mode, exchange) WHERE paper_account_id IS NULL DO UPDATE
+               SET trade_count = daily_summary.trade_count + $6,
+                   win_count = daily_summary.win_count + $7,
+                   total_pnl = daily_summary.total_pnl + $8"#,
+        )
+        .bind(date)
+        .bind(strategy_name)
+        .bind(pair)
+        .bind(mode)
+        .bind(exchange)
+        .bind(trade_count_delta)
+        .bind(win_count_delta)
+        .bind(pnl_delta)
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }

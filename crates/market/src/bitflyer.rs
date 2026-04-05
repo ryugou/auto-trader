@@ -140,9 +140,12 @@ impl BitflyerMonitor {
             let ts = chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?
                 .with_timezone(&chrono::Utc);
 
-            builder.on_tick(price, size, ts);
+            // on_tick returns completed candle when period boundary is crossed
+            let from_tick = builder.on_tick(price, size, ts);
+            let from_complete = builder.try_complete(ts);
+            let completed = from_tick.or(from_complete);
 
-            if let Some(candle) = builder.try_complete(ts) {
+            if let Some(candle) = completed {
                 if let Some(pool) = &self.pool
                     && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
                 {

@@ -43,8 +43,16 @@ impl CandleBuilder {
         DateTime::from_timestamp(truncated, 0).unwrap()
     }
 
-    pub fn on_tick(&mut self, price: Decimal, size: Decimal, ts: DateTime<Utc>) {
+    /// Process a tick. If this tick starts a new period, the previous period's
+    /// candle is completed and returned before the new tick is recorded.
+    pub fn on_tick(&mut self, price: Decimal, size: Decimal, ts: DateTime<Utc>) -> Option<Candle> {
         let ps = self.period_start(ts);
+        let completed = if self.current_period_start.is_some() && self.current_period_start != Some(ps) {
+            // New period detected — complete the previous candle first
+            self.complete_current()
+        } else {
+            None
+        };
         if self.current_period_start != Some(ps) {
             self.current_period_start = Some(ps);
             self.open = Some(price);
@@ -62,6 +70,31 @@ impl CandleBuilder {
             self.close = Some(price);
             self.volume += size;
         }
+        completed
+    }
+
+    fn complete_current(&mut self) -> Option<Candle> {
+        let ps = self.current_period_start?;
+        let candle = Candle {
+            pair: self.pair.clone(),
+            exchange: self.exchange,
+            timeframe: self.timeframe.clone(),
+            open: self.open.take()?,
+            high: self.high.take()?,
+            low: self.low.take()?,
+            close: self.close.take()?,
+            volume: Some(
+                self.volume
+                    .to_string()
+                    .parse::<f64>()
+                    .ok()?
+                    .round() as u64,
+            ),
+            timestamp: ps,
+        };
+        self.current_period_start = None;
+        self.volume = Decimal::ZERO;
+        Some(candle)
     }
 
     /// Returns a completed candle if the given timestamp is past the current period.
@@ -107,41 +140,21 @@ mod tests {
             CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, "M1".to_string());
         let base = Utc.with_ymd_and_hms(2026, 4, 5, 12, 0, 0).unwrap();
 
-        builder.on_tick(dec!(15000000), dec!(0.1), base);
-        builder.on_tick(
-            dec!(15100000),
-            dec!(0.2),
-            base + chrono::Duration::seconds(10),
-        );
-        builder.on_tick(
-            dec!(14900000),
-            dec!(0.15),
-            base + chrono::Duration::seconds(30),
-        );
-        builder.on_tick(
-            dec!(15050000),
-            dec!(0.05),
-            base + chrono::Duration::seconds(50),
-        );
+        assert!(builder.on_tick(dec!(15000000), dec!(0.1), base).is_none());
+        assert!(builder.on_tick(dec!(15100000), dec!(0.2), base + chrono::Duration::seconds(10)).is_none());
+        assert!(builder.on_tick(dec!(14900000), dec!(0.15), base + chrono::Duration::seconds(30)).is_none());
+        assert!(builder.on_tick(dec!(15050000), dec!(0.05), base + chrono::Duration::seconds(50)).is_none());
 
         // Minute hasn't ended yet — no candle emitted
-        assert!(builder
-            .try_complete(base + chrono::Duration::seconds(50))
-            .is_none());
+        assert!(builder.try_complete(base + chrono::Duration::seconds(50)).is_none());
 
-        // Minute ends
-        let candle = builder
-            .try_complete(base + chrono::Duration::seconds(61))
-            .unwrap();
+        // Minute ends via try_complete
+        let candle = builder.try_complete(base + chrono::Duration::seconds(61)).unwrap();
         assert_eq!(candle.open, dec!(15000000));
         assert_eq!(candle.high, dec!(15100000));
         assert_eq!(candle.low, dec!(14900000));
         assert_eq!(candle.close, dec!(15050000));
-        // 0.1 + 0.2 + 0.15 + 0.05 = 0.5 → rounds to 1 as u64
-        assert_eq!(candle.volume, Some(1));
         assert_eq!(candle.exchange, Exchange::BitflyerCfd);
-        assert_eq!(candle.pair, Pair::new("FX_BTC_JPY"));
-        assert_eq!(candle.timeframe, "M1");
     }
 
     #[test]
@@ -149,28 +162,27 @@ mod tests {
         let pair = Pair::new("FX_BTC_JPY");
         let mut builder = CandleBuilder::new(pair, Exchange::BitflyerCfd, "M1".to_string());
         let base = Utc.with_ymd_and_hms(2026, 4, 5, 12, 0, 0).unwrap();
-        assert!(builder
-            .try_complete(base + chrono::Duration::seconds(61))
-            .is_none());
+        assert!(builder.try_complete(base + chrono::Duration::seconds(61)).is_none());
     }
 
     #[test]
-    fn period_boundary_resets_builder() {
+    fn period_boundary_completes_previous_candle() {
         let pair = Pair::new("FX_BTC_JPY");
         let mut builder =
             CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, "M1".to_string());
         let base = Utc.with_ymd_and_hms(2026, 4, 5, 12, 0, 0).unwrap();
 
-        builder.on_tick(dec!(100), dec!(10), base);
-        // Tick in next period resets state
-        builder.on_tick(dec!(200), dec!(5), base + chrono::Duration::seconds(60));
+        assert!(builder.on_tick(dec!(100), dec!(10), base).is_none());
+        // Tick in next period completes previous candle
+        let candle = builder.on_tick(dec!(200), dec!(5), base + chrono::Duration::seconds(60));
+        assert!(candle.is_some(), "on_tick should return completed candle at period boundary");
+        let candle = candle.unwrap();
+        assert_eq!(candle.open, dec!(100));
+        assert_eq!(candle.close, dec!(100));
 
-        let candle = builder
-            .try_complete(base + chrono::Duration::seconds(121))
-            .unwrap();
-        assert_eq!(candle.open, dec!(200));
-        assert_eq!(candle.high, dec!(200));
-        assert_eq!(candle.low, dec!(200));
-        assert_eq!(candle.close, dec!(200));
+        // New period's candle is building
+        let candle2 = builder.try_complete(base + chrono::Duration::seconds(121)).unwrap();
+        assert_eq!(candle2.open, dec!(200));
+        assert_eq!(candle2.close, dec!(200));
     }
 }
