@@ -51,14 +51,14 @@ async fn main() -> anyhow::Result<()> {
     let monitor = MarketMonitor::new(oanda, pairs, config.monitor.interval_secs, price_tx.clone())
         .with_db(pool.clone());
 
-    // Vegapunk client (shared, optional — continues without if unavailable)
-    let vegapunk_client: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
+    // Vegapunk: single gRPC channel, multiple clients share it
+    let vegapunk_base: Option<auto_trader_vegapunk::client::VegapunkClient> =
         match auto_trader_vegapunk::client::VegapunkClient::connect(
             &config.vegapunk.endpoint, &config.vegapunk.schema
         ).await {
             Ok(client) => {
                 tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
-                Some(Arc::new(Mutex::new(client)))
+                Some(client)
             }
             Err(e) => {
                 tracing::warn!("vegapunk unavailable (continuing without): {e}");
@@ -103,21 +103,11 @@ async fn main() -> anyhow::Result<()> {
                 let gemini_config = config.gemini.as_ref()
                     .expect("gemini config required for swing_llm");
 
-                // Use shared Vegapunk client for swing_llm (optional — degrades gracefully)
-                let vp_client = match &vegapunk_client {
-                    Some(shared) => {
-                        // Create a separate connection for strategy use (needs exclusive &mut)
-                        match auto_trader_vegapunk::client::VegapunkClient::connect(
-                            &config.vegapunk.endpoint, &config.vegapunk.schema,
-                        ).await {
-                            Ok(c) => c,
-                            Err(e) => {
-                                tracing::warn!("vegapunk unavailable for {}, skipping strategy: {e}", sc.name);
-                                let _ = shared; // acknowledge shared exists
-                                continue;
-                            }
-                        }
-                    }
+                // Clone from shared Vegapunk channel (no new TCP connection)
+                let vp_client = match &vegapunk_base {
+                    Some(base) => auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
+                        base, &config.vegapunk.schema,
+                    ),
                     None => {
                         tracing::warn!("vegapunk unavailable, skipping strategy: {}", sc.name);
                         continue;
@@ -150,8 +140,13 @@ async fn main() -> anyhow::Result<()> {
         Decimal::from(25),
     ));
 
-    let vegapunk_client_exec = vegapunk_client.clone();
-    let vegapunk_client_recorder = vegapunk_client.clone();
+    let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
+        vegapunk_base.as_ref().map(|base| {
+            Arc::new(Mutex::new(
+                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(base, &config.vegapunk.schema),
+            ))
+        });
+    let vegapunk_client_recorder = vegapunk_client_exec.clone();
 
     // Task: Market monitor
     let monitor_handle = tokio::spawn(async move {
@@ -177,17 +172,12 @@ async fn main() -> anyhow::Result<()> {
             &gemini_config.model,
         ).with_db(pool.clone());
 
-        // Optionally attach Vegapunk for macro event ingestion
-        if let Some(vp) = &vegapunk_client {
-            match auto_trader_vegapunk::client::VegapunkClient::connect(
-                &config.vegapunk.endpoint, &config.vegapunk.schema,
-            ).await {
-                Ok(vp_for_macro) => {
-                    analyst = analyst.with_vegapunk(vp_for_macro);
-                    let _ = vp; // acknowledge shared exists
-                }
-                Err(e) => tracing::warn!("vegapunk unavailable for macro analyst: {e}"),
-            }
+        // Clone from shared Vegapunk channel for macro event ingestion
+        if let Some(base) = &vegapunk_base {
+            let vp_for_macro = auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
+                base, &config.vegapunk.schema,
+            );
+            analyst = analyst.with_vegapunk(vp_for_macro);
         }
 
         let news_interval = std::time::Duration::from_secs(mac.news_interval_secs);
@@ -203,7 +193,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Task: Strategy engine (price -> signal) + forward to position monitor
-    // Also receives macro updates from broadcast channel
+    // Also receives macro updates from broadcast channel.
+    // Design note: select! is unbiased here. Macro updates arrive at ~30min intervals,
+    // so starvation of the price path is not a practical concern in Phase 0.
     let engine_handle = tokio::spawn(async move {
         let mut macro_rx = macro_rx;
         loop {
@@ -285,10 +277,12 @@ async fn main() -> anyhow::Result<()> {
                             tracing::warn!("vegapunk ingest failed for trade open: {e}");
                         }
                     }
-                    let _ = trade_tx_clone.send(TradeEvent {
+                    if let Err(e) = trade_tx_clone.send(TradeEvent {
                         trade,
                         action: TradeAction::Opened,
-                    }).await;
+                    }).await {
+                        tracing::error!("trade channel send failed (trade may not be recorded): {e}");
+                    }
                 }
                 Err(e) => tracing::error!("execute error: {e}"),
             }
@@ -358,19 +352,22 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Daily batch (max_drawdown calculation at UTC 0:00)
-    // Initialize with yesterday to process missed day on startup
+    // On startup, idempotently recompute last 7 days to cover any missed batches.
+    // update_daily_max_drawdown is safe to re-run (overwrites max_drawdown).
     let daily_pool = pool.clone();
     let daily_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let today = chrono::Utc::now().date_naive();
-        let yesterday = today - chrono::Duration::days(1);
 
-        // Backfill yesterday's max_drawdown on startup
-        tracing::info!("daily batch startup: backfilling {yesterday}");
-        if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
-            &daily_pool, yesterday,
-        ).await {
-            tracing::error!("daily batch backfill failed for {yesterday}: {e}");
+        let backfill_days = 7;
+        for i in (1..=backfill_days).rev() {
+            let d = today - chrono::Duration::days(i);
+            tracing::info!("daily batch startup backfill: {d}");
+            if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
+                &daily_pool, d,
+            ).await {
+                tracing::error!("daily batch backfill failed for {d}: {e}");
+            }
         }
 
         let mut last_date = today;

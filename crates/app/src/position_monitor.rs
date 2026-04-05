@@ -60,10 +60,12 @@ pub async fn run_position_monitor<E: OrderExecutor>(
                             closed_trade.strategy_name, closed_trade.pair,
                             closed_trade.direction, exit_price, reason
                         );
-                        let _ = trade_tx.send(TradeEvent {
+                        if let Err(e) = trade_tx.send(TradeEvent {
                             trade: closed_trade,
                             action: TradeAction::Closed { exit_price, exit_reason: reason },
-                        }).await;
+                        }).await {
+                            tracing::error!("trade channel send failed for position close (close may not be recorded): {e}");
+                        }
                     }
                     Err(e) => tracing::error!("failed to close position: {e}"),
                 }

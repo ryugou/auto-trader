@@ -5,6 +5,7 @@ pub struct BacktestReport {
     pub total_trades: usize,
     pub wins: usize,
     pub losses: usize,
+    pub execution_failures: usize,
     pub win_rate: f64,
     pub total_pnl: Decimal,
     pub max_drawdown: Decimal,
@@ -14,7 +15,7 @@ pub struct BacktestReport {
 }
 
 impl BacktestReport {
-    pub fn from_trades(trades: Vec<Trade>, initial_balance: Decimal, final_balance: Decimal) -> Self {
+    pub fn from_trades_with_failures(trades: Vec<Trade>, initial_balance: Decimal, final_balance: Decimal, execution_failures: usize) -> Self {
         let closed: Vec<&Trade> = trades.iter()
             .filter(|t| t.status == TradeStatus::Closed)
             .collect();
@@ -57,7 +58,7 @@ impl BacktestReport {
         };
 
         Self {
-            total_trades, wins, losses, win_rate,
+            total_trades, wins, losses, execution_failures, win_rate,
             total_pnl, max_drawdown: max_dd,
             initial_balance, final_balance, profit_factor,
         }
@@ -65,7 +66,7 @@ impl BacktestReport {
 
     pub fn print_summary(&self) {
         println!("=== Backtest Report ===");
-        println!("Trades: {} (W:{} L:{})", self.total_trades, self.wins, self.losses);
+        println!("Trades: {} (W:{} L:{} Err:{})", self.total_trades, self.wins, self.losses, self.execution_failures);
         println!("Win Rate: {:.1}%", self.win_rate * 100.0);
         println!("Total PnL: {}", self.total_pnl);
         println!("Max Drawdown: {}", self.max_drawdown);

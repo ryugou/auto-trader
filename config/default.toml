@@ -20,7 +20,7 @@ model = "gemini-2.0-flash"
 api_url = "https://generativelanguage.googleapis.com"
 
 [macro_analyst]
-enabled = true
+enabled = false
 calendar_interval_secs = 3600
 news_interval_secs = 1800
 news_sources = [

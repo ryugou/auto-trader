@@ -99,6 +99,7 @@ impl OrderExecutor for PaperTrader {
         trade.exit_price = Some(exit_price);
         trade.exit_at = Some(Utc::now());
         trade.pnl_pips = Some(pnl_pips);
+        // Paper-only scale: price_diff * leverage. Not real-money P&L (ignores lot size).
         trade.pnl_amount = Some(price_diff * self.leverage);
         trade.exit_reason = Some(exit_reason);
         trade.status = TradeStatus::Closed;

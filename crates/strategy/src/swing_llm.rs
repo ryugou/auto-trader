@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 pub struct SwingLLMv1 {
     name: String,
     pairs: Vec<Pair>,
+    /// Maximum holding days — currently used as LLM prompt context only.
+    /// Enforcement via forced close is not implemented in Phase 0.
     holding_days_max: u32,
     vegapunk: Mutex<VegapunkClient>,
     gemini_client: reqwest::Client,

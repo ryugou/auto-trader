@@ -36,6 +36,7 @@ impl BacktestRunner {
 
         let trader = PaperTrader::new(initial_balance, leverage);
         let mut trades: Vec<Trade> = Vec::new();
+        let mut execution_failures: usize = 0;
 
         // Replay candles chronologically
         for (i, candle) in candles.iter().enumerate() {
@@ -92,16 +93,19 @@ impl BacktestRunner {
                 if !has_pos {
                     match trader.execute(&signal).await {
                         Ok(trade) => trades.push(trade),
-                        Err(e) => tracing::warn!(
-                            "backtest execute failed at candle {i} for {}: {e}",
-                            signal.pair
-                        ),
+                        Err(e) => {
+                            execution_failures += 1;
+                            tracing::warn!(
+                                "backtest execute failed at candle {i} for {}: {e}",
+                                signal.pair
+                            );
+                        }
                     }
                 }
             }
         }
 
         let final_balance = trader.balance().await;
-        Ok(BacktestReport::from_trades(trades, initial_balance, final_balance))
+        Ok(BacktestReport::from_trades_with_failures(trades, initial_balance, final_balance, execution_failures))
     }
 }
