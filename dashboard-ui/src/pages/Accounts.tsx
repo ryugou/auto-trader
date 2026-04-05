@@ -1,0 +1,164 @@
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { api } from '../api/client'
+import AccountForm from '../components/AccountForm'
+import type { PaperAccount, CreatePaperAccount } from '../api/types'
+
+export default function Accounts() {
+  const queryClient = useQueryClient()
+  const [showForm, setShowForm] = useState(false)
+  const [editTarget, setEditTarget] = useState<PaperAccount | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
+
+  const { data: accounts, isLoading } = useQuery({
+    queryKey: ['accounts'],
+    queryFn: () => api.accounts.list(),
+  })
+
+  const createMut = useMutation({
+    mutationFn: (data: CreatePaperAccount) => api.accounts.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      setShowForm(false)
+    },
+  })
+
+  const updateMut = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: CreatePaperAccount }) =>
+      api.accounts.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      setEditTarget(null)
+    },
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => api.accounts.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      setDeleteTarget(null)
+    },
+  })
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold">口座管理</h2>
+        <button
+          onClick={() => setShowForm(true)}
+          className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded transition"
+        >
+          + 新規作成
+        </button>
+      </div>
+
+      <div className="bg-gray-900 rounded-lg shadow overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800">
+                <th className="px-4 py-2 text-left text-gray-400 font-medium">名前</th>
+                <th className="px-4 py-2 text-left text-gray-400 font-medium">取引所</th>
+                <th className="px-4 py-2 text-left text-gray-400 font-medium">戦略</th>
+                <th className="px-4 py-2 text-right text-gray-400 font-medium">初期残高</th>
+                <th className="px-4 py-2 text-right text-gray-400 font-medium">現在残高</th>
+                <th className="px-4 py-2 text-right text-gray-400 font-medium">レバレッジ</th>
+                <th className="px-4 py-2 text-left text-gray-400 font-medium">通貨</th>
+                <th className="px-4 py-2 text-left text-gray-400 font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {isLoading ? (
+                <tr>
+                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                    読み込み中...
+                  </td>
+                </tr>
+              ) : !accounts?.length ? (
+                <tr>
+                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                    口座がありません
+                  </td>
+                </tr>
+              ) : (
+                accounts.map((a) => (
+                  <tr key={a.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                    <td className="px-4 py-2 font-medium">{a.name}</td>
+                    <td className="px-4 py-2 text-gray-300">{a.exchange}</td>
+                    <td className="px-4 py-2 text-gray-300">{a.strategy}</td>
+                    <td className="px-4 py-2 text-right">
+                      {Number(a.initial_balance).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2 text-right">
+                      {Number(a.current_balance).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2 text-right">{a.leverage}x</td>
+                    <td className="px-4 py-2 text-gray-300">{a.currency}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setEditTarget(a)}
+                          className="text-blue-400 hover:text-blue-300 text-xs"
+                        >
+                          編集
+                        </button>
+                        <button
+                          onClick={() => setDeleteTarget(a)}
+                          className="text-red-400 hover:text-red-300 text-xs"
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showForm && (
+        <AccountForm
+          onSubmit={(data) => createMut.mutate(data)}
+          onCancel={() => setShowForm(false)}
+        />
+      )}
+
+      {editTarget && (
+        <AccountForm
+          account={editTarget}
+          onSubmit={(data) =>
+            updateMut.mutate({ id: editTarget.id, data })
+          }
+          onCancel={() => setEditTarget(null)}
+        />
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-gray-900 rounded-lg p-6 w-full max-w-sm shadow-xl">
+            <h3 className="text-lg font-bold mb-2">口座を削除</h3>
+            <p className="text-gray-400 text-sm mb-4">
+              「{deleteTarget.name}」を削除しますか？この操作は取り消せません。
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => deleteMut.mutate(deleteTarget.id)}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white text-sm font-medium py-2 rounded transition"
+              >
+                削除
+              </button>
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm font-medium py-2 rounded transition"
+              >
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
