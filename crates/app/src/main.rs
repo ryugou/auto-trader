@@ -303,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Drop senders to signal downstream tasks to finish
     drop(price_tx);
+    drop(trade_tx); // allow recorder to drain and exit
     monitor_handle.abort();
     daily_handle.abort(); // infinite loop — must abort explicitly
 

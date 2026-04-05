@@ -89,10 +89,12 @@ impl SwingLLMv1 {
             macro_context,
         );
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
         let url = format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
-            self.gemini_api_url, self.gemini_model, self.gemini_api_key
+            "{}/v1beta/models/{}:generateContent",
+            self.gemini_api_url, self.gemini_model
         );
 
         let body = serde_json::json!({
@@ -101,6 +103,7 @@ impl SwingLLMv1 {
 
         let resp: serde_json::Value = client
             .post(&url)
+            .header("x-goog-api-key", &self.gemini_api_key)
             .json(&body)
             .send()
             .await?
@@ -165,11 +168,16 @@ impl Strategy for SwingLLMv1 {
         if !self.should_check(&pair_key) {
             return None;
         }
-        self.last_check.insert(pair_key, chrono::Utc::now());
 
         let result = self
             .query_vegapunk_and_llm(&event.pair, event.candle.close)
             .await;
+
+        // Update last_check only after successful query to allow retry on failure
+        if result.is_ok() {
+            self.last_check.insert(pair_key, chrono::Utc::now());
+        }
+
         match result {
             Ok(Some((direction, entry, sl, tp, confidence))) => {
                 let (stop_loss, take_profit) = match direction {

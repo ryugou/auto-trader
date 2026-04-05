@@ -46,7 +46,10 @@ struct GeminiPartResponse {
 impl GeminiSummarizer {
     pub fn new(api_url: &str, api_key: &str, model: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("failed to build HTTP client"),
             api_url: api_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -67,13 +70,14 @@ impl GeminiSummarizer {
         };
 
         let url = format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
-            self.api_url, self.model, self.api_key
+            "{}/v1beta/models/{}:generateContent",
+            self.api_url, self.model
         );
 
         let resp: GeminiResponse = self
             .client
             .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .json(&request)
             .send()
             .await?
