@@ -347,10 +347,12 @@ async fn main() -> anyhow::Result<()> {
                             if price_monitor_tx.send(event.clone()).await.is_err() {
                                 tracing::warn!("FX position monitor channel closed");
                             }
-                            // Forward to crypto position monitors
-                            for (name, tx) in &crypto_price_senders {
-                                if tx.send(event.clone()).await.is_err() {
-                                    tracing::warn!("crypto position monitor closed for {name}");
+                            // Forward to crypto position monitors (crypto events only)
+                            if event.exchange == auto_trader_core::types::Exchange::BitflyerCfd {
+                                for (name, tx) in &crypto_price_senders {
+                                    if tx.send(event.clone()).await.is_err() {
+                                        tracing::warn!("crypto position monitor closed for {name}");
+                                    }
                                 }
                             }
                             engine.on_price(&event).await;
