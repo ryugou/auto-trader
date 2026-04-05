@@ -1,20 +1,49 @@
 use crate::proto::graph_rag_engine_client::GraphRagEngineClient;
 use crate::proto::*;
+use tonic::metadata::MetadataValue;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
+use tonic::{Request, Status};
+
+type AuthClient = GraphRagEngineClient<InterceptedService<Channel, AuthInterceptor>>;
+
+#[derive(Clone)]
+struct AuthInterceptor {
+    token: Option<MetadataValue<tonic::metadata::Ascii>>,
+}
+
+impl tonic::service::Interceptor for AuthInterceptor {
+    fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
+        if let Some(token) = &self.token {
+            req.metadata_mut()
+                .insert("authorization", token.clone());
+        }
+        Ok(req)
+    }
+}
 
 pub struct VegapunkClient {
-    client: GraphRagEngineClient<Channel>,
+    client: AuthClient,
     schema: String,
 }
 
 impl VegapunkClient {
-    pub async fn connect(endpoint: &str, schema: &str) -> anyhow::Result<Self> {
+    pub async fn connect(endpoint: &str, schema: &str, auth_token: Option<&str>) -> anyhow::Result<Self> {
         let channel = Endpoint::from_shared(endpoint.to_string())?
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
             .connect()
             .await?;
-        let client = GraphRagEngineClient::new(channel);
+
+        let interceptor = AuthInterceptor {
+            token: auth_token.map(|t| {
+                format!("Bearer {t}")
+                    .parse::<MetadataValue<tonic::metadata::Ascii>>()
+                    .expect("invalid auth token")
+            }),
+        };
+
+        let client = GraphRagEngineClient::with_interceptor(channel.clone(), interceptor.clone());
         Ok(Self {
             client,
             schema: schema.to_string(),
@@ -46,7 +75,7 @@ impl VegapunkClient {
             }),
             schema: Some(self.schema.clone()),
         };
-        let response: tonic::Response<IngestRawResponse> = self.client.ingest_raw(request).await?;
+        let response = self.client.ingest_raw(request).await?;
         Ok(response.into_inner())
     }
 
@@ -68,7 +97,7 @@ impl VegapunkClient {
             limit: None,
             structural_weight: None,
         };
-        let response: tonic::Response<SearchResponse> = self.client.search(request).await?;
+        let response = self.client.search(request).await?;
         Ok(response.into_inner())
     }
 
