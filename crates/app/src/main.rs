@@ -42,21 +42,30 @@ async fn main() -> anyhow::Result<()> {
     let (signal_tx, mut signal_rx) = mpsc::channel::<SignalEvent>(256);
     let (trade_tx, mut trade_rx) = mpsc::channel::<TradeEvent>(256);
 
-    // OANDA client
-    let api_key = std::env::var("OANDA_API_KEY")
-        .expect("OANDA_API_KEY must be set");
-    let account_id = std::env::var("OANDA_ACCOUNT_ID")
-        .unwrap_or_else(|_| config.oanda.account_id.clone());
-    let oanda = OandaClient::new(&config.oanda.api_url, &account_id, &api_key)?;
-
-    // Market monitor
+    // FX market monitor (optional — skipped if no FX pairs or OANDA_API_KEY not set)
     let fx_pairs: Vec<Pair> = if !config.pairs.active.is_empty() {
         config.pairs.active.iter().map(|s| Pair::new(s)).collect()
     } else {
         config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
     };
-    let monitor = MarketMonitor::new(oanda, fx_pairs, config.monitor.interval_secs, price_tx.clone())
-        .with_db(pool.clone());
+    let fx_monitor: Option<MarketMonitor> = if !fx_pairs.is_empty() {
+        match (std::env::var("OANDA_API_KEY"), config.oanda.as_ref()) {
+            (Ok(api_key), Some(oanda_config)) if !api_key.trim().is_empty() => {
+                let account_id = std::env::var("OANDA_ACCOUNT_ID")
+                    .unwrap_or_else(|_| oanda_config.account_id.clone());
+                let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
+                Some(MarketMonitor::new(oanda, fx_pairs, config.monitor.interval_secs, price_tx.clone())
+                    .with_db(pool.clone()))
+            }
+            _ => {
+                tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
+                None
+            }
+        }
+    } else {
+        tracing::info!("no FX pairs configured, FX monitor disabled");
+        None
+    };
 
     // Vegapunk: single gRPC channel with optional Bearer token auth
     let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
@@ -239,12 +248,16 @@ async fn main() -> anyhow::Result<()> {
         });
     let vegapunk_client_recorder = vegapunk_client_exec.clone();
 
-    // Task: Market monitor
-    let monitor_handle = tokio::spawn(async move {
-        if let Err(e) = monitor.run().await {
-            tracing::error!("monitor error: {e}");
-        }
-    });
+    // Task: FX Market monitor (optional)
+    let fx_monitor_handle = if let Some(monitor) = fx_monitor {
+        Some(tokio::spawn(async move {
+            if let Err(e) = monitor.run().await {
+                tracing::error!("FX monitor error: {e}");
+            }
+        }))
+    } else {
+        None
+    };
 
     // bitFlyer monitor (crypto)
     let bitflyer_handle = if let Some(bf_config) = &config.bitflyer {
@@ -671,7 +684,9 @@ async fn main() -> anyhow::Result<()> {
     // Drop senders to signal downstream tasks to finish
     drop(price_tx);
     drop(trade_tx); // allow recorder to drain and exit
-    monitor_handle.abort();
+    if let Some(h) = fx_monitor_handle {
+        h.abort();
+    }
     if let Some(h) = bitflyer_handle {
         h.abort();
     }
