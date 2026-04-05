@@ -10,10 +10,11 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn paper_trade_roundtrip() {
-    let trader = PaperTrader::new(dec!(100000), dec!(25));
+    let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
 
     let signal = Signal {
         strategy_name: "test".to_string(),
@@ -75,7 +76,7 @@ async fn channel_pipeline() {
 
 #[tokio::test]
 async fn paper_trader_close_at_sl_price() {
-    let trader = PaperTrader::new(dec!(100000), dec!(25));
+    let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
 
     // Open a long position
     let signal = Signal {
@@ -101,4 +102,56 @@ async fn paper_trader_close_at_sl_price() {
     assert_eq!(closed.exit_price, Some(dec!(149.50)));
     // PnL: (149.50 - 150.00) / 0.01 = -50 pips
     assert_eq!(closed.pnl_pips.unwrap(), dec!(-50));
+}
+
+#[tokio::test]
+async fn crypto_paper_trade_with_quantity() {
+    let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
+
+    let signal = Signal {
+        strategy_name: "crypto_trend_v1".to_string(),
+        pair: Pair::new("FX_BTC_JPY"),
+        direction: Direction::Long,
+        entry_price: dec!(15000000),
+        stop_loss: dec!(14800000),
+        take_profit: dec!(15400000),
+        confidence: 0.8,
+        timestamp: Utc::now(),
+    };
+
+    let trade = trader.execute_with_quantity(&signal, dec!(0.01)).await.unwrap();
+    assert_eq!(trade.exchange, Exchange::BitflyerCfd);
+    assert_eq!(trade.quantity, Some(dec!(0.01)));
+
+    // Close: pnl = (15400000 - 15000000) * 0.01 = 4000 JPY
+    let closed = trader
+        .close_position(&trade.id.to_string(), ExitReason::TpHit, dec!(15400000))
+        .await
+        .unwrap();
+    assert_eq!(closed.pnl_amount, Some(dec!(4000)));
+
+    // Balance: 100000 + 4000 = 104000
+    assert_eq!(trader.balance().await, dec!(104000));
+}
+
+#[tokio::test]
+async fn overnight_fee_deducted() {
+    let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
+
+    let signal = Signal {
+        strategy_name: "crypto_trend_v1".to_string(),
+        pair: Pair::new("FX_BTC_JPY"),
+        direction: Direction::Long,
+        entry_price: dec!(15000000),
+        stop_loss: dec!(14800000),
+        take_profit: dec!(15400000),
+        confidence: 0.8,
+        timestamp: Utc::now(),
+    };
+    trader.execute_with_quantity(&signal, dec!(0.01)).await.unwrap();
+
+    // fee_rate = 0.04% → notional = 15000000 * 0.01 = 150000 → fee = 150000 * 0.0004 = 60
+    let fees = trader.apply_overnight_fees(dec!(0.0004)).await;
+    assert_eq!(fees, dec!(60));
+    assert_eq!(trader.balance().await, dec!(99940)); // 100000 - 60
 }

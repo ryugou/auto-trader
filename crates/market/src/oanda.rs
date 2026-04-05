@@ -1,8 +1,10 @@
-use auto_trader_core::types::{Candle, Pair};
+use auto_trader_core::types::{Candle, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::str::FromStr;
+
+use crate::provider::MarketDataProvider;
 
 pub struct OandaClient {
     client: reqwest::Client,
@@ -18,7 +20,7 @@ struct CandlesResponse {
 #[derive(Debug, Deserialize)]
 struct OandaCandle {
     time: String,
-    volume: Option<i32>,
+    volume: Option<u64>,
     mid: OandaCandleMid,
     complete: bool,
 }
@@ -117,6 +119,7 @@ impl OandaClient {
             let timestamp = DateTime::parse_from_rfc3339(&c.time)?.with_timezone(&Utc);
             candles.push(Candle {
                 pair: pair_clone.clone(),
+                exchange: Exchange::Oanda,
                 timeframe: granularity.to_string(),
                 open: Decimal::from_str(&c.mid.o)?,
                 high: Decimal::from_str(&c.mid.h)?,
@@ -176,5 +179,21 @@ impl OandaClient {
         let bid = Decimal::from_str(bid_str)?;
         let ask = Decimal::from_str(ask_str)?;
         Ok((bid + ask) / Decimal::from(2))
+    }
+}
+
+#[async_trait::async_trait]
+impl MarketDataProvider for OandaClient {
+    async fn get_candles(
+        &self,
+        pair: &Pair,
+        timeframe: &str,
+        count: u32,
+    ) -> anyhow::Result<Vec<Candle>> {
+        self.get_candles(pair, timeframe, count).await
+    }
+
+    async fn get_latest_price(&self, pair: &Pair) -> anyhow::Result<Decimal> {
+        self.get_latest_price(pair).await
     }
 }

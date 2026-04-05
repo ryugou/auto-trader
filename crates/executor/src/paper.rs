@@ -9,20 +9,92 @@ use uuid::Uuid;
 pub struct PaperTrader {
     balance: Mutex<Decimal>,
     positions: Mutex<HashMap<Uuid, Trade>>,
+    exchange: Exchange,
     leverage: Decimal,
+    paper_account_id: Option<Uuid>,
 }
 
 impl PaperTrader {
-    pub fn new(initial_balance: Decimal, leverage: Decimal) -> Self {
+    pub fn new(
+        exchange: Exchange,
+        initial_balance: Decimal,
+        leverage: Decimal,
+        paper_account_id: Option<Uuid>,
+    ) -> Self {
         Self {
             balance: Mutex::new(initial_balance),
             positions: Mutex::new(HashMap::new()),
+            exchange,
             leverage,
+            paper_account_id,
         }
+    }
+
+    pub fn account_id(&self) -> Option<Uuid> {
+        self.paper_account_id
+    }
+
+    pub fn leverage(&self) -> Decimal {
+        self.leverage
     }
 
     pub async fn balance(&self) -> Decimal {
         *self.balance.lock().await
+    }
+
+    pub async fn execute_with_quantity(
+        &self,
+        signal: &Signal,
+        quantity: Decimal,
+    ) -> anyhow::Result<Trade> {
+        let trade = Trade {
+            id: Uuid::new_v4(),
+            strategy_name: signal.strategy_name.clone(),
+            pair: signal.pair.clone(),
+            exchange: self.exchange,
+            direction: signal.direction,
+            entry_price: signal.entry_price,
+            exit_price: None,
+            stop_loss: signal.stop_loss,
+            take_profit: signal.take_profit,
+            quantity: Some(quantity),
+            leverage: self.leverage,
+            fees: Decimal::ZERO,
+            paper_account_id: self.paper_account_id,
+            entry_at: Utc::now(),
+            exit_at: None,
+            pnl_pips: None,
+            pnl_amount: None,
+            exit_reason: None,
+            mode: TradeMode::Paper,
+            status: TradeStatus::Open,
+        };
+        self.positions.lock().await.insert(trade.id, trade.clone());
+        tracing::info!(
+            "Paper OPEN: {} {} {:?} @ {} qty={}",
+            trade.strategy_name,
+            trade.pair,
+            trade.direction,
+            trade.entry_price,
+            quantity
+        );
+        Ok(trade)
+    }
+
+    /// Apply overnight fee to all open positions.
+    /// Returns total fees charged.
+    pub async fn apply_overnight_fees(&self, fee_rate: Decimal) -> Decimal {
+        let mut positions = self.positions.lock().await;
+        let mut balance = self.balance.lock().await;
+        let mut total_fees = Decimal::ZERO;
+        for trade in positions.values_mut() {
+            let notional = trade.entry_price * trade.quantity.unwrap_or(Decimal::ONE);
+            let fee = notional * fee_rate;
+            trade.fees += fee;
+            *balance -= fee;
+            total_fees += fee;
+        }
+        total_fees
     }
 
     fn calculate_price_diff(direction: Direction, entry: Decimal, exit: Decimal) -> Decimal {
@@ -50,11 +122,16 @@ impl OrderExecutor for PaperTrader {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
             pair: signal.pair.clone(),
+            exchange: self.exchange,
             direction: signal.direction,
             entry_price: signal.entry_price,
             exit_price: None,
             stop_loss: signal.stop_loss,
             take_profit: signal.take_profit,
+            quantity: None,
+            leverage: self.leverage,
+            fees: Decimal::ZERO,
+            paper_account_id: None,
             entry_at: Utc::now(),
             exit_at: None,
             pnl_pips: None,
@@ -95,23 +172,31 @@ impl OrderExecutor for PaperTrader {
             .ok_or_else(|| anyhow::anyhow!("position {id} not found"))?;
 
         let price_diff = Self::calculate_price_diff(trade.direction, trade.entry_price, exit_price);
-        let pnl_pips = Self::price_diff_to_pips(&trade.pair, price_diff);
+
+        let (pnl_pips, pnl_amount) = if let Some(quantity) = trade.quantity {
+            // Crypto/quantity-based: pnl = price_diff * quantity
+            (None, price_diff * quantity)
+        } else {
+            // FX legacy: pip-based calculation
+            let pnl_pips = Self::price_diff_to_pips(&trade.pair, price_diff);
+            (Some(pnl_pips), price_diff * self.leverage)
+        };
+
         trade.exit_price = Some(exit_price);
         trade.exit_at = Some(Utc::now());
-        trade.pnl_pips = Some(pnl_pips);
-        // Paper-only scale: price_diff * leverage. Not real-money P&L (ignores lot size).
-        trade.pnl_amount = Some(price_diff * self.leverage);
+        trade.pnl_pips = pnl_pips;
+        trade.pnl_amount = Some(pnl_amount);
         trade.exit_reason = Some(exit_reason);
         trade.status = TradeStatus::Closed;
 
         let mut balance = self.balance.lock().await;
-        *balance += trade.pnl_amount.unwrap_or_default();
+        *balance += pnl_amount;
 
         tracing::info!(
-            "Paper CLOSE: {} {} pnl={} pips reason={:?}",
+            "Paper CLOSE: {} {} pnl={} reason={:?}",
             trade.strategy_name,
             trade.pair,
-            pnl_pips,
+            pnl_amount,
             exit_reason
         );
         Ok(trade)
@@ -138,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_and_close_position() {
-        let trader = PaperTrader::new(dec!(100000), dec!(25));
+        let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
         let trade = trader.execute(&test_signal()).await.unwrap();
         assert_eq!(trade.status, TradeStatus::Open);
         assert_eq!(trade.mode, TradeMode::Paper);
@@ -163,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn short_position_pnl() {
-        let trader = PaperTrader::new(dec!(100000), dec!(25));
+        let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
         let mut signal = test_signal();
         signal.direction = Direction::Short;
         let trade = trader.execute(&signal).await.unwrap();
@@ -208,5 +293,61 @@ mod tests {
             PaperTrader::price_diff_to_pips(&Pair::new("EUR_USD"), dec!(0.0050)),
             dec!(50)
         );
+    }
+
+    #[tokio::test]
+    async fn crypto_position_with_quantity() {
+        let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
+        let signal = Signal {
+            strategy_name: "crypto_trend_v1".to_string(),
+            pair: Pair::new("FX_BTC_JPY"),
+            direction: Direction::Long,
+            entry_price: dec!(15000000),
+            stop_loss: dec!(14800000),
+            take_profit: dec!(15400000),
+            confidence: 0.8,
+            timestamp: Utc::now(),
+        };
+        let trade = trader
+            .execute_with_quantity(&signal, dec!(0.01))
+            .await
+            .unwrap();
+        assert_eq!(trade.quantity, Some(dec!(0.01)));
+        assert_eq!(trade.leverage, dec!(2));
+        assert_eq!(trade.paper_account_id, trader.account_id());
+
+        // Close: pnl = (15400000 - 15000000) * 0.01 = 4000 JPY
+        let closed = trader
+            .close_position(&trade.id.to_string(), ExitReason::TpHit, dec!(15400000))
+            .await
+            .unwrap();
+        assert_eq!(closed.pnl_amount, Some(dec!(4000)));
+
+        // Balance: 100000 + 4000 = 104000
+        assert_eq!(trader.balance().await, dec!(104000));
+    }
+
+    #[tokio::test]
+    async fn overnight_fee() {
+        let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
+        let signal = Signal {
+            strategy_name: "crypto_trend_v1".to_string(),
+            pair: Pair::new("FX_BTC_JPY"),
+            direction: Direction::Long,
+            entry_price: dec!(15000000),
+            stop_loss: dec!(14800000),
+            take_profit: dec!(15400000),
+            confidence: 0.8,
+            timestamp: Utc::now(),
+        };
+        trader
+            .execute_with_quantity(&signal, dec!(0.01))
+            .await
+            .unwrap();
+
+        // fee_rate = 0.04% → notional = 15000000 * 0.01 = 150000 → fee = 150000 * 0.0004 = 60
+        let fees = trader.apply_overnight_fees(dec!(0.0004)).await;
+        assert_eq!(fees, dec!(60));
+        assert_eq!(trader.balance().await, dec!(99940)); // 100000 - 60
     }
 }

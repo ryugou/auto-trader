@@ -1,6 +1,6 @@
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
-use auto_trader_core::types::{Direction, ExitReason, Pair, Trade};
+use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade};
 use auto_trader_executor::paper::PaperTrader;
 use auto_trader_core::executor::OrderExecutor;
 use crate::report::BacktestReport;
@@ -26,7 +26,7 @@ impl BacktestRunner {
     ) -> anyhow::Result<BacktestReport> {
         // Load candles from DB — get_candles returns DESC order, reverse for chronological
         let mut candles = auto_trader_db::candles::get_candles(
-            &self.pool, &pair.0, timeframe, 10000
+            &self.pool, "oanda", &pair.0, timeframe, 10000
         ).await?;
         candles.reverse(); // chronological order
 
@@ -34,7 +34,7 @@ impl BacktestRunner {
             anyhow::bail!("no candle data for {} {}", pair, timeframe);
         }
 
-        let trader = PaperTrader::new(initial_balance, leverage);
+        let trader = PaperTrader::new(Exchange::Oanda, initial_balance, leverage, None);
         let mut trades: Vec<Trade> = Vec::new();
         let mut execution_failures: usize = 0;
 
@@ -55,6 +55,7 @@ impl BacktestRunner {
 
             let event = PriceEvent {
                 pair: pair.clone(),
+                exchange: Exchange::Oanda,
                 candle: candle.clone(),
                 indicators,
                 timestamp: candle.timestamp,

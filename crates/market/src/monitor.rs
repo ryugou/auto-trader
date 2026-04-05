@@ -1,5 +1,5 @@
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::Pair;
+use auto_trader_core::types::{Exchange, Pair};
 use crate::indicators;
 use crate::oanda::OandaClient;
 use rust_decimal::Decimal;
@@ -83,6 +83,7 @@ impl MarketMonitor {
 
         let event = PriceEvent {
             pair: pair.clone(),
+            exchange: Exchange::Oanda,
             timestamp: latest.timestamp,
             candle: latest,
             indicators,

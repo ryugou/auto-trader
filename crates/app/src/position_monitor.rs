@@ -21,6 +21,8 @@ pub async fn run_position_monitor<E: OrderExecutor>(
 
         for pos in positions {
             let trade = &pos.trade;
+            // Filter by pair. Exchange filtering is handled by routing:
+            // each paper_account has its own monitor receiving only relevant PriceEvents.
             if trade.pair != event.pair {
                 continue;
             }

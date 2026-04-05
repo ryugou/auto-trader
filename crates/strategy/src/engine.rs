@@ -32,10 +32,10 @@ impl StrategyEngine {
             if slot.mode == "disabled" {
                 continue;
             }
-            if let Some(signal) = slot.strategy.on_price(event).await {
-                if let Err(e) = self.signal_tx.send(SignalEvent { signal }).await {
-                    tracing::error!("signal channel closed, dropping signal: {e}");
-                }
+            if let Some(signal) = slot.strategy.on_price(event).await
+                && let Err(e) = self.signal_tx.send(SignalEvent { signal }).await
+            {
+                tracing::error!("signal channel closed, dropping signal: {e}");
             }
         }
     }

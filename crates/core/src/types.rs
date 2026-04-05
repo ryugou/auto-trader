@@ -18,6 +18,28 @@ impl std::fmt::Display for Pair {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Exchange {
+    Oanda,
+    BitflyerCfd,
+}
+
+impl Exchange {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Exchange::Oanda => "oanda",
+            Exchange::BitflyerCfd => "bitflyer_cfd",
+        }
+    }
+}
+
+impl std::fmt::Display for Exchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -82,11 +104,16 @@ pub struct Trade {
     pub id: Uuid,
     pub strategy_name: String,
     pub pair: Pair,
+    pub exchange: Exchange,
     pub direction: Direction,
     pub entry_price: Decimal,
     pub exit_price: Option<Decimal>,
     pub stop_loss: Decimal,
     pub take_profit: Decimal,
+    pub quantity: Option<Decimal>,
+    pub leverage: Decimal,
+    pub fees: Decimal,
+    pub paper_account_id: Option<Uuid>,
     pub entry_at: DateTime<Utc>,
     pub exit_at: Option<DateTime<Utc>>,
     pub pnl_pips: Option<Decimal>,
@@ -104,12 +131,13 @@ pub struct Position {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candle {
     pub pair: Pair,
+    pub exchange: Exchange,
     pub timeframe: String,
     pub open: Decimal,
     pub high: Decimal,
     pub low: Decimal,
     pub close: Decimal,
-    pub volume: Option<i32>,
+    pub volume: Option<u64>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -128,6 +156,20 @@ mod tests {
     fn direction_serializes_snake_case() {
         let json = serde_json::to_string(&Direction::Long).unwrap();
         assert_eq!(json, r#""long""#);
+    }
+
+    #[test]
+    fn exchange_serializes_snake_case() {
+        let json = serde_json::to_string(&Exchange::BitflyerCfd).unwrap();
+        assert_eq!(json, r#""bitflyer_cfd""#);
+        let json = serde_json::to_string(&Exchange::Oanda).unwrap();
+        assert_eq!(json, r#""oanda""#);
+    }
+
+    #[test]
+    fn exchange_display() {
+        assert_eq!(Exchange::Oanda.as_str(), "oanda");
+        assert_eq!(Exchange::BitflyerCfd.as_str(), "bitflyer_cfd");
     }
 
     #[test]

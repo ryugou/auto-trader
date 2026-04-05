@@ -76,8 +76,8 @@ impl MacroAnalyst {
                     }
                 }
 
-                if let Some(pool) = &self.pool {
-                    if let Err(e) = auto_trader_db::macro_events::insert_macro_event(
+                if let Some(pool) = &self.pool
+                    && let Err(e) = auto_trader_db::macro_events::insert_macro_event(
                         pool,
                         &summary,
                         "news",
@@ -86,9 +86,8 @@ impl MacroAnalyst {
                         Some(&item.source),
                     )
                     .await
-                    {
-                        tracing::warn!("failed to insert macro event: {e}");
-                    }
+                {
+                    tracing::warn!("failed to insert macro event: {e}");
                 }
 
                 let update = MacroUpdate {

@@ -14,7 +14,28 @@ interval_secs = 60
 # backfill_days = 7  # startup時にmax_drawdownを再計算する日数（デフォルト: 7）
 
 [pairs]
-active = ["USD_JPY", "EUR_USD"]
+fx = ["USD_JPY", "EUR_USD"]
+crypto = ["FX_BTC_JPY"]
+
+[bitflyer]
+ws_url = "wss://ws.lightstream.bitflyer.com/json-rpc"
+api_url = "https://api.bitflyer.com"
+
+[pair_config.FX_BTC_JPY]
+price_unit = 1
+min_order_size = 0.001
+
+[pair_config.USD_JPY]
+price_unit = 0.001
+min_order_size = 1
+
+[pair_config.EUR_USD]
+price_unit = 0.00001
+min_order_size = 1
+
+[position_sizing]
+method = "risk_based"
+risk_rate = 0.02
 
 [gemini]
 model = "gemini-2.0-flash"
@@ -42,3 +63,19 @@ enabled = false
 mode = "paper"
 pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
+
+# Crypto paper accounts — each receives the SAME signals independently.
+# This enables parallel simulation with different capital allocations.
+[[paper_accounts]]
+name = "crypto_real"
+exchange = "bitflyer_cfd"
+initial_balance = 5233
+leverage = 2
+currency = "JPY"
+
+[[paper_accounts]]
+name = "crypto_100k"
+exchange = "bitflyer_cfd"
+initial_balance = 100000
+leverage = 2
+currency = "JPY"
