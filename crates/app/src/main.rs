@@ -100,7 +100,9 @@ async fn main() -> anyhow::Result<()> {
     let engine_handle = tokio::spawn(async move {
         while let Some(event) = price_rx.recv().await {
             // Forward to position monitor
-            let _ = price_monitor_tx.send(event.clone()).await;
+            if price_monitor_tx.send(event.clone()).await.is_err() {
+                tracing::warn!("position monitor channel closed, SL/TP monitoring stopped");
+            }
             engine.on_price(&event).await;
         }
     });
