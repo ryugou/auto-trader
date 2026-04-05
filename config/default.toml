@@ -71,20 +71,9 @@ mode = "paper"
 pairs = ["FX_BTC_JPY"]
 params = { ma_short = 8, ma_long = 21, rsi_threshold = 75 }
 
-# Crypto paper accounts — each account is bound to one strategy.
-# Multiple accounts can share the same strategy (for comparing different capital amounts).
-[[paper_accounts]]
-name = "crypto_real"
-exchange = "bitflyer_cfd"
-initial_balance = 5233
-leverage = 2
-strategy = "crypto_trend_v1"
-currency = "JPY"
-
-[[paper_accounts]]
-name = "crypto_100k"
-exchange = "bitflyer_cfd"
-initial_balance = 100000
-leverage = 2
-strategy = "crypto_trend_v1"
-currency = "JPY"
+# Paper accounts are managed in the database (paper_accounts table).
+# Initial accounts are seeded by migration. Use the REST API to manage:
+#   GET    /api/paper-accounts
+#   POST   /api/paper-accounts
+#   PUT    /api/paper-accounts/:id
+#   DELETE /api/paper-accounts/:id
