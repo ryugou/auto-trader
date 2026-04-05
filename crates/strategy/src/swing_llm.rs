@@ -55,7 +55,7 @@ impl SwingLLMv1 {
         &self,
         pair: &Pair,
         current_price: Decimal,
-    ) -> anyhow::Result<Option<(Direction, Decimal, Decimal, Decimal)>> {
+    ) -> anyhow::Result<Option<(Direction, Decimal, Decimal, Decimal, f64)>> {
         // 1. Search Vegapunk for similar patterns
         let query = format!(
             "{}の現在の市場状況とトレード判断。価格: {}",
@@ -137,16 +137,16 @@ impl SwingLLMv1 {
             _ => return Ok(None),
         };
 
-        let pip_size = if current_price > Decimal::from(10) {
-            Decimal::new(1, 2) // JPY pairs
+        let pip_size = if pair.0.contains("JPY") {
+            Decimal::new(1, 2) // JPY pairs: 0.01
         } else {
-            Decimal::new(1, 4)
+            Decimal::new(1, 4) // others: 0.0001
         };
 
         let sl = pip_size * Decimal::try_from(sl_pips)?;
         let tp = pip_size * Decimal::try_from(tp_pips)?;
 
-        Ok(Some((direction, current_price, sl, tp)))
+        Ok(Some((direction, current_price, sl, tp, confidence)))
     }
 }
 
@@ -171,7 +171,7 @@ impl Strategy for SwingLLMv1 {
             .query_vegapunk_and_llm(&event.pair, event.candle.close)
             .await;
         match result {
-            Ok(Some((direction, entry, sl, tp))) => {
+            Ok(Some((direction, entry, sl, tp, confidence))) => {
                 let (stop_loss, take_profit) = match direction {
                     Direction::Long => (entry - sl, entry + tp),
                     Direction::Short => (entry + sl, entry - tp),
@@ -183,7 +183,7 @@ impl Strategy for SwingLLMv1 {
                     entry_price: entry,
                     stop_loss,
                     take_profit,
-                    confidence: 0.6,
+                    confidence,
                     timestamp: event.timestamp,
                 })
             }
