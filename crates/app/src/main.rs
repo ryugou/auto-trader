@@ -314,8 +314,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                         // Upsert daily summary
                         let date = exit_at.date_naive();
-                        let mode_str = serde_json::to_string(&t.mode).unwrap_or_default();
-                        let mode_str = mode_str.trim_matches('"');
+                        let mode_str = t.mode.as_str();
                         let win = if pnl_pips > Decimal::ZERO { 1 } else { 0 };
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool, date, &t.strategy_name, &t.pair.0,
@@ -359,7 +358,9 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let today = chrono::Utc::now().date_naive();
 
-        let backfill_days = 7;
+        // Idempotently recompute recent days to cover missed batches.
+        // Configurable via monitor.backfill_days (default: 7).
+        let backfill_days: i64 = config.monitor.backfill_days.unwrap_or(7) as i64;
         for i in (1..=backfill_days).rev() {
             let d = today - chrono::Duration::days(i);
             tracing::info!("daily batch startup backfill: {d}");

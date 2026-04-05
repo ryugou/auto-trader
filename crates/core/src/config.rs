@@ -37,6 +37,9 @@ pub struct DatabaseConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct MonitorConfig {
     pub interval_secs: u64,
+    /// Number of days to backfill max_drawdown on startup (default: 7).
+    #[serde(default)]
+    pub backfill_days: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
