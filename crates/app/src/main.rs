@@ -3,7 +3,7 @@ mod position_monitor;
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
 use auto_trader_core::executor::OrderExecutor;
-use auto_trader_core::types::Pair;
+use auto_trader_core::types::{Direction, Pair};
 use auto_trader_db::pool::create_pool;
 use auto_trader_executor::paper::PaperTrader;
 use auto_trader_market::monitor::MarketMonitor;
@@ -119,6 +119,23 @@ async fn main() -> anyhow::Result<()> {
         Decimal::from(25),
     ));
 
+    // Vegapunk client (optional — continues without if unavailable)
+    let vegapunk_client: Option<Arc<tokio::sync::Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
+        match auto_trader_vegapunk::client::VegapunkClient::connect(
+            &config.vegapunk.endpoint, &config.vegapunk.schema
+        ).await {
+            Ok(client) => {
+                tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
+                Some(Arc::new(tokio::sync::Mutex::new(client)))
+            }
+            Err(e) => {
+                tracing::warn!("vegapunk unavailable (continuing without): {e}");
+                None
+            }
+        };
+    let vegapunk_client_exec = vegapunk_client.clone();
+    let vegapunk_client_recorder = vegapunk_client.clone();
+
     // Task: Market monitor
     let monitor_handle = tokio::spawn(async move {
         if let Err(e) = monitor.run().await {
@@ -169,6 +186,25 @@ async fn main() -> anyhow::Result<()> {
             }
             match executor.execute(signal).await {
                 Ok(trade) => {
+                    // Ingest trade decision to Vegapunk
+                    if let Some(vp) = &vegapunk_client_exec {
+                        let mut vp = vp.lock().await;
+                        let direction_str = match trade.direction {
+                            Direction::Long => "ロング",
+                            Direction::Short => "ショート",
+                        };
+                        let text = format!(
+                            "{} {} 判断。trade_id: {}。エントリー価格: {}。SL: {}、TP: {}。戦略: {}",
+                            trade.pair, direction_str,
+                            trade.id, trade.entry_price, trade.stop_loss, trade.take_profit,
+                            trade.strategy_name
+                        );
+                        let channel = format!("{}-trades", trade.pair.0.to_lowercase());
+                        let timestamp = chrono::Utc::now().to_rfc3339();
+                        if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
+                            tracing::warn!("vegapunk ingest failed for trade open: {e}");
+                        }
+                    }
                     let _ = trade_tx_clone.send(TradeEvent {
                         trade,
                         action: TradeAction::Opened,
@@ -211,6 +247,28 @@ async fn main() -> anyhow::Result<()> {
                             &recorder_pool, date, &t.strategy_name, &t.pair.0,
                             mode_str, 1, win, pnl_amount,
                         ).await;
+                        // Ingest trade result to Vegapunk
+                        if let Some(vp) = &vegapunk_client_recorder {
+                            let mut vp = vp.lock().await;
+                            let direction_str = match t.direction {
+                                Direction::Long => "ロング",
+                                Direction::Short => "ショート",
+                            };
+                            let holding = exit_at.signed_duration_since(t.entry_at);
+                            let text = format!(
+                                "{} {} 決済。trade_id: {}。{:?}。PnL: {} pips。保有時間: {}秒。戦略: {}",
+                                t.pair, direction_str,
+                                t.id, exit_reason,
+                                pnl_pips,
+                                holding.num_seconds(),
+                                t.strategy_name,
+                            );
+                            let channel = format!("{}-trades", t.pair.0.to_lowercase());
+                            let timestamp = exit_at.to_rfc3339();
+                            if let Err(e) = vp.ingest_raw(&text, "trade_result", &channel, &timestamp).await {
+                                tracing::warn!("vegapunk ingest failed for trade close: {e}");
+                            }
+                        }
                     }
                 }
             }
