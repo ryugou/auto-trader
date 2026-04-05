@@ -45,12 +45,9 @@ impl MarketMonitor {
 
     async fn fetch_and_emit(&self, pair: &Pair) -> anyhow::Result<()> {
         let candles = self.client.get_candles(pair, "M5", 100).await?;
-        if candles.is_empty() {
-            return Ok(());
-        }
         let latest = match candles.last() {
             Some(c) => c.clone(),
-            None => return Ok(()),  // empty after filtering incomplete candles
+            None => return Ok(()),  // no complete candles
         };
         let closes: Vec<Decimal> = candles.iter().map(|c| c.close).collect();
 
