@@ -76,7 +76,7 @@ impl VegapunkClient {
                 channel: Some(channel.to_string()),
                 timestamp: Some(timestamp.to_string()),
             }),
-            schema: Some(self.schema.clone()),
+            schema: self.schema.clone(),
         };
         let response = self.client.ingest_raw(request).await?;
         Ok(response.into_inner())
@@ -95,7 +95,7 @@ impl VegapunkClient {
             top_k: Some(top_k),
             format: None,
             mode: Some(mode.to_string()),
-            schema: Some(self.schema.clone()),
+            schema: self.schema.clone(),
             offset: None,
             limit: None,
             structural_weight: None,
@@ -121,7 +121,7 @@ impl VegapunkClient {
 
     pub async fn merge(&mut self) -> anyhow::Result<()> {
         let request = MergeRequest {
-            schema: Some(self.schema.clone()),
+            schema: self.schema.clone(),
         };
         self.client.merge(request).await?;
         Ok(())
