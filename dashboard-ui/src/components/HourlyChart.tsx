@@ -9,13 +9,16 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { api } from '../api/client'
-import { useFilters } from '../contexts/FilterContext'
+import type { DashboardFilter } from '../api/types'
 
-export default function HourlyChart() {
-  const { dashboardFilter } = useFilters()
+interface HourlyChartProps {
+  filters?: DashboardFilter
+}
+
+export default function HourlyChart({ filters = {} }: HourlyChartProps) {
   const { data, isLoading } = useQuery({
-    queryKey: ['hourly-winrate', dashboardFilter],
-    queryFn: () => api.dashboard.hourlyWinrate(dashboardFilter),
+    queryKey: ['hourly-winrate', filters],
+    queryFn: () => api.dashboard.hourlyWinrate(filters),
   })
 
   if (isLoading) {

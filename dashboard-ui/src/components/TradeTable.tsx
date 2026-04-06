@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   useReactTable,
@@ -7,8 +7,16 @@ import {
   flexRender,
 } from '@tanstack/react-table'
 import { api } from '../api/client'
-import { useFilters } from '../contexts/FilterContext'
 import type { TradeRow } from '../api/types'
+
+interface TradeTableProps {
+  filters: {
+    exchange?: string
+    paper_account_id?: string
+    from?: string
+    to?: string
+  }
+}
 
 const col = createColumnHelper<TradeRow>()
 
@@ -39,92 +47,119 @@ function holdingTime(entry: string, exit: string | null): string {
   return `${days}d${hours % 24}h`
 }
 
-const columns = [
-  col.accessor('entry_at', {
-    header: '日時',
-    cell: (info) => formatDate(info.getValue()),
-  }),
-  col.accessor('strategy_name', { header: '戦略' }),
-  col.accessor('pair', { header: 'ペア' }),
-  col.accessor('direction', {
-    header: '方向',
-    cell: (info) => {
-      const dir = info.getValue()
-      return (
-        <span className={dir === 'long' ? 'text-emerald-400' : 'text-red-400'}>
-          {dir.toUpperCase()}
-        </span>
-      )
-    },
-  }),
-  col.accessor('entry_price', {
-    header: 'エントリー',
-    cell: (info) => formatNum(info.getValue()),
-  }),
-  col.accessor('exit_price', {
-    header: 'エグジット',
-    cell: (info) => formatNum(info.getValue()),
-  }),
-  col.accessor('quantity', {
-    header: '数量',
-    cell: (info) => formatNum(info.getValue()),
-  }),
-  col.accessor('pnl_amount', {
-    header: 'PnL',
-    cell: (info) => {
-      const val = info.getValue()
-      if (!val) return '-'
-      const n = Number(val)
-      return (
-        <span className={n >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-          {n >= 0 ? '+' : ''}{Math.round(n).toLocaleString()}
-        </span>
-      )
-    },
-  }),
-  col.accessor('fees', {
-    header: '手数料',
-    cell: (info) => formatNum(info.getValue()),
-  }),
-  col.display({
-    id: 'net_pnl',
-    header: 'Net PnL',
-    cell: (info) => {
-      const row = info.row.original
-      if (!row.pnl_amount) return '-'
-      const net = Number(row.pnl_amount) - Number(row.fees)
-      return (
-        <span className={net >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-          {net >= 0 ? '+' : ''}{Math.round(net).toLocaleString()}
-        </span>
-      )
-    },
-  }),
-  col.display({
-    id: 'holding_time',
-    header: '保有時間',
-    cell: (info) => {
-      const row = info.row.original
-      return holdingTime(row.entry_at, row.exit_at)
-    },
-  }),
-]
+function buildColumns(accountMap: Map<string, string>) {
+  return [
+    col.accessor('entry_at', {
+      header: '日時',
+      cell: (info) => formatDate(info.getValue()),
+    }),
+    col.accessor('strategy_name', { header: '戦略' }),
+    col.accessor('paper_account_id', {
+      header: '口座',
+      cell: (info) => {
+        const id = info.getValue()
+        if (!id) return '-'
+        return accountMap.get(id) ?? '-'
+      },
+    }),
+    col.accessor('pair', { header: 'ペア' }),
+    col.accessor('direction', {
+      header: '方向',
+      cell: (info) => {
+        const dir = info.getValue()
+        return (
+          <span className={dir === 'long' ? 'text-emerald-400' : 'text-red-400'}>
+            {dir.toUpperCase()}
+          </span>
+        )
+      },
+    }),
+    col.accessor('entry_price', {
+      header: 'エントリー',
+      cell: (info) => formatNum(info.getValue()),
+    }),
+    col.accessor('exit_price', {
+      header: 'エグジット',
+      cell: (info) => formatNum(info.getValue()),
+    }),
+    col.accessor('quantity', {
+      header: '数量',
+      cell: (info) => formatNum(info.getValue()),
+    }),
+    col.accessor('pnl_amount', {
+      header: 'PnL',
+      cell: (info) => {
+        const val = info.getValue()
+        if (!val) return '-'
+        const n = Number(val)
+        return (
+          <span className={n >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+            {n >= 0 ? '+' : ''}{Math.round(n).toLocaleString()}
+          </span>
+        )
+      },
+    }),
+    col.accessor('fees', {
+      header: '手数料',
+      cell: (info) => formatNum(info.getValue()),
+    }),
+    col.display({
+      id: 'net_pnl',
+      header: 'Net PnL',
+      cell: (info) => {
+        const row = info.row.original
+        if (!row.pnl_amount) return '-'
+        const net = Number(row.pnl_amount) - Number(row.fees)
+        return (
+          <span className={net >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+            {net >= 0 ? '+' : ''}{Math.round(net).toLocaleString()}
+          </span>
+        )
+      },
+    }),
+    col.display({
+      id: 'holding_time',
+      header: '保有時間',
+      cell: (info) => {
+        const row = info.row.original
+        return holdingTime(row.entry_at, row.exit_at)
+      },
+    }),
+  ]
+}
 
-export default function TradeTable() {
-  const { dashboardFilter } = useFilters()
+export default function TradeTable({ filters }: TradeTableProps) {
   const [page, setPage] = useState(1)
   const perPage = 20
 
+  useEffect(() => {
+    setPage(1)
+  }, [filters])
+
+  const { data: accounts } = useQuery({
+    queryKey: ['accounts'],
+    queryFn: () => api.accounts.list(),
+  })
+
+  const accountMap = useMemo(() => {
+    const m = new Map<string, string>()
+    accounts?.forEach((a) => m.set(a.id, a.name))
+    return m
+  }, [accounts])
+
+  const columns = useMemo(() => buildColumns(accountMap), [accountMap])
+
   const { data, isLoading } = useQuery({
-    queryKey: ['trades', dashboardFilter, page],
+    queryKey: ['trades', filters, page],
     queryFn: () =>
       api.trades.list({
-        ...dashboardFilter,
+        ...filters,
         page: String(page),
         per_page: String(perPage),
       }),
   })
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
     data: data?.trades ?? [],
     columns,

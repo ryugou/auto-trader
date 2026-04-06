@@ -127,6 +127,7 @@ export default function Accounts() {
 
       {editTarget && (
         <AccountForm
+          key={editTarget.id}
           account={editTarget}
           onSubmit={(data) =>
             updateMut.mutate({ id: editTarget.id, data })

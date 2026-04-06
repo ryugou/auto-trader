@@ -1,7 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { FilterProvider } from './contexts/FilterContext'
-import GlobalFilters from './components/GlobalFilters'
 import Overview from './pages/Overview'
 import Trades from './pages/Trades'
 import Analysis from './pages/Analysis'
@@ -52,30 +50,25 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <FilterProvider>
-          <div className="min-h-screen bg-gray-950 text-gray-100">
-            <header className="border-b border-gray-800 px-4 py-3">
-              <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                <h1 className="text-lg font-bold whitespace-nowrap">
-                  Auto Trader
-                </h1>
-                <NavBar />
-                <div className="sm:ml-auto">
-                  <GlobalFilters />
-                </div>
-              </div>
-            </header>
-            <main className="max-w-7xl mx-auto p-4">
-              <Routes>
-                <Route path="/" element={<Overview />} />
-                <Route path="/trades" element={<Trades />} />
-                <Route path="/analysis" element={<Analysis />} />
-                <Route path="/accounts" element={<Accounts />} />
-                <Route path="/positions" element={<Positions />} />
-              </Routes>
-            </main>
-          </div>
-        </FilterProvider>
+        <div className="min-h-screen bg-gray-950 text-gray-100">
+          <header className="border-b border-gray-800 px-4 py-3">
+            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center gap-3">
+              <h1 className="text-lg font-bold whitespace-nowrap">
+                Auto Trader
+              </h1>
+              <NavBar />
+            </div>
+          </header>
+          <main className="max-w-7xl mx-auto p-4">
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/trades" element={<Trades />} />
+              <Route path="/analysis" element={<Analysis />} />
+              <Route path="/accounts" element={<Accounts />} />
+              <Route path="/positions" element={<Positions />} />
+            </Routes>
+          </main>
+        </div>
       </BrowserRouter>
     </QueryClientProvider>
   )
