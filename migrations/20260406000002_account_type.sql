@@ -2,6 +2,9 @@
 -- Existing rows default to 'paper' (they are all paper accounts).
 ALTER TABLE paper_accounts
     ADD COLUMN account_type TEXT NOT NULL DEFAULT 'paper';
+ALTER TABLE paper_accounts
+    ADD CONSTRAINT paper_accounts_account_type_check
+    CHECK (account_type IN ('paper', 'live'));
 
 -- Add account_type to daily_summary so Overview can be split per type.
 ALTER TABLE daily_summary

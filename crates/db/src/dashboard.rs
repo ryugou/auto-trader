@@ -332,12 +332,16 @@ pub async fn get_evaluated_balance(
                ORDER BY pair, exchange, timestamp DESC
            ),
            open_pnl AS (
+               -- For crypto (quantity is set): PnL = price_diff * quantity
+               -- For FX (quantity is NULL): PnL = price_diff * leverage (matches close_position)
                SELECT
                    t.paper_account_id,
                    SUM(
                        CASE WHEN t.direction = 'long'
-                           THEN (COALESCE(lp.close, t.entry_price) - t.entry_price) * COALESCE(t.quantity, 1)
-                           ELSE (t.entry_price - COALESCE(lp.close, t.entry_price)) * COALESCE(t.quantity, 1)
+                           THEN (COALESCE(lp.close, t.entry_price) - t.entry_price)
+                                * COALESCE(t.quantity, t.leverage)
+                           ELSE (t.entry_price - COALESCE(lp.close, t.entry_price))
+                                * COALESCE(t.quantity, t.leverage)
                        END
                    ) AS unrealized_pnl
                FROM trades t
