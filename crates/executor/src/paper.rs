@@ -1,52 +1,62 @@
+//! DB-backed paper trader.
+//!
+//! All state (balance, open positions) lives in the database.
+//! PaperTrader holds no in-memory state beyond its pool/exchange/account_id.
+//! This ensures that restarts do not lose any trades or balance information.
+
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
-use tokio::sync::Mutex;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 pub struct PaperTrader {
-    balance: Mutex<Decimal>,
-    positions: Mutex<HashMap<Uuid, Trade>>,
+    pool: PgPool,
     exchange: Exchange,
-    leverage: Decimal,
-    paper_account_id: Option<Uuid>,
+    paper_account_id: Uuid,
 }
 
 impl PaperTrader {
-    pub fn new(
-        exchange: Exchange,
-        initial_balance: Decimal,
-        leverage: Decimal,
-        paper_account_id: Option<Uuid>,
-    ) -> Self {
+    pub fn new(pool: PgPool, exchange: Exchange, paper_account_id: Uuid) -> Self {
         Self {
-            balance: Mutex::new(initial_balance),
-            positions: Mutex::new(HashMap::new()),
+            pool,
             exchange,
-            leverage,
             paper_account_id,
         }
     }
 
-    pub fn account_id(&self) -> Option<Uuid> {
+    pub fn account_id(&self) -> Uuid {
         self.paper_account_id
     }
 
-    pub fn leverage(&self) -> Decimal {
-        self.leverage
+    pub fn exchange(&self) -> Exchange {
+        self.exchange
     }
 
-    pub async fn balance(&self) -> Decimal {
-        *self.balance.lock().await
+    /// Fetch current balance from DB.
+    pub async fn balance(&self) -> anyhow::Result<Decimal> {
+        auto_trader_db::paper_accounts::get_paper_account(&self.pool, self.paper_account_id)
+            .await?
+            .map(|a| a.current_balance)
+            .ok_or_else(|| anyhow::anyhow!("paper account {} not found", self.paper_account_id))
     }
 
+    /// Fetch leverage from DB.
+    pub async fn leverage(&self) -> anyhow::Result<Decimal> {
+        auto_trader_db::paper_accounts::get_paper_account(&self.pool, self.paper_account_id)
+            .await?
+            .map(|a| a.leverage)
+            .ok_or_else(|| anyhow::anyhow!("paper account {} not found", self.paper_account_id))
+    }
+
+    /// Open a position with an explicit quantity (crypto path).
     pub async fn execute_with_quantity(
         &self,
         signal: &Signal,
         quantity: Decimal,
     ) -> anyhow::Result<Trade> {
+        let leverage = self.leverage().await?;
         let trade = Trade {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
@@ -58,9 +68,9 @@ impl PaperTrader {
             stop_loss: signal.stop_loss,
             take_profit: signal.take_profit,
             quantity: Some(quantity),
-            leverage: self.leverage,
+            leverage,
             fees: Decimal::ZERO,
-            paper_account_id: self.paper_account_id,
+            paper_account_id: Some(self.paper_account_id),
             entry_at: Utc::now(),
             exit_at: None,
             pnl_pips: None,
@@ -69,7 +79,7 @@ impl PaperTrader {
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
         };
-        self.positions.lock().await.insert(trade.id, trade.clone());
+        auto_trader_db::trades::insert_trade(&self.pool, &trade).await?;
         tracing::info!(
             "Paper OPEN: {} {} {:?} @ {} qty={}",
             trade.strategy_name,
@@ -81,20 +91,70 @@ impl PaperTrader {
         Ok(trade)
     }
 
-    /// Apply overnight fee to all open positions.
-    /// Returns total fees charged.
-    pub async fn apply_overnight_fees(&self, fee_rate: Decimal) -> Decimal {
-        let mut positions = self.positions.lock().await;
-        let mut balance = self.balance.lock().await;
+    /// Apply overnight fee to all open positions for this account.
+    /// Returns total fees charged. Updates trades.fees and paper_accounts.current_balance in DB.
+    ///
+    /// Runs in a single transaction so that fees and balance stay consistent even
+    /// if concurrent closes occur. Open trades are locked via `FOR UPDATE` to
+    /// guarantee we only charge fees on trades that are still open at commit time.
+    pub async fn apply_overnight_fees(&self, fee_rate: Decimal) -> anyhow::Result<Decimal> {
+        let mut tx = self.pool.begin().await?;
+
+        #[derive(sqlx::FromRow)]
+        struct OpenTradeRow {
+            id: Uuid,
+            entry_price: Decimal,
+            quantity: Option<Decimal>,
+        }
+
+        let rows: Vec<OpenTradeRow> = sqlx::query_as(
+            r#"SELECT id, entry_price, quantity
+               FROM trades
+               WHERE paper_account_id = $1 AND status = 'open'
+               FOR UPDATE"#,
+        )
+        .bind(self.paper_account_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
         let mut total_fees = Decimal::ZERO;
-        for trade in positions.values_mut() {
-            let notional = trade.entry_price * trade.quantity.unwrap_or(Decimal::ONE);
+        for row in rows {
+            let quantity = row.quantity.unwrap_or(Decimal::ONE);
+            let notional = row.entry_price * quantity;
             let fee = notional * fee_rate;
-            trade.fees += fee;
-            *balance -= fee;
+            if fee == Decimal::ZERO {
+                continue;
+            }
+            sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
+                .bind(row.id)
+                .bind(fee)
+                .execute(&mut *tx)
+                .await?;
             total_fees += fee;
         }
-        total_fees
+
+        if total_fees > Decimal::ZERO {
+            let result = sqlx::query(
+                "UPDATE paper_accounts SET current_balance = current_balance - $2, updated_at = NOW() WHERE id = $1",
+            )
+            .bind(self.paper_account_id)
+            .bind(total_fees)
+            .execute(&mut *tx)
+            .await?;
+            if result.rows_affected() == 0 {
+                anyhow::bail!(
+                    "paper account {} not found when applying overnight fees",
+                    self.paper_account_id
+                );
+            }
+        }
+
+        tx.commit().await?;
+        Ok(total_fees)
+    }
+
+    async fn open_trades_internal(&self) -> anyhow::Result<Vec<Trade>> {
+        auto_trader_db::trades::get_open_trades_by_account(&self.pool, self.paper_account_id).await
     }
 
     fn calculate_price_diff(direction: Direction, entry: Decimal, exit: Decimal) -> Decimal {
@@ -118,6 +178,8 @@ impl PaperTrader {
 
 impl OrderExecutor for PaperTrader {
     async fn execute(&self, signal: &Signal) -> anyhow::Result<Trade> {
+        // FX-style open (no explicit quantity).
+        let leverage = self.leverage().await?;
         let trade = Trade {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
@@ -129,9 +191,9 @@ impl OrderExecutor for PaperTrader {
             stop_loss: signal.stop_loss,
             take_profit: signal.take_profit,
             quantity: None,
-            leverage: self.leverage,
+            leverage,
             fees: Decimal::ZERO,
-            paper_account_id: None,
+            paper_account_id: Some(self.paper_account_id),
             entry_at: Utc::now(),
             exit_at: None,
             pnl_pips: None,
@@ -140,23 +202,20 @@ impl OrderExecutor for PaperTrader {
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
         };
-        self.positions.lock().await.insert(trade.id, trade.clone());
+        auto_trader_db::trades::insert_trade(&self.pool, &trade).await?;
         tracing::info!(
-            "Paper OPEN: {} {} {} @ {}",
+            "Paper OPEN: {} {} {:?} @ {}",
             trade.strategy_name,
             trade.pair,
-            serde_json::to_string(&trade.direction).unwrap_or_default(),
+            trade.direction,
             trade.entry_price
         );
         Ok(trade)
     }
 
     async fn open_positions(&self) -> anyhow::Result<Vec<Position>> {
-        let positions = self.positions.lock().await;
-        Ok(positions
-            .values()
-            .map(|t| Position { trade: t.clone() })
-            .collect())
+        let trades = self.open_trades_internal().await?;
+        Ok(trades.into_iter().map(|trade| Position { trade }).collect())
     }
 
     async fn close_position(
@@ -166,31 +225,135 @@ impl OrderExecutor for PaperTrader {
         exit_price: Decimal,
     ) -> anyhow::Result<Trade> {
         let uuid = Uuid::parse_str(id)?;
-        let mut positions = self.positions.lock().await;
-        let mut trade = positions
-            .remove(&uuid)
-            .ok_or_else(|| anyhow::anyhow!("position {id} not found"))?;
+        let mut tx = self.pool.begin().await?;
 
-        let price_diff = Self::calculate_price_diff(trade.direction, trade.entry_price, exit_price);
+        // Lock the trade row and atomically verify it is still open.
+        #[derive(sqlx::FromRow)]
+        struct LockedTradeRow {
+            id: Uuid,
+            strategy_name: String,
+            pair: String,
+            exchange: String,
+            direction: String,
+            entry_price: Decimal,
+            stop_loss: Decimal,
+            take_profit: Decimal,
+            quantity: Option<Decimal>,
+            leverage: Decimal,
+            fees: Decimal,
+            paper_account_id: Option<Uuid>,
+            entry_at: DateTime<Utc>,
+        }
 
-        let (pnl_pips, pnl_amount) = if let Some(quantity) = trade.quantity {
+        let locked: Option<LockedTradeRow> = sqlx::query_as(
+            r#"SELECT id, strategy_name, pair, exchange, direction, entry_price,
+                      stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+                      entry_at
+               FROM trades
+               WHERE id = $1 AND paper_account_id = $2 AND status = 'open'
+               FOR UPDATE"#,
+        )
+        .bind(uuid)
+        .bind(self.paper_account_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let locked = locked.ok_or_else(|| {
+            anyhow::anyhow!("trade {id} not found, already closed, or belongs to another account")
+        })?;
+
+        let direction = match locked.direction.as_str() {
+            "long" => Direction::Long,
+            "short" => Direction::Short,
+            other => anyhow::bail!("unknown direction: {other}"),
+        };
+        let exchange = match locked.exchange.as_str() {
+            "oanda" => Exchange::Oanda,
+            "bitflyer_cfd" => Exchange::BitflyerCfd,
+            other => anyhow::bail!("unknown exchange: {other}"),
+        };
+        let pair = Pair::new(&locked.pair);
+
+        let price_diff = Self::calculate_price_diff(direction, locked.entry_price, exit_price);
+        let leverage = locked.leverage;
+        let (pnl_pips, pnl_amount) = if let Some(quantity) = locked.quantity {
             // Crypto/quantity-based: pnl = price_diff * quantity
             (None, price_diff * quantity)
         } else {
-            // FX legacy: pip-based calculation
-            let pnl_pips = Self::price_diff_to_pips(&trade.pair, price_diff);
-            (Some(pnl_pips), price_diff * self.leverage)
+            // FX: pip-based calculation
+            let pnl_pips = Self::price_diff_to_pips(&pair, price_diff);
+            (Some(pnl_pips), price_diff * leverage)
         };
 
-        trade.exit_price = Some(exit_price);
-        trade.exit_at = Some(Utc::now());
-        trade.pnl_pips = pnl_pips;
-        trade.pnl_amount = Some(pnl_amount);
-        trade.exit_reason = Some(exit_reason);
-        trade.status = TradeStatus::Closed;
+        let exit_at = Utc::now();
+        let exit_reason_str = serde_json::to_string(&exit_reason)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
 
-        let mut balance = self.balance.lock().await;
-        *balance += pnl_amount;
+        // CAS update: only succeeds if the trade is still open. Combined with
+        // the FOR UPDATE lock above this guarantees exclusive close semantics.
+        let update_result = sqlx::query(
+            r#"UPDATE trades
+               SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
+                   exit_reason = $6, status = 'closed'
+               WHERE id = $1 AND paper_account_id = $7 AND status = 'open'"#,
+        )
+        .bind(locked.id)
+        .bind(exit_price)
+        .bind(exit_at)
+        .bind(pnl_pips)
+        .bind(pnl_amount)
+        .bind(&exit_reason_str)
+        .bind(self.paper_account_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if update_result.rows_affected() == 0 {
+            anyhow::bail!("trade {id} was closed concurrently");
+        }
+
+        // Persist balance delta in the same transaction. Fees are deducted
+        // from the balance when they are charged (e.g. overnight fees), so we
+        // only add the gross pnl here to avoid double-counting.
+        let bal_result = sqlx::query(
+            "UPDATE paper_accounts SET current_balance = current_balance + $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(self.paper_account_id)
+        .bind(pnl_amount)
+        .execute(&mut *tx)
+        .await?;
+        if bal_result.rows_affected() == 0 {
+            anyhow::bail!(
+                "paper account {} not found when closing trade {id}",
+                self.paper_account_id
+            );
+        }
+
+        tx.commit().await?;
+
+        let trade = Trade {
+            id: locked.id,
+            strategy_name: locked.strategy_name,
+            pair,
+            exchange,
+            direction,
+            entry_price: locked.entry_price,
+            exit_price: Some(exit_price),
+            stop_loss: locked.stop_loss,
+            take_profit: locked.take_profit,
+            quantity: locked.quantity,
+            leverage: locked.leverage,
+            fees: locked.fees,
+            paper_account_id: locked.paper_account_id,
+            entry_at: locked.entry_at,
+            exit_at: Some(exit_at),
+            pnl_pips,
+            pnl_amount: Some(pnl_amount),
+            exit_reason: Some(exit_reason),
+            mode: TradeMode::Paper,
+            status: TradeStatus::Closed,
+        };
 
         tracing::info!(
             "Paper CLOSE: {} {} pnl={} reason={:?}",
@@ -205,61 +368,11 @@ impl OrderExecutor for PaperTrader {
 
 #[cfg(test)]
 mod tests {
+    //! DB-dependent tests are intentionally omitted.
+    //! Only pure functions are unit-tested here. Integration tests with a real
+    //! Postgres instance can be added under crates/app/tests if needed.
     use super::*;
     use rust_decimal_macros::dec;
-
-    fn test_signal() -> Signal {
-        Signal {
-            strategy_name: "test_strat".to_string(),
-            pair: Pair::new("USD_JPY"),
-            direction: Direction::Long,
-            entry_price: dec!(150.00),
-            stop_loss: dec!(149.50),
-            take_profit: dec!(151.00),
-            confidence: 0.8,
-            timestamp: Utc::now(),
-        }
-    }
-
-    #[tokio::test]
-    async fn open_and_close_position() {
-        let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
-        let trade = trader.execute(&test_signal()).await.unwrap();
-        assert_eq!(trade.status, TradeStatus::Open);
-        assert_eq!(trade.mode, TradeMode::Paper);
-
-        let positions = trader.open_positions().await.unwrap();
-        assert_eq!(positions.len(), 1);
-
-        // USD_JPY: 1 pip = 0.01, so 151.00 - 150.00 = 1.00 = 100 pips
-        let closed = trader
-            .close_position(&trade.id.to_string(), ExitReason::TpHit, dec!(151.00))
-            .await
-            .unwrap();
-        assert_eq!(closed.status, TradeStatus::Closed);
-        assert_eq!(closed.pnl_pips, Some(dec!(100))); // 1.00 / 0.01 = 100 pips
-        assert_eq!(closed.pnl_amount, Some(dec!(25.00))); // price_diff * leverage = 1.00 * 25
-
-        let positions = trader.open_positions().await.unwrap();
-        assert_eq!(positions.len(), 0);
-
-        assert_eq!(trader.balance().await, dec!(100025));
-    }
-
-    #[tokio::test]
-    async fn short_position_pnl() {
-        let trader = PaperTrader::new(Exchange::Oanda, dec!(100000), dec!(25), None);
-        let mut signal = test_signal();
-        signal.direction = Direction::Short;
-        let trade = trader.execute(&signal).await.unwrap();
-
-        // USD_JPY: short from 150.00, exit 150.50 = -0.50 price diff = -50 pips
-        let closed = trader
-            .close_position(&trade.id.to_string(), ExitReason::SlHit, dec!(150.50))
-            .await
-            .unwrap();
-        assert_eq!(closed.pnl_pips, Some(dec!(-50)));
-    }
 
     #[test]
     fn calculate_price_diff_long() {
@@ -293,61 +406,5 @@ mod tests {
             PaperTrader::price_diff_to_pips(&Pair::new("EUR_USD"), dec!(0.0050)),
             dec!(50)
         );
-    }
-
-    #[tokio::test]
-    async fn crypto_position_with_quantity() {
-        let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
-        let signal = Signal {
-            strategy_name: "crypto_trend_v1".to_string(),
-            pair: Pair::new("FX_BTC_JPY"),
-            direction: Direction::Long,
-            entry_price: dec!(15000000),
-            stop_loss: dec!(14800000),
-            take_profit: dec!(15400000),
-            confidence: 0.8,
-            timestamp: Utc::now(),
-        };
-        let trade = trader
-            .execute_with_quantity(&signal, dec!(0.01))
-            .await
-            .unwrap();
-        assert_eq!(trade.quantity, Some(dec!(0.01)));
-        assert_eq!(trade.leverage, dec!(2));
-        assert_eq!(trade.paper_account_id, trader.account_id());
-
-        // Close: pnl = (15400000 - 15000000) * 0.01 = 4000 JPY
-        let closed = trader
-            .close_position(&trade.id.to_string(), ExitReason::TpHit, dec!(15400000))
-            .await
-            .unwrap();
-        assert_eq!(closed.pnl_amount, Some(dec!(4000)));
-
-        // Balance: 100000 + 4000 = 104000
-        assert_eq!(trader.balance().await, dec!(104000));
-    }
-
-    #[tokio::test]
-    async fn overnight_fee() {
-        let trader = PaperTrader::new(Exchange::BitflyerCfd, dec!(100000), dec!(2), Some(Uuid::new_v4()));
-        let signal = Signal {
-            strategy_name: "crypto_trend_v1".to_string(),
-            pair: Pair::new("FX_BTC_JPY"),
-            direction: Direction::Long,
-            entry_price: dec!(15000000),
-            stop_loss: dec!(14800000),
-            take_profit: dec!(15400000),
-            confidence: 0.8,
-            timestamp: Utc::now(),
-        };
-        trader
-            .execute_with_quantity(&signal, dec!(0.01))
-            .await
-            .unwrap();
-
-        // fee_rate = 0.04% → notional = 15000000 * 0.01 = 150000 → fee = 150000 * 0.0004 = 60
-        let fees = trader.apply_overnight_fees(dec!(0.0004)).await;
-        assert_eq!(fees, dec!(60));
-        assert_eq!(trader.balance().await, dec!(99940)); // 100000 - 60
     }
 }

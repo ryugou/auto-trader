@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 auto-trader-core = { workspace = true }
+auto-trader-db = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -13,6 +14,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = "1"

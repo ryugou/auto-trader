@@ -1,5 +1,4 @@
 mod api;
-mod position_monitor;
 
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
@@ -17,6 +16,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+
+fn exchange_from_str(s: &str) -> Option<Exchange> {
+    match s {
+        "oanda" => Some(Exchange::Oanda),
+        "bitflyer_cfd" => Some(Exchange::BitflyerCfd),
+        _ => None,
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -195,56 +202,49 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Collect actually registered strategy names for paper_account validation
-    let registered_strategies: Vec<&str> = engine.registered_names();
+    // Collect actually registered strategy names for paper_account validation.
+    // Held as owned Strings so we can freely move it into async tasks.
+    let registered_strategies: Vec<String> = engine
+        .registered_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
 
-    // Paper traders: positions are in-memory only (process lifetime = session).
-    // On restart, DB may have status='open' trades from previous session.
-    // These are NOT restored — the app starts fresh. If position persistence is
-    // needed, load open trades from DB on startup and reconstruct PaperTrader state.
-    // For now, stale DB records can be cleaned up manually or ignored.
-    let paper_trader = Arc::new(PaperTrader::new(
-        Exchange::Oanda,
-        Decimal::from(100_000),
-        Decimal::from(25),
-        None,
-    ));
-
-    // Paper accounts — loaded from DB (source of truth)
-    // Each account is bound to exactly one strategy.
-    let db_accounts = auto_trader_db::paper_accounts::list_paper_accounts(&pool).await?;
-    let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
-        let mut accounts = Vec::new();
-        for pac in &db_accounts {
-            if !registered_strategies.contains(&pac.strategy.as_str()) {
-                tracing::warn!(
-                    "paper account '{}' references strategy '{}' which is not registered, skipping",
-                    pac.name, pac.strategy
-                );
-                continue;
+    // Paper accounts live in the database and are the source of truth. We do
+    // NOT take a startup snapshot — every task (executor, position monitor,
+    // overnight fees) re-reads the current account list from the DB so that
+    // additions/updates/deletions via the REST API are picked up immediately.
+    //
+    // Note: FX (OANDA) paper trading is currently disabled at the executor
+    // level. If you want FX paper trading, create an FX paper_account in the
+    // database — the same pipeline will pick it up automatically once the
+    // executor gate is relaxed.
+    //
+    // Log the accounts currently present at startup for visibility only.
+    match auto_trader_db::paper_accounts::list_paper_accounts(&pool).await {
+        Ok(db_accounts) => {
+            if db_accounts.is_empty() {
+                tracing::info!("no paper accounts found in DB at startup");
             }
-            let exchange = match pac.exchange.as_str() {
-                "bitflyer_cfd" => Exchange::BitflyerCfd,
-                _ => Exchange::Oanda,
-            };
-            // Use current_balance from DB (reflects previous session's P&L)
-            let trader = Arc::new(PaperTrader::new(
-                exchange,
-                pac.current_balance,
-                pac.leverage,
-                Some(pac.id),
-            ));
-            tracing::info!(
-                "paper account: {} (id={}, strategy={}, balance={} (initial={}), leverage={})",
-                pac.name, pac.id, pac.strategy, pac.current_balance, pac.initial_balance, pac.leverage
-            );
-            accounts.push((pac.name.clone(), pac.strategy.clone(), trader));
+            for pac in &db_accounts {
+                tracing::info!(
+                    "paper account: {} (id={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
+                    pac.name, pac.id, pac.exchange, pac.strategy,
+                    pac.current_balance, pac.initial_balance, pac.leverage
+                );
+                if !registered_strategies.iter().any(|s| s == &pac.strategy) {
+                    tracing::warn!(
+                        "paper account '{}' references strategy '{}' which is not registered; signals for this strategy will be skipped",
+                        pac.name, pac.strategy
+                    );
+                }
+            }
         }
-        if accounts.is_empty() {
-            tracing::info!("no paper accounts found in DB");
+        Err(e) => {
+            tracing::error!("failed to list paper accounts at startup: {e}");
         }
-        accounts
-    };
+    }
+
 
     // PositionSizer for crypto
     let min_order_sizes: HashMap<Pair, Decimal> = config
@@ -357,32 +357,113 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Task: Position monitor — FX (price -> SL/TP check -> close)
-    let pos_monitor_executor = paper_trader.clone();
-    let pos_monitor_trade_tx = trade_tx.clone();
+    // FX position monitor removed: FX paper trading is currently disabled.
+    // Drain the forwarded FX price channel so senders do not block.
+    let mut price_monitor_rx = price_monitor_rx;
     let pos_monitor_handle = tokio::spawn(async move {
-        position_monitor::run_position_monitor(
-            pos_monitor_executor,
-            price_monitor_rx,
-            pos_monitor_trade_tx,
-        ).await;
+        while price_monitor_rx.recv().await.is_some() {}
     });
 
-    // Task: Position monitors — crypto (one per paper_account)
-    let mut crypto_price_senders: Vec<(String, mpsc::Sender<PriceEvent>)> = Vec::new();
-    for (name, _strategy, trader) in &paper_accounts {
-        let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
-        let monitor_trader = trader.clone();
-        let monitor_trade_tx = trade_tx.clone();
-        crypto_price_senders.push((name.clone(), crypto_price_tx));
-        tokio::spawn(async move {
-            position_monitor::run_position_monitor(
-                monitor_trader,
-                crypto_price_rx,
-                monitor_trade_tx,
-            ).await;
-        });
-    }
+    // Task: Crypto position monitor — single task, DB-driven.
+    //
+    // Rather than holding per-account PaperTrader instances, we re-read the
+    // open-trade list from the DB on every price tick. This makes the monitor
+    // automatically track account additions/removals done via the REST API.
+    let (crypto_price_tx, mut crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
+    let crypto_monitor_pool = pool.clone();
+    let crypto_monitor_trade_tx = trade_tx.clone();
+    let crypto_monitor_handle = tokio::spawn(async move {
+        while let Some(event) = crypto_price_rx.recv().await {
+            let current_price = event.candle.close;
+            let open_trades = match auto_trader_db::trades::list_open_with_account_name(
+                &crypto_monitor_pool,
+            ).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("crypto monitor: failed to list open trades: {e}");
+                    continue;
+                }
+            };
+            for owned in open_trades {
+                let trade = owned.trade;
+                if trade.exchange != Exchange::BitflyerCfd || trade.pair != event.pair {
+                    continue;
+                }
+                let Some(account_id) = trade.paper_account_id else {
+                    continue;
+                };
+                let exit_reason = match trade.direction {
+                    Direction::Long => {
+                        if current_price <= trade.stop_loss {
+                            Some(auto_trader_core::types::ExitReason::SlHit)
+                        } else if current_price >= trade.take_profit {
+                            Some(auto_trader_core::types::ExitReason::TpHit)
+                        } else {
+                            None
+                        }
+                    }
+                    Direction::Short => {
+                        if current_price >= trade.stop_loss {
+                            Some(auto_trader_core::types::ExitReason::SlHit)
+                        } else if current_price <= trade.take_profit {
+                            Some(auto_trader_core::types::ExitReason::TpHit)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(reason) = exit_reason {
+                    let exit_price = match reason {
+                        auto_trader_core::types::ExitReason::SlHit => trade.stop_loss,
+                        auto_trader_core::types::ExitReason::TpHit => trade.take_profit,
+                        _ => current_price,
+                    };
+                    let trader = PaperTrader::new(
+                        crypto_monitor_pool.clone(),
+                        Exchange::BitflyerCfd,
+                        account_id,
+                    );
+                    match trader
+                        .close_position(&trade.id.to_string(), reason, exit_price)
+                        .await
+                    {
+                        Ok(closed_trade) => {
+                            tracing::info!(
+                                "position closed: {} {} {:?} at {} ({:?})",
+                                closed_trade.strategy_name,
+                                closed_trade.pair,
+                                closed_trade.direction,
+                                exit_price,
+                                reason
+                            );
+                            if let Err(e) = crypto_monitor_trade_tx
+                                .send(TradeEvent {
+                                    trade: closed_trade,
+                                    action: TradeAction::Closed {
+                                        exit_price,
+                                        exit_reason: reason,
+                                    },
+                                })
+                                .await
+                            {
+                                tracing::error!(
+                                    "trade channel send failed for position close: {e}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            // Concurrent close losers land here — log at debug.
+                            tracing::debug!(
+                                "close_position skipped/failed for trade {}: {e}",
+                                trade.id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        tracing::info!("crypto position monitor: price channel closed, stopping");
+    });
 
     // Task: Strategy engine (price -> signal) + forward to position monitors
     // Also receives macro updates from broadcast channel.
@@ -401,13 +482,11 @@ async fn main() -> anyhow::Result<()> {
                             {
                                 tracing::warn!("FX position monitor channel closed");
                             }
-                            // Forward to crypto position monitors (crypto events only)
-                            if event.exchange == auto_trader_core::types::Exchange::BitflyerCfd {
-                                for (name, tx) in &crypto_price_senders {
-                                    if tx.send(event.clone()).await.is_err() {
-                                        tracing::warn!("crypto position monitor closed for {name}");
-                                    }
-                                }
+                            // Forward to the single crypto position monitor (crypto events only)
+                            if event.exchange == auto_trader_core::types::Exchange::BitflyerCfd
+                                && crypto_price_tx.send(event.clone()).await.is_err()
+                            {
+                                tracing::warn!("crypto position monitor channel closed");
                             }
                             engine.on_price(&event).await;
                         }
@@ -430,10 +509,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Signal executor (signal -> trade)
-    // Enforces 1-pair-1-position per strategy per account at execution time
-    // FX signals → paper_trader, crypto signals → matching paper_account by strategy name
-    let executor = paper_trader.clone();
-    let executor_accounts = paper_accounts.clone();
+    // Enforces 1-pair-1-position per strategy per account at execution time.
+    // Only crypto paper_accounts are supported — FX paper trading is disabled.
+    //
+    // Account list is re-read from the DB on every signal so REST API changes
+    // (add/update/delete paper_accounts) are picked up without restart.
+    let executor_pool = pool.clone();
     let executor_sizer = position_sizer.clone();
     let trade_tx_clone = trade_tx.clone();
     let crypto_pairs_set: Vec<String> = config
@@ -446,100 +527,82 @@ async fn main() -> anyhow::Result<()> {
             let signal = &signal_event.signal;
             let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
 
-            if is_crypto {
-                // Crypto: dispatch signal only to paper_accounts bound to this strategy.
-                let mut matched = false;
-                for (name, strategy_name, account) in &executor_accounts {
-                    if strategy_name != &signal.strategy_name {
-                        continue;
-                    }
-                    matched = true;
-                    let positions = account.open_positions().await.unwrap_or_default();
-                    let has_position = positions.iter().any(|p| {
-                        p.trade.strategy_name == signal.strategy_name
-                            && p.trade.pair == signal.pair
-                    });
-                    if has_position {
-                        tracing::debug!(
-                            "skipping signal: {} already has open position for {} in account {}",
-                            signal.strategy_name, signal.pair, name
+            if !is_crypto {
+                tracing::debug!(
+                    "ignoring non-crypto signal: {} {} (FX paper trading disabled)",
+                    signal.strategy_name, signal.pair
+                );
+                continue;
+            }
+
+            // Re-read accounts from the DB for each signal.
+            let db_accounts = match auto_trader_db::paper_accounts::list_paper_accounts(
+                &executor_pool,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("executor: failed to list paper accounts: {e}");
+                    continue;
+                }
+            };
+
+            // Crypto: dispatch signal only to paper_accounts bound to this strategy.
+            let mut matched = false;
+            for pac in &db_accounts {
+                if pac.strategy != signal.strategy_name {
+                    continue;
+                }
+                // Only dispatch to crypto accounts here.
+                let exchange = match exchange_from_str(&pac.exchange) {
+                    Some(e) => e,
+                    None => {
+                        tracing::warn!(
+                            "skipping paper account {} ({}): unknown exchange '{}'",
+                            pac.name, pac.id, pac.exchange
                         );
                         continue;
                     }
-
-                    let balance = account.balance().await;
-                    let leverage = account.leverage();
-                    let quantity = executor_sizer.calculate_quantity(
-                        &signal.pair,
-                        balance,
-                        signal.entry_price,
-                        signal.stop_loss,
-                        leverage,
-                    );
-                    let Some(qty) = quantity else {
-                        tracing::info!(
-                            "position sizing rejected signal for account {}: {} {}",
-                            name, signal.strategy_name, signal.pair
-                        );
-                        continue;
-                    };
-
-                    match account.execute_with_quantity(signal, qty).await {
-                        Ok(trade) => {
-                            if let Some(vp) = vegapunk_client_exec.clone() {
-                                let trade_clone = trade.clone();
-                                tokio::spawn(async move {
-                                    let mut vp = vp.lock().await;
-                                    let direction_str = match trade_clone.direction {
-                                        Direction::Long => "ロング",
-                                        Direction::Short => "ショート",
-                                    };
-                                    let text = format!(
-                                        "[{}] {} {} 判断。trade_id: {}。エントリー価格: {}。qty: {}。SL: {}、TP: {}。戦略: {}",
-                                        trade_clone.exchange, trade_clone.pair, direction_str,
-                                        trade_clone.id, trade_clone.entry_price,
-                                        trade_clone.quantity.map(|q| q.to_string()).unwrap_or_default(),
-                                        trade_clone.stop_loss, trade_clone.take_profit,
-                                        trade_clone.strategy_name
-                                    );
-                                    let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
-                                    let timestamp = chrono::Utc::now().to_rfc3339();
-                                    if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
-                                        tracing::warn!("vegapunk ingest failed for trade open: {e}");
-                                    }
-                                });
-                            }
-                            if let Err(e) = trade_tx_clone.send(TradeEvent {
-                                trade,
-                                action: TradeAction::Opened,
-                            }).await {
-                                tracing::error!("trade channel send failed (trade may not be recorded): {e}");
-                            }
-                        }
-                        Err(e) => tracing::error!("execute error for account {}: {e}", name),
-                    }
+                };
+                if exchange != Exchange::BitflyerCfd {
+                    continue;
                 }
-                if !matched {
-                    tracing::warn!(
-                        "crypto signal from '{}' had no matching paper_account",
-                        signal.strategy_name
-                    );
-                }
-            } else {
-                // FX: existing paper_trader
-                let positions = executor.open_positions().await.unwrap_or_default();
+                let account = PaperTrader::new(executor_pool.clone(), exchange, pac.id);
+                let name = &pac.name;
+                matched = true;
+                let positions = account.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
                     p.trade.strategy_name == signal.strategy_name
                         && p.trade.pair == signal.pair
                 });
                 if has_position {
                     tracing::debug!(
-                        "skipping signal: {} already has open position for {}",
-                        signal.strategy_name, signal.pair
+                        "skipping signal: {} already has open position for {} in account {}",
+                        signal.strategy_name, signal.pair, name
                     );
                     continue;
                 }
-                match executor.execute(signal).await {
+
+                // Use values from the fresh DB read above rather than round-tripping.
+                let balance = pac.current_balance;
+                let leverage = pac.leverage;
+                let quantity = executor_sizer.calculate_quantity(
+                    &signal.pair,
+                    balance,
+                    signal.entry_price,
+                    signal.stop_loss,
+                    leverage,
+                );
+                let Some(qty) = quantity else {
+                    tracing::info!(
+                        "position sizing rejected signal for account {}: {} {}",
+                        name, signal.strategy_name, signal.pair
+                    );
+                    continue;
+                };
+
+                match account.execute_with_quantity(signal, qty).await {
                     Ok(trade) => {
                         if let Some(vp) = vegapunk_client_exec.clone() {
                             let trade_clone = trade.clone();
@@ -568,47 +631,38 @@ async fn main() -> anyhow::Result<()> {
                             trade,
                             action: TradeAction::Opened,
                         }).await {
-                            tracing::error!("trade channel send failed (trade may not be recorded): {e}");
+                            tracing::error!("trade channel send failed: {e}");
                         }
                     }
-                    Err(e) => tracing::error!("execute error: {e}"),
+                    Err(e) => tracing::error!("execute error for account {}: {e}", name),
                 }
+            }
+            if !matched {
+                tracing::warn!(
+                    "crypto signal from '{}' had no matching paper_account",
+                    signal.strategy_name
+                );
             }
         }
     });
 
-    // Task: Trade recorder (trade -> DB)
+    // Task: Trade recorder — handles side effects after PaperTrader has already
+    // persisted the trade to the DB. Responsibilities:
+    //   - Upsert daily_summary on close
+    //   - Fire-and-forget Vegapunk ingestion on close
+    // Note: trade INSERT/UPDATE and balance changes are owned by PaperTrader.
     let recorder_pool = pool.clone();
     let recorder_handle = tokio::spawn(async move {
         while let Some(trade_event) = trade_rx.recv().await {
             match trade_event.action {
                 TradeAction::Opened => {
-                    if let Err(e) = auto_trader_db::trades::insert_trade(
-                        &recorder_pool,
-                        &trade_event.trade,
-                    ).await {
-                        tracing::error!("record trade error: {e}");
-                    }
+                    // Nothing to record: PaperTrader already inserted the trade.
                 }
                 TradeAction::Closed { .. } => {
                     let t = &trade_event.trade;
-                    if let (Some(exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
+                    if let (Some(_exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
                         (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
                     {
-                        if let Err(e) = auto_trader_db::trades::update_trade_closed(
-                            &recorder_pool, t.id, exit_price, exit_at, t.pnl_pips, pnl_amount, exit_reason, t.fees,
-                        ).await {
-                            tracing::error!("update trade error: {e}");
-                        }
-                        // Persist balance change to paper_accounts (if applicable)
-                        if let Some(account_id) = t.paper_account_id {
-                            let net_pnl = pnl_amount - t.fees;
-                            if let Err(e) = auto_trader_db::paper_accounts::add_pnl(
-                                &recorder_pool, account_id, net_pnl,
-                            ).await {
-                                tracing::error!("update paper account balance error: {e}");
-                            }
-                        }
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let mode_str = t.mode.as_str();
@@ -693,10 +747,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
-    // Note: Positions are in-memory only — on restart they are lost, so startup
-    // backfill is not meaningful. If positions are persisted to DB in the future,
-    // track last_fee_date per account and backfill missed days on startup.
-    let overnight_accounts = paper_accounts.clone();
+    // Since positions now live in the DB, this correctly applies fees to all
+    // outstanding positions across restarts. The account list is re-read from
+    // the DB at every tick so REST API changes are reflected immediately.
+    let overnight_pool = pool.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
@@ -705,10 +759,44 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             let today = chrono::Utc::now().date_naive();
             if today != last_date {
-                for (name, _strategy, trader) in &overnight_accounts {
-                    let fees = trader.apply_overnight_fees(fee_rate).await;
-                    if fees > Decimal::ZERO {
-                        tracing::info!("overnight fee applied: {} = {} JPY", name, fees);
+                let accounts = match auto_trader_db::paper_accounts::list_paper_accounts(
+                    &overnight_pool,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("overnight fee: failed to list paper accounts: {e}");
+                        last_date = today;
+                        continue;
+                    }
+                };
+                for pac in accounts {
+                    let exchange = match exchange_from_str(&pac.exchange) {
+                        Some(e) => e,
+                        None => {
+                            tracing::warn!(
+                                "overnight fee: skipping paper account {} ({}): unknown exchange '{}'",
+                                pac.name, pac.id, pac.exchange
+                            );
+                            continue;
+                        }
+                    };
+                    if exchange != Exchange::BitflyerCfd {
+                        continue;
+                    }
+                    let trader = PaperTrader::new(overnight_pool.clone(), exchange, pac.id);
+                    match trader.apply_overnight_fees(fee_rate).await {
+                        Ok(fees) if fees > Decimal::ZERO => {
+                            tracing::info!(
+                                "overnight fee applied: {} = {} JPY",
+                                pac.name, fees
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("overnight fee failed for {}: {e}", pac.name)
+                        }
                     }
                 }
                 last_date = today;
@@ -717,13 +805,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // REST API server
-    let api_state = api::AppState {
-        pool: pool.clone(),
-        paper_traders: paper_accounts
-            .iter()
-            .map(|(name, _strategy, trader)| (name.clone(), trader.clone()))
-            .collect(),
-    };
+    let api_state = api::AppState { pool: pool.clone() };
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_state);
         // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
@@ -767,6 +849,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(drain_timeout, async {
         let _ = engine_handle.await;
         let _ = pos_monitor_handle.await;
+        let _ = crypto_monitor_handle.await;
         let _ = executor_handle.await;
         let _ = recorder_handle.await;
     }).await;
