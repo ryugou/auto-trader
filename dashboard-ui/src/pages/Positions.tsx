@@ -16,6 +16,12 @@ export default function Positions() {
     queryClient.invalidateQueries({ queryKey: ['positions'] })
   }
 
+  const JST_OFFSET_MS = 9 * 60 * 60 * 1000
+  const toJstDateString = (iso: string) =>
+    new Date(new Date(iso).getTime() + JST_OFFSET_MS)
+      .toISOString()
+      .slice(0, 10)
+
   const filtered = (positions ?? []).filter((p) => {
     if (filters.exchange && p.exchange !== filters.exchange) return false
     if (
@@ -24,11 +30,11 @@ export default function Positions() {
     )
       return false
     if (filters.from) {
-      const entry = new Date(p.entry_at).toISOString().slice(0, 10)
+      const entry = toJstDateString(p.entry_at)
       if (entry < filters.from) return false
     }
     if (filters.to) {
-      const entry = new Date(p.entry_at).toISOString().slice(0, 10)
+      const entry = toJstDateString(p.entry_at)
       if (entry > filters.to) return false
     }
     return true

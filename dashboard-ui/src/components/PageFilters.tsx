@@ -14,20 +14,27 @@ interface PageFiltersProps {
   onChange: (next: PageFilterValue) => void
 }
 
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000
+
+// JST (UTC+9) 基準の YYYY-MM-DD を返す
+function jstDateString(date: Date): string {
+  return new Date(date.getTime() + JST_OFFSET_MS).toISOString().slice(0, 10)
+}
+
 function periodToRange(period: string): { from?: string; to?: string } {
   if (!period) return {}
   const now = new Date()
-  const to = now.toISOString().slice(0, 10)
+  const to = jstDateString(now)
   if (period === 'today') return { from: to, to }
   if (period === '1w') {
     const d = new Date(now)
-    d.setDate(d.getDate() - 7)
-    return { from: d.toISOString().slice(0, 10), to }
+    d.setUTCDate(d.getUTCDate() - 7)
+    return { from: jstDateString(d), to }
   }
   if (period === '1m') {
     const d = new Date(now)
-    d.setMonth(d.getMonth() - 1)
-    return { from: d.toISOString().slice(0, 10), to }
+    d.setUTCMonth(d.getUTCMonth() - 1)
+    return { from: jstDateString(d), to }
   }
   return {}
 }

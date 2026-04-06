@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   useReactTable,
@@ -132,6 +132,10 @@ export default function TradeTable({ filters }: TradeTableProps) {
   const [page, setPage] = useState(1)
   const perPage = 20
 
+  useEffect(() => {
+    setPage(1)
+  }, [filters])
+
   const { data: accounts } = useQuery({
     queryKey: ['accounts'],
     queryFn: () => api.accounts.list(),
@@ -155,6 +159,7 @@ export default function TradeTable({ filters }: TradeTableProps) {
       }),
   })
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
     data: data?.trades ?? [],
     columns,

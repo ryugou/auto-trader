@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import type { CreatePaperAccount, PaperAccount } from '../api/types'
 
 interface Props {
@@ -8,23 +8,14 @@ interface Props {
 }
 
 export default function AccountForm({ account, onSubmit, onCancel }: Props) {
-  const [name, setName] = useState('')
-  const [exchange, setExchange] = useState('bitflyer_cfd')
-  const [initialBalance, setInitialBalance] = useState('')
-  const [leverage, setLeverage] = useState('1')
-  const [strategy, setStrategy] = useState('')
-  const [currency, setCurrency] = useState('JPY')
-
-  useEffect(() => {
-    if (account) {
-      setName(account.name)
-      setExchange(account.exchange)
-      setInitialBalance(account.initial_balance)
-      setLeverage(account.leverage)
-      setStrategy(account.strategy)
-      setCurrency(account.currency)
-    }
-  }, [account])
+  const [name, setName] = useState(account?.name ?? '')
+  const [exchange, setExchange] = useState(account?.exchange ?? 'bitflyer_cfd')
+  const [initialBalance, setInitialBalance] = useState(
+    account?.initial_balance ?? '',
+  )
+  const [leverage, setLeverage] = useState(account?.leverage ?? '1')
+  const [strategy, setStrategy] = useState(account?.strategy ?? '')
+  const [currency, setCurrency] = useState(account?.currency ?? 'JPY')
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
