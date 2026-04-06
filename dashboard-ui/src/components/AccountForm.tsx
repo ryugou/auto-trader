@@ -31,8 +31,8 @@ export default function AccountForm({ account, onSubmit, onCancel }: Props) {
     onSubmit({
       name,
       exchange,
-      initial_balance: Number(initialBalance),
-      leverage: Number(leverage),
+      initial_balance: initialBalance,
+      leverage,
       strategy,
       currency: currency || undefined,
     })
@@ -65,7 +65,8 @@ export default function AccountForm({ account, onSubmit, onCancel }: Props) {
             <select
               value={exchange}
               onChange={(e) => setExchange(e.target.value)}
-              className={inputClass}
+              disabled={!!account}
+              className={`${inputClass} ${account ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <option value="bitflyer_cfd">Crypto (bitFlyer)</option>
               <option value="oanda">FX (OANDA)</option>
@@ -111,7 +112,8 @@ export default function AccountForm({ account, onSubmit, onCancel }: Props) {
             <select
               value={currency}
               onChange={(e) => setCurrency(e.target.value)}
-              className={inputClass}
+              disabled={!!account}
+              className={`${inputClass} ${account ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <option value="JPY">JPY</option>
               <option value="USD">USD</option>

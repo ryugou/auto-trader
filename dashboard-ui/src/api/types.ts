@@ -14,34 +14,34 @@ export interface PaperAccount {
 export interface CreatePaperAccount {
   name: string
   exchange: string
-  initial_balance: number
-  leverage: number
+  initial_balance: string
+  leverage: string
   strategy: string
   currency?: string
 }
 
 export interface UpdatePaperAccount {
   name?: string
-  initial_balance?: number
-  leverage?: number
+  initial_balance?: string
+  leverage?: string
   strategy?: string
 }
 
 export interface SummaryResponse {
-  total_pnl: number
-  net_pnl: number
-  total_fees: number
+  total_pnl: string
+  net_pnl: string
+  total_fees: string
   trade_count: number
   win_count: number
   loss_count: number
   win_rate: number
   expected_value: number
-  max_drawdown: number
+  max_drawdown: string
 }
 
 export interface PnlHistoryRow {
   date: string
-  total_pnl: string
+  daily_pnl: string
   cumulative_pnl: string
 }
 
@@ -50,7 +50,6 @@ export interface StrategyStats {
   trade_count: number
   win_count: number
   total_pnl: string
-  max_drawdown: string
 }
 
 export interface PairStats {

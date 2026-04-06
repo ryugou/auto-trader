@@ -14,6 +14,11 @@ import type {
 
 const BASE = ''
 
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('api_token')
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 function qs(params: Record<string, string | undefined> | DashboardFilter): string {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined)
   if (entries.length === 0) return ''
@@ -21,7 +26,7 @@ function qs(params: Record<string, string | undefined> | DashboardFilter): strin
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(BASE + path)
+  const res = await fetch(BASE + path, { headers: { ...authHeaders() } })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
 }
@@ -29,7 +34,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
@@ -39,7 +44,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 async function put<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
@@ -47,7 +52,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del(path: string): Promise<void> {
-  const res = await fetch(BASE + path, { method: 'DELETE' })
+  const res = await fetch(BASE + path, { method: 'DELETE', headers: { ...authHeaders() } })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
 }
 

@@ -43,19 +43,21 @@ export default function KpiCards() {
     )
   }
 
-  const pnlColor = data.net_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+  const netPnl = Number(data.net_pnl)
+  const maxDrawdown = Number(data.max_drawdown)
+  const pnlColor = netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
   const ddColor = 'text-red-400'
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      <Card label="総損益" value={formatJpy(data.net_pnl)} color={pnlColor} />
+      <Card label="総損益" value={formatJpy(netPnl)} color={pnlColor} />
       <Card label="勝率" value={formatPercent(data.win_rate * 100)} color="text-gray-100" />
       <Card
         label="期待値"
         value={formatJpy(data.expected_value)}
         color={data.expected_value >= 0 ? 'text-emerald-400' : 'text-red-400'}
       />
-      <Card label="最大DD" value={formatJpy(data.max_drawdown)} color={ddColor} />
+      <Card label="最大DD" value={formatJpy(maxDrawdown)} color={ddColor} />
     </div>
   )
 }
