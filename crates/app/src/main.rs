@@ -17,10 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-fn exchange_from_str(s: &str) -> Exchange {
+fn exchange_from_str(s: &str) -> Option<Exchange> {
     match s {
-        "bitflyer_cfd" => Exchange::BitflyerCfd,
-        _ => Exchange::Oanda,
+        "oanda" => Some(Exchange::Oanda),
+        "bitflyer_cfd" => Some(Exchange::BitflyerCfd),
+        _ => None,
     }
 }
 
@@ -554,7 +555,16 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 // Only dispatch to crypto accounts here.
-                let exchange = exchange_from_str(&pac.exchange);
+                let exchange = match exchange_from_str(&pac.exchange) {
+                    Some(e) => e,
+                    None => {
+                        tracing::warn!(
+                            "skipping paper account {} ({}): unknown exchange '{}'",
+                            pac.name, pac.id, pac.exchange
+                        );
+                        continue;
+                    }
+                };
                 if exchange != Exchange::BitflyerCfd {
                     continue;
                 }
@@ -762,7 +772,16 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 for pac in accounts {
-                    let exchange = exchange_from_str(&pac.exchange);
+                    let exchange = match exchange_from_str(&pac.exchange) {
+                        Some(e) => e,
+                        None => {
+                            tracing::warn!(
+                                "overnight fee: skipping paper account {} ({}): unknown exchange '{}'",
+                                pac.name, pac.id, pac.exchange
+                            );
+                            continue;
+                        }
+                    };
                     if exchange != Exchange::BitflyerCfd {
                         continue;
                     }

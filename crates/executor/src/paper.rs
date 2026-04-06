@@ -250,15 +250,17 @@ impl OrderExecutor for PaperTrader {
                       stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                       entry_at
                FROM trades
-               WHERE id = $1 AND status = 'open'
+               WHERE id = $1 AND paper_account_id = $2 AND status = 'open'
                FOR UPDATE"#,
         )
         .bind(uuid)
+        .bind(self.paper_account_id)
         .fetch_optional(&mut *tx)
         .await?;
 
-        let locked = locked
-            .ok_or_else(|| anyhow::anyhow!("trade {id} not found or already closed"))?;
+        let locked = locked.ok_or_else(|| {
+            anyhow::anyhow!("trade {id} not found, already closed, or belongs to another account")
+        })?;
 
         let direction = match locked.direction.as_str() {
             "long" => Direction::Long,
@@ -295,7 +297,7 @@ impl OrderExecutor for PaperTrader {
             r#"UPDATE trades
                SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
                    exit_reason = $6, status = 'closed'
-               WHERE id = $1 AND status = 'open'"#,
+               WHERE id = $1 AND paper_account_id = $7 AND status = 'open'"#,
         )
         .bind(locked.id)
         .bind(exit_price)
@@ -303,6 +305,7 @@ impl OrderExecutor for PaperTrader {
         .bind(pnl_pips)
         .bind(pnl_amount)
         .bind(&exit_reason_str)
+        .bind(self.paper_account_id)
         .execute(&mut *tx)
         .await?;
 

@@ -4,7 +4,7 @@ use auto_trader_core::strategy::Strategy;
 use auto_trader_core::types::{
     Direction, Exchange, ExitReason, Pair, Trade, TradeMode, TradeStatus,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -38,6 +38,7 @@ impl SimTrader {
     fn open(
         &mut self,
         signal: &auto_trader_core::types::Signal,
+        now: DateTime<Utc>,
     ) -> Trade {
         let trade = Trade {
             id: Uuid::new_v4(),
@@ -53,7 +54,7 @@ impl SimTrader {
             leverage: self.leverage,
             fees: Decimal::ZERO,
             paper_account_id: None,
-            entry_at: Utc::now(),
+            entry_at: now,
             exit_at: None,
             pnl_pips: None,
             pnl_amount: None,
@@ -74,6 +75,7 @@ impl SimTrader {
         id: Uuid,
         reason: ExitReason,
         exit_price: Decimal,
+        now: DateTime<Utc>,
     ) -> anyhow::Result<Trade> {
         let mut trade = self
             .positions
@@ -94,7 +96,7 @@ impl SimTrader {
         let pnl_amount = price_diff * self.leverage;
 
         trade.exit_price = Some(exit_price);
-        trade.exit_at = Some(Utc::now());
+        trade.exit_at = Some(now);
         trade.pnl_pips = Some(pnl_pips);
         trade.pnl_amount = Some(pnl_amount);
         trade.exit_reason = Some(reason);
@@ -190,7 +192,7 @@ impl BacktestRunner {
                     }
                 };
                 if let Some((reason, price)) = exit {
-                    let closed = trader.close(t.id, reason, price)?;
+                    let closed = trader.close(t.id, reason, price, candle.timestamp)?;
                     trades.push(closed);
                 }
             }
@@ -203,7 +205,7 @@ impl BacktestRunner {
                     t.strategy_name == signal.strategy_name && t.pair == signal.pair
                 });
                 if !has_pos {
-                    let trade = trader.open(&signal);
+                    let trade = trader.open(&signal, candle.timestamp);
                     trades.push(trade);
                 }
             }
