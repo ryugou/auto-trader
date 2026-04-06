@@ -808,13 +808,9 @@ async fn main() -> anyhow::Result<()> {
     let api_state = api::AppState { pool: pool.clone() };
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_state);
-        // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
-        // Otherwise bind to 127.0.0.1 to prevent unauthenticated external access.
-        let bind_addr = if std::env::var("API_TOKEN").is_ok() {
-            "0.0.0.0:3001"
-        } else {
-            "127.0.0.1:3001"
-        };
+        // Always bind to 0.0.0.0. Host-level access control is handled by
+        // docker-compose port mapping (127.0.0.1:3001:3001) or firewall.
+        let bind_addr = "0.0.0.0:3001";
         let listener = tokio::net::TcpListener::bind(bind_addr).await
             .expect("failed to bind API server");
         tracing::info!("API server listening on {bind_addr}");
