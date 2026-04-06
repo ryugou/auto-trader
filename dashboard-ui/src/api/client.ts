@@ -10,6 +10,7 @@ import type {
   CreatePaperAccount,
   UpdatePaperAccount,
   DashboardFilter,
+  BalanceHistoryResponse,
 } from './types'
 
 const BASE = ''
@@ -62,6 +63,8 @@ export const api = {
       get<SummaryResponse>(`/api/dashboard/summary${qs(f)}`),
     pnlHistory: (f: DashboardFilter = {}) =>
       get<PnlHistoryRow[]>(`/api/dashboard/pnl-history${qs(f)}`),
+    balanceHistory: (f: DashboardFilter = {}) =>
+      get<BalanceHistoryResponse>(`/api/dashboard/balance-history${qs(f)}`),
     strategies: (f: DashboardFilter = {}) =>
       get<StrategyStats[]>(`/api/dashboard/strategies${qs(f)}`),
     pairs: (f: DashboardFilter = {}) =>

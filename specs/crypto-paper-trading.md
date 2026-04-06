@@ -286,10 +286,21 @@ CREATE TABLE paper_accounts (
     current_balance DECIMAL NOT NULL,
     currency TEXT NOT NULL DEFAULT 'JPY',
     leverage DECIMAL NOT NULL DEFAULT 1,
+    strategy TEXT NOT NULL DEFAULT '',
+    -- 'paper' (検証用) / 'live' (本番。資金は実口座に紐づく)
+    account_type TEXT NOT NULL DEFAULT 'paper',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
+
+### account_type と評価額
+
+- `account_type` は `'paper'` / `'live'` の 2 値。ラベル表示は「ペーパー」「通常」。
+- 作成時のみ指定可能。`UpdatePaperAccount` では変更不可。
+- `daily_summary.account_type` も保存し、概要ページを paper / live で分離表示できる。
+- 評価額（`evaluated_balance`）は `current_balance + 含み損益` で算出。含み損益は `price_candles` の最新 close を使用。
+- 残高推移チャート (`/api/dashboard/balance-history`) は `initial_balance + 累積実現損益` を日次再構築する。
 
 ### ダッシュボードの集計キー
 

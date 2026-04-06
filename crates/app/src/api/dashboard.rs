@@ -35,6 +35,7 @@ pub async fn summary(
         &state.pool,
         filter.exchange.as_deref(),
         filter.paper_account_id,
+        filter.account_type.as_deref(),
         from,
         to,
     )
@@ -80,12 +81,29 @@ pub async fn pnl_history(
         &state.pool,
         filter.exchange.as_deref(),
         filter.paper_account_id,
+        filter.account_type.as_deref(),
         from,
         to,
     )
     .await
     .map(Json)
     .map_err(ApiError::from)
+}
+
+#[derive(Debug, Serialize)]
+pub struct BalanceHistoryResponse {
+    pub accounts: Vec<dashboard::BalanceHistoryAccount>,
+}
+
+pub async fn balance_history(
+    State(state): State<AppState>,
+    Query(filter): Query<DashboardFilter>,
+) -> Result<Json<BalanceHistoryResponse>, ApiError> {
+    let accounts =
+        dashboard::get_balance_history(&state.pool, filter.account_type.as_deref())
+            .await
+            .map_err(ApiError::from)?;
+    Ok(Json(BalanceHistoryResponse { accounts }))
 }
 
 pub async fn strategies(
