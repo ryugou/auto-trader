@@ -9,11 +9,13 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct SummaryResponse {
-    pub total_trades: i64,
+    pub trade_count: i64,
     pub win_count: i64,
     pub loss_count: i64,
     pub win_rate: f64,
     pub total_pnl: Decimal,
+    pub net_pnl: Decimal,
+    pub total_fees: Decimal,
     pub max_drawdown: Decimal,
     pub expected_value: f64,
 }
@@ -45,24 +47,23 @@ pub async fn summary(
     } else {
         0.0
     };
+    let net_pnl = stats.total_pnl - stats.total_fees;
     let expected_value = if stats.total_trades > 0 {
-        // Convert total_pnl Decimal to f64 for expected value calculation
-        let pnl_f64: f64 = stats
-            .total_pnl
-            .to_string()
-            .parse()
-            .unwrap_or(0.0);
+        // Convert net_pnl Decimal to f64 for expected value calculation
+        let pnl_f64: f64 = net_pnl.to_string().parse().unwrap_or(0.0);
         pnl_f64 / stats.total_trades as f64
     } else {
         0.0
     };
 
     Ok(Json(SummaryResponse {
-        total_trades: stats.total_trades,
+        trade_count: stats.total_trades,
         win_count: stats.win_count,
         loss_count,
         win_rate,
         total_pnl: stats.total_pnl,
+        net_pnl,
+        total_fees: stats.total_fees,
         max_drawdown: stats.max_drawdown,
         expected_value,
     }))

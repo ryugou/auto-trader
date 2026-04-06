@@ -49,7 +49,7 @@ export default function KpiCards() {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       <Card label="総損益" value={formatJpy(data.net_pnl)} color={pnlColor} />
-      <Card label="勝率" value={formatPercent(data.win_rate)} color="text-gray-100" />
+      <Card label="勝率" value={formatPercent(data.win_rate * 100)} color="text-gray-100" />
       <Card
         label="期待値"
         value={formatJpy(data.expected_value)}

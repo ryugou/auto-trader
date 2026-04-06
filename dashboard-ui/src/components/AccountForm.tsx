@@ -9,7 +9,7 @@ interface Props {
 
 export default function AccountForm({ account, onSubmit, onCancel }: Props) {
   const [name, setName] = useState('')
-  const [exchange, setExchange] = useState('crypto')
+  const [exchange, setExchange] = useState('bitflyer_cfd')
   const [initialBalance, setInitialBalance] = useState('')
   const [leverage, setLeverage] = useState('1')
   const [strategy, setStrategy] = useState('')
@@ -67,8 +67,8 @@ export default function AccountForm({ account, onSubmit, onCancel }: Props) {
               onChange={(e) => setExchange(e.target.value)}
               className={inputClass}
             >
-              <option value="crypto">暗号資産</option>
-              <option value="fx">FX</option>
+              <option value="bitflyer_cfd">Crypto (bitFlyer)</option>
+              <option value="oanda">FX (OANDA)</option>
             </select>
           </div>
           <div>

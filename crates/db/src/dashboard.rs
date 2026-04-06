@@ -13,6 +13,7 @@ pub struct SummaryStats {
     pub total_trades: i64,
     pub win_count: i64,
     pub total_pnl: Decimal,
+    pub total_fees: Decimal,
     pub max_drawdown: Decimal,
 }
 
@@ -85,15 +86,32 @@ pub async fn get_summary(
 ) -> anyhow::Result<SummaryStats> {
     let row = sqlx::query_as::<_, SummaryStats>(
         r#"SELECT
-               COALESCE(SUM(trade_count), 0)::bigint   AS total_trades,
-               COALESCE(SUM(win_count), 0)::bigint     AS win_count,
-               COALESCE(SUM(total_pnl), 0)             AS total_pnl,
-               COALESCE(MAX(max_drawdown), 0)           AS max_drawdown
-           FROM daily_summary
-           WHERE ($1::text IS NULL OR exchange = $1)
-             AND ($2::uuid IS NULL OR paper_account_id = $2)
-             AND ($3::date IS NULL OR date >= $3)
-             AND ($4::date IS NULL OR date <= $4)"#,
+               ds.total_trades,
+               ds.win_count,
+               ds.total_pnl,
+               COALESCE(t.total_fees, 0) AS total_fees,
+               ds.max_drawdown
+           FROM (
+               SELECT
+                   COALESCE(SUM(trade_count), 0)::bigint AS total_trades,
+                   COALESCE(SUM(win_count), 0)::bigint   AS win_count,
+                   COALESCE(SUM(total_pnl), 0)           AS total_pnl,
+                   COALESCE(MAX(max_drawdown), 0)         AS max_drawdown
+               FROM daily_summary
+               WHERE ($1::text IS NULL OR exchange = $1)
+                 AND ($2::uuid IS NULL OR paper_account_id = $2)
+                 AND ($3::date IS NULL OR date >= $3)
+                 AND ($4::date IS NULL OR date <= $4)
+           ) ds
+           CROSS JOIN LATERAL (
+               SELECT COALESCE(SUM(fees), 0) AS total_fees
+               FROM trades
+               WHERE status = 'closed'
+                 AND ($1::text IS NULL OR exchange = $1)
+                 AND ($2::uuid IS NULL OR paper_account_id = $2)
+                 AND ($3::date IS NULL OR exit_at >= $3::date::timestamptz)
+                 AND ($4::date IS NULL OR exit_at < ($4::date + 1)::timestamptz)
+           ) t"#,
     )
     .bind(exchange)
     .bind(paper_account_id)

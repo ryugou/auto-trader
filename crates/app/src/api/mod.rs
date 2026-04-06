@@ -14,7 +14,7 @@ use axum::{Json, Router};
 use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,39 +24,43 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     let api_token = std::env::var("API_TOKEN").ok();
-    Router::new()
+
+    let api_routes = Router::new()
         .route(
-            "/api/paper-accounts",
+            "/paper-accounts",
             get(accounts::list).post(accounts::create),
         )
         .route(
-            "/api/paper-accounts/{id}",
+            "/paper-accounts/{id}",
             get(accounts::get_one)
                 .put(accounts::update)
                 .delete(accounts::remove),
         )
-        .route("/api/dashboard/summary", get(dashboard::summary))
-        .route("/api/dashboard/pnl-history", get(dashboard::pnl_history))
-        .route("/api/dashboard/strategies", get(dashboard::strategies))
-        .route("/api/dashboard/pairs", get(dashboard::pairs))
-        .route(
-            "/api/dashboard/hourly-winrate",
-            get(dashboard::hourly_winrate),
-        )
-        .route("/api/trades", get(trades::list))
-        .route("/api/positions", get(positions::list))
+        .route("/dashboard/summary", get(dashboard::summary))
+        .route("/dashboard/pnl-history", get(dashboard::pnl_history))
+        .route("/dashboard/strategies", get(dashboard::strategies))
+        .route("/dashboard/pairs", get(dashboard::pairs))
+        .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))
+        .route("/trades", get(trades::list))
+        .route("/positions", get(positions::list))
         .layer(middleware::from_fn(move |req, next| {
             let token = api_token.clone();
             auth_middleware(token, req, next)
         }))
-        .fallback_service(ServeDir::new("dashboard-ui/dist"))
+        .with_state(state);
+
+    Router::new()
+        .nest("/api", api_routes)
+        .fallback_service(
+            ServeDir::new("dashboard-ui/dist")
+                .fallback(ServeFile::new("dashboard-ui/dist/index.html")),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
-        .with_state(state)
 }
 
 async fn auth_middleware(

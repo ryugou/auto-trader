@@ -54,8 +54,8 @@ export default function GlobalFilters() {
         className={selectClass}
       >
         <option value="">全体</option>
-        <option value="fx">FX</option>
-        <option value="crypto">暗号資産</option>
+        <option value="oanda">FX (OANDA)</option>
+        <option value="bitflyer_cfd">Crypto (bitFlyer)</option>
       </select>
 
       <select

@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct PositionResponse {
-    pub id: Uuid,
-    pub account_name: String,
+    pub trade_id: Uuid,
+    pub paper_account_name: String,
     pub strategy_name: String,
     pub pair: String,
     pub exchange: String,
@@ -45,8 +45,8 @@ pub async fn list(
                 .to_string();
 
             result.push(PositionResponse {
-                id: t.id,
-                account_name: account_name.clone(),
+                trade_id: t.id,
+                paper_account_name: account_name.clone(),
                 strategy_name: t.strategy_name.clone(),
                 pair: t.pair.0.clone(),
                 exchange: t.exchange.as_str().to_string(),
