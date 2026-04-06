@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
-import { useFilters } from '../contexts/FilterContext'
+import type { DashboardFilter } from '../api/types'
 
 function formatJpy(value: number): string {
   const sign = value >= 0 ? '+' : ''
@@ -26,11 +26,14 @@ function Card({ label, value, color }: CardProps) {
   )
 }
 
-export default function KpiCards() {
-  const { dashboardFilter } = useFilters()
+interface KpiCardsProps {
+  filters?: DashboardFilter
+}
+
+export default function KpiCards({ filters = {} }: KpiCardsProps) {
   const { data, isLoading } = useQuery({
-    queryKey: ['dashboard-summary', dashboardFilter],
-    queryFn: () => api.dashboard.summary(dashboardFilter),
+    queryKey: ['dashboard-summary', filters],
+    queryFn: () => api.dashboard.summary(filters),
   })
 
   if (isLoading || !data) {
