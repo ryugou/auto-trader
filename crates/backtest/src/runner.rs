@@ -13,6 +13,11 @@ use uuid::Uuid;
 /// This is deliberately separate from the production `PaperTrader`, which is
 /// DB-backed. Backtests run fully in-memory on historical candles and do not
 /// (and should not) touch persistent storage.
+///
+/// NOTE: Currently supports **FX backtests only**. SimTrader has no explicit
+/// `quantity` and no overnight-fee model, so crypto strategies that rely on
+/// position sizing or swap fees will not produce accurate results. Crypto
+/// backtest support is deferred to a future iteration.
 struct SimTrader {
     exchange: Exchange,
     leverage: Decimal,

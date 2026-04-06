@@ -6,7 +6,7 @@
 
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -93,27 +93,63 @@ impl PaperTrader {
 
     /// Apply overnight fee to all open positions for this account.
     /// Returns total fees charged. Updates trades.fees and paper_accounts.current_balance in DB.
+    ///
+    /// Runs in a single transaction so that fees and balance stay consistent even
+    /// if concurrent closes occur. Open trades are locked via `FOR UPDATE` to
+    /// guarantee we only charge fees on trades that are still open at commit time.
     pub async fn apply_overnight_fees(&self, fee_rate: Decimal) -> anyhow::Result<Decimal> {
-        let positions = self.open_trades_internal().await?;
+        let mut tx = self.pool.begin().await?;
+
+        #[derive(sqlx::FromRow)]
+        struct OpenTradeRow {
+            id: Uuid,
+            entry_price: Decimal,
+            quantity: Option<Decimal>,
+        }
+
+        let rows: Vec<OpenTradeRow> = sqlx::query_as(
+            r#"SELECT id, entry_price, quantity
+               FROM trades
+               WHERE paper_account_id = $1 AND status = 'open'
+               FOR UPDATE"#,
+        )
+        .bind(self.paper_account_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
         let mut total_fees = Decimal::ZERO;
-        for trade in positions {
-            let quantity = trade.quantity.unwrap_or(Decimal::ONE);
-            let notional = trade.entry_price * quantity;
+        for row in rows {
+            let quantity = row.quantity.unwrap_or(Decimal::ONE);
+            let notional = row.entry_price * quantity;
             let fee = notional * fee_rate;
             if fee == Decimal::ZERO {
                 continue;
             }
-            auto_trader_db::trades::add_fees(&self.pool, trade.id, fee).await?;
+            sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
+                .bind(row.id)
+                .bind(fee)
+                .execute(&mut *tx)
+                .await?;
             total_fees += fee;
         }
+
         if total_fees > Decimal::ZERO {
-            auto_trader_db::paper_accounts::add_pnl(
-                &self.pool,
-                self.paper_account_id,
-                -total_fees,
+            let result = sqlx::query(
+                "UPDATE paper_accounts SET current_balance = current_balance - $2, updated_at = NOW() WHERE id = $1",
             )
+            .bind(self.paper_account_id)
+            .bind(total_fees)
+            .execute(&mut *tx)
             .await?;
+            if result.rows_affected() == 0 {
+                anyhow::bail!(
+                    "paper account {} not found when applying overnight fees",
+                    self.paper_account_id
+                );
+            }
         }
+
+        tx.commit().await?;
         Ok(total_fees)
     }
 
@@ -189,55 +225,132 @@ impl OrderExecutor for PaperTrader {
         exit_price: Decimal,
     ) -> anyhow::Result<Trade> {
         let uuid = Uuid::parse_str(id)?;
-        let mut trade = auto_trader_db::trades::get_trade_by_id(&self.pool, uuid)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("trade {id} not found"))?;
+        let mut tx = self.pool.begin().await?;
 
-        if trade.status == TradeStatus::Closed {
-            anyhow::bail!("trade {id} already closed");
+        // Lock the trade row and atomically verify it is still open.
+        #[derive(sqlx::FromRow)]
+        struct LockedTradeRow {
+            id: Uuid,
+            strategy_name: String,
+            pair: String,
+            exchange: String,
+            direction: String,
+            entry_price: Decimal,
+            stop_loss: Decimal,
+            take_profit: Decimal,
+            quantity: Option<Decimal>,
+            leverage: Decimal,
+            fees: Decimal,
+            paper_account_id: Option<Uuid>,
+            entry_at: DateTime<Utc>,
         }
 
-        let price_diff = Self::calculate_price_diff(trade.direction, trade.entry_price, exit_price);
-        let leverage = trade.leverage;
-        let (pnl_pips, pnl_amount) = if let Some(quantity) = trade.quantity {
+        let locked: Option<LockedTradeRow> = sqlx::query_as(
+            r#"SELECT id, strategy_name, pair, exchange, direction, entry_price,
+                      stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+                      entry_at
+               FROM trades
+               WHERE id = $1 AND status = 'open'
+               FOR UPDATE"#,
+        )
+        .bind(uuid)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let locked = locked
+            .ok_or_else(|| anyhow::anyhow!("trade {id} not found or already closed"))?;
+
+        let direction = match locked.direction.as_str() {
+            "long" => Direction::Long,
+            "short" => Direction::Short,
+            other => anyhow::bail!("unknown direction: {other}"),
+        };
+        let exchange = match locked.exchange.as_str() {
+            "oanda" => Exchange::Oanda,
+            "bitflyer_cfd" => Exchange::BitflyerCfd,
+            other => anyhow::bail!("unknown exchange: {other}"),
+        };
+        let pair = Pair::new(&locked.pair);
+
+        let price_diff = Self::calculate_price_diff(direction, locked.entry_price, exit_price);
+        let leverage = locked.leverage;
+        let (pnl_pips, pnl_amount) = if let Some(quantity) = locked.quantity {
             // Crypto/quantity-based: pnl = price_diff * quantity
             (None, price_diff * quantity)
         } else {
             // FX: pip-based calculation
-            let pnl_pips = Self::price_diff_to_pips(&trade.pair, price_diff);
+            let pnl_pips = Self::price_diff_to_pips(&pair, price_diff);
             (Some(pnl_pips), price_diff * leverage)
         };
 
         let exit_at = Utc::now();
-        trade.exit_price = Some(exit_price);
-        trade.exit_at = Some(exit_at);
-        trade.pnl_pips = pnl_pips;
-        trade.pnl_amount = Some(pnl_amount);
-        trade.exit_reason = Some(exit_reason);
-        trade.status = TradeStatus::Closed;
+        let exit_reason_str = serde_json::to_string(&exit_reason)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
 
-        // Persist trade close.
-        auto_trader_db::trades::update_trade_closed(
-            &self.pool,
-            trade.id,
-            exit_price,
-            exit_at,
+        // CAS update: only succeeds if the trade is still open. Combined with
+        // the FOR UPDATE lock above this guarantees exclusive close semantics.
+        let update_result = sqlx::query(
+            r#"UPDATE trades
+               SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
+                   exit_reason = $6, status = 'closed'
+               WHERE id = $1 AND status = 'open'"#,
+        )
+        .bind(locked.id)
+        .bind(exit_price)
+        .bind(exit_at)
+        .bind(pnl_pips)
+        .bind(pnl_amount)
+        .bind(&exit_reason_str)
+        .execute(&mut *tx)
+        .await?;
+
+        if update_result.rows_affected() == 0 {
+            anyhow::bail!("trade {id} was closed concurrently");
+        }
+
+        // Persist balance delta in the same transaction. Fees are deducted
+        // from the balance when they are charged (e.g. overnight fees), so we
+        // only add the gross pnl here to avoid double-counting.
+        let bal_result = sqlx::query(
+            "UPDATE paper_accounts SET current_balance = current_balance + $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(self.paper_account_id)
+        .bind(pnl_amount)
+        .execute(&mut *tx)
+        .await?;
+        if bal_result.rows_affected() == 0 {
+            anyhow::bail!(
+                "paper account {} not found when closing trade {id}",
+                self.paper_account_id
+            );
+        }
+
+        tx.commit().await?;
+
+        let trade = Trade {
+            id: locked.id,
+            strategy_name: locked.strategy_name,
+            pair,
+            exchange,
+            direction,
+            entry_price: locked.entry_price,
+            exit_price: Some(exit_price),
+            stop_loss: locked.stop_loss,
+            take_profit: locked.take_profit,
+            quantity: locked.quantity,
+            leverage: locked.leverage,
+            fees: locked.fees,
+            paper_account_id: locked.paper_account_id,
+            entry_at: locked.entry_at,
+            exit_at: Some(exit_at),
             pnl_pips,
-            pnl_amount,
-            exit_reason,
-            trade.fees,
-        )
-        .await?;
-
-        // Persist balance delta. Fees are deducted from the balance when they
-        // are charged (e.g. overnight fees), so we only add the gross pnl here
-        // to avoid double-counting.
-        auto_trader_db::paper_accounts::add_pnl(
-            &self.pool,
-            self.paper_account_id,
-            pnl_amount,
-        )
-        .await?;
+            pnl_amount: Some(pnl_amount),
+            exit_reason: Some(exit_reason),
+            mode: TradeMode::Paper,
+            status: TradeStatus::Closed,
+        };
 
         tracing::info!(
             "Paper CLOSE: {} {} pnl={} reason={:?}",
