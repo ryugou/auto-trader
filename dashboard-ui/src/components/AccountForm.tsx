@@ -1,13 +1,23 @@
 import { useState } from 'react'
-import type { CreatePaperAccount, PaperAccount } from '../api/types'
+import type {
+  CreatePaperAccount,
+  PaperAccount,
+  UpdatePaperAccount,
+} from '../api/types'
 
 interface Props {
   account?: PaperAccount | null
-  onSubmit: (data: CreatePaperAccount) => void
+  onCreate?: (data: CreatePaperAccount) => void
+  onUpdate?: (data: UpdatePaperAccount) => void
   onCancel: () => void
 }
 
-export default function AccountForm({ account, onSubmit, onCancel }: Props) {
+export default function AccountForm({
+  account,
+  onCreate,
+  onUpdate,
+  onCancel,
+}: Props) {
   const isEdit = !!account
   const [name, setName] = useState(account?.name ?? '')
   const [exchange, setExchange] = useState(account?.exchange ?? 'bitflyer_cfd')
@@ -23,15 +33,24 @@ export default function AccountForm({ account, onSubmit, onCancel }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    onSubmit({
-      name,
-      exchange,
-      initial_balance: initialBalance,
-      leverage,
-      strategy,
-      account_type: accountType,
-      currency: currency || undefined,
-    })
+    if (isEdit) {
+      // Edit mode: only mutable fields. Backend rejects unknown fields.
+      onUpdate?.({
+        name,
+        leverage,
+        strategy,
+      })
+    } else {
+      onCreate?.({
+        name,
+        exchange,
+        initial_balance: initialBalance,
+        leverage,
+        strategy,
+        account_type: accountType,
+        currency: currency || undefined,
+      })
+    }
   }
 
   const inputClass =

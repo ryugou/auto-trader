@@ -338,7 +338,7 @@ pub async fn get_evaluated_balance(
                        CASE WHEN t.direction = 'long'
                            THEN (COALESCE(lp.close, t.entry_price) - t.entry_price) * COALESCE(t.quantity, 1)
                            ELSE (t.entry_price - COALESCE(lp.close, t.entry_price)) * COALESCE(t.quantity, 1)
-                       END - t.fees
+                       END
                    ) AS unrealized_pnl
                FROM trades t
                LEFT JOIN latest_prices lp
@@ -380,8 +380,8 @@ pub async fn get_balance_history(
     for (account_id, account_name, initial_balance) in accounts {
         let points: Vec<BalanceHistoryPoint> = sqlx::query_as(
             r#"WITH bounds AS (
-                   SELECT MIN(DATE(entry_at)) AS start_date
-                   FROM trades
+                   SELECT MIN(DATE(occurred_at)) AS start_date
+                   FROM paper_account_events
                    WHERE paper_account_id = $1
                ),
                dates AS (
@@ -391,12 +391,12 @@ pub async fn get_balance_history(
                        '1 day'::interval
                    )::date AS date
                ),
-               daily_pnl AS (
-                   SELECT DATE(exit_at) AS date,
-                          SUM(COALESCE(pnl_amount, 0) - fees) AS daily_net
-                   FROM trades
-                   WHERE paper_account_id = $1 AND status = 'closed'
-                   GROUP BY DATE(exit_at)
+               daily_delta AS (
+                   SELECT DATE(occurred_at) AS date,
+                          SUM(amount) AS daily_net
+                   FROM paper_account_events
+                   WHERE paper_account_id = $1
+                   GROUP BY DATE(occurred_at)
                )
                SELECT
                    d.date,
@@ -408,7 +408,7 @@ pub async fn get_balance_history(
                     )
                    )::numeric AS balance
                FROM dates d
-               LEFT JOIN daily_pnl dp ON dp.date = d.date
+               LEFT JOIN daily_delta dp ON dp.date = d.date
                ORDER BY d.date"#,
         )
         .bind(account_id)

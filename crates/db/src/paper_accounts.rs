@@ -36,6 +36,7 @@ fn default_currency() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePaperAccount {
     pub name: Option<String>,
     pub leverage: Option<Decimal>,

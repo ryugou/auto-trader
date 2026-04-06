@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import AccountForm from '../components/AccountForm'
-import type { PaperAccount, CreatePaperAccount } from '../api/types'
+import type {
+  PaperAccount,
+  CreatePaperAccount,
+  UpdatePaperAccount,
+} from '../api/types'
 
 export default function Accounts() {
   const queryClient = useQueryClient()
@@ -24,7 +28,7 @@ export default function Accounts() {
   })
 
   const updateMut = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: CreatePaperAccount }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdatePaperAccount }) =>
       api.accounts.update(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] })
@@ -145,7 +149,7 @@ export default function Accounts() {
 
       {showForm && (
         <AccountForm
-          onSubmit={(data) => createMut.mutate(data)}
+          onCreate={(data) => createMut.mutate(data)}
           onCancel={() => setShowForm(false)}
         />
       )}
@@ -154,7 +158,7 @@ export default function Accounts() {
         <AccountForm
           key={editTarget.id}
           account={editTarget}
-          onSubmit={(data) =>
+          onUpdate={(data) =>
             updateMut.mutate({ id: editTarget.id, data })
           }
           onCancel={() => setEditTarget(null)}
