@@ -1,13 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
+import type { DashboardFilter } from '../api/types'
 
-export interface PageFilterValue {
-  exchange?: string
-  paper_account_id?: string
-  from?: string
-  to?: string
-}
+export type PageFilterValue = DashboardFilter
 
 interface PageFiltersProps {
   value: PageFilterValue
