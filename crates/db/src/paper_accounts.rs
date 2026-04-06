@@ -14,6 +14,7 @@ pub struct PaperAccount {
     pub currency: String,
     pub leverage: Decimal,
     pub strategy: String,
+    pub account_type: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -25,6 +26,7 @@ pub struct CreatePaperAccount {
     pub initial_balance: Decimal,
     pub leverage: Decimal,
     pub strategy: String,
+    pub account_type: String,
     #[serde(default = "default_currency")]
     pub currency: String,
 }
@@ -36,29 +38,30 @@ fn default_currency() -> String {
 #[derive(Debug, Deserialize)]
 pub struct UpdatePaperAccount {
     pub name: Option<String>,
-    pub initial_balance: Option<Decimal>,
     pub leverage: Option<Decimal>,
     pub strategy: Option<String>,
 }
 
+const ACCOUNT_COLUMNS: &str = "id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, account_type, created_at, updated_at";
+
 pub async fn list_paper_accounts(pool: &PgPool) -> anyhow::Result<Vec<PaperAccount>> {
-    let accounts = sqlx::query_as::<_, PaperAccount>(
-        "SELECT id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, created_at, updated_at
-         FROM paper_accounts ORDER BY created_at ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let sql = format!(
+        "SELECT {ACCOUNT_COLUMNS} FROM paper_accounts ORDER BY created_at ASC"
+    );
+    let accounts = sqlx::query_as::<_, PaperAccount>(&sql)
+        .fetch_all(pool)
+        .await?;
     Ok(accounts)
 }
 
 pub async fn get_paper_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<PaperAccount>> {
-    let account = sqlx::query_as::<_, PaperAccount>(
-        "SELECT id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, created_at, updated_at
-         FROM paper_accounts WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!(
+        "SELECT {ACCOUNT_COLUMNS} FROM paper_accounts WHERE id = $1"
+    );
+    let account = sqlx::query_as::<_, PaperAccount>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(account)
 }
 
@@ -67,20 +70,22 @@ pub async fn create_paper_account(
     req: &CreatePaperAccount,
 ) -> anyhow::Result<PaperAccount> {
     let id = Uuid::new_v4();
-    let account = sqlx::query_as::<_, PaperAccount>(
-        r#"INSERT INTO paper_accounts (id, name, exchange, initial_balance, current_balance, currency, leverage, strategy)
-           VALUES ($1, $2, $3, $4, $4, $5, $6, $7)
-           RETURNING id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(&req.name)
-    .bind(&req.exchange)
-    .bind(req.initial_balance)
-    .bind(&req.currency)
-    .bind(req.leverage)
-    .bind(&req.strategy)
-    .fetch_one(pool)
-    .await?;
+    let sql = format!(
+        r#"INSERT INTO paper_accounts (id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, account_type)
+           VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8)
+           RETURNING {ACCOUNT_COLUMNS}"#
+    );
+    let account = sqlx::query_as::<_, PaperAccount>(&sql)
+        .bind(id)
+        .bind(&req.name)
+        .bind(&req.exchange)
+        .bind(req.initial_balance)
+        .bind(&req.currency)
+        .bind(req.leverage)
+        .bind(&req.strategy)
+        .bind(&req.account_type)
+        .fetch_one(pool)
+        .await?;
     Ok(account)
 }
 
@@ -89,23 +94,22 @@ pub async fn update_paper_account(
     id: Uuid,
     req: &UpdatePaperAccount,
 ) -> anyhow::Result<Option<PaperAccount>> {
-    let account = sqlx::query_as::<_, PaperAccount>(
+    let sql = format!(
         r#"UPDATE paper_accounts SET
             name = COALESCE($2, name),
-            initial_balance = COALESCE($3, initial_balance),
-            leverage = COALESCE($4, leverage),
-            strategy = COALESCE($5, strategy),
+            leverage = COALESCE($3, leverage),
+            strategy = COALESCE($4, strategy),
             updated_at = NOW()
            WHERE id = $1
-           RETURNING id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(&req.name)
-    .bind(req.initial_balance)
-    .bind(req.leverage)
-    .bind(&req.strategy)
-    .fetch_optional(pool)
-    .await?;
+           RETURNING {ACCOUNT_COLUMNS}"#
+    );
+    let account = sqlx::query_as::<_, PaperAccount>(&sql)
+        .bind(id)
+        .bind(&req.name)
+        .bind(req.leverage)
+        .bind(&req.strategy)
+        .fetch_optional(pool)
+        .await?;
     Ok(account)
 }
 
@@ -131,3 +135,12 @@ pub async fn delete_paper_account(pool: &PgPool, id: Uuid) -> anyhow::Result<boo
     Ok(result.rows_affected() > 0)
 }
 
+/// Look up account_type by id. Returns None when the account does not exist.
+pub async fn get_account_type(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<String>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT account_type FROM paper_accounts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(v,)| v))
+}

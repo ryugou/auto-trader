@@ -58,10 +58,13 @@ export default function Accounts() {
             <thead>
               <tr className="border-b border-gray-800">
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">名前</th>
+                <th className="px-4 py-2 text-left text-gray-400 font-medium">種別</th>
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">取引所</th>
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">戦略</th>
                 <th className="px-4 py-2 text-right text-gray-400 font-medium">初期残高</th>
                 <th className="px-4 py-2 text-right text-gray-400 font-medium">現在残高</th>
+                <th className="px-4 py-2 text-right text-gray-400 font-medium">含み損益</th>
+                <th className="px-4 py-2 text-right text-gray-400 font-medium">評価額</th>
                 <th className="px-4 py-2 text-right text-gray-400 font-medium">レバレッジ</th>
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">通貨</th>
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">操作</th>
@@ -70,20 +73,34 @@ export default function Accounts() {
             <tbody>
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
                     読み込み中...
                   </td>
                 </tr>
               ) : !accounts?.length ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
                     口座がありません
                   </td>
                 </tr>
               ) : (
-                accounts.map((a) => (
+                accounts.map((a) => {
+                  const unrealized = a.unrealized_pnl ? Number(a.unrealized_pnl) : 0
+                  const evaluated = a.evaluated_balance
+                    ? Number(a.evaluated_balance)
+                    : Number(a.current_balance)
+                  const unrealizedColor =
+                    unrealized > 0
+                      ? 'text-emerald-400'
+                      : unrealized < 0
+                        ? 'text-red-400'
+                        : 'text-gray-300'
+                  return (
                   <tr key={a.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                     <td className="px-4 py-2 font-medium">{a.name}</td>
+                    <td className="px-4 py-2 text-gray-300">
+                      {a.account_type === 'live' ? '通常' : 'ペーパー'}
+                    </td>
                     <td className="px-4 py-2 text-gray-300">{a.exchange}</td>
                     <td className="px-4 py-2 text-gray-300">{a.strategy}</td>
                     <td className="px-4 py-2 text-right">
@@ -91,6 +108,13 @@ export default function Accounts() {
                     </td>
                     <td className="px-4 py-2 text-right">
                       {Number(a.current_balance).toLocaleString()}
+                    </td>
+                    <td className={`px-4 py-2 text-right ${unrealizedColor}`}>
+                      {unrealized >= 0 ? '+' : ''}
+                      {Math.round(unrealized).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2 text-right font-medium">
+                      {Math.round(evaluated).toLocaleString()}
                     </td>
                     <td className="px-4 py-2 text-right">{a.leverage}x</td>
                     <td className="px-4 py-2 text-gray-300">{a.currency}</td>
@@ -111,7 +135,8 @@ export default function Accounts() {
                       </div>
                     </td>
                   </tr>
-                ))
+                  )
+                })
               )}
             </tbody>
           </table>

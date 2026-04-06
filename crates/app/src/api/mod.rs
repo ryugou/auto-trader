@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/dashboard/summary", get(dashboard::summary))
         .route("/dashboard/pnl-history", get(dashboard::pnl_history))
+        .route("/dashboard/balance-history", get(dashboard::balance_history))
         .route("/dashboard/strategies", get(dashboard::strategies))
         .route("/dashboard/pairs", get(dashboard::pairs))
         .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))

@@ -7,8 +7,12 @@ export interface PaperAccount {
   currency: string
   leverage: string
   strategy: string
+  account_type: string
   created_at: string
   updated_at: string
+  // Enriched fields from GET /api/paper-accounts
+  unrealized_pnl?: string
+  evaluated_balance?: string
 }
 
 export interface CreatePaperAccount {
@@ -17,12 +21,12 @@ export interface CreatePaperAccount {
   initial_balance: string
   leverage: string
   strategy: string
+  account_type: string
   currency?: string
 }
 
 export interface UpdatePaperAccount {
   name?: string
-  initial_balance?: string
   leverage?: string
   strategy?: string
 }
@@ -84,6 +88,7 @@ export interface TradeRow {
   exit_at: string | null
   exit_reason: string | null
   paper_account_id: string | null
+  account_type: string | null
   status: string
 }
 
@@ -112,8 +117,24 @@ export interface PositionResponse {
 export interface DashboardFilter {
   exchange?: string
   paper_account_id?: string
+  account_type?: string
   strategy?: string
   pair?: string
   from?: string
   to?: string
+}
+
+export interface BalanceHistoryPoint {
+  date: string
+  balance: string
+}
+
+export interface BalanceHistoryAccount {
+  account_id: string
+  account_name: string
+  data: BalanceHistoryPoint[]
+}
+
+export interface BalanceHistoryResponse {
+  accounts: BalanceHistoryAccount[]
 }
