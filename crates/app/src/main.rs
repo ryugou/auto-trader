@@ -273,15 +273,13 @@ async fn main() -> anyhow::Result<()> {
     let vegapunk_client_recorder = vegapunk_client_exec.clone();
 
     // Task: FX Market monitor (optional)
-    let fx_monitor_handle = if let Some(monitor) = fx_monitor {
-        Some(tokio::spawn(async move {
+    let fx_monitor_handle = fx_monitor.map(|monitor| {
+        tokio::spawn(async move {
             if let Err(e) = monitor.run().await {
                 tracing::error!("FX monitor error: {e}");
             }
-        }))
-    } else {
-        None
-    };
+        })
+    });
 
     // bitFlyer monitor (crypto)
     let bitflyer_handle = if let Some(bf_config) = &config.bitflyer {
@@ -398,10 +396,10 @@ async fn main() -> anyhow::Result<()> {
                     match price {
                         Some(event) => {
                             // Forward to FX position monitor (FX events only)
-                            if event.exchange == auto_trader_core::types::Exchange::Oanda {
-                                if price_monitor_tx.send(event.clone()).await.is_err() {
-                                    tracing::warn!("FX position monitor channel closed");
-                                }
+                            if event.exchange == auto_trader_core::types::Exchange::Oanda
+                                && price_monitor_tx.send(event.clone()).await.is_err()
+                            {
+                                tracing::warn!("FX position monitor channel closed");
                             }
                             // Forward to crypto position monitors (crypto events only)
                             if event.exchange == auto_trader_core::types::Exchange::BitflyerCfd {
@@ -719,9 +717,15 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // REST API server
-    let api_pool = pool.clone();
+    let api_state = api::AppState {
+        pool: pool.clone(),
+        paper_traders: paper_accounts
+            .iter()
+            .map(|(name, _strategy, trader)| (name.clone(), trader.clone()))
+            .collect(),
+    };
     let api_handle = tokio::spawn(async move {
-        let app = api::router(api_pool);
+        let app = api::router(api_state);
         // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
         // Otherwise bind to 127.0.0.1 to prevent unauthenticated external access.
         let bind_addr = if std::env::var("API_TOKEN").is_ok() {

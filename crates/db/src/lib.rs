@@ -1,4 +1,5 @@
 pub mod candles;
+pub mod dashboard;
 pub mod macro_events;
 pub mod paper_accounts;
 pub mod pool;

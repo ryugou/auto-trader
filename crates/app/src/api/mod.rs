@@ -1,0 +1,120 @@
+mod accounts;
+mod dashboard;
+pub(crate) mod filters;
+mod positions;
+mod trades;
+
+use auto_trader_executor::paper::PaperTrader;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::{Json, Router};
+use serde_json::json;
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: sqlx::PgPool,
+    pub paper_traders: Vec<(String, Arc<PaperTrader>)>,
+}
+
+pub fn router(state: AppState) -> Router {
+    let api_token = std::env::var("API_TOKEN").ok();
+
+    let api_routes = Router::new()
+        .route(
+            "/paper-accounts",
+            get(accounts::list).post(accounts::create),
+        )
+        .route(
+            "/paper-accounts/{id}",
+            get(accounts::get_one)
+                .put(accounts::update)
+                .delete(accounts::remove),
+        )
+        .route("/dashboard/summary", get(dashboard::summary))
+        .route("/dashboard/pnl-history", get(dashboard::pnl_history))
+        .route("/dashboard/strategies", get(dashboard::strategies))
+        .route("/dashboard/pairs", get(dashboard::pairs))
+        .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))
+        .route("/trades", get(trades::list))
+        .route("/positions", get(positions::list))
+        .layer(middleware::from_fn(move |req, next| {
+            let token = api_token.clone();
+            auth_middleware(token, req, next)
+        }))
+        .with_state(state);
+
+    Router::new()
+        .nest("/api", api_routes)
+        .fallback_service(
+            ServeDir::new("dashboard-ui/dist")
+                .fallback(ServeFile::new("dashboard-ui/dist/index.html")),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+}
+
+async fn auth_middleware(
+    api_token: Option<String>,
+    req: Request,
+    next: Next,
+) -> axum::response::Response {
+    if let Some(expected) = &api_token {
+        let auth = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match auth {
+            Some(token) if token == expected => next.run(req).await,
+            _ => (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthorized" })),
+            )
+                .into_response(),
+        }
+    } else {
+        next.run(req).await
+    }
+}
+
+pub(crate) struct ApiError(pub StatusCode, pub String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        for cause in e.chain() {
+            if let Some(sqlx::Error::Database(pg_err)) = cause.downcast_ref::<sqlx::Error>() {
+                return match pg_err.code().as_deref() {
+                    Some("23505") => ApiError(StatusCode::CONFLICT, "duplicate name".to_string()),
+                    Some("23503") => ApiError(
+                        StatusCode::CONFLICT,
+                        "account has related trades, cannot delete".to_string(),
+                    ),
+                    _ => ApiError(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "database error".to_string(),
+                    ),
+                };
+            }
+        }
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error".to_string(),
+        )
+    }
+}
