@@ -1,5 +1,4 @@
 use super::{ApiError, AppState};
-use auto_trader_core::executor::OrderExecutor;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -27,28 +26,28 @@ pub struct PositionResponse {
 pub async fn list(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PositionResponse>>, ApiError> {
-    let mut result = Vec::new();
-
-    for (account_name, trader) in &state.paper_traders {
-        let positions = trader.open_positions().await.map_err(|e| {
+    let rows = auto_trader_db::trades::list_open_with_account_name(&state.pool)
+        .await
+        .map_err(|e| {
             ApiError(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to get positions for {account_name}: {e}"),
+                format!("failed to list open positions: {e}"),
             )
         })?;
 
-        for pos in positions {
-            let t = &pos.trade;
+    let result = rows
+        .into_iter()
+        .map(|row| {
+            let t = row.trade;
             let direction = serde_json::to_string(&t.direction)
                 .unwrap_or_default()
                 .trim_matches('"')
                 .to_string();
-
-            result.push(PositionResponse {
+            PositionResponse {
                 trade_id: t.id,
-                paper_account_name: account_name.clone(),
-                strategy_name: t.strategy_name.clone(),
-                pair: t.pair.0.clone(),
+                paper_account_name: row.paper_account_name.unwrap_or_default(),
+                strategy_name: t.strategy_name,
+                pair: t.pair.0,
                 exchange: t.exchange.as_str().to_string(),
                 direction,
                 entry_price: t.entry_price,
@@ -57,9 +56,9 @@ pub async fn list(
                 quantity: t.quantity,
                 entry_at: t.entry_at,
                 paper_account_id: t.paper_account_id,
-            });
-        }
-    }
+            }
+        })
+        .collect();
 
     Ok(Json(result))
 }

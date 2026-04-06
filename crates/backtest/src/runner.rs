@@ -1,11 +1,108 @@
+use crate::report::BacktestReport;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
-use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade};
-use auto_trader_executor::paper::PaperTrader;
-use auto_trader_core::executor::OrderExecutor;
-use crate::report::BacktestReport;
+use auto_trader_core::types::{
+    Direction, Exchange, ExitReason, Pair, Trade, TradeMode, TradeStatus,
+};
+use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use uuid::Uuid;
+
+/// In-memory simulated trader used for backtests only.
+/// This is deliberately separate from the production `PaperTrader`, which is
+/// DB-backed. Backtests run fully in-memory on historical candles and do not
+/// (and should not) touch persistent storage.
+struct SimTrader {
+    exchange: Exchange,
+    leverage: Decimal,
+    balance: Decimal,
+    positions: HashMap<Uuid, Trade>,
+}
+
+impl SimTrader {
+    fn new(exchange: Exchange, initial_balance: Decimal, leverage: Decimal) -> Self {
+        Self {
+            exchange,
+            leverage,
+            balance: initial_balance,
+            positions: HashMap::new(),
+        }
+    }
+
+    fn open(
+        &mut self,
+        signal: &auto_trader_core::types::Signal,
+    ) -> Trade {
+        let trade = Trade {
+            id: Uuid::new_v4(),
+            strategy_name: signal.strategy_name.clone(),
+            pair: signal.pair.clone(),
+            exchange: self.exchange,
+            direction: signal.direction,
+            entry_price: signal.entry_price,
+            exit_price: None,
+            stop_loss: signal.stop_loss,
+            take_profit: signal.take_profit,
+            quantity: None,
+            leverage: self.leverage,
+            fees: Decimal::ZERO,
+            paper_account_id: None,
+            entry_at: Utc::now(),
+            exit_at: None,
+            pnl_pips: None,
+            pnl_amount: None,
+            exit_reason: None,
+            mode: TradeMode::Backtest,
+            status: TradeStatus::Open,
+        };
+        self.positions.insert(trade.id, trade.clone());
+        trade
+    }
+
+    fn open_positions(&self) -> Vec<Trade> {
+        self.positions.values().cloned().collect()
+    }
+
+    fn close(
+        &mut self,
+        id: Uuid,
+        reason: ExitReason,
+        exit_price: Decimal,
+    ) -> anyhow::Result<Trade> {
+        let mut trade = self
+            .positions
+            .remove(&id)
+            .ok_or_else(|| anyhow::anyhow!("position {id} not found"))?;
+
+        let price_diff = match trade.direction {
+            Direction::Long => exit_price - trade.entry_price,
+            Direction::Short => trade.entry_price - exit_price,
+        };
+
+        let pip_size = if trade.pair.0.contains("JPY") {
+            Decimal::new(1, 2)
+        } else {
+            Decimal::new(1, 4)
+        };
+        let pnl_pips = price_diff / pip_size;
+        let pnl_amount = price_diff * self.leverage;
+
+        trade.exit_price = Some(exit_price);
+        trade.exit_at = Some(Utc::now());
+        trade.pnl_pips = Some(pnl_pips);
+        trade.pnl_amount = Some(pnl_amount);
+        trade.exit_reason = Some(reason);
+        trade.status = TradeStatus::Closed;
+
+        self.balance += pnl_amount;
+        Ok(trade)
+    }
+
+    fn balance(&self) -> Decimal {
+        self.balance
+    }
+}
 
 pub struct BacktestRunner {
     pool: sqlx::PgPool,
@@ -34,9 +131,9 @@ impl BacktestRunner {
             anyhow::bail!("no candle data for {} {}", pair, timeframe);
         }
 
-        let trader = PaperTrader::new(Exchange::Oanda, initial_balance, leverage, None);
+        let mut trader = SimTrader::new(Exchange::Oanda, initial_balance, leverage);
         let mut trades: Vec<Trade> = Vec::new();
-        let mut execution_failures: usize = 0;
+        let execution_failures: usize = 0;
 
         // Replay candles chronologically
         for (i, candle) in candles.iter().enumerate() {
@@ -62,24 +159,33 @@ impl BacktestRunner {
             };
 
             // Check SL/TP on open positions
-            let positions = trader.open_positions().await?;
-            for pos in positions {
-                let t = &pos.trade;
-                if t.pair != *pair { continue; }
+            let open = trader.open_positions();
+            for t in open {
+                if t.pair != *pair {
+                    continue;
+                }
                 let exit = match t.direction {
                     Direction::Long => {
-                        if candle.low <= t.stop_loss { Some((ExitReason::SlHit, t.stop_loss)) }
-                        else if candle.high >= t.take_profit { Some((ExitReason::TpHit, t.take_profit)) }
-                        else { None }
+                        if candle.low <= t.stop_loss {
+                            Some((ExitReason::SlHit, t.stop_loss))
+                        } else if candle.high >= t.take_profit {
+                            Some((ExitReason::TpHit, t.take_profit))
+                        } else {
+                            None
+                        }
                     }
                     Direction::Short => {
-                        if candle.high >= t.stop_loss { Some((ExitReason::SlHit, t.stop_loss)) }
-                        else if candle.low <= t.take_profit { Some((ExitReason::TpHit, t.take_profit)) }
-                        else { None }
+                        if candle.high >= t.stop_loss {
+                            Some((ExitReason::SlHit, t.stop_loss))
+                        } else if candle.low <= t.take_profit {
+                            Some((ExitReason::TpHit, t.take_profit))
+                        } else {
+                            None
+                        }
                     }
                 };
                 if let Some((reason, price)) = exit {
-                    let closed = trader.close_position(&t.id.to_string(), reason, price).await?;
+                    let closed = trader.close(t.id, reason, price)?;
                     trades.push(closed);
                 }
             }
@@ -87,26 +193,23 @@ impl BacktestRunner {
             // Run strategy
             if let Some(signal) = strategy.on_price(&event).await {
                 // Check 1-pair-1-position per strategy
-                let open = trader.open_positions().await?;
-                let has_pos = open.iter().any(|p| {
-                    p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
+                let open = trader.open_positions();
+                let has_pos = open.iter().any(|t| {
+                    t.strategy_name == signal.strategy_name && t.pair == signal.pair
                 });
                 if !has_pos {
-                    match trader.execute(&signal).await {
-                        Ok(trade) => trades.push(trade),
-                        Err(e) => {
-                            execution_failures += 1;
-                            tracing::warn!(
-                                "backtest execute failed at candle {i} for {}: {e}",
-                                signal.pair
-                            );
-                        }
-                    }
+                    let trade = trader.open(&signal);
+                    trades.push(trade);
                 }
             }
         }
 
-        let final_balance = trader.balance().await;
-        Ok(BacktestReport::from_trades_with_failures(trades, initial_balance, final_balance, execution_failures))
+        let final_balance = trader.balance();
+        Ok(BacktestReport::from_trades_with_failures(
+            trades,
+            initial_balance,
+            final_balance,
+            execution_failures,
+        ))
     }
 }

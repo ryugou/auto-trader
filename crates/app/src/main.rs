@@ -198,20 +198,14 @@ async fn main() -> anyhow::Result<()> {
     // Collect actually registered strategy names for paper_account validation
     let registered_strategies: Vec<&str> = engine.registered_names();
 
-    // Paper traders: positions are in-memory only (process lifetime = session).
-    // On restart, DB may have status='open' trades from previous session.
-    // These are NOT restored — the app starts fresh. If position persistence is
-    // needed, load open trades from DB on startup and reconstruct PaperTrader state.
-    // For now, stale DB records can be cleaned up manually or ignored.
-    let paper_trader = Arc::new(PaperTrader::new(
-        Exchange::Oanda,
-        Decimal::from(100_000),
-        Decimal::from(25),
-        None,
-    ));
-
-    // Paper accounts — loaded from DB (source of truth)
-    // Each account is bound to exactly one strategy.
+    // Paper accounts — loaded from DB (source of truth).
+    // All state (balance, positions) is persisted in Postgres; PaperTrader holds
+    // no in-memory state. On restart the open positions remain intact because
+    // they are re-read from the database on every access.
+    //
+    // Note: FX (OANDA) paper trading is currently disabled. If you want FX paper
+    // trading, create an FX paper_account in the database — the same pipeline
+    // will pick it up automatically.
     let db_accounts = auto_trader_db::paper_accounts::list_paper_accounts(&pool).await?;
     let paper_accounts: Vec<(String, String, Arc<PaperTrader>)> = {
         let mut accounts = Vec::new();
@@ -227,13 +221,7 @@ async fn main() -> anyhow::Result<()> {
                 "bitflyer_cfd" => Exchange::BitflyerCfd,
                 _ => Exchange::Oanda,
             };
-            // Use current_balance from DB (reflects previous session's P&L)
-            let trader = Arc::new(PaperTrader::new(
-                exchange,
-                pac.current_balance,
-                pac.leverage,
-                Some(pac.id),
-            ));
+            let trader = Arc::new(PaperTrader::new(pool.clone(), exchange, pac.id));
             tracing::info!(
                 "paper account: {} (id={}, strategy={}, balance={} (initial={}), leverage={})",
                 pac.name, pac.id, pac.strategy, pac.current_balance, pac.initial_balance, pac.leverage
@@ -357,15 +345,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Task: Position monitor — FX (price -> SL/TP check -> close)
-    let pos_monitor_executor = paper_trader.clone();
-    let pos_monitor_trade_tx = trade_tx.clone();
+    // FX position monitor removed: FX paper trading is currently disabled.
+    // Drain the forwarded FX price channel so senders do not block.
+    let mut price_monitor_rx = price_monitor_rx;
     let pos_monitor_handle = tokio::spawn(async move {
-        position_monitor::run_position_monitor(
-            pos_monitor_executor,
-            price_monitor_rx,
-            pos_monitor_trade_tx,
-        ).await;
+        while price_monitor_rx.recv().await.is_some() {}
     });
 
     // Task: Position monitors — crypto (one per paper_account)
@@ -430,9 +414,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Signal executor (signal -> trade)
-    // Enforces 1-pair-1-position per strategy per account at execution time
-    // FX signals → paper_trader, crypto signals → matching paper_account by strategy name
-    let executor = paper_trader.clone();
+    // Enforces 1-pair-1-position per strategy per account at execution time.
+    // Only crypto paper_accounts are supported — FX paper trading is disabled.
     let executor_accounts = paper_accounts.clone();
     let executor_sizer = position_sizer.clone();
     let trade_tx_clone = trade_tx.clone();
@@ -446,100 +429,64 @@ async fn main() -> anyhow::Result<()> {
             let signal = &signal_event.signal;
             let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
 
-            if is_crypto {
-                // Crypto: dispatch signal only to paper_accounts bound to this strategy.
-                let mut matched = false;
-                for (name, strategy_name, account) in &executor_accounts {
-                    if strategy_name != &signal.strategy_name {
-                        continue;
-                    }
-                    matched = true;
-                    let positions = account.open_positions().await.unwrap_or_default();
-                    let has_position = positions.iter().any(|p| {
-                        p.trade.strategy_name == signal.strategy_name
-                            && p.trade.pair == signal.pair
-                    });
-                    if has_position {
-                        tracing::debug!(
-                            "skipping signal: {} already has open position for {} in account {}",
-                            signal.strategy_name, signal.pair, name
-                        );
-                        continue;
-                    }
+            if !is_crypto {
+                tracing::debug!(
+                    "ignoring non-crypto signal: {} {} (FX paper trading disabled)",
+                    signal.strategy_name, signal.pair
+                );
+                continue;
+            }
 
-                    let balance = account.balance().await;
-                    let leverage = account.leverage();
-                    let quantity = executor_sizer.calculate_quantity(
-                        &signal.pair,
-                        balance,
-                        signal.entry_price,
-                        signal.stop_loss,
-                        leverage,
-                    );
-                    let Some(qty) = quantity else {
-                        tracing::info!(
-                            "position sizing rejected signal for account {}: {} {}",
-                            name, signal.strategy_name, signal.pair
-                        );
-                        continue;
-                    };
-
-                    match account.execute_with_quantity(signal, qty).await {
-                        Ok(trade) => {
-                            if let Some(vp) = vegapunk_client_exec.clone() {
-                                let trade_clone = trade.clone();
-                                tokio::spawn(async move {
-                                    let mut vp = vp.lock().await;
-                                    let direction_str = match trade_clone.direction {
-                                        Direction::Long => "ロング",
-                                        Direction::Short => "ショート",
-                                    };
-                                    let text = format!(
-                                        "[{}] {} {} 判断。trade_id: {}。エントリー価格: {}。qty: {}。SL: {}、TP: {}。戦略: {}",
-                                        trade_clone.exchange, trade_clone.pair, direction_str,
-                                        trade_clone.id, trade_clone.entry_price,
-                                        trade_clone.quantity.map(|q| q.to_string()).unwrap_or_default(),
-                                        trade_clone.stop_loss, trade_clone.take_profit,
-                                        trade_clone.strategy_name
-                                    );
-                                    let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
-                                    let timestamp = chrono::Utc::now().to_rfc3339();
-                                    if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
-                                        tracing::warn!("vegapunk ingest failed for trade open: {e}");
-                                    }
-                                });
-                            }
-                            if let Err(e) = trade_tx_clone.send(TradeEvent {
-                                trade,
-                                action: TradeAction::Opened,
-                            }).await {
-                                tracing::error!("trade channel send failed (trade may not be recorded): {e}");
-                            }
-                        }
-                        Err(e) => tracing::error!("execute error for account {}: {e}", name),
-                    }
+            // Crypto: dispatch signal only to paper_accounts bound to this strategy.
+            let mut matched = false;
+            for (name, strategy_name, account) in &executor_accounts {
+                if strategy_name != &signal.strategy_name {
+                    continue;
                 }
-                if !matched {
-                    tracing::warn!(
-                        "crypto signal from '{}' had no matching paper_account",
-                        signal.strategy_name
-                    );
-                }
-            } else {
-                // FX: existing paper_trader
-                let positions = executor.open_positions().await.unwrap_or_default();
+                matched = true;
+                let positions = account.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
                     p.trade.strategy_name == signal.strategy_name
                         && p.trade.pair == signal.pair
                 });
                 if has_position {
                     tracing::debug!(
-                        "skipping signal: {} already has open position for {}",
-                        signal.strategy_name, signal.pair
+                        "skipping signal: {} already has open position for {} in account {}",
+                        signal.strategy_name, signal.pair, name
                     );
                     continue;
                 }
-                match executor.execute(signal).await {
+
+                let balance = match account.balance().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::error!("failed to read balance for account {}: {e}", name);
+                        continue;
+                    }
+                };
+                let leverage = match account.leverage().await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!("failed to read leverage for account {}: {e}", name);
+                        continue;
+                    }
+                };
+                let quantity = executor_sizer.calculate_quantity(
+                    &signal.pair,
+                    balance,
+                    signal.entry_price,
+                    signal.stop_loss,
+                    leverage,
+                );
+                let Some(qty) = quantity else {
+                    tracing::info!(
+                        "position sizing rejected signal for account {}: {} {}",
+                        name, signal.strategy_name, signal.pair
+                    );
+                    continue;
+                };
+
+                match account.execute_with_quantity(signal, qty).await {
                     Ok(trade) => {
                         if let Some(vp) = vegapunk_client_exec.clone() {
                             let trade_clone = trade.clone();
@@ -568,47 +515,38 @@ async fn main() -> anyhow::Result<()> {
                             trade,
                             action: TradeAction::Opened,
                         }).await {
-                            tracing::error!("trade channel send failed (trade may not be recorded): {e}");
+                            tracing::error!("trade channel send failed: {e}");
                         }
                     }
-                    Err(e) => tracing::error!("execute error: {e}"),
+                    Err(e) => tracing::error!("execute error for account {}: {e}", name),
                 }
+            }
+            if !matched {
+                tracing::warn!(
+                    "crypto signal from '{}' had no matching paper_account",
+                    signal.strategy_name
+                );
             }
         }
     });
 
-    // Task: Trade recorder (trade -> DB)
+    // Task: Trade recorder — handles side effects after PaperTrader has already
+    // persisted the trade to the DB. Responsibilities:
+    //   - Upsert daily_summary on close
+    //   - Fire-and-forget Vegapunk ingestion on close
+    // Note: trade INSERT/UPDATE and balance changes are owned by PaperTrader.
     let recorder_pool = pool.clone();
     let recorder_handle = tokio::spawn(async move {
         while let Some(trade_event) = trade_rx.recv().await {
             match trade_event.action {
                 TradeAction::Opened => {
-                    if let Err(e) = auto_trader_db::trades::insert_trade(
-                        &recorder_pool,
-                        &trade_event.trade,
-                    ).await {
-                        tracing::error!("record trade error: {e}");
-                    }
+                    // Nothing to record: PaperTrader already inserted the trade.
                 }
                 TradeAction::Closed { .. } => {
                     let t = &trade_event.trade;
-                    if let (Some(exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
+                    if let (Some(_exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
                         (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
                     {
-                        if let Err(e) = auto_trader_db::trades::update_trade_closed(
-                            &recorder_pool, t.id, exit_price, exit_at, t.pnl_pips, pnl_amount, exit_reason, t.fees,
-                        ).await {
-                            tracing::error!("update trade error: {e}");
-                        }
-                        // Persist balance change to paper_accounts (if applicable)
-                        if let Some(account_id) = t.paper_account_id {
-                            let net_pnl = pnl_amount - t.fees;
-                            if let Err(e) = auto_trader_db::paper_accounts::add_pnl(
-                                &recorder_pool, account_id, net_pnl,
-                            ).await {
-                                tracing::error!("update paper account balance error: {e}");
-                            }
-                        }
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let mode_str = t.mode.as_str();
@@ -693,9 +631,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
-    // Note: Positions are in-memory only — on restart they are lost, so startup
-    // backfill is not meaningful. If positions are persisted to DB in the future,
-    // track last_fee_date per account and backfill missed days on startup.
+    // Since positions now live in the DB, this correctly applies fees to all
+    // outstanding positions across restarts.
     let overnight_accounts = paper_accounts.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -706,9 +643,12 @@ async fn main() -> anyhow::Result<()> {
             let today = chrono::Utc::now().date_naive();
             if today != last_date {
                 for (name, _strategy, trader) in &overnight_accounts {
-                    let fees = trader.apply_overnight_fees(fee_rate).await;
-                    if fees > Decimal::ZERO {
-                        tracing::info!("overnight fee applied: {} = {} JPY", name, fees);
+                    match trader.apply_overnight_fees(fee_rate).await {
+                        Ok(fees) if fees > Decimal::ZERO => {
+                            tracing::info!("overnight fee applied: {} = {} JPY", name, fees);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("overnight fee failed for {}: {e}", name),
                     }
                 }
                 last_date = today;
@@ -717,13 +657,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // REST API server
-    let api_state = api::AppState {
-        pool: pool.clone(),
-        paper_traders: paper_accounts
-            .iter()
-            .map(|(name, _strategy, trader)| (name.clone(), trader.clone()))
-            .collect(),
-    };
+    let api_state = api::AppState { pool: pool.clone() };
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_state);
         // Bind to 0.0.0.0 only when API_TOKEN is set (authenticated mode).
