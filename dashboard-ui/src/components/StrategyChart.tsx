@@ -10,13 +10,16 @@ import {
   Cell,
 } from 'recharts'
 import { api } from '../api/client'
-import { useFilters } from '../contexts/FilterContext'
+import type { DashboardFilter } from '../api/types'
 
-export default function StrategyChart() {
-  const { dashboardFilter } = useFilters()
+interface StrategyChartProps {
+  filters?: DashboardFilter
+}
+
+export default function StrategyChart({ filters = {} }: StrategyChartProps) {
   const { data, isLoading } = useQuery({
-    queryKey: ['strategies', dashboardFilter],
-    queryFn: () => api.dashboard.strategies(dashboardFilter),
+    queryKey: ['strategies', filters],
+    queryFn: () => api.dashboard.strategies(filters),
   })
 
   if (isLoading) {

@@ -9,13 +9,16 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { api } from '../api/client'
-import { useFilters } from '../contexts/FilterContext'
+import type { DashboardFilter } from '../api/types'
 
-export default function PnlChart() {
-  const { dashboardFilter } = useFilters()
+interface PnlChartProps {
+  filters?: DashboardFilter
+}
+
+export default function PnlChart({ filters = {} }: PnlChartProps) {
   const { data, isLoading } = useQuery({
-    queryKey: ['pnl-history', dashboardFilter],
-    queryFn: () => api.dashboard.pnlHistory(dashboardFilter),
+    queryKey: ['pnl-history', filters],
+    queryFn: () => api.dashboard.pnlHistory(filters),
   })
 
   if (isLoading) {

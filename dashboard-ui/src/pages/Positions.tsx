@@ -1,8 +1,11 @@
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
+import PageFilters, { type PageFilterValue } from '../components/PageFilters'
 
 export default function Positions() {
   const queryClient = useQueryClient()
+  const [filters, setFilters] = useState<PageFilterValue>({})
 
   const { data: positions, isLoading } = useQuery({
     queryKey: ['positions'],
@@ -12,6 +15,24 @@ export default function Positions() {
   const handleReload = () => {
     queryClient.invalidateQueries({ queryKey: ['positions'] })
   }
+
+  const filtered = (positions ?? []).filter((p) => {
+    if (filters.exchange && p.exchange !== filters.exchange) return false
+    if (
+      filters.paper_account_id &&
+      p.paper_account_id !== filters.paper_account_id
+    )
+      return false
+    if (filters.from) {
+      const entry = new Date(p.entry_at).toISOString().slice(0, 10)
+      if (entry < filters.from) return false
+    }
+    if (filters.to) {
+      const entry = new Date(p.entry_at).toISOString().slice(0, 10)
+      if (entry > filters.to) return false
+    }
+    return true
+  })
 
   return (
     <div className="space-y-6">
@@ -24,6 +45,8 @@ export default function Positions() {
           リロード
         </button>
       </div>
+
+      <PageFilters value={filters} onChange={setFilters} />
 
       <div className="bg-gray-900 rounded-lg shadow overflow-hidden">
         <div className="overflow-x-auto">
@@ -49,14 +72,14 @@ export default function Positions() {
                     読み込み中...
                   </td>
                 </tr>
-              ) : !positions?.length ? (
+              ) : !filtered.length ? (
                 <tr>
                   <td colSpan={10} className="px-4 py-8 text-center text-gray-500">
                     保有ポジションはありません
                   </td>
                 </tr>
               ) : (
-                positions.map((p) => (
+                filtered.map((p) => (
                   <tr
                     key={p.trade_id}
                     className="border-b border-gray-800/50 hover:bg-gray-800/30"

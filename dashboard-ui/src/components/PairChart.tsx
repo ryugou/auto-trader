@@ -10,13 +10,16 @@ import {
   Cell,
 } from 'recharts'
 import { api } from '../api/client'
-import { useFilters } from '../contexts/FilterContext'
+import type { DashboardFilter } from '../api/types'
 
-export default function PairChart() {
-  const { dashboardFilter } = useFilters()
+interface PairChartProps {
+  filters?: DashboardFilter
+}
+
+export default function PairChart({ filters = {} }: PairChartProps) {
   const { data, isLoading } = useQuery({
-    queryKey: ['pairs', dashboardFilter],
-    queryFn: () => api.dashboard.pairs(dashboardFilter),
+    queryKey: ['pairs', filters],
+    queryFn: () => api.dashboard.pairs(filters),
   })
 
   if (isLoading) {
