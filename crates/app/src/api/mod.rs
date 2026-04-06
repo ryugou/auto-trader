@@ -4,7 +4,6 @@ pub(crate) mod filters;
 mod positions;
 mod trades;
 
-use auto_trader_executor::paper::PaperTrader;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -12,14 +11,12 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
-use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
-    pub paper_traders: Vec<(String, Arc<PaperTrader>)>,
 }
 
 pub fn router(state: AppState) -> Router {

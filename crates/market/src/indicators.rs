@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn rsi_all_gains() {
-        let prices: Vec<Decimal> = (0..=14).map(|i| Decimal::from(i)).collect();
+        let prices: Vec<Decimal> = (0..=14).map(Decimal::from).collect();
         let result = rsi(&prices, 14).unwrap();
         assert_eq!(result, dec!(100));
     }

@@ -94,6 +94,96 @@ pub async fn get_open_trades(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
+/// Fetch all open trades for a given paper account.
+pub async fn get_open_trades_by_account(
+    pool: &PgPool,
+    paper_account_id: Uuid,
+) -> anyhow::Result<Vec<Trade>> {
+    let rows = sqlx::query_as::<_, TradeRow>(
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+                  entry_at, exit_at, pnl_pips, pnl_amount,
+                  exit_reason, mode, status, created_at
+           FROM trades
+           WHERE paper_account_id = $1 AND status = 'open'
+           ORDER BY entry_at ASC"#,
+    )
+    .bind(paper_account_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
+/// Fetch a single trade by id.
+pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Trade>> {
+    let row = sqlx::query_as::<_, TradeRow>(
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+                  entry_at, exit_at, pnl_pips, pnl_amount,
+                  exit_reason, mode, status, created_at
+           FROM trades
+           WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| r.try_into()).transpose()
+}
+
+/// Add a fee delta to trades.fees (positive delta increases fees).
+pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Result<()> {
+    let result = sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
+        .bind(id)
+        .bind(fee_delta)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("trade {id} not found when adding fees");
+    }
+    Ok(())
+}
+
+/// Response row for positions API — joins with paper_accounts to include account name.
+#[derive(Debug)]
+pub struct OpenTradeWithAccount {
+    pub trade: Trade,
+    pub paper_account_name: Option<String>,
+}
+
+/// Fetch all currently open trades joined with the paper account name.
+pub async fn list_open_with_account_name(
+    pool: &PgPool,
+) -> anyhow::Result<Vec<OpenTradeWithAccount>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        #[sqlx(flatten)]
+        trade: TradeRow,
+        account_name: Option<String>,
+    }
+    let rows = sqlx::query_as::<_, Row>(
+        r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
+                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
+                  t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
+                  t.exit_reason, t.mode, t.status, t.created_at,
+                  pa.name AS account_name
+           FROM trades t
+           LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
+           WHERE t.status = 'open'
+           ORDER BY t.entry_at DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|r| {
+            let trade: Trade = r.trade.try_into()?;
+            Ok(OpenTradeWithAccount {
+                trade,
+                paper_account_name: r.account_name,
+            })
+        })
+        .collect()
+}
+
 #[derive(sqlx::FromRow)]
 struct TradeRow {
     id: Uuid,
