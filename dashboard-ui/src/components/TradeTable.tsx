@@ -62,6 +62,15 @@ function buildColumns(accountMap: Map<string, string>) {
         return accountMap.get(id) ?? '-'
       },
     }),
+    col.accessor('account_type', {
+      header: '種別',
+      cell: (info) => {
+        const t = info.getValue()
+        if (t === 'paper') return 'ペーパー'
+        if (t === 'live') return '通常'
+        return '-'
+      },
+    }),
     col.accessor('pair', { header: 'ペア' }),
     col.accessor('direction', {
       header: '方向',

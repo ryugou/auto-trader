@@ -130,6 +130,20 @@ impl PaperTrader {
                 .bind(fee)
                 .execute(&mut *tx)
                 .await?;
+
+            // Record the fee accrual as an event so balance history can
+            // attribute the deduction to the correct day.
+            sqlx::query(
+                r#"INSERT INTO paper_account_events
+                       (paper_account_id, event_type, amount, reference_id)
+                   VALUES ($1, 'overnight_fee', $2, $3)"#,
+            )
+            .bind(self.paper_account_id)
+            .bind(-fee)
+            .bind(row.id)
+            .execute(&mut *tx)
+            .await?;
+
             total_fees += fee;
         }
 
@@ -329,6 +343,19 @@ impl OrderExecutor for PaperTrader {
                 self.paper_account_id
             );
         }
+
+        // Record the realized pnl as an event for balance history reconstruction.
+        sqlx::query(
+            r#"INSERT INTO paper_account_events
+                   (paper_account_id, event_type, amount, occurred_at, reference_id)
+               VALUES ($1, 'trade_close', $2, $3, $4)"#,
+        )
+        .bind(self.paper_account_id)
+        .bind(pnl_amount)
+        .bind(exit_at)
+        .bind(locked.id)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
 

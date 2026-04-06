@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub struct DashboardFilter {
     pub exchange: Option<String>,
     pub paper_account_id: Option<Uuid>,
+    pub account_type: Option<String>,
     pub strategy: Option<String>,
     pub pair: Option<String>,
     pub from: Option<String>,

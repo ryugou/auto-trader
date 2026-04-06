@@ -667,9 +667,22 @@ async fn main() -> anyhow::Result<()> {
                         let date = exit_at.date_naive();
                         let mode_str = t.mode.as_str();
                         let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
+                        // Look up account_type for this trade (paper / live).
+                        // Fall back to None if the account was deleted or this
+                        // is an FX trade without a paper_account_id.
+                        let account_type = match t.paper_account_id {
+                            Some(aid) => auto_trader_db::paper_accounts::get_account_type(
+                                &recorder_pool,
+                                aid,
+                            )
+                            .await
+                            .unwrap_or(None),
+                            None => None,
+                        };
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool, date, &t.strategy_name, &t.pair.0,
                             mode_str, t.exchange.as_str(), t.paper_account_id,
+                            account_type.as_deref(),
                             1, win, pnl_amount,
                         ).await {
                             tracing::error!("upsert daily summary error: {e}");
