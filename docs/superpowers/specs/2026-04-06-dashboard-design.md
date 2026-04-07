@@ -1,5 +1,11 @@
 # ダッシュボード設計仕様
 
+> **⚠️ 一部廃止 (2026-04-07)**
+> 本仕様内で言及している `crypto_trend_v1` 戦略および `crypto_real` /
+> `crypto_100k` paper account は **削除済み** です（migration
+> `20260407000006_cleanup_legacy_crypto_trend.sql` 参照）。本ドキュメントは
+> ダッシュボード v1 設計時の歴史的記録として残しています。
+
 ## 概要
 
 auto-trader の成績確認・口座管理用ダッシュボード。既存の axum API にエンドポイントを追加し、React + Recharts でフロントエンドを構築する。

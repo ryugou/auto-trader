@@ -189,27 +189,7 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
-            name if name.starts_with("crypto_trend") => {
-                let ma_short = sc.params.get("ma_short")
-                    .and_then(|v| v.as_integer()).unwrap_or(8) as usize;
-                let ma_long = sc.params.get("ma_long")
-                    .and_then(|v| v.as_integer()).unwrap_or(21) as usize;
-                let rsi_thresh = sc.params.get("rsi_threshold")
-                    .and_then(|v| v.as_integer()).unwrap_or(75);
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                engine.add_strategy(
-                    Box::new(auto_trader_strategy::crypto_trend::CryptoTrendV1::new(
-                        sc.name.clone(),
-                        ma_short,
-                        ma_long,
-                        Decimal::from(rsi_thresh),
-                        pairs,
-                    )),
-                    sc.mode.clone(),
-                );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
-            }
-            // New crypto strategies (2026-04 experiment).
+            // Crypto strategies (2026-04 experiment).
             // The strategy implementations carry their own parameter
             // constants — config params are accepted for forward
             // compatibility but currently not consumed (the values are

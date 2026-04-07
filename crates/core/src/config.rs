@@ -195,7 +195,7 @@ mode = "paper"
 pairs = ["USD_JPY"]
 
 [[strategies]]
-name = "crypto_trend_v1"
+name = "donchian_trend_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY"]

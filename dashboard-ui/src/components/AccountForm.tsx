@@ -47,10 +47,11 @@ export default function AccountForm({
   )
 
   // When the user switches exchange in create mode, the previously selected
-  // strategy (e.g. crypto_trend_v1) may no longer exist for the new
-  // category. Clear it so the dropdown forces a re-pick instead of
-  // submitting an out-of-category value. Edit mode preserves the original
-  // exchange (the field is disabled), so this only fires for new accounts.
+  // strategy may no longer exist for the new category (e.g. picking a
+  // crypto strategy then switching to OANDA). Clear it so the dropdown
+  // forces a re-pick instead of submitting an out-of-category value.
+  // Edit mode preserves the original exchange (the field is disabled),
+  // so this only fires for new accounts.
   useEffect(() => {
     if (isEdit) return
     if (!strategy) return
