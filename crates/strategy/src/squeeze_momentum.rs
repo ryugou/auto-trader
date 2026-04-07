@@ -56,10 +56,12 @@ const SWING_LOOKBACK: usize = 5;
 /// whipsaw — give the trade enough room to survive a single bad bar.
 const SL_PCT: Decimal = dec!(0.04);
 /// Capital allocation per trade. Squeeze entries are rare and the
-/// "all-in shot" is the strategy's edge — commit 90 % when it fires,
-/// leaving a 10 % cushion against the next adverse move and exchange
-/// maintenance-margin slippage.
-const ALLOCATION_PCT: Decimal = dec!(0.90);
+/// "all-in shot" is the strategy's edge. 95 % rather than 100 % because
+/// the SL is at -4 % and at full allocation the maintenance-margin
+/// ratio at SL hit is right at the exchange's liquidation line — a
+/// 5 % buffer means slippage on the SL fill can't trip a forced close
+/// before our own SL does.
+const ALLOCATION_PCT: Decimal = dec!(0.95);
 const TIME_LIMIT_HOURS: i64 = 48;
 const HISTORY_LEN: usize = 200;
 

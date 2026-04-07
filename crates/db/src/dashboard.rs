@@ -320,7 +320,19 @@ pub async fn get_trades(
     Ok((rows, total.0))
 }
 
-/// Evaluate a paper account's balance including unrealized P&L from open positions.
+/// Evaluate a paper account's balance.
+///
+/// After the margin-lock accounting change, `paper_accounts.current_balance`
+/// only stores **free cash**. The "total equity" view that the dashboard
+/// shows as `evaluated_balance` therefore needs to add back:
+///
+///   - `locked_margin`: the sum of `quantity × entry_price / leverage`
+///     across all currently open crypto trades on this account
+///   - `unrealized_pnl`: mark-to-market gain/loss vs the latest candle
+///
+/// FX trades have `quantity = NULL` and never had margin deducted, so
+/// they contribute 0 to `locked_margin` and the legacy unrealized PnL
+/// formula (`price_diff * leverage`) still applies.
 pub async fn get_evaluated_balance(
     pool: &PgPool,
     paper_account_id: Uuid,
@@ -349,13 +361,27 @@ pub async fn get_evaluated_balance(
                    ON lp.pair = t.pair AND lp.exchange = t.exchange
                WHERE t.status = 'open' AND t.paper_account_id = $1
                GROUP BY t.paper_account_id
+           ),
+           locked AS (
+               SELECT
+                   t.paper_account_id,
+                   SUM(t.quantity * t.entry_price / t.leverage) AS locked_margin
+               FROM trades t
+               WHERE t.status = 'open'
+                 AND t.paper_account_id = $1
+                 AND t.quantity IS NOT NULL
+                 AND t.leverage > 0
+               GROUP BY t.paper_account_id
            )
            SELECT
                pa.current_balance,
                COALESCE(op.unrealized_pnl, 0) AS unrealized_pnl,
-               pa.current_balance + COALESCE(op.unrealized_pnl, 0) AS evaluated_balance
+               pa.current_balance
+                   + COALESCE(lm.locked_margin, 0)
+                   + COALESCE(op.unrealized_pnl, 0) AS evaluated_balance
            FROM paper_accounts pa
            LEFT JOIN open_pnl op ON op.paper_account_id = pa.id
+           LEFT JOIN locked    lm ON lm.paper_account_id = pa.id
            WHERE pa.id = $1"#,
     )
     .bind(paper_account_id)

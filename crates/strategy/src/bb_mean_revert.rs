@@ -53,10 +53,13 @@ const RSI_SHORT_THRESHOLD: Decimal = dec!(75);
 /// Stop-loss as a flat percentage of entry price. Mean-reversion entries
 /// are tight by design — if the reversion thesis fails, get out at -2 %.
 const SL_PCT: Decimal = dec!(0.02);
-/// Capital allocation per trade (residual signal property). Conservative
-/// 30 % keeps powder dry for the multiple chances reversion strategies
-/// expect to see.
-const ALLOCATION_PCT: Decimal = dec!(0.30);
+/// Capital allocation per trade. Each strategy runs on its own
+/// dedicated paper account with no expected concurrent positions, so
+/// leaving cash idle wastes the experiment. 100 % is safe at 2×
+/// leverage + a 2 % SL because the SL fires well before the
+/// maintenance-margin threshold, so the exchange can't force-close
+/// before our own SL does.
+const ALLOCATION_PCT: Decimal = dec!(1.00);
 const TIME_LIMIT_HOURS: i64 = 24;
 
 pub struct BbMeanRevertV1 {

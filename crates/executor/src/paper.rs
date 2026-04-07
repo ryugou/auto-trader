@@ -51,12 +51,25 @@ impl PaperTrader {
     }
 
     /// Open a position with an explicit quantity (crypto path).
+    ///
+    /// Atomically:
+    /// 1. inserts the trade row
+    /// 2. deducts the required margin (`quantity × entry_price / leverage`)
+    ///    from `paper_accounts.current_balance` so the dashboard reflects
+    ///    "free cash" correctly
+    /// 3. records a `margin_lock` event in `paper_account_events` so the
+    ///    balance-history reconstruction can replay margin movements
+    ///
+    /// The margin is *refunded* in full when `close_position` runs, plus
+    /// the realized PnL.
     pub async fn execute_with_quantity(
         &self,
         signal: &Signal,
         quantity: Decimal,
     ) -> anyhow::Result<Trade> {
         let leverage = self.leverage().await?;
+        let entry_at = Utc::now();
+        let margin = quantity * signal.entry_price / leverage;
         let trade = Trade {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
@@ -71,7 +84,7 @@ impl PaperTrader {
             leverage,
             fees: Decimal::ZERO,
             paper_account_id: Some(self.paper_account_id),
-            entry_at: Utc::now(),
+            entry_at,
             exit_at: None,
             pnl_pips: None,
             pnl_amount: None,
@@ -80,14 +93,89 @@ impl PaperTrader {
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
         };
-        auto_trader_db::trades::insert_trade(&self.pool, &trade).await?;
+
+        // Insert the trade row, deduct margin, and write the
+        // balance-history event in a single transaction so a crash
+        // can't leave us with a position whose margin we forgot to lock.
+        let direction_str = match trade.direction {
+            Direction::Long => "long",
+            Direction::Short => "short",
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"INSERT INTO trades
+               (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
+                entry_at, exit_at, pnl_pips, pnl_amount,
+                exit_reason, mode, status, max_hold_until)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
+        )
+        .bind(trade.id)
+        .bind(&trade.strategy_name)
+        .bind(&trade.pair.0)
+        .bind(trade.exchange.as_str())
+        .bind(direction_str)
+        .bind(trade.entry_price)
+        .bind(trade.exit_price)
+        .bind(trade.stop_loss)
+        .bind(trade.take_profit)
+        .bind(trade.quantity)
+        .bind(trade.leverage)
+        .bind(trade.fees)
+        .bind(trade.paper_account_id)
+        .bind(trade.entry_at)
+        .bind(trade.exit_at)
+        .bind(trade.pnl_pips)
+        .bind(trade.pnl_amount)
+        .bind::<Option<String>>(None)
+        .bind("paper")
+        .bind("open")
+        .bind(trade.max_hold_until)
+        .execute(&mut *tx)
+        .await?;
+
+        // Deduct the margin from current_balance so the dashboard's
+        // "free cash" view is correct.
+        let bal_result = sqlx::query(
+            "UPDATE paper_accounts SET current_balance = current_balance - $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(self.paper_account_id)
+        .bind(margin)
+        .execute(&mut *tx)
+        .await?;
+        if bal_result.rows_affected() == 0 {
+            anyhow::bail!(
+                "paper account {} not found when locking margin for trade {}",
+                self.paper_account_id,
+                trade.id
+            );
+        }
+
+        // Record the margin lock as an event so balance-history
+        // reconstruction (paper_account_events) can replay it. Stored as
+        // a NEGATIVE amount since it's a deduction from cash.
+        sqlx::query(
+            r#"INSERT INTO paper_account_events
+                   (paper_account_id, event_type, amount, occurred_at, reference_id)
+               VALUES ($1, 'margin_lock', $2, $3, $4)"#,
+        )
+        .bind(self.paper_account_id)
+        .bind(-margin)
+        .bind(entry_at)
+        .bind(trade.id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
         tracing::info!(
-            "Paper OPEN: {} {} {:?} @ {} qty={}",
+            "Paper OPEN: {} {} {:?} @ {} qty={} margin_locked={}",
             trade.strategy_name,
             trade.pair,
             trade.direction,
             trade.entry_price,
-            quantity
+            quantity,
+            margin
         );
         Ok(trade)
     }
@@ -330,14 +418,28 @@ impl OrderExecutor for PaperTrader {
             anyhow::bail!("trade {id} was closed concurrently");
         }
 
-        // Persist balance delta in the same transaction. Fees are deducted
-        // from the balance when they are charged (e.g. overnight fees), so we
-        // only add the gross pnl here to avoid double-counting.
+        // Persist balance delta in the same transaction. Two pieces:
+        // 1. Refund the locked margin (`quantity × entry_price /
+        //    leverage`) — execute_with_quantity deducted it on open and
+        //    we need to give it back here.
+        // 2. Add the gross PnL. Fees are deducted from the balance when
+        //    they are charged (overnight fees), so we don't subtract
+        //    them here.
+        // FX trades have `quantity = NULL`; their margin is implicit and
+        // was never deducted on open, so the refund step is skipped for
+        // them.
+        let margin_refund = match locked.quantity {
+            Some(q) if locked.leverage > Decimal::ZERO => {
+                q * locked.entry_price / locked.leverage
+            }
+            _ => Decimal::ZERO,
+        };
+        let bal_delta = margin_refund + pnl_amount;
         let bal_result = sqlx::query(
             "UPDATE paper_accounts SET current_balance = current_balance + $2, updated_at = NOW() WHERE id = $1",
         )
         .bind(self.paper_account_id)
-        .bind(pnl_amount)
+        .bind(bal_delta)
         .execute(&mut *tx)
         .await?;
         if bal_result.rows_affected() == 0 {
@@ -347,7 +449,24 @@ impl OrderExecutor for PaperTrader {
             );
         }
 
-        // Record the realized pnl as an event for balance history reconstruction.
+        // Two events: margin_release (refund) + trade_close (realized PnL)
+        // so balance-history reconstruction can replay both legs
+        // independently. Skip margin_release for FX trades that never
+        // had a margin_lock recorded.
+        if margin_refund > Decimal::ZERO {
+            sqlx::query(
+                r#"INSERT INTO paper_account_events
+                       (paper_account_id, event_type, amount, occurred_at, reference_id)
+                   VALUES ($1, 'margin_release', $2, $3, $4)"#,
+            )
+            .bind(self.paper_account_id)
+            .bind(margin_refund)
+            .bind(exit_at)
+            .bind(locked.id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
         sqlx::query(
             r#"INSERT INTO paper_account_events
                    (paper_account_id, event_type, amount, occurred_at, reference_id)
