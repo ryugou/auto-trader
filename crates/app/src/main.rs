@@ -441,23 +441,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
 
-    // PositionSizer for crypto
+    // PositionSizer for crypto. Pure capacity-based — the strategy
+    // declares its own `allocation_pct` on each Signal, no global
+    // risk_rate, no chart info passed in.
     let min_order_sizes: HashMap<Pair, Decimal> = config
         .pair_config
         .iter()
         .map(|(k, v)| (Pair::new(k), v.min_order_size))
         .collect();
-    let risk_rate = config
-        .position_sizing
-        .as_ref()
-        .map(|ps| {
-            if ps.method != "risk_based" {
-                tracing::warn!("position_sizing.method='{}' is not supported, using risk_based", ps.method);
-            }
+    if let Some(ps) = config.position_sizing.as_ref() {
+        tracing::info!(
+            "position_sizing config (method='{}', risk_rate={}) is ignored — sizing is now per-strategy via Signal.allocation_pct",
+            ps.method,
             ps.risk_rate
-        })
-        .unwrap_or(Decimal::new(2, 2)); // default 0.02
-    let position_sizer = Arc::new(PositionSizer::new(risk_rate, min_order_sizes));
+        );
+    }
+    let position_sizer = Arc::new(PositionSizer::new(min_order_sizes));
 
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
@@ -941,8 +940,8 @@ async fn main() -> anyhow::Result<()> {
                     &signal.pair,
                     balance,
                     signal.entry_price,
-                    signal.stop_loss,
                     leverage,
+                    signal.allocation_pct,
                 );
                 let Some(qty) = quantity else {
                     tracing::info!(

@@ -12,9 +12,11 @@
 //!   a higher-high.
 //!
 //! ## Stop loss
-//! `max(0.5 × ATR(14), 0.5%)` distance from entry, but capped at 2% of
-//! entry price so 0.001 BTC × ~11M JPY positions stay sizable on a 30k
-//! JPY paper account.
+//! Flat **2 % from entry price** (`SL_PCT`). Mean-reversion entries
+//! are tight by design — if the reversion thesis fails, get out at -2 %.
+//! Sizing is decoupled from the SL distance via `allocation_pct` on
+//! the emitted Signal, so the SL value is purely a price level for
+//! the position monitor to enforce.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when price returns to SMA20 (BB middle).
@@ -41,18 +43,20 @@ use std::collections::{HashMap, VecDeque};
 
 const BB_PERIOD: usize = 20;
 const RSI_PERIOD: usize = 14;
-const ATR_PERIOD: usize = 14;
-/// Number of historical candles each per-pair `VecDeque` keeps. We need
-/// `max(BB_PERIOD, RSI_PERIOD+1, ATR_PERIOD+1)` for the indicator math
-/// itself, plus one extra for the "previous bar lower-low" check, plus
+/// Number of historical candles each per-pair `VecDeque` keeps. Enough
+/// for BB(20) + RSI(14+1) + the "previous bar lower-low" check, with
 /// some headroom for the warmup-from-DB seed (200 bars in main.rs).
 const HISTORY_LEN: usize = 200;
 
 const RSI_LONG_THRESHOLD: Decimal = dec!(25);
 const RSI_SHORT_THRESHOLD: Decimal = dec!(75);
-const SL_MIN_PCT: Decimal = dec!(0.005); // 0.5%
-const SL_MAX_PCT: Decimal = dec!(0.02); // 2% cap (30k account safety)
-const SL_ATR_MULT: Decimal = dec!(0.5);
+/// Stop-loss as a flat percentage of entry price. Mean-reversion entries
+/// are tight by design — if the reversion thesis fails, get out at -2 %.
+const SL_PCT: Decimal = dec!(0.02);
+/// Capital allocation per trade (residual signal property). Conservative
+/// 30 % keeps powder dry for the multiple chances reversion strategies
+/// expect to see.
+const ALLOCATION_PCT: Decimal = dec!(0.30);
 const TIME_LIMIT_HOURS: i64 = 24;
 
 pub struct BbMeanRevertV1 {
@@ -81,29 +85,6 @@ impl BbMeanRevertV1 {
     fn closes(history: &VecDeque<Candle>) -> Vec<Decimal> {
         history.iter().map(|c| c.close).collect()
     }
-
-    fn highs(history: &VecDeque<Candle>) -> Vec<Decimal> {
-        history.iter().map(|c| c.high).collect()
-    }
-
-    fn lows(history: &VecDeque<Candle>) -> Vec<Decimal> {
-        history.iter().map(|c| c.low).collect()
-    }
-
-    /// SL distance for a fresh entry, derived from ATR with a min and a
-    /// hard percentage cap. Returns absolute price distance (not signed).
-    fn compute_sl_distance(history: &VecDeque<Candle>, entry: Decimal) -> Option<Decimal> {
-        let atr_val = indicators::atr(
-            &Self::highs(history),
-            &Self::lows(history),
-            &Self::closes(history),
-            ATR_PERIOD,
-        )?;
-        let atr_based = atr_val * SL_ATR_MULT;
-        let pct_min = entry * SL_MIN_PCT;
-        let pct_max = entry * SL_MAX_PCT;
-        Some(atr_based.max(pct_min).min(pct_max))
-    }
 }
 
 #[async_trait::async_trait]
@@ -124,8 +105,8 @@ impl Strategy for BbMeanRevertV1 {
         let history = self.history.get(&key)?;
 
         // Need at least BB_PERIOD candles plus one previous bar for the
-        // capitulation check. ATR/RSI need their own history too.
-        if history.len() < BB_PERIOD.max(RSI_PERIOD + 1).max(ATR_PERIOD + 1) + 1 {
+        // capitulation check. RSI needs its own history too.
+        if history.len() < BB_PERIOD.max(RSI_PERIOD + 1) + 1 {
             return None;
         }
 
@@ -140,7 +121,7 @@ impl Strategy for BbMeanRevertV1 {
         let prev_candle = &history[len - 2];
         let curr_candle = &history[len - 1];
 
-        let sl_distance = Self::compute_sl_distance(history, entry)?;
+        let sl_offset = entry * SL_PCT;
 
         // Long setup: oversold extreme + capitulation candle
         if entry < lower
@@ -152,10 +133,13 @@ impl Strategy for BbMeanRevertV1 {
                 pair: event.pair.clone(),
                 direction: Direction::Long,
                 entry_price: entry,
-                stop_loss: entry - sl_distance,
-                take_profit: entry * dec!(99), // unused — actual exit comes from on_open_positions
+                stop_loss: entry - sl_offset,
+                // Take profit is dynamic (SMA20 mean-reach via on_open_positions);
+                // park the fixed TP far away so the SL/TP monitor never trips it.
+                take_profit: entry * dec!(1000),
                 confidence: 0.65,
                 timestamp: event.timestamp,
+                allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
@@ -170,10 +154,11 @@ impl Strategy for BbMeanRevertV1 {
                 pair: event.pair.clone(),
                 direction: Direction::Short,
                 entry_price: entry,
-                stop_loss: entry + sl_distance,
-                take_profit: entry * dec!(0.01), // unused
+                stop_loss: entry + sl_offset,
+                take_profit: entry / dec!(1000),
                 confidence: 0.65,
                 timestamp: event.timestamp,
+                allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
