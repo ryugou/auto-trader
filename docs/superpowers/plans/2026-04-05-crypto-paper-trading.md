@@ -1,5 +1,13 @@
 # Crypto Paper Trading Implementation Plan
 
+> **⚠️ 一部廃止 (2026-04-07)**
+> 本計画で構築した `crypto_trend_v1` 戦略および `crypto_real` /
+> `crypto_100k` paper account は **削除済み** です（migration
+> `20260407000006_cleanup_legacy_crypto_trend.sql` 参照）。本ドキュメントは
+> 当初実装計画の歴史的記録として残しています。現在の検証は新 3 戦略
+> (`bb_mean_revert_v1` / `donchian_trend_v1` / `squeeze_momentum_v1`)
+> × 30,000 円口座 3 つで行っています。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** bitFlyer Crypto CFD（BTC/JPY）のペーパートレード機能を既存 FX パイプラインに統合し、複数口座での並行シミュレーションを実現する。

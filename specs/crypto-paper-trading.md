@@ -1,5 +1,14 @@
 # 暗号資産ペーパートレード 設計仕様
 
+> **⚠️ 一部廃止 (2026-04-07)**
+> 本仕様内で言及している `crypto_trend_v1` 戦略および `crypto_real` /
+> `crypto_100k` paper account は **削除済み** です（migration
+> `20260407000006_cleanup_legacy_crypto_trend.sql` 参照）。現在の検証は
+> `bb_mean_revert_v1` / `donchian_trend_v1` / `squeeze_momentum_v1` の
+> 3 戦略 × `crypto_safe_v1` / `crypto_normal_v1` / `crypto_aggressive_v1`
+> 各 30,000 円口座で行っています。本ドキュメントは当初設計の歴史的記録
+> として残しています。
+
 ## 概要
 
 bitFlyer Crypto CFD（Lightning API）を使った暗号資産のペーパートレード機能。既存の FX 自動売買アーキテクチャに統合し、同じイベント駆動パイプライン上で BTC/JPY の売買シミュレーションを行う。価格データは bitFlyer Lightning の Public API（WebSocket + REST）から取得し、注文はペーパートレードで実行する。将来的に Private API での本番移行が可能な設計とする。

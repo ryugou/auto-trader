@@ -64,14 +64,7 @@ mode = "paper"
 pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
 
-[[strategies]]
-name = "crypto_trend_v1"
-enabled = true
-mode = "paper"
-pairs = ["FX_BTC_JPY"]
-params = { ma_short = 8, ma_long = 21, rsi_threshold = 75 }
-
-# === New crypto strategies (2026-04 experiment) ===
+# === Crypto strategies (2026-04 experiment) ===
 # Each runs on its own dedicated 30,000 JPY paper account so the
 # experiment is "find what works" — accounts are isolated, blow-ups are
 # acceptable, iteration loop fast. See migrations/20260407000005 for the
