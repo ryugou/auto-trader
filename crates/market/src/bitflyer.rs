@@ -39,6 +39,7 @@ pub struct BitflyerMonitor {
     timeframe: String,
     tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
+    closes_seed: HashMap<String, Vec<Decimal>>,
 }
 
 impl BitflyerMonitor {
@@ -54,11 +55,20 @@ impl BitflyerMonitor {
             timeframe: timeframe.to_string(),
             tx,
             pool: None,
+            closes_seed: HashMap::new(),
         }
     }
 
     pub fn with_db(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Pre-populate per-pair `closes_map` so SMA/RSI indicators can fire from
+    /// the very first live candle after restart. Caller is responsible for
+    /// loading and ordering the closes (oldest → newest).
+    pub fn with_closes_seed(mut self, seed: HashMap<String, Vec<Decimal>>) -> Self {
+        self.closes_seed = seed;
         self
     }
 
@@ -70,7 +80,20 @@ impl BitflyerMonitor {
                 CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, self.timeframe.clone()),
             );
         }
-        let mut closes_map: HashMap<String, Vec<Decimal>> = HashMap::new();
+        // Seed indicator state from caller-provided history (loaded once in
+        // app composition layer alongside the strategy engine warmup) so we
+        // don't have to wait ma_long_period × timeframe minutes after every
+        // restart before SMA/RSI can fire.
+        let mut closes_map: HashMap<String, Vec<Decimal>> = self.closes_seed.clone();
+        for (pair, closes) in &closes_map {
+            tracing::info!(
+                "bitflyer warmup: seeded {} {} closes for {}",
+                closes.len(),
+                self.timeframe,
+                pair
+            );
+        }
+
         let mut backoff_secs = 1u64;
 
         loop {

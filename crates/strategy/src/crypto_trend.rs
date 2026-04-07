@@ -110,6 +110,24 @@ impl Strategy for CryptoTrendV1 {
     fn on_macro_update(&mut self, _update: &MacroUpdate) {
         // Crypto strategy ignores macro updates
     }
+
+    async fn warmup(&mut self, events: &[PriceEvent]) {
+        let max_len = self.ma_long_period + 2;
+        for event in events {
+            if event.exchange != Exchange::BitflyerCfd {
+                continue;
+            }
+            if !self.pairs.iter().any(|p| p == &event.pair) {
+                continue;
+            }
+            let key = event.pair.0.clone();
+            let history = self.price_history.entry(key).or_default();
+            history.push_back(event.candle.close);
+            while history.len() > max_len {
+                history.pop_front();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +250,75 @@ mod tests {
         // SL = entry + 2%, TP = entry - 4%
         assert_eq!(signal.stop_loss, dec!(9180000));
         assert_eq!(signal.take_profit, dec!(8640000));
+    }
+
+    #[tokio::test]
+    async fn warmup_seeds_history_so_first_live_event_can_signal() {
+        let mut strat = CryptoTrendV1::new(
+            "crypto_test".to_string(),
+            3,
+            5,
+            dec!(70),
+            vec![Pair::new("BTC_JPY")],
+        );
+
+        // Six flat warmup events — should leave history populated but
+        // emit nothing (warmup never returns signals).
+        let warmup: Vec<PriceEvent> = (0..6)
+            .map(|_| {
+                make_price_event(
+                    "BTC_JPY",
+                    Exchange::BitflyerCfd,
+                    dec!(10000000),
+                    HashMap::new(),
+                )
+            })
+            .collect();
+        strat.warmup(&warmup).await;
+
+        // Single live event with a price spike + RSI should now produce
+        // a Long signal — without warmup it would take 6+ live candles.
+        let mut indicators = HashMap::new();
+        indicators.insert("rsi_14".to_string(), dec!(50));
+        let live = make_price_event(
+            "BTC_JPY",
+            Exchange::BitflyerCfd,
+            dec!(11000000),
+            indicators,
+        );
+        let signal = strat.on_price(&live).await;
+        assert!(
+            signal.is_some(),
+            "warmup should populate history so first live event can fire"
+        );
+        assert_eq!(signal.unwrap().direction, Direction::Long);
+    }
+
+    #[tokio::test]
+    async fn warmup_ignores_non_bitflyer_events() {
+        let mut strat = CryptoTrendV1::new(
+            "crypto_test".to_string(),
+            3,
+            5,
+            dec!(70),
+            vec![Pair::new("BTC_JPY")],
+        );
+        let warmup: Vec<PriceEvent> = (0..10)
+            .map(|_| {
+                make_price_event("BTC_JPY", Exchange::Oanda, dec!(10000000), HashMap::new())
+            })
+            .collect();
+        strat.warmup(&warmup).await;
+
+        // History should still be empty → live event cannot fire
+        let mut indicators = HashMap::new();
+        indicators.insert("rsi_14".to_string(), dec!(50));
+        let live = make_price_event(
+            "BTC_JPY",
+            Exchange::BitflyerCfd,
+            dec!(11000000),
+            indicators,
+        );
+        assert!(strat.on_price(&live).await.is_none());
     }
 }

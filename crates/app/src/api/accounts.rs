@@ -1,7 +1,8 @@
 use super::{ApiError, AppState};
 use auto_trader_db::dashboard;
 use auto_trader_db::paper_accounts::{
-    self, CreatePaperAccount, PaperAccount, UpdatePaperAccount,
+    self, normalize_currency, validate_initial_balance, CreatePaperAccount, PaperAccount,
+    UpdatePaperAccount,
 };
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -93,13 +94,19 @@ pub async fn get_one(
 
 pub async fn create(
     State(state): State<AppState>,
-    Json(req): Json<CreatePaperAccount>,
+    mut req: Json<CreatePaperAccount>,
 ) -> Result<impl IntoResponse, ApiError> {
     if req.account_type != "paper" && req.account_type != "live" {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "account_type must be 'paper' or 'live'".to_string(),
         ));
+    }
+    // Normalize currency casing (`jpy` → `JPY`) so the minimum-balance check
+    // can't be sidestepped by the client.
+    req.currency = normalize_currency(&req.currency);
+    if let Err(msg) = validate_initial_balance(&req.currency, req.initial_balance) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, msg));
     }
     paper_accounts::create_paper_account(&state.pool, &req)
         .await

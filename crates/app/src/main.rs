@@ -202,6 +202,133 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Warm up strategies and the bitflyer indicator cache from DB so they
+    // don't sit cold for ma_long_period × timeframe minutes after every
+    // restart. We load each (exchange, pair, timeframe) once and feed both
+    // consumers from the same `Vec<Candle>` to keep indicator state and live
+    // stream consistent.
+    //
+    // NOTE: timeframe constants below MUST match what each monitor uses
+    // internally:
+    //  - BitflyerMonitor is constructed with "M5"
+    //  - MarketMonitor (Oanda) calls get_candles with "M5"
+    // If those change, update here too.
+    const CRYPTO_TIMEFRAME: &str = "M5";
+    const FX_TIMEFRAME: &str = "M5";
+    const WARMUP_LIMIT: i64 = 200;
+
+    let crypto_pairs_for_warmup: Vec<Pair> = config
+        .pairs
+        .crypto
+        .as_ref()
+        .map(|v| v.iter().map(|s| Pair::new(s)).collect())
+        .unwrap_or_default();
+
+    let mut bitflyer_closes_seed: std::collections::HashMap<String, Vec<Decimal>> =
+        std::collections::HashMap::new();
+
+    {
+        use auto_trader_core::event::PriceEvent;
+        use auto_trader_core::types::Exchange as ExchangeTy;
+        use std::collections::HashMap as StdHashMap;
+
+        async fn load_warmup_history(
+            pool: &sqlx::PgPool,
+            exchange: &str,
+            pair: &str,
+            timeframe: &str,
+            limit: i64,
+        ) -> Vec<auto_trader_core::types::Candle> {
+            match auto_trader_db::candles::get_candles(pool, exchange, pair, timeframe, limit).await
+            {
+                // get_candles returns DESC; reverse to ASC (oldest first) so
+                // both indicator cache and strategy history are seeded in
+                // chronological order.
+                Ok(candles) => candles.into_iter().rev().collect(),
+                Err(e) => {
+                    tracing::warn!(
+                        "warmup load failed for {exchange} {pair} {timeframe}: {e}"
+                    );
+                    Vec::new()
+                }
+            }
+        }
+
+        // Crypto: bitflyer_cfd
+        for pair in &crypto_pairs_for_warmup {
+            let candles = load_warmup_history(
+                &pool,
+                ExchangeTy::BitflyerCfd.as_str(),
+                &pair.0,
+                CRYPTO_TIMEFRAME,
+                WARMUP_LIMIT,
+            )
+            .await;
+            if candles.is_empty() {
+                continue;
+            }
+            // Feed bitflyer indicator cache: just the closes.
+            let closes: Vec<Decimal> = candles.iter().map(|c| c.close).collect();
+            bitflyer_closes_seed.insert(pair.0.clone(), closes);
+
+            // Feed strategy engine: PriceEvent so indicator history populates.
+            let n = candles.len();
+            let events: Vec<PriceEvent> = candles
+                .into_iter()
+                .map(|c| PriceEvent {
+                    pair: c.pair.clone(),
+                    exchange: ExchangeTy::BitflyerCfd,
+                    timestamp: c.timestamp,
+                    candle: c,
+                    indicators: StdHashMap::new(),
+                })
+                .collect();
+            engine.warmup(&events).await;
+            tracing::info!(
+                "strategy warmup: fed {n} bitflyer_cfd {CRYPTO_TIMEFRAME} candles for {}",
+                pair.0
+            );
+        }
+
+        // FX: Oanda. fx_pairs is moved into MarketMonitor::new earlier, so
+        // re-derive the list from config the same way (`active` legacy field
+        // takes precedence over `fx`).
+        let fx_pairs_for_warmup: Vec<Pair> = if !config.pairs.active.is_empty() {
+            config.pairs.active.iter().map(|s| Pair::new(s)).collect()
+        } else {
+            config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
+        };
+        for pair in &fx_pairs_for_warmup {
+            let candles = load_warmup_history(
+                &pool,
+                ExchangeTy::Oanda.as_str(),
+                &pair.0,
+                FX_TIMEFRAME,
+                WARMUP_LIMIT,
+            )
+            .await;
+            if candles.is_empty() {
+                continue;
+            }
+            let n = candles.len();
+            let events: Vec<PriceEvent> = candles
+                .into_iter()
+                .map(|c| PriceEvent {
+                    pair: c.pair.clone(),
+                    exchange: ExchangeTy::Oanda,
+                    timestamp: c.timestamp,
+                    candle: c,
+                    indicators: StdHashMap::new(),
+                })
+                .collect();
+            engine.warmup(&events).await;
+            tracing::info!(
+                "strategy warmup: fed {n} oanda {FX_TIMEFRAME} candles for {}",
+                pair.0
+            );
+        }
+    }
+
     // Collect actually registered strategy names for paper_account validation.
     // Held as owned Strings so we can freely move it into async tasks.
     let registered_strategies: Vec<String> = engine
@@ -293,10 +420,11 @@ async fn main() -> anyhow::Result<()> {
             let bf_monitor = auto_trader_market::bitflyer::BitflyerMonitor::new(
                 &bf_config.ws_url,
                 crypto_pairs,
-                "M5",
+                CRYPTO_TIMEFRAME,
                 price_tx.clone(),
             )
-            .with_db(pool.clone());
+            .with_db(pool.clone())
+            .with_closes_seed(std::mem::take(&mut bitflyer_closes_seed));
             Some(tokio::spawn(async move {
                 if let Err(e) = bf_monitor.run().await {
                     tracing::error!("bitflyer monitor error: {e}");

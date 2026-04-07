@@ -29,6 +29,20 @@ impl StrategyEngine {
         self.slots.iter().map(|s| s.strategy.name()).collect()
     }
 
+    /// Seed all strategies with historical events (oldest → newest) so their
+    /// indicator state is ready before the first live event arrives.
+    ///
+    /// Note on "disabled": this iterates *registered* strategies, including
+    /// those whose `mode` is `"disabled"` — those still receive macro updates
+    /// and warmup so they are ready if re-enabled later. Strategies whose
+    /// top-level config `enabled = false` are never registered with the
+    /// engine in the first place (see `main.rs`), so they are not warmed up.
+    pub async fn warmup(&mut self, events: &[PriceEvent]) {
+        for slot in &mut self.slots {
+            slot.strategy.warmup(events).await;
+        }
+    }
+
     /// Dispatch PriceEvent to all enabled strategies.
     /// 1-pair-1-position constraint is enforced at the executor level (main.rs),
     /// not here. The engine simply forwards all signals.
@@ -130,5 +144,87 @@ mod tests {
 
         // Even disabled strategies receive macro updates (they just don't emit signals)
         assert_eq!(updates.lock().unwrap().len(), 1);
+    }
+
+    /// Dummy strategy that records warmup events for testing.
+    struct WarmupRecorder {
+        name: String,
+        warmups: Arc<StdMutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Strategy for WarmupRecorder {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn on_price(&mut self, _event: &PriceEvent) -> Option<Signal> {
+            None
+        }
+        fn on_macro_update(&mut self, _update: &MacroUpdate) {}
+        async fn warmup(&mut self, events: &[PriceEvent]) {
+            self.warmups.lock().unwrap().push(events.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn warmup_dispatches_to_disabled_strategies_too() {
+        // Strategies with mode="disabled" are still registered (e.g. for
+        // future re-enable) and should receive warmup state so they don't
+        // start cold when flipped on.
+        use auto_trader_core::types::{Candle, Exchange, Pair};
+        use chrono::Utc;
+        use rust_decimal_macros::dec;
+
+        let (tx, _rx) = mpsc::channel::<SignalEvent>(16);
+        let mut engine = StrategyEngine::new(tx);
+
+        let enabled_log = Arc::new(StdMutex::new(Vec::<usize>::new()));
+        let disabled_log = Arc::new(StdMutex::new(Vec::<usize>::new()));
+        engine.add_strategy(
+            Box::new(WarmupRecorder {
+                name: "enabled".to_string(),
+                warmups: enabled_log.clone(),
+            }),
+            "paper".to_string(),
+        );
+        engine.add_strategy(
+            Box::new(WarmupRecorder {
+                name: "disabled".to_string(),
+                warmups: disabled_log.clone(),
+            }),
+            "disabled".to_string(),
+        );
+
+        let candle = Candle {
+            pair: Pair::new("X"),
+            exchange: Exchange::BitflyerCfd,
+            timeframe: "M5".to_string(),
+            open: dec!(1),
+            high: dec!(1),
+            low: dec!(1),
+            close: dec!(1),
+            volume: Some(0),
+            timestamp: Utc::now(),
+        };
+        let events = vec![
+            PriceEvent {
+                pair: Pair::new("X"),
+                exchange: Exchange::BitflyerCfd,
+                timestamp: candle.timestamp,
+                candle: candle.clone(),
+                indicators: std::collections::HashMap::new(),
+            },
+            PriceEvent {
+                pair: Pair::new("X"),
+                exchange: Exchange::BitflyerCfd,
+                timestamp: candle.timestamp,
+                candle,
+                indicators: std::collections::HashMap::new(),
+            },
+        ];
+        engine.warmup(&events).await;
+
+        assert_eq!(enabled_log.lock().unwrap().as_slice(), &[2usize]);
+        assert_eq!(disabled_log.lock().unwrap().as_slice(), &[2usize]);
     }
 }
