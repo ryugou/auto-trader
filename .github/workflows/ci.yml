@@ -1,17 +1,33 @@
 name: CI
 
+# Build / test only at merge time. PRs are validated locally with the
+# same docker-based toolchain (cargo test --workspace + cargo clippy --
+# -D warnings + npm run build), so running CI on every PR push just
+# duplicates that work and slows down iteration. The workflow_dispatch
+# trigger lets us re-run main builds manually if a transient failure
+# needs another shot.
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Even though `on:` only auto-fires for `push: branches: [main]`,
+    # `workflow_dispatch` can be invoked from any ref. Gate the actual
+    # work so a manual run from a feature branch can't accidentally
+    # publish a "main CI passed" status against non-main commits.
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - name: Checkout submodules
+        # The proto submodule may be in a separate (potentially private)
+        # repo whose default GITHUB_TOKEN scope doesn't reach. Rewrite
+        # the URL with our SUBMODULE_PAT so the recursive init can
+        # authenticate consistently regardless of the proto repo's
+        # visibility.
         run: |
           git config --global url."https://x-access-token:${{ secrets.SUBMODULE_PAT }}@github.com/".insteadOf "https://github.com/"
           git submodule update --init --recursive
@@ -25,13 +41,27 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # See note on `frontend.if` — same reason: workflow_dispatch from
+    # a non-main ref must not produce a "main CI passed" signal.
+    if: github.ref == 'refs/heads/main'
     steps:
+      # Rust + protobuf-compiler ビルドはディスクを多く消費するので
+      # ubuntu-latest の不要 SDK を先に削除して空きを確保する。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
       - uses: actions/checkout@v4
       - name: Checkout submodules
         run: |
           git config --global url."https://x-access-token:${{ secrets.SUBMODULE_PAT }}@github.com/".insteadOf "https://github.com/"
           git submodule update --init --recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # target/ をキャッシュして再ビルドコストを大幅に削減する。
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - run: sudo apt-get install -y protobuf-compiler
       - run: cargo check --workspace
       - run: cargo test --workspace
