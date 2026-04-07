@@ -1,5 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { RiskBadge, useStrategyCatalogQuery } from '../components/RiskBadge'
 import type { Strategy } from '../api/types'
 
 const categoryLabel: Record<Strategy['category'], string> = {
@@ -12,18 +11,6 @@ const categoryBadgeClass: Record<Strategy['category'], string> = {
   crypto: 'bg-amber-900/40 text-amber-300 border border-amber-800',
 }
 
-const riskLabel: Record<Strategy['risk_level'], string> = {
-  low: '慎重',
-  medium: '標準',
-  high: '攻め',
-}
-
-const riskBadgeClass: Record<Strategy['risk_level'], string> = {
-  low: 'bg-green-900/40 text-green-300 border border-green-800',
-  medium: 'bg-blue-900/40 text-blue-300 border border-blue-800',
-  high: 'bg-red-900/40 text-red-300 border border-red-800',
-}
-
 /**
  * Read-only strategy catalog. The data comes from the `strategies` table
  * which is metadata only — the trading engine still loads strategies from
@@ -31,10 +18,7 @@ const riskBadgeClass: Record<Strategy['risk_level'], string> = {
  * and a migration row.
  */
 export default function Strategies() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['strategies', 'all'],
-    queryFn: () => api.strategies.list(),
-  })
+  const { data, isLoading, error } = useStrategyCatalogQuery()
 
   if (isLoading) {
     return <div className="text-gray-400">読み込み中…</div>
@@ -80,11 +64,7 @@ function StrategyCard({ strategy }: { strategy: Strategy }) {
           <code className="text-xs text-gray-500">{strategy.name}</code>
         </div>
         <div className="flex flex-col items-end gap-1">
-          <span
-            className={`text-xs px-2 py-0.5 rounded ${riskBadgeClass[strategy.risk_level]}`}
-          >
-            {riskLabel[strategy.risk_level]}
-          </span>
+          <RiskBadge riskLevel={strategy.risk_level} />
           <span
             className={`text-xs px-2 py-0.5 rounded ${categoryBadgeClass[strategy.category]}`}
           >

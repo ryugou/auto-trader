@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import AccountForm from '../components/AccountForm'
+import { RiskBadge, useStrategyRiskLookup } from '../components/RiskBadge'
 import type {
   PaperAccount,
   CreatePaperAccount,
@@ -18,6 +19,7 @@ export default function Accounts() {
     queryKey: ['accounts'],
     queryFn: () => api.accounts.list(),
   })
+  const lookupRisk = useStrategyRiskLookup()
 
   const createMut = useMutation({
     mutationFn: (data: CreatePaperAccount) => api.accounts.create(data),
@@ -106,7 +108,12 @@ export default function Accounts() {
                       {a.account_type === 'live' ? '通常' : 'ペーパー'}
                     </td>
                     <td className="px-4 py-2 text-gray-300">{a.exchange}</td>
-                    <td className="px-4 py-2 text-gray-300">{a.strategy}</td>
+                    <td className="px-4 py-2 text-gray-300">
+                      <div className="flex items-center gap-2">
+                        <RiskBadge riskLevel={lookupRisk(a.strategy)} />
+                        <span>{a.strategy}</span>
+                      </div>
+                    </td>
                     <td className="px-4 py-2 text-right">
                       {Number(a.initial_balance).toLocaleString()}
                     </td>
