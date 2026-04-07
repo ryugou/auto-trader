@@ -715,20 +715,22 @@ async fn main() -> anyhow::Result<()> {
 
                             // Build per-strategy open-position view from the
                             // DB so strategies can decide trailing/indicator
-                            // exits. Re-read every tick — the open list is
-                            // small and DB-driven by design (single source
-                            // of truth, no in-memory cache to drift).
-                            let positions_by_strategy = match auto_trader_db::trades::list_open_with_account_name(&engine_pool).await {
+                            // exits. We use a per-pair query (filtered in
+                            // SQL by exchange/pair) so this stays cheap
+                            // as the open-trade table grows. The crypto
+                            // position monitor still does its own scan
+                            // for SL/TP — those run in different tasks
+                            // with different needs (per-strategy grouping
+                            // here, account-level joins there).
+                            let positions_by_strategy = match auto_trader_db::trades::list_open_with_account_name_for_pair(
+                                &engine_pool,
+                                event.exchange.as_str(),
+                                &event.pair.0,
+                            ).await {
                                 Ok(rows) => {
                                     let mut by_strategy: std::collections::HashMap<String, Vec<auto_trader_core::types::Position>> =
                                         std::collections::HashMap::new();
                                     for r in rows {
-                                        // Only show positions for the same exchange/pair
-                                        // the event is about — strategies should not see
-                                        // unrelated open positions.
-                                        if r.trade.exchange != event.exchange || r.trade.pair != event.pair {
-                                            continue;
-                                        }
                                         by_strategy
                                             .entry(r.trade.strategy_name.clone())
                                             .or_default()

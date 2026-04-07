@@ -125,6 +125,11 @@ pub fn donchian_channel(
     if highs.len() != lows.len() {
         return None;
     }
+    // Empty inputs would underflow `highs.len() - 1` to usize::MAX when
+    // include_current = false. Bail out explicitly.
+    if highs.is_empty() {
+        return None;
+    }
     let end = if include_current {
         highs.len()
     } else {

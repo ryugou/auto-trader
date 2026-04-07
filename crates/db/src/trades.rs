@@ -151,6 +151,48 @@ pub struct OpenTradeWithAccount {
     pub paper_account_name: Option<String>,
 }
 
+/// Fetch open trades for a single (exchange, pair) joined with the paper
+/// account name. Used by the strategy engine on every price tick — we
+/// scope to the event's exchange/pair in SQL so the query stays cheap as
+/// the open-trade table grows, instead of pulling every open trade and
+/// filtering in Rust.
+pub async fn list_open_with_account_name_for_pair(
+    pool: &PgPool,
+    exchange: &str,
+    pair: &str,
+) -> anyhow::Result<Vec<OpenTradeWithAccount>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        #[sqlx(flatten)]
+        trade: TradeRow,
+        account_name: Option<String>,
+    }
+    let rows = sqlx::query_as::<_, Row>(
+        r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
+                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
+                  t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
+                  t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
+                  pa.name AS account_name
+           FROM trades t
+           LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
+           WHERE t.status = 'open' AND t.exchange = $1 AND t.pair = $2
+           ORDER BY t.entry_at DESC"#,
+    )
+    .bind(exchange)
+    .bind(pair)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|r| {
+            let trade: Trade = r.trade.try_into()?;
+            Ok(OpenTradeWithAccount {
+                trade,
+                paper_account_name: r.account_name,
+            })
+        })
+        .collect()
+}
+
 /// Fetch all currently open trades joined with the paper account name.
 pub async fn list_open_with_account_name(
     pool: &PgPool,

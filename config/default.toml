@@ -76,14 +76,20 @@ params = { ma_short = 8, ma_long = 21, rsi_threshold = 75 }
 # experiment is "find what works" — accounts are isolated, blow-ups are
 # acceptable, iteration loop fast. See migrations/20260407000005 for the
 # full algorithm descriptions.
+#
+# NOTE on `params`: the new crypto strategies bake their tunables in as
+# `const` values inside the Rust source for now. The values listed below
+# document the intended tuning for each profile but are NOT consumed at
+# runtime — main.rs constructs the strategy structs without forwarding
+# `sc.params`. Wiring this through is a follow-up task once we know
+# which parameters actually need adjustment from experiment results.
 
 [[strategies]]
 name = "bb_mean_revert_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY"]
-# 慎重 (low risk). All numeric params are read in main.rs; the strategy
-# itself uses const defaults if a key is omitted.
+# 慎重 (low risk).
 params = { bb_period = 20, bb_stddev = 2.5, rsi_period = 14, atr_period = 14 }
 
 [[strategies]]

@@ -46,8 +46,10 @@ VALUES
 
 ## 利確（動的）
 - **Long / Short** とも価格が **SMA20（BB ミドル）に到達** したら決済
-- **RSI(14) が 50 を逆方向に超えた**ら戦略破綻と判断して即決済
-- **24 時間** 経過しても両条件未達なら強制決済（fail-safe）
+- **24 時間** 経過しても未達なら強制決済（fail-safe）
+
+なお invalidation は **SL に一任** している。レンジ離脱で価格が逆走した
+場合は SL が拾うので、別途 RSI ベースの早利確ロジックは持たない。
 
 ## 出典
 [Babypips Short-Term Bollinger Reversion](https://www.babypips.com/trading/system-rules-short-term-bollinger-reversion-strategy)
