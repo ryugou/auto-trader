@@ -49,6 +49,13 @@ async fn main() -> anyhow::Result<()> {
     let (signal_tx, mut signal_rx) = mpsc::channel::<SignalEvent>(256);
     let (trade_tx, mut trade_rx) = mpsc::channel::<TradeEvent>(256);
 
+    // Single source of truth for the timeframe used by each market monitor
+    // AND its corresponding strategy warmup loader. Sharing the same constant
+    // here prevents drift between live polling/streaming and warmup history.
+    const CRYPTO_TIMEFRAME: &str = "M5";
+    const FX_TIMEFRAME: &str = "M5";
+    const WARMUP_LIMIT: i64 = 200;
+
     // FX market monitor (optional — skipped if no FX pairs or OANDA_API_KEY not set)
     let fx_pairs: Vec<Pair> = if !config.pairs.active.is_empty() {
         config.pairs.active.iter().map(|s| Pair::new(s)).collect()
@@ -61,8 +68,14 @@ async fn main() -> anyhow::Result<()> {
                 let account_id = std::env::var("OANDA_ACCOUNT_ID")
                     .unwrap_or_else(|_| oanda_config.account_id.clone());
                 let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
-                Some(MarketMonitor::new(oanda, fx_pairs, config.monitor.interval_secs, price_tx.clone())
-                    .with_db(pool.clone()))
+                Some(MarketMonitor::new(
+                    oanda,
+                    fx_pairs,
+                    config.monitor.interval_secs,
+                    FX_TIMEFRAME,
+                    price_tx.clone(),
+                )
+                .with_db(pool.clone()))
             }
             _ => {
                 tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
@@ -208,14 +221,9 @@ async fn main() -> anyhow::Result<()> {
     // consumers from the same `Vec<Candle>` to keep indicator state and live
     // stream consistent.
     //
-    // NOTE: timeframe constants below MUST match what each monitor uses
-    // internally:
-    //  - BitflyerMonitor is constructed with "M5"
-    //  - MarketMonitor (Oanda) calls get_candles with "M5"
-    // If those change, update here too.
-    const CRYPTO_TIMEFRAME: &str = "M5";
-    const FX_TIMEFRAME: &str = "M5";
-    const WARMUP_LIMIT: i64 = 200;
+    // CRYPTO_TIMEFRAME / FX_TIMEFRAME / WARMUP_LIMIT are declared at the top
+    // of main() so the same value is used both here and when constructing
+    // the live monitors — preventing warmup/live drift.
 
     let crypto_pairs_for_warmup: Vec<Pair> = config
         .pairs
@@ -417,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| v.iter().map(|s| Pair::new(s)).collect())
             .unwrap_or_default();
         if !crypto_pairs.is_empty() {
-            let bf_monitor = auto_trader_market::bitflyer::BitflyerMonitor::new(
+            let mut bf_monitor = auto_trader_market::bitflyer::BitflyerMonitor::new(
                 &bf_config.ws_url,
                 crypto_pairs,
                 CRYPTO_TIMEFRAME,

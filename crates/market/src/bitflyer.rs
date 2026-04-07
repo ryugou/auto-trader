@@ -72,7 +72,7 @@ impl BitflyerMonitor {
         self
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut builders: HashMap<String, CandleBuilder> = HashMap::new();
         for pair in &self.pairs {
             builders.insert(
@@ -83,8 +83,9 @@ impl BitflyerMonitor {
         // Seed indicator state from caller-provided history (loaded once in
         // app composition layer alongside the strategy engine warmup) so we
         // don't have to wait ma_long_period × timeframe minutes after every
-        // restart before SMA/RSI can fire.
-        let mut closes_map: HashMap<String, Vec<Decimal>> = self.closes_seed.clone();
+        // restart before SMA/RSI can fire. Move the seed out instead of
+        // cloning so we don't keep a duplicate copy of every warmup vector.
+        let mut closes_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.closes_seed);
         for (pair, closes) in &closes_map {
             tracing::info!(
                 "bitflyer warmup: seeded {} {} closes for {}",

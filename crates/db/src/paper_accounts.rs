@@ -39,10 +39,17 @@ pub fn normalize_currency(currency: &str) -> String {
 /// callers may pass any casing — keeping the bypass surface area small.
 /// Defense-in-depth: the same rule is enforced by a CHECK constraint in
 /// the database (see `migrations/20260407000001_min_balance_constraint.sql`).
+///
+/// The error message is intentionally exchange-agnostic — this rule applies
+/// uniformly to every JPY-denominated paper account (FX, crypto, …). The
+/// 10,000 JPY floor was originally derived from bitFlyer Crypto CFD's
+/// 0.001 BTC minimum order size, but the same number is also a sensible
+/// minimum for FX paper accounts where leveraged tick moves can wipe out
+/// tiny balances within a single trade.
 pub fn validate_initial_balance(currency: &str, initial_balance: Decimal) -> Result<(), String> {
     if normalize_currency(currency) == "JPY" && initial_balance < MIN_INITIAL_BALANCE_JPY {
         return Err(format!(
-            "initial_balance must be at least {MIN_INITIAL_BALANCE_JPY} JPY (required to cover margin and a 10% loss budget at the bitFlyer 0.001 BTC minimum order size)"
+            "initial_balance must be at least {MIN_INITIAL_BALANCE_JPY} JPY (minimum required for JPY-denominated paper accounts to cover margin, trading losses, and a safety buffer)"
         ));
     }
     Ok(())

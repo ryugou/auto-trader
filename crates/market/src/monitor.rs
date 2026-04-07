@@ -12,6 +12,7 @@ pub struct MarketMonitor {
     client: OandaClient,
     pairs: Vec<Pair>,
     interval_secs: u64,
+    timeframe: String,
     tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
 }
@@ -21,9 +22,17 @@ impl MarketMonitor {
         client: OandaClient,
         pairs: Vec<Pair>,
         interval_secs: u64,
+        timeframe: &str,
         tx: mpsc::Sender<PriceEvent>,
     ) -> Self {
-        Self { client, pairs, interval_secs, tx, pool: None }
+        Self {
+            client,
+            pairs,
+            interval_secs,
+            timeframe: timeframe.to_string(),
+            tx,
+            pool: None,
+        }
     }
 
     pub fn with_db(mut self, pool: PgPool) -> Self {
@@ -51,7 +60,7 @@ impl MarketMonitor {
     }
 
     async fn fetch_and_emit(&self, pair: &Pair) -> anyhow::Result<()> {
-        let candles = self.client.get_candles(pair, "M5", 100).await?;
+        let candles = self.client.get_candles(pair, &self.timeframe, 100).await?;
         let latest = match candles.last() {
             Some(c) => c.clone(),
             None => return Ok(()),  // no complete candles
