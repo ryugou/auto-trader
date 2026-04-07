@@ -41,6 +41,11 @@ export function useStrategyCatalogQuery() {
     queryKey: ['strategies', 'all'],
     queryFn: () => api.strategies.list(),
     staleTime: 5 * 60 * 1000,
+    // Strategy catalog is quasi-static (only changes when a developer
+    // adds a new strategy + migration). Opt out of the global 15-second
+    // polling — cached data is treated as fresh for 5 minutes, after
+    // which TanStack Query will refetch on mount or window focus.
+    refetchInterval: false,
   })
 }
 
