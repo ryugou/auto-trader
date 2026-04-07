@@ -11,6 +11,7 @@ import type {
   UpdatePaperAccount,
   DashboardFilter,
   BalanceHistoryResponse,
+  Strategy,
 } from './types'
 
 const BASE = ''
@@ -87,5 +88,10 @@ export const api = {
     update: (id: string, data: UpdatePaperAccount) =>
       put<PaperAccount>(`/api/paper-accounts/${id}`, data),
     delete: (id: string) => del(`/api/paper-accounts/${id}`),
+  },
+  strategies: {
+    list: (category?: 'fx' | 'crypto') =>
+      get<Strategy[]>(`/api/strategies${category ? `?category=${category}` : ''}`),
+    get: (name: string) => get<Strategy>(`/api/strategies/${name}`),
   },
 }

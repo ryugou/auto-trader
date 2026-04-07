@@ -31,6 +31,17 @@ export interface UpdatePaperAccount {
   strategy?: string
 }
 
+export interface Strategy {
+  name: string
+  display_name: string
+  category: 'fx' | 'crypto'
+  description: string
+  algorithm: string
+  default_params: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
 export interface SummaryResponse {
   total_pnl: string
   net_pnl: string

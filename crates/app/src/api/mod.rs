@@ -2,6 +2,7 @@ mod accounts;
 mod dashboard;
 pub(crate) mod filters;
 mod positions;
+mod strategies;
 mod trades;
 
 use axum::extract::Request;
@@ -41,6 +42,8 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))
         .route("/trades", get(trades::list))
         .route("/positions", get(positions::list))
+        .route("/strategies", get(strategies::list))
+        .route("/strategies/{name}", get(strategies::get_one))
         .layer(middleware::from_fn(move |req, next| {
             let token = api_token.clone();
             auth_middleware(token, req, next)

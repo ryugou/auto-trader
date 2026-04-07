@@ -4,6 +4,7 @@ use auto_trader_db::paper_accounts::{
     self, normalize_currency, validate_initial_balance, CreatePaperAccount, PaperAccount,
     UpdatePaperAccount,
 };
+use auto_trader_db::strategies;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -108,6 +109,22 @@ pub async fn create(
     if let Err(msg) = validate_initial_balance(&req.currency, req.initial_balance) {
         return Err(ApiError(StatusCode::BAD_REQUEST, msg));
     }
+    // Reject unknown strategy names so a non-UI client can't store dangling
+    // references that the runtime cannot resolve. The catalog is the source
+    // of truth for what strategies are nameable; the engine still loads
+    // their actual logic from config/default.toml.
+    if !strategies::strategy_exists(&state.pool, &req.strategy)
+        .await
+        .map_err(ApiError::from)?
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "strategy '{}' not found in catalog (see GET /api/strategies)",
+                req.strategy
+            ),
+        ));
+    }
     paper_accounts::create_paper_account(&state.pool, &req)
         .await
         .map(|a| (StatusCode::CREATED, Json(a)))
@@ -119,6 +136,18 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdatePaperAccount>,
 ) -> Result<Json<PaperAccount>, ApiError> {
+    // If the caller is changing strategy, validate against the catalog for
+    // the same reason as create above.
+    if let Some(name) = req.strategy.as_deref()
+        && !strategies::strategy_exists(&state.pool, name)
+            .await
+            .map_err(ApiError::from)?
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("strategy '{name}' not found in catalog (see GET /api/strategies)"),
+        ));
+    }
     paper_accounts::update_paper_account(&state.pool, id, &req)
         .await
         .map_err(ApiError::from)?
