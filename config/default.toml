@@ -51,13 +51,6 @@ news_sources = [
 ]
 
 [[strategies]]
-name = "trend_follow_v1"
-enabled = true
-mode = "paper"
-pairs = ["USD_JPY"]
-params = { ma_short = 20, ma_long = 50, rsi_threshold = 70 }
-
-[[strategies]]
 name = "swing_llm_v1"
 enabled = false
 mode = "paper"
