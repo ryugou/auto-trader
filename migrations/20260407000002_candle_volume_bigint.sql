@@ -1,0 +1,18 @@
+-- Widen price_candles.volume from INTEGER to BIGINT.
+--
+-- Why: the application maps Postgres rows back to `Candle.volume:
+-- Option<u64>` via a `CandleRow.volume: Option<i64>` intermediate, and
+-- sqlx is strict about column type ↔ Rust type mapping on SELECT. With
+-- the column declared INTEGER (INT4), every `get_candles` call fails
+-- with "mismatched types: Rust type Option<i64> is not compatible with
+-- SQL type INT4". Inserts had been silently working because Postgres
+-- accepts the implicit INT8 → INT4 cast there.
+--
+-- This regressed visibly when the strategy warmup loader started
+-- calling `get_candles` from the production startup path; before that,
+-- `get_candles` was only used by the backtest crate, which never ran
+-- against the live DB.
+--
+-- BIGINT is also the correct width for trade-volume aggregates, which
+-- can exceed INT4 for high-volume crypto pairs.
+ALTER TABLE price_candles ALTER COLUMN volume TYPE BIGINT;
