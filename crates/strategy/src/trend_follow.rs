@@ -88,6 +88,7 @@ impl Strategy for TrendFollowV1 {
                 take_profit: entry + tp_pips,
                 confidence: 0.7,
                 timestamp: event.timestamp,
+                allocation_pct: rust_decimal_macros::dec!(0.5),
                 max_hold_until: None,
             })
         } else if death_cross && rsi > &(Decimal::from(100) - self.rsi_threshold) {
@@ -109,6 +110,7 @@ impl Strategy for TrendFollowV1 {
                 take_profit: entry - tp_pips,
                 confidence: 0.7,
                 timestamp: event.timestamp,
+                allocation_pct: rust_decimal_macros::dec!(0.5),
                 max_hold_until: None,
             })
         } else {

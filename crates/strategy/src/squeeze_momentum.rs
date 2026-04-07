@@ -47,8 +47,17 @@ const KC_ATR_MULT: Decimal = dec!(1.5);
 const ATR_PERIOD: usize = 14;
 const EMA_TRAIL_PERIOD: usize = 21;
 const SQUEEZE_BARS: usize = 6;
+/// Bars looked back for the historical-needed minimum (kept for the
+/// `len < needed + 2` guard even though SL is now flat-percentage).
 const SWING_LOOKBACK: usize = 5;
-const SL_MAX_PCT: Decimal = dec!(0.04); // 4% cap (30k account safety)
+/// Stop-loss as a flat percentage of entry price. Squeeze releases can
+/// whipsaw — give the trade enough room to survive a single bad bar.
+const SL_PCT: Decimal = dec!(0.04);
+/// Capital allocation per trade. Squeeze entries are rare and the
+/// "all-in shot" is the strategy's edge — commit 90 % when it fires,
+/// leaving a 10 % cushion against the next adverse move and exchange
+/// maintenance-margin slippage.
+const ALLOCATION_PCT: Decimal = dec!(0.90);
 const TIME_LIMIT_HOURS: i64 = 48;
 const HISTORY_LEN: usize = 200;
 
@@ -151,44 +160,37 @@ impl Strategy for SqueezeMomentumV1 {
         let mom_prev = closes[closes.len() - 2] - sma20_prev;
 
         let entry = event.candle.close;
-        // Recent N-bar swing extreme for the SL anchor.
-        let highs = Self::highs(history);
-        let lows = Self::lows(history);
-        let recent_low = lows[lows.len() - SWING_LOOKBACK..].iter().min().copied()?;
-        let recent_high = highs[highs.len() - SWING_LOOKBACK..].iter().max().copied()?;
+        let sl_offset = entry * SL_PCT;
 
         // Long: positive and rising momentum
         if mom_curr > Decimal::ZERO && mom_curr > mom_prev {
-            // SL = recent low, but capped at 4% from entry
-            let raw_distance = entry - recent_low;
-            let capped = raw_distance.min(entry * SL_MAX_PCT).max(entry * dec!(0.005));
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Long,
                 entry_price: entry,
-                stop_loss: entry - capped,
+                stop_loss: entry - sl_offset,
                 // Trailing exit handled in on_open_positions; fixed TP
                 // is parked far away.
                 take_profit: entry * dec!(1000),
                 confidence: 0.55,
                 timestamp: event.timestamp,
+                allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
         // Short: negative and falling momentum
         if mom_curr < Decimal::ZERO && mom_curr < mom_prev {
-            let raw_distance = recent_high - entry;
-            let capped = raw_distance.min(entry * SL_MAX_PCT).max(entry * dec!(0.005));
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Short,
                 entry_price: entry,
-                stop_loss: entry + capped,
+                stop_loss: entry + sl_offset,
                 take_profit: entry / dec!(1000),
                 confidence: 0.55,
                 timestamp: event.timestamp,
+                allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }

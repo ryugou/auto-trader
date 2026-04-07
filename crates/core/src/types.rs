@@ -108,12 +108,29 @@ pub struct Signal {
     pub take_profit: Decimal,
     pub confidence: f64,
     pub timestamp: DateTime<Utc>,
+    /// Fraction of leveraged account capacity the strategy wants to
+    /// commit to this trade. Must be in (0, 1].
+    ///
+    /// The sizer turns this into a quantity via
+    /// `floor((balance × leverage × allocation_pct / price) / min_lot)`.
+    /// `allocation_pct` is the **only** sizing knob the strategy gets;
+    /// chart-derived values (SL distance, ATR, …) intentionally do not
+    /// influence quantity, matching the layering "signal = chart,
+    /// execution = balance".
+    #[serde(default = "default_allocation_pct")]
+    pub allocation_pct: Decimal,
     /// Optional time-based fail-safe: position monitor will force-close
     /// the trade at this UTC time even if neither SL nor TP nor any
     /// strategy-driven exit has fired. Strategies use this to bound
     /// "stale" trades (e.g. mean-reversion 24h, vol-breakout 48h).
     #[serde(default)]
     pub max_hold_until: Option<DateTime<Utc>>,
+}
+
+fn default_allocation_pct() -> Decimal {
+    // Conservative default: half the account's capacity. Strategies
+    // SHOULD set their own value rather than rely on this.
+    rust_decimal::Decimal::new(5, 1) // 0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,11 +220,34 @@ mod tests {
             take_profit: dec!(151.00),
             confidence: 0.8,
             timestamp: Utc::now(),
+            allocation_pct: dec!(0.5),
             max_hold_until: None,
         };
         let json = serde_json::to_string(&signal).unwrap();
         let back: Signal = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pair, signal.pair);
         assert_eq!(back.direction, Direction::Long);
+    }
+
+    #[test]
+    fn signal_deserialize_without_allocation_pct_falls_back_to_default() {
+        // Backwards compatibility: a serialized Signal from before the
+        // allocation_pct field was added must still deserialize, with
+        // the field defaulting to 0.5 (the conservative half-allocation
+        // fallback).
+        let legacy_json = r#"{
+            "strategy_name": "legacy",
+            "pair": "USD_JPY",
+            "direction": "long",
+            "entry_price": "150.00",
+            "stop_loss": "149.50",
+            "take_profit": "151.00",
+            "confidence": 0.8,
+            "timestamp": "2024-01-01T00:00:00Z"
+        }"#;
+        let signal: Signal =
+            serde_json::from_str(legacy_json).expect("legacy Signal must deserialize");
+        assert_eq!(signal.allocation_pct, dec!(0.5));
+        assert!(signal.max_hold_until.is_none());
     }
 }

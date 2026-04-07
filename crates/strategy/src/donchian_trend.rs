@@ -40,8 +40,13 @@ const ENTRY_CHANNEL: usize = 20;
 const EXIT_CHANNEL: usize = 10;
 const ATR_PERIOD: usize = 14;
 const ATR_BASELINE_BARS: usize = 50;
-const SL_ATR_MULT: Decimal = dec!(2);
-const SL_MAX_PCT: Decimal = dec!(0.03); // 3% cap (30k account safety)
+/// Stop-loss as a flat percentage of entry price. Trend strategies want
+/// a slightly wider safety net than mean-reversion ones because the
+/// entry is on a momentum break and short-term retraces are normal.
+const SL_PCT: Decimal = dec!(0.03);
+/// Capital allocation per trade. Trend trades are infrequent but
+/// directionally strong, so we commit a meaningful 60 % of capacity.
+const ALLOCATION_PCT: Decimal = dec!(0.60);
 const HISTORY_LEN: usize = 200;
 
 pub struct DonchianTrendV1 {
@@ -162,8 +167,7 @@ impl Strategy for DonchianTrendV1 {
         }
 
         let entry = event.candle.close;
-        let raw_sl_distance = atr * SL_ATR_MULT;
-        let capped_sl_distance = raw_sl_distance.min(entry * SL_MAX_PCT);
+        let sl_offset = entry * SL_PCT;
 
         if entry > channel_high {
             return Some(Signal {
@@ -171,13 +175,14 @@ impl Strategy for DonchianTrendV1 {
                 pair: event.pair.clone(),
                 direction: Direction::Long,
                 entry_price: entry,
-                stop_loss: entry - capped_sl_distance,
+                stop_loss: entry - sl_offset,
                 // Trailing exit handled in on_open_positions; the fixed
                 // TP is parked far away so the SL/TP monitor never fires
                 // it (Turtle System has no fixed TP by design).
                 take_profit: entry * dec!(1000),
                 confidence: 0.6,
                 timestamp: event.timestamp,
+                allocation_pct: ALLOCATION_PCT,
                 max_hold_until: None,
             });
         }
@@ -187,10 +192,11 @@ impl Strategy for DonchianTrendV1 {
                 pair: event.pair.clone(),
                 direction: Direction::Short,
                 entry_price: entry,
-                stop_loss: entry + capped_sl_distance,
+                stop_loss: entry + sl_offset,
                 take_profit: entry / dec!(1000),
                 confidence: 0.6,
                 timestamp: event.timestamp,
+                allocation_pct: ALLOCATION_PCT,
                 max_hold_until: None,
             });
         }

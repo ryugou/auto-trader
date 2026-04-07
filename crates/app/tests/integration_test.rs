@@ -34,6 +34,7 @@ async fn channel_pipeline() {
         take_profit: dec!(151.00),
         confidence: 0.8,
         timestamp: Utc::now(),
+        allocation_pct: dec!(0.5),
         max_hold_until: None,
     };
 

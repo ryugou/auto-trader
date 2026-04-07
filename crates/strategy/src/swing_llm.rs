@@ -224,6 +224,7 @@ impl Strategy for SwingLLMv1 {
                     take_profit,
                     confidence,
                     timestamp: event.timestamp,
+                    allocation_pct: rust_decimal::Decimal::new(5, 1), // 0.5
                     max_hold_until: None,
                 })
             }
