@@ -34,6 +34,7 @@ async fn channel_pipeline() {
         take_profit: dec!(151.00),
         confidence: 0.8,
         timestamp: Utc::now(),
+        max_hold_until: None,
     };
 
     signal_tx.send(SignalEvent { signal: signal.clone() }).await.unwrap();

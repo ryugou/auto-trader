@@ -85,6 +85,17 @@ pub enum ExitReason {
     SlHit,
     Manual,
     SignalReverse,
+    /// Mean-reversion target reached (e.g. price returned to BB middle).
+    /// Strategy-driven exit emitted via `Strategy::on_open_positions`.
+    StrategyMeanReached,
+    /// Trailing channel break (e.g. Donchian opposite-side break).
+    StrategyTrailingChannel,
+    /// Trailing moving-average break (e.g. close beyond EMA(21)).
+    StrategyTrailingMa,
+    /// Indicator-based reversal (e.g. RSI crossed back through midline).
+    StrategyIndicatorReversal,
+    /// Time-based fail-safe — `max_hold_until` deadline reached.
+    StrategyTimeLimit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +108,12 @@ pub struct Signal {
     pub take_profit: Decimal,
     pub confidence: f64,
     pub timestamp: DateTime<Utc>,
+    /// Optional time-based fail-safe: position monitor will force-close
+    /// the trade at this UTC time even if neither SL nor TP nor any
+    /// strategy-driven exit has fired. Strategies use this to bound
+    /// "stale" trades (e.g. mean-reversion 24h, vol-breakout 48h).
+    #[serde(default)]
+    pub max_hold_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +138,9 @@ pub struct Trade {
     pub exit_reason: Option<ExitReason>,
     pub mode: TradeMode,
     pub status: TradeStatus,
+    /// Optional time-based fail-safe — see `Signal::max_hold_until`.
+    #[serde(default)]
+    pub max_hold_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +203,7 @@ mod tests {
             take_profit: dec!(151.00),
             confidence: 0.8,
             timestamp: Utc::now(),
+            max_hold_until: None,
         };
         let json = serde_json::to_string(&signal).unwrap();
         let back: Signal = serde_json::from_str(&json).unwrap();

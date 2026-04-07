@@ -186,11 +186,19 @@ export default function AccountForm({
                   ? '読み込み中…'
                   : '戦略を選択してください'}
               </option>
-              {strategyOptions.map((s) => (
-                <option key={s.name} value={s.name}>
-                  {s.display_name} ({s.name})
-                </option>
-              ))}
+              {strategyOptions.map((s) => {
+                const riskTag =
+                  s.risk_level === 'low'
+                    ? '[慎重]'
+                    : s.risk_level === 'high'
+                      ? '[攻め]'
+                      : '[標準]'
+                return (
+                  <option key={s.name} value={s.name}>
+                    {riskTag} {s.display_name} ({s.name})
+                  </option>
+                )
+              })}
               {/* Edit-mode safety: if the existing account references a
                   strategy that has since been removed from the catalog,
                   still show it so the user can re-select something else. */}

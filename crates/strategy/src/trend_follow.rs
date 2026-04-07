@@ -88,6 +88,7 @@ impl Strategy for TrendFollowV1 {
                 take_profit: entry + tp_pips,
                 confidence: 0.7,
                 timestamp: event.timestamp,
+                max_hold_until: None,
             })
         } else if death_cross && rsi > &(Decimal::from(100) - self.rsi_threshold) {
             let entry = event.candle.close;
@@ -108,6 +109,7 @@ impl Strategy for TrendFollowV1 {
                 take_profit: entry - tp_pips,
                 confidence: 0.7,
                 timestamp: event.timestamp,
+                max_hold_until: None,
             })
         } else {
             None

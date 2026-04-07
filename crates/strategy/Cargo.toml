@@ -9,12 +9,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 rust_decimal = { workspace = true }
+rust_decimal_macros = "1"
 auto-trader-market = { workspace = true }
 async-trait = { workspace = true }
 auto-trader-vegapunk = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = "1"

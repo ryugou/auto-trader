@@ -1,5 +1,7 @@
 use auto_trader_core::event::{PriceEvent, SignalEvent};
-use auto_trader_core::strategy::{MacroUpdate, Strategy};
+use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy};
+use auto_trader_core::types::Position;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 struct StrategySlot {
@@ -57,6 +59,46 @@ impl StrategyEngine {
                 tracing::error!("signal channel closed, dropping signal: {e}");
             }
         }
+    }
+
+    /// Dispatch a price event AND give every enabled strategy a chance to
+    /// inspect its open positions and emit dynamic exit signals (trailing
+    /// stops, indicator reversals, time limits, …).
+    ///
+    /// Caller passes `open_positions_by_strategy`, a map keyed by strategy
+    /// name. Strategies with no entry in the map are treated as having no
+    /// open positions for this tick. Strategies in `disabled` mode are
+    /// skipped entirely (entries and exits both).
+    ///
+    /// Returned ExitSignals are *not* pushed onto the entry signal
+    /// channel — they have a different shape (close vs open) and a
+    /// dedicated exit-executor task in `main.rs` consumes the returned
+    /// vec via its own channel.
+    pub async fn on_price_with_positions(
+        &mut self,
+        event: &PriceEvent,
+        open_positions_by_strategy: &HashMap<String, Vec<Position>>,
+    ) -> Vec<ExitSignal> {
+        let mut all_exits: Vec<ExitSignal> = Vec::new();
+        for slot in &mut self.slots {
+            if slot.mode == "disabled" {
+                continue;
+            }
+            // 1) New entry signal
+            if let Some(signal) = slot.strategy.on_price(event).await
+                && let Err(e) = self.signal_tx.send(SignalEvent { signal }).await
+            {
+                tracing::error!("signal channel closed, dropping signal: {e}");
+            }
+            // 2) Dynamic exit signals against this strategy's open positions
+            let positions = open_positions_by_strategy
+                .get(slot.strategy.name())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let exits = slot.strategy.on_open_positions(positions, event).await;
+            all_exits.extend(exits);
+        }
+        all_exits
     }
 
     /// Broadcast MacroUpdate to all strategies, including disabled ones.

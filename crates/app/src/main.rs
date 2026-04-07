@@ -209,6 +209,44 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
+            // New crypto strategies (2026-04 experiment).
+            // The strategy implementations carry their own parameter
+            // constants — config params are accepted for forward
+            // compatibility but currently not consumed (the values are
+            // baked in at the source for now).
+            name if name.starts_with("bb_mean_revert") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::bb_mean_revert::BbMeanRevertV1::new(
+                        sc.name.clone(),
+                        pairs,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
+            name if name.starts_with("donchian_trend") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::donchian_trend::DonchianTrendV1::new(
+                        sc.name.clone(),
+                        pairs,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
+            name if name.starts_with("squeeze_momentum") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::squeeze_momentum::SqueezeMomentumV1::new(
+                        sc.name.clone(),
+                        pairs,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
             other => {
                 tracing::warn!("unknown strategy: {other}, skipping");
             }
@@ -550,7 +588,17 @@ async fn main() -> anyhow::Result<()> {
                 let Some(account_id) = trade.paper_account_id else {
                     continue;
                 };
-                let exit_reason = match trade.direction {
+                // Time-based fail-safe — strategies that wrote a
+                // `max_hold_until` get force-closed at the current price
+                // when the wall clock passes the deadline. Tagged with
+                // the dedicated StrategyTimeLimit ExitReason so analytics
+                // can attribute these closes correctly.
+                let now = chrono::Utc::now();
+                let time_limit_hit = trade
+                    .max_hold_until
+                    .is_some_and(|deadline| now >= deadline);
+
+                let mut exit_reason = match trade.direction {
                     Direction::Long => {
                         if current_price <= trade.stop_loss {
                             Some(auto_trader_core::types::ExitReason::SlHit)
@@ -570,6 +618,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 };
+                if exit_reason.is_none() && time_limit_hit {
+                    exit_reason =
+                        Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
+                }
                 if let Some(reason) = exit_reason {
                     let exit_price = match reason {
                         auto_trader_core::types::ExitReason::SlHit => trade.stop_loss,
@@ -623,6 +675,20 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("crypto position monitor: price channel closed, stopping");
     });
 
+    // Channel for strategy-driven exit signals (trailing stops, indicator
+    // reversals, etc.) emitted from `Strategy::on_open_positions`. The
+    // strategy engine task pushes onto this channel and a dedicated
+    // executor task drains it. Buffer is small because exits per tick are
+    // bounded by the number of open positions.
+    //
+    // IMPORTANT: `exit_tx` is moved into the engine task below so that
+    // when the engine task exits (price channel closed) the sender drops
+    // and the executor task's `recv()` returns None, allowing graceful
+    // shutdown to complete inside the drain timeout.
+    let (exit_tx, mut exit_rx) =
+        mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
+    let engine_pool = pool.clone();
+
     // Task: Strategy engine (price -> signal) + forward to position monitors
     // Also receives macro updates from broadcast channel.
     // Design note: select! is unbiased here. Macro updates arrive at ~30min intervals,
@@ -646,7 +712,46 @@ async fn main() -> anyhow::Result<()> {
                             {
                                 tracing::warn!("crypto position monitor channel closed");
                             }
-                            engine.on_price(&event).await;
+
+                            // Build per-strategy open-position view from the
+                            // DB so strategies can decide trailing/indicator
+                            // exits. We use a per-pair query (filtered in
+                            // SQL by exchange/pair) so this stays cheap
+                            // as the open-trade table grows. The crypto
+                            // position monitor still does its own scan
+                            // for SL/TP — those run in different tasks
+                            // with different needs (per-strategy grouping
+                            // here, account-level joins there).
+                            let positions_by_strategy = match auto_trader_db::trades::list_open_with_account_name_for_pair(
+                                &engine_pool,
+                                event.exchange.as_str(),
+                                &event.pair.0,
+                            ).await {
+                                Ok(rows) => {
+                                    let mut by_strategy: std::collections::HashMap<String, Vec<auto_trader_core::types::Position>> =
+                                        std::collections::HashMap::new();
+                                    for r in rows {
+                                        by_strategy
+                                            .entry(r.trade.strategy_name.clone())
+                                            .or_default()
+                                            .push(auto_trader_core::types::Position { trade: r.trade });
+                                    }
+                                    by_strategy
+                                }
+                                Err(e) => {
+                                    tracing::warn!("engine: failed to list open trades for on_open_positions: {e}");
+                                    std::collections::HashMap::new()
+                                }
+                            };
+
+                            let exits = engine
+                                .on_price_with_positions(&event, &positions_by_strategy)
+                                .await;
+                            for exit in exits {
+                                if exit_tx.send(exit).await.is_err() {
+                                    tracing::warn!("exit channel closed, dropping strategy exit signal");
+                                }
+                            }
                         }
                         None => break, // price channel closed
                     }
@@ -661,6 +766,93 @@ async fn main() -> anyhow::Result<()> {
                             tracing::info!("macro broadcast channel closed");
                         }
                     }
+                }
+            }
+        }
+    });
+
+    // Task: Strategy-driven exit executor. Pulls ExitSignals from the
+    // engine task and force-closes the referenced trades via PaperTrader.
+    // The fixed SL/TP path in the crypto position monitor still runs
+    // independently — these two paths are complementary.
+    //
+    // After a successful close we ALSO push a TradeEvent::Closed onto
+    // `trade_tx` so the recorder task (daily_summary upsert + Vegapunk
+    // ingest) sees the close, just like SL/TP closes do. Without this
+    // forwarding, strategy-driven closes would silently disappear from
+    // the daily summary and the analytics dashboard.
+    let exit_pool = pool.clone();
+    let exit_trade_tx = trade_tx.clone();
+    let exit_executor_handle = tokio::spawn(async move {
+        while let Some(exit) = exit_rx.recv().await {
+            // Look up the trade so we know which account / pair to close
+            // against and at what price.
+            let trade = match auto_trader_db::trades::get_trade_by_id(&exit_pool, exit.trade_id).await {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    tracing::warn!("exit signal references missing trade {}", exit.trade_id);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("exit executor: failed to load trade {}: {e}", exit.trade_id);
+                    continue;
+                }
+            };
+            if trade.status != auto_trader_core::types::TradeStatus::Open {
+                // Already closed (e.g. SL/TP fired in the same tick from
+                // the position monitor). Nothing to do.
+                continue;
+            }
+            let Some(account_id) = trade.paper_account_id else {
+                tracing::warn!(
+                    "exit signal targets non-paper trade {} — strategy-driven exits only support paper accounts",
+                    trade.id
+                );
+                continue;
+            };
+            let trader = auto_trader_executor::paper::PaperTrader::new(
+                exit_pool.clone(),
+                trade.exchange,
+                account_id,
+            );
+            // Map the strategy-specific reason onto the ExitReason enum
+            // so the trade row carries true attribution
+            // (StrategyMeanReached / StrategyTrailingChannel / …) instead
+            // of being squashed to Manual.
+            let reason = exit.reason.to_exit_reason();
+            match trader
+                .close_position(&trade.id.to_string(), reason, exit.close_price)
+                .await
+            {
+                Ok(closed) => {
+                    tracing::info!(
+                        "strategy exit: {} {} {:?} reason={} entry={} exit={}",
+                        closed.strategy_name,
+                        closed.pair,
+                        closed.direction,
+                        exit.reason.as_tag(),
+                        closed.entry_price,
+                        closed.exit_price.unwrap_or_default()
+                    );
+                    // Forward to recorder so daily_summary / Vegapunk
+                    // ingest pick up this close just like SL/TP closes.
+                    let exit_price = closed.exit_price.unwrap_or(exit.close_price);
+                    if exit_trade_tx
+                        .send(auto_trader_core::event::TradeEvent {
+                            trade: closed,
+                            action: auto_trader_core::event::TradeAction::Closed {
+                                exit_price,
+                                exit_reason: reason,
+                            },
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("trade channel closed, strategy exit not recorded");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("strategy exit: failed to close trade {}: {e}", trade.id);
                 }
             }
         }
@@ -1017,6 +1209,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = engine_handle.await;
         let _ = pos_monitor_handle.await;
         let _ = crypto_monitor_handle.await;
+        let _ = exit_executor_handle.await;
         let _ = executor_handle.await;
         let _ = recorder_handle.await;
     }).await;

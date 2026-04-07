@@ -78,6 +78,7 @@ impl PaperTrader {
             exit_reason: None,
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
+            max_hold_until: signal.max_hold_until,
         };
         auto_trader_db::trades::insert_trade(&self.pool, &trade).await?;
         tracing::info!(
@@ -215,6 +216,7 @@ impl OrderExecutor for PaperTrader {
             exit_reason: None,
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
+            max_hold_until: signal.max_hold_until,
         };
         auto_trader_db::trades::insert_trade(&self.pool, &trade).await?;
         tracing::info!(
@@ -257,12 +259,13 @@ impl OrderExecutor for PaperTrader {
             fees: Decimal,
             paper_account_id: Option<Uuid>,
             entry_at: DateTime<Utc>,
+            max_hold_until: Option<DateTime<Utc>>,
         }
 
         let locked: Option<LockedTradeRow> = sqlx::query_as(
             r#"SELECT id, strategy_name, pair, exchange, direction, entry_price,
                       stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
-                      entry_at
+                      entry_at, max_hold_until
                FROM trades
                WHERE id = $1 AND paper_account_id = $2 AND status = 'open'
                FOR UPDATE"#,
@@ -380,6 +383,10 @@ impl OrderExecutor for PaperTrader {
             exit_reason: Some(exit_reason),
             mode: TradeMode::Paper,
             status: TradeStatus::Closed,
+            // close_position only re-builds the trade view in memory; the
+            // DB row's max_hold_until is preserved as-is and not relevant
+            // after close, so we read from the locked snapshot.
+            max_hold_until: locked.max_hold_until,
         };
 
         tracing::info!(

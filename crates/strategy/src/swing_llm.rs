@@ -224,6 +224,7 @@ impl Strategy for SwingLLMv1 {
                     take_profit,
                     confidence,
                     timestamp: event.timestamp,
+                    max_hold_until: None,
                 })
             }
             Ok(None) => None,
