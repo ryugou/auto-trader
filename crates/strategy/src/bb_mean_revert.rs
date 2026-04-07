@@ -12,9 +12,11 @@
 //!   a higher-high.
 //!
 //! ## Stop loss
-//! `max(0.5 × ATR(14), 0.5%)` distance from entry, but capped at 2% of
-//! entry price so 0.001 BTC × ~11M JPY positions stay sizable on a 30k
-//! JPY paper account.
+//! Flat **2 % from entry price** (`SL_PCT`). Mean-reversion entries
+//! are tight by design — if the reversion thesis fails, get out at -2 %.
+//! Sizing is decoupled from the SL distance via `allocation_pct` on
+//! the emitted Signal, so the SL value is purely a price level for
+//! the position monitor to enforce.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when price returns to SMA20 (BB middle).

@@ -43,8 +43,9 @@ impl PositionSizer {
     /// structurally too small to express even one minimum lot at this
     /// price under the requested allocation.
     ///
-    /// `allocation_pct` is clamped to (0, 1]. Values outside that range
-    /// are treated as bugs and rejected (returns None).
+    /// `allocation_pct` must be in (0, 1]. Values outside that range
+    /// are treated as bugs and rejected (returns None) — the sizer
+    /// does not silently clamp.
     pub fn calculate_quantity(
         &self,
         pair: &Pair,

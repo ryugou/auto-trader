@@ -16,8 +16,10 @@
 //! - **Short**: mirror — close < 20-bar low AND elevated ATR.
 //!
 //! ## Stop loss
-//! `2 × ATR(14)` from entry, capped at 3% of entry price for the 30k
-//! JPY paper account safety budget.
+//! Flat **3 % from entry price** (`SL_PCT`). Trend strategies want a
+//! slightly wider safety net than mean-reversion ones because the entry
+//! is on a momentum break and small retraces are normal. Sizing is
+//! independent of the SL distance — see `allocation_pct` on Signal.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when current close < prior 10-bar low.

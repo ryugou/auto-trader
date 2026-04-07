@@ -17,8 +17,10 @@
 //! - **Short**: squeeze fires AND momentum is negative AND decreased.
 //!
 //! ## Stop loss
-//! Most recent 5-bar swing low (long) or swing high (short), capped at
-//! 4% of entry price for 30k JPY paper account safety.
+//! Flat **4 % from entry price** (`SL_PCT`). Squeeze releases can
+//! whipsaw — give the trade enough room to survive a single bad bar.
+//! Sizing is independent of the SL distance — see `allocation_pct` on
+//! Signal.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when current close < EMA(21).
