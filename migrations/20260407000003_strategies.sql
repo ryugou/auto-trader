@@ -137,3 +137,8 @@ ALTER TABLE paper_accounts
     FOREIGN KEY (strategy) REFERENCES strategies(name)
     ON DELETE RESTRICT
     ON UPDATE CASCADE;
+
+-- Index the referencing column so the FK's RESTRICT check on parent
+-- updates/deletes — and any future "all accounts using strategy X" lookup
+-- — doesn't sequentially scan paper_accounts.
+CREATE INDEX paper_accounts_strategy_idx ON paper_accounts(strategy);
