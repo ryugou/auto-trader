@@ -71,6 +71,37 @@ mode = "paper"
 pairs = ["FX_BTC_JPY"]
 params = { ma_short = 8, ma_long = 21, rsi_threshold = 75 }
 
+# === New crypto strategies (2026-04 experiment) ===
+# Each runs on its own dedicated 30,000 JPY paper account so the
+# experiment is "find what works" — accounts are isolated, blow-ups are
+# acceptable, iteration loop fast. See migrations/20260407000005 for the
+# full algorithm descriptions.
+
+[[strategies]]
+name = "bb_mean_revert_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+# 慎重 (low risk). All numeric params are read in main.rs; the strategy
+# itself uses const defaults if a key is omitted.
+params = { bb_period = 20, bb_stddev = 2.5, rsi_period = 14, atr_period = 14 }
+
+[[strategies]]
+name = "donchian_trend_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+# 標準 (medium risk).
+params = { entry_channel = 20, exit_channel = 10, atr_period = 14, atr_baseline_bars = 50 }
+
+[[strategies]]
+name = "squeeze_momentum_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+# 攻め (high risk).
+params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 21, squeeze_bars = 6 }
+
 # Paper accounts are managed in the database (paper_accounts table).
 # Initial accounts are seeded by migration. Use the REST API to manage:
 #   GET    /api/paper-accounts

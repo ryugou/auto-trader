@@ -11,6 +11,10 @@ pub struct Strategy {
     pub name: String,
     pub display_name: String,
     pub category: String,
+    /// 'low' | 'medium' | 'high' — used by the UI to render a risk badge
+    /// next to the strategy name. Persisted via the
+    /// `strategies_risk_level_check` CHECK constraint.
+    pub risk_level: String,
     pub description: String,
     pub algorithm: String,
     pub default_params: serde_json::Value,
@@ -18,7 +22,7 @@ pub struct Strategy {
     pub updated_at: DateTime<Utc>,
 }
 
-const STRATEGY_COLUMNS: &str = "name, display_name, category, description, algorithm, default_params, created_at, updated_at";
+const STRATEGY_COLUMNS: &str = "name, display_name, category, risk_level, description, algorithm, default_params, created_at, updated_at";
 
 /// List all strategies in the catalog. Optionally filter by category
 /// (`fx` / `crypto`) so the account-creation UI can scope the dropdown to

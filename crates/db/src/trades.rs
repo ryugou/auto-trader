@@ -12,8 +12,8 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
            (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
             stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
             entry_at, exit_at, pnl_pips, pnl_amount,
-            exit_reason, mode, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"#,
+            exit_reason, mode, status, max_hold_until)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
     )
     .bind(trade.id)
     .bind(&trade.strategy_name)
@@ -40,6 +40,7 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
     }))
     .bind(serde_json::to_string(&trade.mode).unwrap_or_default().trim_matches('"'))
     .bind(serde_json::to_string(&trade.status).unwrap_or_default().trim_matches('"'))
+    .bind(trade.max_hold_until)
     .execute(pool)
     .await?;
     Ok(())
@@ -83,7 +84,7 @@ pub async fn get_open_trades(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at
+                  exit_reason, mode, status, created_at, max_hold_until
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
     )
@@ -103,7 +104,7 @@ pub async fn get_open_trades_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at
+                  exit_reason, mode, status, created_at, max_hold_until
            FROM trades
            WHERE paper_account_id = $1 AND status = 'open'
            ORDER BY entry_at ASC"#,
@@ -120,7 +121,7 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at
+                  exit_reason, mode, status, created_at, max_hold_until
            FROM trades
            WHERE id = $1"#,
     )
@@ -164,7 +165,7 @@ pub async fn list_open_with_account_name(
         r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
                   t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
-                  t.exit_reason, t.mode, t.status, t.created_at,
+                  t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
                   pa.name AS account_name
            FROM trades t
            LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
@@ -208,6 +209,7 @@ struct TradeRow {
     status: String,
     #[allow(dead_code)]
     created_at: DateTime<Utc>,
+    max_hold_until: Option<DateTime<Utc>>,
 }
 
 impl TryFrom<TradeRow> for Trade {
@@ -243,6 +245,11 @@ impl TryFrom<TradeRow> for Trade {
                 "sl_hit" => Ok(ExitReason::SlHit),
                 "manual" => Ok(ExitReason::Manual),
                 "signal_reverse" => Ok(ExitReason::SignalReverse),
+                "strategy_mean_reached" => Ok(ExitReason::StrategyMeanReached),
+                "strategy_trailing_channel" => Ok(ExitReason::StrategyTrailingChannel),
+                "strategy_trailing_ma" => Ok(ExitReason::StrategyTrailingMa),
+                "strategy_indicator_reversal" => Ok(ExitReason::StrategyIndicatorReversal),
+                "strategy_time_limit" => Ok(ExitReason::StrategyTimeLimit),
                 other => Err(anyhow::anyhow!("unknown exit_reason: {other}")),
             })
             .transpose()?;
@@ -267,6 +274,7 @@ impl TryFrom<TradeRow> for Trade {
             exit_reason,
             mode,
             status,
+            max_hold_until: r.max_hold_until,
         })
     }
 }
