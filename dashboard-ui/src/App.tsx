@@ -12,6 +12,13 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 30_000,
       retry: 1,
+      // Auto-refetch every 15 seconds while a query is mounted so the
+      // dashboard reflects new positions / fills / balance changes
+      // without the user having to hit reload. TanStack defaults to
+      // pausing this when the browser tab is in the background, so we
+      // don't burn CPU when nobody's watching.
+      refetchInterval: 15_000,
+      refetchOnWindowFocus: true,
     },
   },
 })

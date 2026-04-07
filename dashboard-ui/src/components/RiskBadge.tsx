@@ -41,6 +41,10 @@ export function useStrategyCatalogQuery() {
     queryKey: ['strategies', 'all'],
     queryFn: () => api.strategies.list(),
     staleTime: 5 * 60 * 1000,
+    // Strategy catalog is quasi-static (only changes when a developer
+    // adds a new strategy + migration). Opt out of the global 15-second
+    // polling — fresh data on mount + on-window-focus is enough.
+    refetchInterval: false,
   })
 }
 
