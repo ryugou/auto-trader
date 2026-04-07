@@ -17,8 +17,9 @@ const queryClient = new QueryClient({
       // without the user having to hit reload. TanStack defaults to
       // pausing this when the browser tab is in the background, so we
       // don't burn CPU when nobody's watching.
+      // (refetchOnWindowFocus is already the TanStack default — left
+      // implicit so the config matches the actual behavior.)
       refetchInterval: 15_000,
-      refetchOnWindowFocus: true,
     },
   },
 })
