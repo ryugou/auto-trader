@@ -117,6 +117,21 @@ impl Strategy for TrendFollowV1 {
     fn on_macro_update(&mut self, _update: &MacroUpdate) {
         // Short-term rule-based strategy ignores macro updates
     }
+
+    async fn warmup(&mut self, events: &[PriceEvent]) {
+        let max_len = self.ma_long_period + 2;
+        for event in events {
+            if !self.pairs.iter().any(|p| p == &event.pair) {
+                continue;
+            }
+            let key = event.pair.0.clone();
+            let history = self.price_history.entry(key).or_default();
+            history.push_back(event.candle.close);
+            while history.len() > max_len {
+                history.pop_front();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +232,55 @@ mod tests {
         assert!(signal.is_some(), "should emit Short signal on death cross with custom MA periods");
         let signal = signal.unwrap();
         assert_eq!(signal.direction, Direction::Short);
+    }
+
+    #[tokio::test]
+    async fn warmup_seeds_history_so_first_live_event_can_signal() {
+        // Without warmup, TrendFollowV1 needs ma_long+1 live events before
+        // it can fire — that's the entire problem warmup is meant to solve
+        // for FX strategies on restart.
+        let mut strat = TrendFollowV1::new(
+            "test".to_string(),
+            3,
+            5,
+            dec!(70),
+            vec![Pair::new("USD_JPY")],
+        );
+
+        let warmup: Vec<PriceEvent> = (0..6)
+            .map(|_| make_price_event("USD_JPY", dec!(150), HashMap::new()))
+            .collect();
+        strat.warmup(&warmup).await;
+
+        let mut indicators = HashMap::new();
+        indicators.insert("rsi_14".to_string(), dec!(50));
+        let live = make_price_event("USD_JPY", dec!(160), indicators);
+        let signal = strat.on_price(&live).await;
+        assert!(
+            signal.is_some(),
+            "warmup should populate history so first live event can fire"
+        );
+        assert_eq!(signal.unwrap().direction, Direction::Long);
+    }
+
+    #[tokio::test]
+    async fn warmup_filters_untracked_pairs() {
+        let mut strat = TrendFollowV1::new(
+            "test".to_string(),
+            3,
+            5,
+            dec!(70),
+            vec![Pair::new("USD_JPY")],
+        );
+        let warmup: Vec<PriceEvent> = (0..10)
+            .map(|_| make_price_event("EUR_USD", dec!(1.10), HashMap::new()))
+            .collect();
+        strat.warmup(&warmup).await;
+
+        // History for USD_JPY should still be empty → live event cannot fire
+        let mut indicators = HashMap::new();
+        indicators.insert("rsi_14".to_string(), dec!(50));
+        let live = make_price_event("USD_JPY", dec!(160), indicators);
+        assert!(strat.on_price(&live).await.is_none());
     }
 }
