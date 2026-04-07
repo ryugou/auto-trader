@@ -20,31 +20,41 @@
 
 BEGIN;
 
+-- We resolve account IDs via stable attributes (name / strategy)
+-- rather than hard-coded UUIDs. Earlier seed migrations used
+-- `ON CONFLICT (name) DO UPDATE` without touching `id`, so an
+-- environment that originally created these accounts via the REST
+-- API could legitimately have different UUIDs. Filtering by name +
+-- strategy makes the cleanup robust across all DB histories.
+
 -- 1. Drop trade history for the two retired accounts. We do not need
 --    to preserve these for analytics — the new 3 paper accounts are
 --    the active experiment.
 DELETE FROM trades
  WHERE paper_account_id IN (
-    'a0000000-0000-0000-0000-000000000001',
-    'a0000000-0000-0000-0000-000000000002'
+    SELECT id
+      FROM paper_accounts
+     WHERE name IN ('crypto_real', 'crypto_100k')
+        OR strategy = 'crypto_trend_v1'
  );
 
--- 2. Daily summary rows for those accounts.
+-- 2. Daily summary rows for those same accounts.
 DELETE FROM daily_summary
  WHERE paper_account_id IN (
-    'a0000000-0000-0000-0000-000000000001',
-    'a0000000-0000-0000-0000-000000000002'
+    SELECT id
+      FROM paper_accounts
+     WHERE name IN ('crypto_real', 'crypto_100k')
+        OR strategy = 'crypto_trend_v1'
  );
 
 -- 3. paper_account_events cascades on paper_accounts delete, so we
---    rely on that for cleanup. Just delete the accounts themselves.
+--    rely on that for cleanup. Delete the retired accounts directly
+--    using the same stable attributes.
 DELETE FROM paper_accounts
- WHERE id IN (
-    'a0000000-0000-0000-0000-000000000001',
-    'a0000000-0000-0000-0000-000000000002'
- );
+ WHERE name IN ('crypto_real', 'crypto_100k')
+    OR strategy = 'crypto_trend_v1';
 
--- 4. Catalog row. With both referencing accounts gone, the FK
+-- 4. Catalog row. With every referencing account gone, the FK
 --    paper_accounts.strategy → strategies(name) is no longer holding
 --    this row in place.
 DELETE FROM strategies WHERE name = 'crypto_trend_v1';
