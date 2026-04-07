@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import PageFilters, { type PageFilterValue } from '../components/PageFilters'
+import { RiskBadge, useStrategyRiskLookup } from '../components/RiskBadge'
 
 export default function Positions() {
   const queryClient = useQueryClient()
@@ -11,6 +12,7 @@ export default function Positions() {
     queryKey: ['positions'],
     queryFn: () => api.positions.list(),
   })
+  const lookupRisk = useStrategyRiskLookup()
 
   const handleReload = () => {
     queryClient.invalidateQueries({ queryKey: ['positions'] })
@@ -90,7 +92,12 @@ export default function Positions() {
                     key={p.trade_id}
                     className="border-b border-gray-800/50 hover:bg-gray-800/30"
                   >
-                    <td className="px-4 py-2">{p.strategy_name}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <RiskBadge riskLevel={lookupRisk(p.strategy_name)} />
+                        <span>{p.strategy_name}</span>
+                      </div>
+                    </td>
                     <td className="px-4 py-2">{p.pair}</td>
                     <td className="px-4 py-2 text-gray-300">{p.exchange}</td>
                     <td className="px-4 py-2">
