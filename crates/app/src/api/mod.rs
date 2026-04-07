@@ -2,6 +2,7 @@ mod accounts;
 mod dashboard;
 pub(crate) mod filters;
 mod positions;
+mod strategies;
 mod trades;
 
 use axum::extract::Request;
@@ -41,6 +42,8 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))
         .route("/trades", get(trades::list))
         .route("/positions", get(positions::list))
+        .route("/strategies", get(strategies::list))
+        .route("/strategies/{name}", get(strategies::get_one))
         .layer(middleware::from_fn(move |req, next| {
             let token = api_token.clone();
             auth_middleware(token, req, next)
@@ -99,10 +102,23 @@ impl From<anyhow::Error> for ApiError {
             if let Some(sqlx::Error::Database(pg_err)) = cause.downcast_ref::<sqlx::Error>() {
                 return match pg_err.code().as_deref() {
                     Some("23505") => ApiError(StatusCode::CONFLICT, "duplicate name".to_string()),
-                    Some("23503") => ApiError(
-                        StatusCode::CONFLICT,
-                        "account has related trades, cannot delete".to_string(),
-                    ),
+                    // FK violation. Disambiguate by constraint name so the
+                    // message reflects which relationship was violated:
+                    //  - paper_accounts_strategy_fk: catalog reference (400,
+                    //    user fixable by picking a valid strategy)
+                    //  - everything else (e.g. trades→paper_accounts): we
+                    //    treat it as a delete-blocked-by-children case
+                    Some("23503") => match pg_err.constraint() {
+                        Some("paper_accounts_strategy_fk") => ApiError(
+                            StatusCode::BAD_REQUEST,
+                            "strategy not found in catalog (see GET /api/strategies)"
+                                .to_string(),
+                        ),
+                        _ => ApiError(
+                            StatusCode::CONFLICT,
+                            "account has related trades, cannot delete".to_string(),
+                        ),
+                    },
                     _ => ApiError(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "database error".to_string(),

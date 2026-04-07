@@ -11,6 +11,7 @@ import type {
   UpdatePaperAccount,
   DashboardFilter,
   BalanceHistoryResponse,
+  Strategy,
 } from './types'
 
 const BASE = ''
@@ -87,5 +88,14 @@ export const api = {
     update: (id: string, data: UpdatePaperAccount) =>
       put<PaperAccount>(`/api/paper-accounts/${id}`, data),
     delete: (id: string) => del(`/api/paper-accounts/${id}`),
+  },
+  strategies: {
+    list: (category?: 'fx' | 'crypto') =>
+      get<Strategy[]>(`/api/strategies${category ? `?category=${category}` : ''}`),
+    // Strategy names can contain free-text characters auto-imported from
+    // historical paper_accounts rows (see migrations/20260407000003), so
+    // URL-encode the path segment to be safe.
+    get: (name: string) =>
+      get<Strategy>(`/api/strategies/${encodeURIComponent(name)}`),
   },
 }

@@ -215,6 +215,28 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Drift check: every strategy actually registered with the engine MUST
+    // exist in the catalog table so the UI dropdown / API validation are
+    // consistent with what the runtime can serve. Strategies present in the
+    // catalog but not registered are fine (the catalog can describe more
+    // than what's currently enabled in config).
+    match auto_trader_db::strategies::list_strategy_names(&pool).await {
+        Ok(catalog_names) => {
+            let catalog_set: std::collections::HashSet<&str> =
+                catalog_names.iter().map(|s| s.as_str()).collect();
+            for name in engine.registered_names() {
+                if !catalog_set.contains(name) {
+                    tracing::warn!(
+                        "strategy '{name}' is registered but missing from the strategies catalog table — UI dropdown and API validation will reject paper accounts that reference it. Add a row to the strategies table (see migrations/20260407000003_strategies.sql)."
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("strategy catalog drift check failed: {e}");
+        }
+    }
+
     // Warm up strategies and the bitflyer indicator cache from DB so they
     // don't sit cold for ma_long_period × timeframe minutes after every
     // restart. We load each (exchange, pair, timeframe) once and feed both

@@ -5,6 +5,7 @@ import Trades from './pages/Trades'
 import Analysis from './pages/Analysis'
 import Accounts from './pages/Accounts'
 import Positions from './pages/Positions'
+import Strategies from './pages/Strategies'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,6 +22,7 @@ const navItems = [
   { to: '/analysis', label: '分析' },
   { to: '/accounts', label: '口座' },
   { to: '/positions', label: 'ポジション' },
+  { to: '/strategies', label: '戦略' },
 ]
 
 function NavBar() {
@@ -66,6 +68,7 @@ function App() {
               <Route path="/analysis" element={<Analysis />} />
               <Route path="/accounts" element={<Accounts />} />
               <Route path="/positions" element={<Positions />} />
+              <Route path="/strategies" element={<Strategies />} />
             </Routes>
           </main>
         </div>

@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api/client'
 import type {
   CreatePaperAccount,
   PaperAccount,
@@ -27,6 +29,36 @@ export default function AccountForm({
   const [leverage, setLeverage] = useState(account?.leverage ?? '1')
   const [strategy, setStrategy] = useState(account?.strategy ?? '')
   const [currency, setCurrency] = useState(account?.currency ?? 'JPY')
+
+  // Strategy catalog (DB-managed). Filtered by exchange so the dropdown only
+  // shows strategies compatible with the selected exchange. The catalog is
+  // metadata only — the runtime engine still loads strategies from
+  // config/default.toml — but using a select prevents typos and gives the
+  // user a list of valid choices.
+  const exchangeCategory: 'fx' | 'crypto' =
+    exchange === 'oanda' ? 'fx' : 'crypto'
+  const strategiesQuery = useQuery({
+    queryKey: ['strategies', exchangeCategory],
+    queryFn: () => api.strategies.list(exchangeCategory),
+  })
+  const strategyOptions = useMemo(
+    () => strategiesQuery.data ?? [],
+    [strategiesQuery.data],
+  )
+
+  // When the user switches exchange in create mode, the previously selected
+  // strategy (e.g. crypto_trend_v1) may no longer exist for the new
+  // category. Clear it so the dropdown forces a re-pick instead of
+  // submitting an out-of-category value. Edit mode preserves the original
+  // exchange (the field is disabled), so this only fires for new accounts.
+  useEffect(() => {
+    if (isEdit) return
+    if (!strategy) return
+    if (strategiesQuery.isLoading) return
+    if (!strategyOptions.some((s) => s.name === strategy)) {
+      setStrategy('')
+    }
+  }, [isEdit, strategy, strategyOptions, strategiesQuery.isLoading])
   const [accountType, setAccountType] = useState<'paper' | 'live'>(
     (account?.account_type as 'paper' | 'live') ?? 'paper',
   )
@@ -142,14 +174,32 @@ export default function AccountForm({
           </div>
           <div>
             <label className={labelClass}>戦略</label>
-            <input
-              type="text"
+            <select
               value={strategy}
               onChange={(e) => setStrategy(e.target.value)}
               required
               className={inputClass}
-              placeholder="例: momentum_v1"
-            />
+              disabled={strategiesQuery.isLoading}
+            >
+              <option value="" disabled>
+                {strategiesQuery.isLoading
+                  ? '読み込み中…'
+                  : '戦略を選択してください'}
+              </option>
+              {strategyOptions.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.display_name} ({s.name})
+                </option>
+              ))}
+              {/* Edit-mode safety: if the existing account references a
+                  strategy that has since been removed from the catalog,
+                  still show it so the user can re-select something else. */}
+              {isEdit &&
+                strategy &&
+                !strategyOptions.some((s) => s.name === strategy) && (
+                  <option value={strategy}>{strategy} (未登録)</option>
+                )}
+            </select>
           </div>
           <div>
             <label className={labelClass}>通貨</label>
