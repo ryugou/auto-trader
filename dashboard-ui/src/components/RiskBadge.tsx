@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { Strategy } from '../api/types'
@@ -16,38 +17,50 @@ const RISK_CLASS: Record<Strategy['risk_level'], string> = {
 
 /**
  * Shared chip rendering the risk-level for a strategy. Renders nothing
- * when the strategy doesn't yet have a `risk_level` (e.g. because the
- * row is still loading or has been deleted from the catalog).
+ * when `riskLevel` is unavailable (e.g. because the catalog lookup is
+ * still loading or the strategy is not found in the lookup map).
  */
 export function RiskBadge({ riskLevel }: { riskLevel?: Strategy['risk_level'] }) {
   if (!riskLevel) return null
   return (
-    <span
-      className={`text-xs px-1.5 py-0.5 rounded ${RISK_CLASS[riskLevel]}`}
-    >
+    <span className={`text-xs px-1.5 py-0.5 rounded ${RISK_CLASS[riskLevel]}`}>
       {RISK_LABEL[riskLevel]}
     </span>
   )
 }
 
 /**
- * Hook returning a `(strategyName) => risk_level | undefined` lookup
- * function backed by the catalog. Components that need risk badges next
- * to many strategy names (positions table, accounts table) call this
- * once and pass the resolver into row renderers — single fetch per page,
- * O(1) lookups per row.
+ * Shared catalog query for the strategies table. Centralized so every
+ * consumer (Strategies catalog page, AccountForm dropdown via category
+ * filter, RiskBadge lookup, …) shares the same staleTime and queryKey
+ * shape — no surprise refetches due to inconsistent options on the same
+ * cache entry.
  */
-export function useStrategyRiskLookup(): (
-  name: string,
-) => Strategy['risk_level'] | undefined {
-  const { data } = useQuery({
+export function useStrategyCatalogQuery() {
+  return useQuery({
     queryKey: ['strategies', 'all'],
     queryFn: () => api.strategies.list(),
     staleTime: 5 * 60 * 1000,
   })
-  const map = new Map<string, Strategy['risk_level']>()
-  for (const s of data ?? []) {
-    map.set(s.name, s.risk_level)
-  }
-  return (name: string) => map.get(name)
+}
+
+/**
+ * Hook returning a `(strategyName) => risk_level | undefined` lookup
+ * function backed by the catalog. The lookup map and the resolver
+ * function are both memoized so they keep stable identities across
+ * re-renders — important when callers pass the resolver into row
+ * renderers that would otherwise re-render unnecessarily.
+ */
+export function useStrategyRiskLookup(): (
+  name: string,
+) => Strategy['risk_level'] | undefined {
+  const { data } = useStrategyCatalogQuery()
+  const map = useMemo(() => {
+    const m = new Map<string, Strategy['risk_level']>()
+    for (const s of data ?? []) {
+      m.set(s.name, s.risk_level)
+    }
+    return m
+  }, [data])
+  return useCallback((name: string) => map.get(name), [map])
 }
