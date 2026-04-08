@@ -23,6 +23,13 @@ export default function NotificationBell() {
       queryClient.invalidateQueries({ queryKey: ['notifications-unread-count'] })
       queryClient.invalidateQueries({ queryKey: ['notifications'] })
     },
+    onError: (err) => {
+      // We have no toast infrastructure. The unread-count query will
+      // self-correct on the next 15s poll, so the user-visible
+      // recovery is automatic — but a silent failure here would
+      // strand the next debugging session without a breadcrumb.
+      console.error('failed to mark notifications as read', err)
+    },
   })
 
   // Close the dropdown on any mousedown outside the container. Using
@@ -61,6 +68,8 @@ export default function NotificationBell() {
         type="button"
         onClick={toggle}
         aria-label="通知"
+        aria-expanded={open}
+        aria-haspopup="dialog"
         className="relative p-1.5 text-gray-400 hover:text-gray-100 rounded transition"
       >
         <svg
