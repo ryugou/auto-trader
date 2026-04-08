@@ -110,10 +110,13 @@
   }
   ```
 - 親 Trades.tsx が `useQuery(['accounts'])` で取得した口座を props で渡す（`TradeTable` 内で再取得しない）
-- `api.trades.list({ paper_account_id: account.id, from, to, page: '1', per_page: '10' })` を1回呼ぶ
-- ページング state およびページャー UI は削除
+- 内部に `page` state を持ち、`api.trades.list({ paper_account_id: account.id, from, to, page, per_page: '10' })` をページごとに呼ぶ
+- フッターに「前へ」「次へ」ボタンを追加（`totalPages > 1` のときのみ表示）
+- 期間フィルタ (`from`/`to`) 変更時は親側で `<TradeTable>` を `key={account.id + from + to}` で remount し、ページと展開状態をリセット（`useEffect` ベースのリセットではなく remount 戦略を採用）
+- リフェッチで `total` が縮んで `page > totalPages` になった場合、`useEffect` で `setPage(totalPages)` する自己補正を持つ
 - `columns` から `paper_account_id`（口座名表示） と `account_type`（種別）を削除
 - 見出し (`<header>`) を新設し、口座名 / 種別バッジ / 評価額 / 残高 / レバレッジを描画
+- `isError` 分岐でトレード取得失敗時に `トレード履歴の取得に失敗しました` を表示
 - 15秒オートリフレッシュ挙動は現状のダッシュボード既定（`refetchInterval` 等）に従う
 
 **`dashboard-ui/src/components/PageFilters.tsx`**
@@ -172,8 +175,8 @@ Trades.tsx
 
 ## 既存コードへの影響
 
-- `dashboard-ui/src/pages/Trades.tsx`: 大幅に書き換え
-- `dashboard-ui/src/components/TradeTable.tsx`: props 型変更、ページング削除、カラム削除、見出し追加
+- `dashboard-ui/src/pages/Trades.tsx`: 大幅に書き換え（期間フィルタのみ + 口座グルーピング + remount key 設計）
+- `dashboard-ui/src/components/TradeTable.tsx`: props 型変更、`口座`/`種別` カラム削除、見出し追加、per-table prev/next ページング追加、isError 分岐追加
 - `dashboard-ui/src/components/PageFilters.tsx`: 変更なし
 - 他ページ（Positions 等）: 影響なし
 

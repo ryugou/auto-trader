@@ -4,7 +4,7 @@
 
 **Goal:** Split the Trades page into one table per paper account, grouped by exchange (crypto first, then FX), with period filter only.
 
-**Architecture:** `Trades.tsx` orchestrates: fetches accounts, groups by exchange, renders one `<TradeTable>` per account. `TradeTable` is refactored from "filter-driven paginated table" into "single-account latest-10 table" that takes a `PaperAccount` directly and renders its own header (name / type badge / balances / leverage).
+**Architecture:** `Trades.tsx` orchestrates: fetches accounts, groups by exchange, renders one `<TradeTable>` per account (keyed on `account.id + from + to` so a period change remounts each child cleanly). `TradeTable` is refactored from "filter-driven paginated table" into "single-account paged table" that takes a `PaperAccount` directly, holds its own per-table page state with prev/next buttons, and renders its own header (name / type badge / balances / leverage).
 
 **Tech Stack:** React 19, TanStack Query v5, TanStack Table v8, Tailwind v4 (no frontend test framework — verification via `npm run lint` + `npm run build` + manual smoke test).
 
