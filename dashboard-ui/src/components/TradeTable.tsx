@@ -22,7 +22,12 @@ const col = createColumnHelper<TradeRow>()
 
 function formatDate(iso: string | null): string {
   if (!iso) return '-'
+  // Pin display to JST regardless of the viewer's local OS timezone.
+  // The trader runs on JST schedules (bitFlyer overnight fees fire at
+  // 04:30 JST etc.), so timestamps need to read as JST or they become
+  // confusing when accessing the dashboard from a non-JST machine.
   return new Date(iso).toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

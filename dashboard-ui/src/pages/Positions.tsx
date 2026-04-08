@@ -125,6 +125,10 @@ export default function Positions() {
                     </td>
                     <td className="px-4 py-2 text-gray-300">
                       {new Date(p.entry_at).toLocaleString('ja-JP', {
+                        // Pin to JST so the entry time matches what
+                        // the trader logs on the server (which is
+                        // also JST-scheduled).
+                        timeZone: 'Asia/Tokyo',
                         month: '2-digit',
                         day: '2-digit',
                         hour: '2-digit',
