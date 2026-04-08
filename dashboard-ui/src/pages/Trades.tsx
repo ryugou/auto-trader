@@ -77,7 +77,7 @@ export default function Trades() {
   const [period, setPeriod] = useState<string>('')
   const range = useMemo(() => periodToRange(period), [period])
 
-  const { data: accounts, isLoading } = useQuery({
+  const { data: accounts, isLoading, isError } = useQuery({
     queryKey: ['accounts'],
     queryFn: () => api.accounts.list(),
   })
@@ -114,6 +114,10 @@ export default function Trades() {
       {isLoading ? (
         <div className="bg-gray-900 rounded p-8 text-center text-gray-500">
           読み込み中...
+        </div>
+      ) : isError ? (
+        <div className="bg-gray-900 rounded p-8 text-center text-red-400">
+          口座一覧の取得に失敗しました
         </div>
       ) : groups.length === 0 ? (
         <div className="bg-gray-900 rounded p-8 text-center text-gray-500">

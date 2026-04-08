@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   useReactTable,
@@ -183,11 +183,21 @@ function buildColumns(
 const PER_PAGE = 10
 
 export default function TradeTable({ account, from, to }: TradeTableProps) {
+  const [page, setPage] = useState(1)
   // IDs of trades whose timeline is expanded. Plain Set instead of
   // TanStack's expanded-row API because each child needs its own
   // independent fetch and we want to avoid carrying the lazy-load
   // state through the table model.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  // When the user changes the period filter, the result set behind
+  // this table is replaced. Reset to page 1 and clear any expanded
+  // rows so a stale trade id from the previous filter window does
+  // not flash on top of the new data.
+  useEffect(() => {
+    setPage(1)
+    setExpanded(new Set())
+  }, [from, to])
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => {
@@ -203,17 +213,30 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
     [expanded],
   )
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['trades', { accountId: account.id, from, to }],
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['trades', { accountId: account.id, from, to, page }],
     queryFn: () =>
       api.trades.list({
         paper_account_id: account.id,
         from,
         to,
-        page: '1',
+        page: String(page),
         per_page: String(PER_PAGE),
       }),
   })
+
+  const total = data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / PER_PAGE))
+  const rangeStart = total === 0 ? 0 : (page - 1) * PER_PAGE + 1
+  const rangeEnd = Math.min(page * PER_PAGE, total)
+
+  // Going to a new page is conceptually the same as switching the
+  // data window — drop any open timelines so a stale row id from the
+  // previous page cannot leak into the new render.
+  const goToPage = (next: number) => {
+    setPage(next)
+    setExpanded(new Set())
+  }
 
   // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
@@ -286,6 +309,12 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
                   読み込み中...
                 </td>
               </tr>
+            ) : isError ? (
+              <tr>
+                <td colSpan={columns.length} className="px-3 py-8 text-center text-red-400">
+                  トレード履歴の取得に失敗しました
+                </td>
+              </tr>
             ) : table.getRowModel().rows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length} className="px-3 py-8 text-center text-gray-500">
@@ -324,6 +353,35 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
           </tbody>
         </table>
       </div>
+
+      {/* Per-table prev/next pager. Hidden when there is only one
+          page of data so empty / very-quiet accounts don't carry a
+          purely decorative footer. */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between gap-2 px-4 py-2 border-t border-gray-800 text-xs text-gray-400">
+          <span>
+            {total} 件中 {rangeStart}-{rangeEnd} 件
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => goToPage(Math.max(1, page - 1))}
+              disabled={page <= 1}
+              className="px-3 py-1 bg-gray-800 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              前へ
+            </button>
+            <button
+              type="button"
+              onClick={() => goToPage(Math.min(totalPages, page + 1))}
+              disabled={page >= totalPages}
+              className="px-3 py-1 bg-gray-800 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              次へ
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
