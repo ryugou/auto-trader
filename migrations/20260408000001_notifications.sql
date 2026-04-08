@@ -27,4 +27,12 @@ CREATE TABLE notifications (
 );
 
 CREATE INDEX idx_notifications_created_at ON notifications (created_at DESC);
+-- Two complementary partial indexes on `read_at`:
+--  - the unread one supports the bell badge `WHERE read_at IS NULL`
+--    count and the `unread_only=true` list filter
+--  - the read one supports the daily `purge_old_read` query, which
+--    runs `WHERE read_at IS NOT NULL AND read_at < NOW() - INTERVAL
+--    '30 days'`. Without this index the purge would full-scan the
+--    table once a day and the cost grows linearly with history.
 CREATE INDEX idx_notifications_unread ON notifications (read_at) WHERE read_at IS NULL;
+CREATE INDEX idx_notifications_read_at ON notifications (read_at) WHERE read_at IS NOT NULL;

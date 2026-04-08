@@ -5,24 +5,22 @@ import type { Notification } from '../api/types'
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 
-function jstDateString(date: Date): string {
-  return new Date(date.getTime() + JST_OFFSET_MS).toISOString().slice(0, 10)
-}
-
 function periodToRange(period: string): { from?: string; to?: string } {
   if (!period) return {}
-  const now = new Date()
-  const to = jstDateString(now)
+  // Build a JST-anchored Date by shifting +9h, then do all date math
+  // on its UTC fields. This keeps the calendar arithmetic in JST so
+  // crossing JST midnight does not bleed an extra day off the front
+  // of "1w" / "1m" the way subtracting from a UTC-anchored Date did.
+  const nowJst = new Date(Date.now() + JST_OFFSET_MS)
+  const to = nowJst.toISOString().slice(0, 10)
   if (period === 'today') return { from: to, to }
   if (period === '1w') {
-    const d = new Date(now)
-    d.setUTCDate(d.getUTCDate() - 7)
-    return { from: jstDateString(d), to }
+    nowJst.setUTCDate(nowJst.getUTCDate() - 7)
+    return { from: nowJst.toISOString().slice(0, 10), to }
   }
   if (period === '1m') {
-    const d = new Date(now)
-    d.setUTCMonth(d.getUTCMonth() - 1)
-    return { from: jstDateString(d), to }
+    nowJst.setUTCMonth(nowJst.getUTCMonth() - 1)
+    return { from: nowJst.toISOString().slice(0, 10), to }
   }
   return {}
 }

@@ -69,7 +69,10 @@ export default function NotificationBell() {
         onClick={toggle}
         aria-label="通知"
         aria-expanded={open}
-        aria-haspopup="dialog"
+        // Intentionally no `aria-haspopup`. The dropdown is a simple
+        // popover (no focus trap, no menu navigation, items are
+        // non-interactive) so claiming "dialog" or "menu" would lie
+        // to assistive tech. `aria-expanded` alone is sufficient.
         className="relative p-1.5 text-gray-400 hover:text-gray-100 rounded transition"
       >
         <svg
