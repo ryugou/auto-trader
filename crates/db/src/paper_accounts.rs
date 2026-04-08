@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -130,6 +130,20 @@ pub async fn create_paper_account(
         anyhow::bail!(msg);
     }
 
+    // JPY balances are integer-only throughout the system (see
+    // PaperTrader::truncate_yen and migration 20260407000009). Truncate
+    // here at the create boundary so a freshly opened account never
+    // starts with fractional yen — the API layer should typically pass
+    // an integer already, but we don't want to rely on every caller
+    // remembering. Non-JPY currencies are passed through unchanged
+    // because their precision contract isn't yen-integer.
+    let initial_balance = if currency == "JPY" {
+        req.initial_balance
+            .round_dp_with_strategy(0, RoundingStrategy::ToZero)
+    } else {
+        req.initial_balance
+    };
+
     let id = Uuid::new_v4();
     let sql = format!(
         r#"INSERT INTO paper_accounts (id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, account_type)
@@ -140,7 +154,7 @@ pub async fn create_paper_account(
         .bind(id)
         .bind(&req.name)
         .bind(&req.exchange)
-        .bind(req.initial_balance)
+        .bind(initial_balance)
         .bind(&currency)
         .bind(req.leverage)
         .bind(&req.strategy)

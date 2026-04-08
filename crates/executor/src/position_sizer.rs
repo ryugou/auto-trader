@@ -196,16 +196,16 @@ mod tests {
     #[test]
     fn the_30k_donchian_case_now_succeeds() {
         // The original bug: 30k account, BTC ~11M, donchian fires.
-        // With 60% allocation (the standard profile), we get:
-        //   30000 × 2 × 0.6 / 11042347 ≈ 0.003259
-        //   truncated to 0.003 BTC
+        // With 100% allocation (the current 標準 profile), we get:
+        //   30000 × 2 × 1.0 / 11042347 ≈ 0.005434
+        //   truncated to 0.005 BTC
         let qty = btc_sizer().calculate_quantity(
             &Pair::new("FX_BTC_JPY"),
             dec!(30000),
             dec!(11042347),
             dec!(2),
-            dec!(0.6),
+            dec!(1.0),
         );
-        assert_eq!(qty, Some(dec!(0.003)));
+        assert_eq!(qty, Some(dec!(0.005)));
     }
 }

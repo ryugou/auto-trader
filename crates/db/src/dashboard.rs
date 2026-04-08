@@ -320,7 +320,19 @@ pub async fn get_trades(
     Ok((rows, total.0))
 }
 
-/// Evaluate a paper account's balance including unrealized P&L from open positions.
+/// Evaluate a paper account's balance.
+///
+/// After the margin-lock accounting change, `paper_accounts.current_balance`
+/// only stores **free cash**. The "total equity" view that the dashboard
+/// shows as `evaluated_balance` therefore needs to add back:
+///
+///   - `locked_margin`: the sum of `quantity × entry_price / leverage`
+///     across all currently open crypto trades on this account
+///   - `unrealized_pnl`: mark-to-market gain/loss vs the latest candle
+///
+/// FX trades have `quantity = NULL` and never had margin deducted, so
+/// they contribute 0 to `locked_margin` and the legacy unrealized PnL
+/// formula (`price_diff * leverage`) still applies.
 pub async fn get_evaluated_balance(
     pool: &PgPool,
     paper_account_id: Uuid,
@@ -334,28 +346,60 @@ pub async fn get_evaluated_balance(
            open_pnl AS (
                -- For crypto (quantity is set): PnL = price_diff * quantity
                -- For FX (quantity is NULL): PnL = price_diff * leverage (matches close_position)
+               --
+               -- TRUNC is applied **per row** (not on the SUM) so that
+               -- the dashboard view matches what `close_position` would
+               -- write to the ledger if every open trade closed at its
+               -- current mark price. SUM(TRUNC(...)) ≠ TRUNC(SUM(...))
+               -- on multi-position accounts (two +0.6 yen positions
+               -- should display 0, not 1).
                SELECT
                    t.paper_account_id,
                    SUM(
-                       CASE WHEN t.direction = 'long'
-                           THEN (COALESCE(lp.close, t.entry_price) - t.entry_price)
-                                * COALESCE(t.quantity, t.leverage)
-                           ELSE (t.entry_price - COALESCE(lp.close, t.entry_price))
-                                * COALESCE(t.quantity, t.leverage)
-                       END
+                       TRUNC(
+                           CASE WHEN t.direction = 'long'
+                               THEN (COALESCE(lp.close, t.entry_price) - t.entry_price)
+                                    * COALESCE(t.quantity, t.leverage)
+                               ELSE (t.entry_price - COALESCE(lp.close, t.entry_price))
+                                    * COALESCE(t.quantity, t.leverage)
+                           END
+                       )
                    ) AS unrealized_pnl
                FROM trades t
                LEFT JOIN latest_prices lp
                    ON lp.pair = t.pair AND lp.exchange = t.exchange
                WHERE t.status = 'open' AND t.paper_account_id = $1
                GROUP BY t.paper_account_id
+           ),
+           locked AS (
+               SELECT
+                   t.paper_account_id,
+                   -- Must match PaperTrader::execute_with_quantity's
+                   -- truncate_yen on margin; otherwise the dashboard
+                   -- locked-margin view drifts 1 yen per open position.
+                   SUM(TRUNC(t.quantity * t.entry_price / t.leverage)) AS locked_margin
+               FROM trades t
+               WHERE t.status = 'open'
+                 AND t.paper_account_id = $1
+                 AND t.quantity IS NOT NULL
+                 AND t.leverage > 0
+               GROUP BY t.paper_account_id
            )
            SELECT
                pa.current_balance,
+               -- All three components are already integer-yen
+               -- (current_balance via truncate_yen on every write,
+               -- locked_margin via per-row TRUNC, unrealized_pnl via
+               -- per-row TRUNC inside open_pnl). The sum is therefore
+               -- exact and the displayed parts always reconcile with
+               -- the displayed total.
                COALESCE(op.unrealized_pnl, 0) AS unrealized_pnl,
-               pa.current_balance + COALESCE(op.unrealized_pnl, 0) AS evaluated_balance
+               pa.current_balance
+                   + COALESCE(lm.locked_margin, 0)
+                   + COALESCE(op.unrealized_pnl, 0) AS evaluated_balance
            FROM paper_accounts pa
            LEFT JOIN open_pnl op ON op.paper_account_id = pa.id
+           LEFT JOIN locked    lm ON lm.paper_account_id = pa.id
            WHERE pa.id = $1"#,
     )
     .bind(paper_account_id)

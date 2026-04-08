@@ -138,16 +138,16 @@ interval_secs = 60
 active = ["USD_JPY"]
 
 [[strategies]]
-name = "trend_follow_v1"
-enabled = true
+name = "swing_llm_v1"
+enabled = false
 mode = "paper"
 pairs = ["USD_JPY"]
-params = { ma_short = 20, ma_long = 50 }
+params = { holding_days_max = 14 }
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.oanda.as_ref().unwrap().api_url, "https://api-fxpractice.oanda.com");
         assert_eq!(config.strategies.len(), 1);
-        assert_eq!(config.strategies[0].name, "trend_follow_v1");
+        assert_eq!(config.strategies[0].name, "swing_llm_v1");
         assert_eq!(config.pairs.active, vec!["USD_JPY"]);
     }
 
@@ -187,12 +187,6 @@ min_order_size = 1
 [position_sizing]
 method = "risk_based"
 risk_rate = 0.02
-
-[[strategies]]
-name = "trend_follow_v1"
-enabled = true
-mode = "paper"
-pairs = ["USD_JPY"]
 
 [[strategies]]
 name = "donchian_trend_v1"

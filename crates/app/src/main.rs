@@ -10,7 +10,6 @@ use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
 use auto_trader_strategy::engine::StrategyEngine;
-use auto_trader_strategy::trend_follow::TrendFollowV1;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -87,11 +86,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Warn if FX strategies are enabled but FX monitor is not running
+    // Warn if FX strategies are enabled but FX monitor is not running.
+    // The only remaining FX strategy in this repo is swing_llm_v1.
     if fx_monitor.is_none() {
-        let has_fx_strategy = config.strategies.iter().any(|s| {
-            s.enabled && (s.name.starts_with("trend_follow") || s.name.starts_with("swing_llm"))
-        });
+        let has_fx_strategy = config
+            .strategies
+            .iter()
+            .any(|s| s.enabled && s.name.starts_with("swing_llm"));
         if has_fx_strategy {
             tracing::warn!(
                 "FX strategies are enabled but FX monitor is not running (OANDA not configured). \
@@ -124,26 +125,6 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         match sc.name.as_str() {
-            name if name.starts_with("trend_follow") => {
-                let ma_short = sc.params.get("ma_short")
-                    .and_then(|v| v.as_integer()).unwrap_or(20) as usize;
-                let ma_long = sc.params.get("ma_long")
-                    .and_then(|v| v.as_integer()).unwrap_or(50) as usize;
-                let rsi_thresh = sc.params.get("rsi_threshold")
-                    .and_then(|v| v.as_integer()).unwrap_or(70);
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                engine.add_strategy(
-                    Box::new(TrendFollowV1::new(
-                        sc.name.clone(),
-                        ma_short,
-                        ma_long,
-                        Decimal::from(rsi_thresh),
-                        pairs,
-                    )),
-                    sc.mode.clone(),
-                );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
-            }
             name if name.starts_with("swing_llm") => {
                 let holding_days_max = sc.params.get("holding_days_max")
                     .and_then(|v| v.as_integer()).unwrap_or(14) as u32;

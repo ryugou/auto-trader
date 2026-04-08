@@ -47,8 +47,11 @@ const ATR_BASELINE_BARS: usize = 50;
 /// entry is on a momentum break and short-term retraces are normal.
 const SL_PCT: Decimal = dec!(0.03);
 /// Capital allocation per trade. Trend trades are infrequent but
-/// directionally strong, so we commit a meaningful 60 % of capacity.
-const ALLOCATION_PCT: Decimal = dec!(0.60);
+/// directionally strong, and this strategy has its own dedicated paper
+/// account — leaving cash idle is pure waste. 100 % is safe at 2×
+/// leverage + a 3 % SL: the SL fires before the maintenance-margin
+/// threshold and the exchange can't auto-liquidate first.
+const ALLOCATION_PCT: Decimal = dec!(1.00);
 const HISTORY_LEN: usize = 200;
 
 pub struct DonchianTrendV1 {
@@ -387,7 +390,7 @@ mod tests {
         );
         // First push the drop into history
         let _ = s.on_price(&drop).await;
-        let exits = s.on_open_positions(&[pos.clone()], &drop).await;
+        let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
         assert_eq!(exits.len(), 1, "expected trailing channel exit");
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
         assert_eq!(exits[0].close_price, dec!(10500000));
