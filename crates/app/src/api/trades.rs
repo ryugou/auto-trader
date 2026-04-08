@@ -1,9 +1,12 @@
 use super::{ApiError, AppState};
 use crate::api::filters::TradeFilter;
 use auto_trader_db::dashboard::{self, TradeRow};
-use axum::extract::{Query, State};
+use auto_trader_db::trades::{self as trades_db, TradeEvent};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct TradesResponse {
@@ -39,4 +42,23 @@ pub async fn list(
         page,
         per_page,
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct TradeEventsResponse {
+    pub events: Vec<TradeEvent>,
+}
+
+/// `GET /api/trades/{id}/events` — return the chronological event
+/// timeline (OPEN → overnight fees → CLOSE) for a single trade. Used
+/// by the trade-history table's expandable row.
+pub async fn events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<TradeEventsResponse>, ApiError> {
+    let events = trades_db::get_trade_events(&state.pool, id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "trade not found".to_string()))?;
+    Ok(Json(TradeEventsResponse { events }))
 }

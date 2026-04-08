@@ -160,6 +160,180 @@ pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Re
     Ok(())
 }
 
+/// Discriminator for `TradeEvent` rows. Modeled as a typed enum (rather
+/// than a free string) so that adding a new event kind is a compile-time
+/// change in both Rust and any TS client generated from this schema, and
+/// so typos cannot reach the wire.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeEventKind {
+    Open,
+    OvernightFee,
+    Close,
+}
+
+/// One entry in a single trade's chronological event timeline (used by
+/// the dashboard "trade detail" expandable row). Synthesized from the
+/// `trades` row + any matching `paper_account_events` so that the
+/// timeline is consistent regardless of when the trade was opened —
+/// pre-margin-lock-contract trades and FX trades simply have no
+/// `margin_lock` / `margin_release` rows in `paper_account_events`,
+/// but the OPEN/CLOSE entries below are still synthesized from the
+/// `trades` row, so the UI always has a complete picture.
+#[derive(Debug, serde::Serialize)]
+pub struct TradeEvent {
+    pub kind: TradeEventKind,
+    pub occurred_at: DateTime<Utc>,
+    /// Mark price at the moment of the event (entry/exit). NULL for
+    /// non-price events such as `overnight_fee`.
+    pub price: Option<Decimal>,
+    /// Position size in base units. Only set for OPEN/CLOSE.
+    pub quantity: Option<Decimal>,
+    /// Direction (`long` / `short`). Only set for OPEN/CLOSE so the UI
+    /// can label which way the position was facing.
+    pub direction: Option<String>,
+    /// Cash delta to the paper account from this event. OPEN is
+    /// `-margin` (locked), `overnight_fee` is `-fee`, and CLOSE is
+    /// `+margin` (released) + `pnl_amount` (realized PnL).
+    ///
+    /// For trades that predate the margin-lock contract (no
+    /// `margin_lock` event row in `paper_account_events`), the OPEN
+    /// `cash_delta` is `None` to indicate "unknown" rather than 0,
+    /// because we can't tell from the trade row alone whether margin
+    /// was deducted or not. CLOSE for those trades just shows
+    /// `pnl_amount` (no margin refund leg) for the same reason.
+    pub cash_delta: Option<Decimal>,
+    /// PnL realized at this event. Only set for CLOSE.
+    pub pnl_amount: Option<Decimal>,
+}
+
+/// Build the event timeline for a single trade. Returns events ordered
+/// chronologically (OPEN → overnight fees → CLOSE). For an open trade
+/// the CLOSE entry is omitted; the most recent overnight fee is the
+/// last row.
+pub async fn get_trade_events(
+    pool: &PgPool,
+    trade_id: Uuid,
+) -> anyhow::Result<Option<Vec<TradeEvent>>> {
+    let Some(trade) = get_trade_by_id(pool, trade_id).await? else {
+        return Ok(None);
+    };
+
+    // Look up any margin_lock / margin_release / overnight_fee events
+    // that reference this trade. These are only present for paper
+    // crypto trades opened after the margin-lock contract shipped; we
+    // tolerate their absence and synthesize OPEN/CLOSE from the trade
+    // row anyway so the timeline is never empty.
+    #[derive(sqlx::FromRow)]
+    struct EventRow {
+        event_type: String,
+        amount: Decimal,
+        occurred_at: DateTime<Utc>,
+    }
+    let event_rows: Vec<EventRow> = sqlx::query_as(
+        r#"SELECT event_type, amount, occurred_at
+           FROM paper_account_events
+           WHERE reference_id = $1
+           ORDER BY occurred_at ASC, id ASC"#,
+    )
+    .bind(trade_id)
+    .fetch_all(pool)
+    .await?;
+
+    let direction = match trade.direction {
+        Direction::Long => "long",
+        Direction::Short => "short",
+    };
+
+    let margin_lock_amount = event_rows
+        .iter()
+        .find(|r| r.event_type == "margin_lock")
+        .map(|r| r.amount);
+    let margin_release_amount = event_rows
+        .iter()
+        .find(|r| r.event_type == "margin_release")
+        .map(|r| r.amount);
+    // Source of truth for the realized PnL leg: prefer the
+    // `trade_close` ledger row when present (that's what
+    // PaperTrader::close_position writes and what
+    // get_balance_history reconstructs from), and fall back to
+    // `trades.pnl_amount` only when the ledger row is missing
+    // (e.g. trades imported before the events table existed).
+    // If the two diverge for the same trade we trust the ledger
+    // and emit a warning so the discrepancy is at least visible.
+    let trade_close_amount = event_rows
+        .iter()
+        .find(|r| r.event_type == "trade_close")
+        .map(|r| r.amount);
+    if let (Some(ledger), Some(field)) = (trade_close_amount, trade.pnl_amount)
+        && ledger != field
+    {
+        tracing::warn!(
+            "trade {}: trade_close ledger amount {} != trades.pnl_amount {}; using ledger",
+            trade_id,
+            ledger,
+            field
+        );
+    }
+    let realized_pnl = trade_close_amount.or(trade.pnl_amount);
+
+    let mut events = Vec::with_capacity(event_rows.len() + 2);
+
+    // OPEN event (synthesized from trade row).
+    events.push(TradeEvent {
+        kind: TradeEventKind::Open,
+        occurred_at: trade.entry_at,
+        price: Some(trade.entry_price),
+        quantity: trade.quantity,
+        direction: Some(direction.to_string()),
+        // margin_lock amount is stored as negative (deduction); pass
+        // it through verbatim so the UI's sign convention matches
+        // every other event row.
+        cash_delta: margin_lock_amount,
+        pnl_amount: None,
+    });
+
+    // Overnight fee accruals — one row per night the position was held.
+    for row in &event_rows {
+        if row.event_type == "overnight_fee" {
+            events.push(TradeEvent {
+                kind: TradeEventKind::OvernightFee,
+                occurred_at: row.occurred_at,
+                price: None,
+                quantity: None,
+                direction: None,
+                cash_delta: Some(row.amount),
+                pnl_amount: None,
+            });
+        }
+    }
+
+    // CLOSE event (only for closed trades). cash_delta combines the
+    // margin refund (positive) and the realized PnL so the timeline
+    // sums to the same value the ledger sees. We pull the realized
+    // PnL from the trade_close event row whenever it's available so
+    // the UI matches the ledger byte-for-byte.
+    if let (Some(exit_at), Some(exit_price)) = (trade.exit_at, trade.exit_price) {
+        let cash_delta = match (margin_release_amount, realized_pnl) {
+            (Some(refund), Some(pnl)) => Some(refund + pnl),
+            (Some(refund), None) => Some(refund),
+            (None, Some(pnl)) => Some(pnl),
+            (None, None) => None,
+        };
+        events.push(TradeEvent {
+            kind: TradeEventKind::Close,
+            occurred_at: exit_at,
+            price: Some(exit_price),
+            quantity: trade.quantity,
+            direction: Some(direction.to_string()),
+            cash_delta,
+            pnl_amount: realized_pnl,
+        });
+    }
+
+    Ok(Some(events))
+}
+
 /// Response row for positions API — joins with paper_accounts to include account name.
 #[derive(Debug)]
 pub struct OpenTradeWithAccount {

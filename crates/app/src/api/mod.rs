@@ -29,7 +29,7 @@ pub fn router(state: AppState) -> Router {
             get(accounts::list).post(accounts::create),
         )
         .route(
-            "/paper-accounts/{id}",
+            "/paper-accounts/:id",
             get(accounts::get_one)
                 .put(accounts::update)
                 .delete(accounts::remove),
@@ -41,9 +41,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard/pairs", get(dashboard::pairs))
         .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))
         .route("/trades", get(trades::list))
+        .route("/trades/:id/events", get(trades::events))
         .route("/positions", get(positions::list))
         .route("/strategies", get(strategies::list))
-        .route("/strategies/{name}", get(strategies::get_one))
+        .route("/strategies/:name", get(strategies::get_one))
         .layer(middleware::from_fn(move |req, next| {
             let token = api_token.clone();
             auth_middleware(token, req, next)
