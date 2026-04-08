@@ -34,8 +34,23 @@ pub struct MarkReadResponse {
     pub marked: u64,
 }
 
-fn parse_date(s: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+/// Parse an optional `YYYY-MM-DD` query parameter. An absent or empty
+/// string yields `Ok(None)` so callers can clear the filter; a present
+/// but malformed value yields `Err(400)` so the user gets a clear
+/// signal instead of "you asked for a filter and silently got the
+/// unfiltered result set".
+fn parse_opt_date(s: Option<&str>, field: &str) -> Result<Option<NaiveDate>, ApiError> {
+    match s {
+        None | Some("") => Ok(None),
+        Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
+            .map(Some)
+            .map_err(|_| {
+                ApiError(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("invalid {field} (expected YYYY-MM-DD)"),
+                )
+            }),
+    }
 }
 
 pub async fn list(
@@ -46,8 +61,8 @@ pub async fn list(
     let limit = filter.limit.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * limit;
     let unread_only = filter.unread_only.unwrap_or(false);
-    let from = filter.from.as_deref().and_then(parse_date);
-    let to = filter.to.as_deref().and_then(parse_date);
+    let from = parse_opt_date(filter.from.as_deref(), "from")?;
+    let to = parse_opt_date(filter.to.as_deref(), "to")?;
 
     // kind must be one of the two known values or None — reject
     // anything else so a typo can't silently collapse to "no match".
