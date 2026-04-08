@@ -6,6 +6,8 @@ import Analysis from './pages/Analysis'
 import Accounts from './pages/Accounts'
 import Positions from './pages/Positions'
 import Strategies from './pages/Strategies'
+import Notifications from './pages/Notifications'
+import NotificationBell from './components/NotificationBell'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -63,10 +65,12 @@ function App() {
         <div className="min-h-screen bg-gray-950 text-gray-100">
           <header className="border-b border-gray-800 px-4 py-3">
             <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center gap-3">
-              <h1 className="text-lg font-bold whitespace-nowrap">
-                Auto Trader
-              </h1>
+              <h1 className="text-lg font-bold whitespace-nowrap">Auto Trader</h1>
               <NavBar />
+              {/* Bell lives flush-right; `ml-auto` inside the component
+                  pushes it to the end of the flex row. Deliberately not
+                  in `navItems` so it does not render as a tab. */}
+              <NotificationBell />
             </div>
           </header>
           <main className="max-w-7xl mx-auto p-4">
@@ -77,6 +81,7 @@ function App() {
               <Route path="/accounts" element={<Accounts />} />
               <Route path="/positions" element={<Positions />} />
               <Route path="/strategies" element={<Strategies />} />
+              <Route path="/notifications" element={<Notifications />} />
             </Routes>
           </main>
         </div>

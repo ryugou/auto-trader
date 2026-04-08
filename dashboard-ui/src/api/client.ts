@@ -13,6 +13,8 @@ import type {
   DashboardFilter,
   BalanceHistoryResponse,
   Strategy,
+  NotificationsResponse,
+  NotificationUnreadCountResponse,
 } from './types'
 
 const BASE = ''
@@ -100,5 +102,13 @@ export const api = {
     // URL-encode the path segment to be safe.
     get: (name: string) =>
       get<Strategy>(`/api/strategies/${encodeURIComponent(name)}`),
+  },
+  notifications: {
+    list: (params: Record<string, string | undefined> = {}) =>
+      get<NotificationsResponse>(`/api/notifications${qs(params)}`),
+    unreadCount: () =>
+      get<NotificationUnreadCountResponse>(`/api/notifications/unread-count`),
+    markAllRead: () =>
+      post<{ marked: number }>(`/api/notifications/mark-all-read`, {}),
   },
 }

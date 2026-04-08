@@ -1,6 +1,7 @@
 mod accounts;
 mod dashboard;
 pub(crate) mod filters;
+mod notifications;
 mod positions;
 mod strategies;
 mod trades;
@@ -45,6 +46,15 @@ pub fn router(state: AppState) -> Router {
         .route("/positions", get(positions::list))
         .route("/strategies", get(strategies::list))
         .route("/strategies/:name", get(strategies::get_one))
+        .route("/notifications", get(notifications::list))
+        .route(
+            "/notifications/unread-count",
+            get(notifications::unread_count),
+        )
+        .route(
+            "/notifications/mark-all-read",
+            axum::routing::post(notifications::mark_all_read),
+        )
         .layer(middleware::from_fn(move |req, next| {
             let token = api_token.clone();
             auth_middleware(token, req, next)
