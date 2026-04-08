@@ -1052,6 +1052,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Purge notifications that have been read for more than 30
+        // days. Unread notifications are kept forever.
+        match auto_trader_db::notifications::purge_old_read(&daily_pool).await {
+            Ok(n) if n > 0 => tracing::info!("purged {n} old read notifications"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("failed to purge old read notifications: {e}"),
+        }
+
         let mut last_date = today;
         loop {
             interval.tick().await;
@@ -1062,6 +1070,11 @@ async fn main() -> anyhow::Result<()> {
                     &daily_pool, last_date,
                 ).await {
                     tracing::error!("daily batch failed: {e}");
+                }
+                match auto_trader_db::notifications::purge_old_read(&daily_pool).await {
+                    Ok(n) if n > 0 => tracing::info!("purged {n} old read notifications"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("failed to purge old read notifications: {e}"),
                 }
                 last_date = now_date;
             }
