@@ -10,7 +10,7 @@ CREATE TABLE notifications (
     paper_account_id UUID NOT NULL,
     strategy_name TEXT NOT NULL,
     pair TEXT NOT NULL,
-    direction TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('long', 'short')),
     price NUMERIC NOT NULL,
     pnl_amount NUMERIC,
     exit_reason TEXT,

@@ -44,7 +44,7 @@ where
 {
     let account_id = trade
         .paper_account_id
-        .ok_or_else(|| anyhow::anyhow!("trade has no paper_account_id"))?;
+        .ok_or_else(|| anyhow::anyhow!("trade {} has no paper_account_id", trade.id))?;
     sqlx::query(
         r#"INSERT INTO notifications
                (kind, trade_id, paper_account_id, strategy_name, pair,
@@ -70,16 +70,16 @@ where
 {
     let account_id = trade
         .paper_account_id
-        .ok_or_else(|| anyhow::anyhow!("trade has no paper_account_id"))?;
+        .ok_or_else(|| anyhow::anyhow!("trade {} has no paper_account_id", trade.id))?;
     let price = trade
         .exit_price
-        .ok_or_else(|| anyhow::anyhow!("closed trade has no exit_price"))?;
+        .ok_or_else(|| anyhow::anyhow!("closed trade {} has no exit_price", trade.id))?;
     let pnl = trade
         .pnl_amount
-        .ok_or_else(|| anyhow::anyhow!("closed trade has no pnl_amount"))?;
+        .ok_or_else(|| anyhow::anyhow!("closed trade {} has no pnl_amount", trade.id))?;
     let reason = trade
         .exit_reason
-        .ok_or_else(|| anyhow::anyhow!("closed trade has no exit_reason"))?;
+        .ok_or_else(|| anyhow::anyhow!("closed trade {} has no exit_reason", trade.id))?;
     sqlx::query(
         r#"INSERT INTO notifications
                (kind, trade_id, paper_account_id, strategy_name, pair,
@@ -111,88 +111,77 @@ pub async fn list(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> anyhow::Result<(Vec<Notification>, i64)> {
-    let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).expect("fixed offset");
+    let jst_offset =
+        chrono::FixedOffset::east_opt(9 * 3600).expect("9-hour offset is always valid");
+    // Convert JST day boundaries to half-open [from, to+1day) UTC
+    // timestamps so the existing `created_at` index can be used and
+    // the bounds check is unambiguous about including `to`.
     let from_ts = from.map(|d| {
         d.and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("midnight is always a valid time")
             .and_local_timezone(jst_offset)
-            .unwrap()
+            .single()
+            .expect("midnight in a fixed-offset zone has no DST ambiguity")
             .with_timezone(&Utc)
     });
     let to_ts = to.map(|d| {
         (d + chrono::Duration::days(1))
             .and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("midnight is always a valid time")
             .and_local_timezone(jst_offset)
-            .unwrap()
+            .single()
+            .expect("midnight in a fixed-offset zone has no DST ambiguity")
             .with_timezone(&Utc)
     });
 
-    let mut sql = String::from(
-        "SELECT id, kind, trade_id, paper_account_id, strategy_name, pair,
-                direction, price, pnl_amount, exit_reason, created_at, read_at
+    // Single helper that appends WHERE clauses to either the SELECT or
+    // the COUNT(*) builder so they cannot drift apart. The builder
+    // handles placeholder numbering for us — no manual `$N` math, and
+    // adding a future filter is mechanical.
+    fn apply_filters<'a>(
+        qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
+        unread_only: bool,
+        kind_filter: Option<&'a str>,
+        from_ts: Option<DateTime<Utc>>,
+        to_ts: Option<DateTime<Utc>>,
+    ) {
+        if unread_only {
+            qb.push(" AND read_at IS NULL");
+        }
+        if let Some(k) = kind_filter {
+            qb.push(" AND kind = ").push_bind(k);
+        }
+        if let Some(f) = from_ts {
+            qb.push(" AND created_at >= ").push_bind(f);
+        }
+        if let Some(t) = to_ts {
+            qb.push(" AND created_at < ").push_bind(t);
+        }
+    }
+
+    let mut select_qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+        "SELECT id, kind, trade_id, paper_account_id, strategy_name, pair, \
+         direction, price, pnl_amount, exit_reason, created_at, read_at \
          FROM notifications WHERE 1=1",
     );
-    if unread_only {
-        sql.push_str(" AND read_at IS NULL");
-    }
-    if kind_filter.is_some() {
-        sql.push_str(" AND kind = $1");
-    }
-    let mut placeholder = if kind_filter.is_some() { 2 } else { 1 };
-    if from_ts.is_some() {
-        sql.push_str(&format!(" AND created_at >= ${placeholder}"));
-        placeholder += 1;
-    }
-    if to_ts.is_some() {
-        sql.push_str(&format!(" AND created_at < ${placeholder}"));
-        placeholder += 1;
-    }
-    sql.push_str(&format!(
-        " ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
-        placeholder,
-        placeholder + 1
-    ));
+    apply_filters(&mut select_qb, unread_only, kind_filter, from_ts, to_ts);
+    select_qb
+        .push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let items: Vec<Notification> = select_qb
+        .build_query_as::<Notification>()
+        .fetch_all(pool)
+        .await?;
 
-    let mut q = sqlx::query_as::<_, Notification>(&sql);
-    if let Some(k) = kind_filter {
-        q = q.bind(k);
-    }
-    if let Some(f) = from_ts {
-        q = q.bind(f);
-    }
-    if let Some(t) = to_ts {
-        q = q.bind(t);
-    }
-    q = q.bind(limit).bind(offset);
-    let items = q.fetch_all(pool).await?;
-
-    let mut count_sql = String::from("SELECT COUNT(*) FROM notifications WHERE 1=1");
-    if unread_only {
-        count_sql.push_str(" AND read_at IS NULL");
-    }
-    if kind_filter.is_some() {
-        count_sql.push_str(" AND kind = $1");
-    }
-    let mut count_ph = if kind_filter.is_some() { 2 } else { 1 };
-    if from_ts.is_some() {
-        count_sql.push_str(&format!(" AND created_at >= ${count_ph}"));
-        count_ph += 1;
-    }
-    if to_ts.is_some() {
-        count_sql.push_str(&format!(" AND created_at < ${count_ph}"));
-    }
-    let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
-    if let Some(k) = kind_filter {
-        cq = cq.bind(k);
-    }
-    if let Some(f) = from_ts {
-        cq = cq.bind(f);
-    }
-    if let Some(t) = to_ts {
-        cq = cq.bind(t);
-    }
-    let total: i64 = cq.fetch_one(pool).await?;
+    let mut count_qb: sqlx::QueryBuilder<sqlx::Postgres> =
+        sqlx::QueryBuilder::new("SELECT COUNT(*) FROM notifications WHERE 1=1");
+    apply_filters(&mut count_qb, unread_only, kind_filter, from_ts, to_ts);
+    let total: i64 = count_qb
+        .build_query_scalar::<i64>()
+        .fetch_one(pool)
+        .await?;
 
     Ok((items, total))
 }
@@ -204,11 +193,11 @@ pub async fn unread_count(pool: &PgPool) -> anyhow::Result<i64> {
     Ok(n)
 }
 
-pub async fn mark_all_read(pool: &PgPool) -> anyhow::Result<i64> {
+pub async fn mark_all_read(pool: &PgPool) -> anyhow::Result<u64> {
     let result = sqlx::query("UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL")
         .execute(pool)
         .await?;
-    Ok(result.rows_affected() as i64)
+    Ok(result.rows_affected())
 }
 
 /// Delete read notifications older than 30 days. Returns rows deleted.
