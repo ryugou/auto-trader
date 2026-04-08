@@ -230,6 +230,18 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
   const rangeStart = total === 0 ? 0 : (page - 1) * PER_PAGE + 1
   const rangeEnd = Math.min(page * PER_PAGE, total)
 
+  // Clamp page back into range if the underlying total shrinks (e.g.
+  // a refetch returns fewer rows than the page we were viewing). The
+  // refetch would otherwise leave us showing "no data" on a page
+  // that no longer exists. Only clamp once `data` has actually
+  // arrived so we don't fight the initial loading state.
+  useEffect(() => {
+    if (data && page > totalPages) {
+      setPage(totalPages)
+      setExpanded(new Set())
+    }
+  }, [data, page, totalPages])
+
   // Going to a new page is conceptually the same as switching the
   // data window — drop any open timelines so a stale row id from the
   // previous page cannot leak into the new render.
