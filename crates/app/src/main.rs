@@ -1,4 +1,5 @@
 mod api;
+mod price_store;
 
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
