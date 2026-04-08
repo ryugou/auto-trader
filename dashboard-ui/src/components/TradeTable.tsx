@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   useReactTable,
@@ -49,10 +49,15 @@ function holdingTime(entry: string, exit: string | null): string {
   return `${days}d${hours % 24}h`
 }
 
-// Render a balance with the appropriate currency glyph. JPY rounds to
-// integer (the trader never books sub-yen amounts); everything else
-// keeps two decimals. Unknown currencies fall back to a trailing code
-// so the value is still readable instead of silently hidden.
+// Render a balance with the appropriate currency glyph.
+// - JPY rounds to integer (the trader never books sub-yen amounts).
+// - USD pins to two decimals (cents are meaningful for FX P&L).
+// - Other currencies fall through with the locale default and a
+//   trailing currency code so the value is still readable instead
+//   of silently hidden. We do not impose 2-decimal pinning on
+//   unknown currencies because their conventional precision varies
+//   (e.g. JPY-like minor-unit-less currencies should not gain
+//   spurious decimals).
 function formatBalance(amount: string | undefined, currency: string): string {
   if (amount == null) return '-'
   const n = Number(amount)
@@ -183,6 +188,12 @@ function buildColumns(
 const PER_PAGE = 10
 
 export default function TradeTable({ account, from, to }: TradeTableProps) {
+  // NOTE on filter changes: this component is intentionally remounted
+  // by its parent (`Trades.tsx` keys it on `account.id + from + to`)
+  // when the period filter changes, so the local `page` and
+  // `expanded` state are reset for free without an extra render +
+  // wasted query. We deliberately do not run a `useEffect([from,to])`
+  // here for that reason.
   const [page, setPage] = useState(1)
   // IDs of trades whose timeline is expanded. Plain Set instead of
   // TanStack's expanded-row API because each child needs its own
@@ -190,27 +201,18 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
   // state through the table model.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-  // When the user changes the period filter, the result set behind
-  // this table is replaced. Reset to page 1 and clear any expanded
-  // rows so a stale trade id from the previous filter window does
-  // not flash on top of the new data.
-  useEffect(() => {
-    setPage(1)
-    setExpanded(new Set())
-  }, [from, to])
-
-  const toggleExpanded = (id: string) => {
+  const toggleExpanded = useCallback((id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
-  }
+  }, [])
 
   const columns = useMemo(
     () => buildColumns(expanded, toggleExpanded),
-    [expanded],
+    [expanded, toggleExpanded],
   )
 
   const { data, isLoading, isError } = useQuery({
@@ -257,11 +259,16 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
     getCoreRowModel: getCoreRowModel(),
   })
 
-  const isPaper = account.account_type === 'paper'
-  const typeBadge = isPaper ? 'ペーパー' : '通常'
-  const typeBadgeClass = isPaper
-    ? 'bg-gray-700 text-gray-200'
-    : 'bg-sky-900 text-sky-200'
+  // Match Accounts.tsx convention: `live` is the explicit "通常"
+  // branch, anything else (including unknown values) renders as
+  // ペーパー. This biases the badge toward "paper" for any
+  // unrecognised account_type so a misconfigured account does not
+  // accidentally look like a live one.
+  const isLive = account.account_type === 'live'
+  const typeBadge = isLive ? '通常' : 'ペーパー'
+  const typeBadgeClass = isLive
+    ? 'bg-sky-900 text-sky-200'
+    : 'bg-gray-700 text-gray-200'
 
   return (
     <div className="bg-gray-900 rounded-lg shadow overflow-hidden">

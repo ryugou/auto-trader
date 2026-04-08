@@ -131,8 +131,14 @@ export default function Trades() {
             </h3>
             <div className="space-y-4">
               {group.accounts.map((account) => (
+                // Key includes from/to so that switching the period
+                // filter remounts each child TradeTable. The remount
+                // resets the per-table page state to 1 and clears
+                // the expanded set without an extra render pass —
+                // and avoids the wasted "old page" query that an
+                // in-place useEffect-based reset would trigger.
                 <TradeTable
-                  key={account.id}
+                  key={`${account.id}:${range.from ?? ''}:${range.to ?? ''}`}
                   account={account}
                   from={range.from}
                   to={range.to}

@@ -12,20 +12,29 @@
 
 ---
 
+> **Note (post-implementation):** This plan was authored before the
+> per-account prev/next pagination requirement was added. The
+> implementation that landed (commits `e6b1c07` and `2bcdb24`)
+> includes a small per-table page state with prev/next buttons,
+> page-aware query keys, and a clamp effect for total-shrink. See
+> the spec for the authoritative behaviour.
+
 ## File Structure
 
 - **Modify** `dashboard-ui/src/components/TradeTable.tsx`
   - Change props from `{ filters }` to `{ account: PaperAccount; from?: string; to?: string }`
-  - Remove pagination state / UI
+  - Replace global pagination with per-table prev/next paging (10 rows / page)
   - Remove `口座` and `種別` columns
   - Add per-table header: name + type badge + evaluated balance / current balance / leverage
-  - Fetch latest 10 trades for the given account
+  - Fetch trades for the given account, page by page
 - **Modify** `dashboard-ui/src/pages/Trades.tsx`
   - Replace `PageFilters` with a period-only filter (inline)
   - Fetch accounts via `api.accounts.list`
   - Group by exchange class (`crypto` / `fx` / `other`) in that order
   - Sort within each group by account name
-  - Render `<TradeTable>` per account; show empty state if no accounts
+  - Render `<TradeTable>` per account, keyed on `account.id + from + to`
+    so a period change remounts the child (drops local page/expanded
+    state without an extra render); show empty state if no accounts
 
 No new files. `PageFilters.tsx` is left untouched (still used by Positions, etc).
 
