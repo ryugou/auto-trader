@@ -1,6 +1,8 @@
 mod accounts;
 mod dashboard;
 pub(crate) mod filters;
+mod health;
+mod market;
 mod notifications;
 mod positions;
 mod strategies;
@@ -19,6 +21,7 @@ use tower_http::services::{ServeDir, ServeFile};
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
+    pub price_store: std::sync::Arc<crate::price_store::PriceStore>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -55,6 +58,8 @@ pub fn router(state: AppState) -> Router {
             "/notifications/mark-all-read",
             axum::routing::post(notifications::mark_all_read),
         )
+        .route("/market/prices", get(market::prices))
+        .route("/health/market-feed", get(health::market_feed))
         .layer(middleware::from_fn(move |req, next| {
             let token = api_token.clone();
             auth_middleware(token, req, next)

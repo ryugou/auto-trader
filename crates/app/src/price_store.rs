@@ -74,6 +74,7 @@ impl PriceStore {
         guard.insert(key, tick);
     }
 
+    #[cfg(test)]
     pub async fn get(&self, key: &FeedKey) -> Option<LatestTick> {
         let guard = self.latest.read().await;
         guard.get(key).cloned()
@@ -85,10 +86,6 @@ impl PriceStore {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
-    }
-
-    pub fn expected(&self) -> &[FeedKey] {
-        &self.expected
     }
 
     /// Roll the expected list against the current observed map and a

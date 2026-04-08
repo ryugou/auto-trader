@@ -43,6 +43,15 @@ async fn main() -> anyhow::Result<()> {
     let pool = create_pool(&config.database.url).await?;
     tracing::info!("database connected");
 
+    // Build the expected feed list — (exchange, pair) tuples this
+    // process is configured to monitor. The health endpoint uses
+    // this list to distinguish "intentionally disabled" from
+    // "expected but missing", so OANDA without an API key never
+    // shows up as a stale alarm. Populated inside each monitor's
+    // setup block so it naturally tracks whatever feeds this
+    // process actually launches.
+    let mut expected_feeds: Vec<crate::price_store::FeedKey> = Vec::new();
+
     // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
     let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
@@ -65,6 +74,15 @@ async fn main() -> anyhow::Result<()> {
     let fx_monitor: Option<MarketMonitor> = if !fx_pairs.is_empty() {
         match (std::env::var("OANDA_API_KEY"), config.oanda.as_ref()) {
             (Ok(api_key), Some(oanda_config)) if !api_key.trim().is_empty() => {
+                // Register this monitor's pairs as expected feeds
+                // before handing them to MarketMonitor (which takes
+                // ownership of fx_pairs).
+                for p in &fx_pairs {
+                    expected_feeds.push(crate::price_store::FeedKey::new(
+                        auto_trader_core::types::Exchange::Oanda,
+                        p.clone(),
+                    ));
+                }
                 let account_id = std::env::var("OANDA_ACCOUNT_ID")
                     .unwrap_or_else(|_| oanda_config.account_id.clone());
                 let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
@@ -446,6 +464,14 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| v.iter().map(|s| Pair::new(s)).collect())
             .unwrap_or_default();
         if !crypto_pairs.is_empty() {
+            // Register crypto pairs as expected feeds before
+            // BitflyerMonitor takes ownership.
+            for p in &crypto_pairs {
+                expected_feeds.push(crate::price_store::FeedKey::new(
+                    auto_trader_core::types::Exchange::BitflyerCfd,
+                    p.clone(),
+                ));
+            }
             let mut bf_monitor = auto_trader_market::bitflyer::BitflyerMonitor::new(
                 &bf_config.ws_url,
                 crypto_pairs,
@@ -465,6 +491,12 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Build the price store once all monitor setup has had a chance
+    // to populate `expected_feeds`. The store is shared between the
+    // engine task (which writes ticks into it) and the API server
+    // (which reads snapshots + health from it).
+    let price_store = crate::price_store::PriceStore::new(expected_feeds);
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
     let (macro_tx, _) = tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
@@ -649,6 +681,7 @@ async fn main() -> anyhow::Result<()> {
     let (exit_tx, mut exit_rx) =
         mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
     let engine_pool = pool.clone();
+    let price_store_for_engine = price_store.clone();
 
     // Task: Strategy engine (price -> signal) + forward to position monitors
     // Also receives macro updates from broadcast channel.
@@ -661,6 +694,22 @@ async fn main() -> anyhow::Result<()> {
                 price = price_rx.recv() => {
                     match price {
                         Some(event) => {
+                            // Snapshot this tick into the in-memory
+                            // store so the dashboard health endpoint
+                            // can tell whether each configured feed
+                            // is fresh.
+                            price_store_for_engine
+                                .update(
+                                    crate::price_store::FeedKey::new(
+                                        event.exchange,
+                                        event.pair.clone(),
+                                    ),
+                                    crate::price_store::LatestTick {
+                                        price: event.candle.close,
+                                        ts: event.timestamp,
+                                    },
+                                )
+                                .await;
                             // Forward to FX position monitor (FX events only)
                             if event.exchange == auto_trader_core::types::Exchange::Oanda
                                 && price_monitor_tx.send(event.clone()).await.is_err()
@@ -1142,7 +1191,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // REST API server
-    let api_state = api::AppState { pool: pool.clone() };
+    let api_state = api::AppState {
+        pool: pool.clone(),
+        price_store: price_store.clone(),
+    };
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_state);
         // Always bind to 0.0.0.0. Host-level access control is handled by
