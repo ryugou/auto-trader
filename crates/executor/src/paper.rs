@@ -120,6 +120,7 @@ impl PaperTrader {
         // can't leave us with a position whose margin we forgot to lock.
         let mut tx = self.pool.begin().await?;
         auto_trader_db::trades::insert_trade_with_executor(&mut *tx, &trade).await?;
+        auto_trader_db::notifications::insert_trade_opened(&mut *tx, &trade).await?;
 
         // Deduct the margin from current_balance so the dashboard's
         // "free cash" view is correct.
@@ -293,7 +294,14 @@ impl OrderExecutor for PaperTrader {
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
         };
-        auto_trader_db::trades::insert_trade(&self.pool, &trade).await?;
+        // Wrap the trade insert + notification insert in a single tx so
+        // the two states never disagree. FX has no margin lock so this
+        // is a two-statement transaction; crypto does the same dance
+        // with more work inside (see `execute_with_quantity`).
+        let mut tx = self.pool.begin().await?;
+        auto_trader_db::trades::insert_trade_with_executor(&mut *tx, &trade).await?;
+        auto_trader_db::notifications::insert_trade_opened(&mut *tx, &trade).await?;
+        tx.commit().await?;
         tracing::info!(
             "Paper OPEN: {} {} {:?} @ {}",
             trade.strategy_name,
@@ -470,8 +478,9 @@ impl OrderExecutor for PaperTrader {
         .execute(&mut *tx)
         .await?;
 
-        tx.commit().await?;
-
+        // Build the closed-trade view *before* commit so we can emit
+        // the notification inside the same tx. The struct is also the
+        // return value for the caller below.
         let trade = Trade {
             id: locked.id,
             strategy_name: locked.strategy_name,
@@ -498,6 +507,9 @@ impl OrderExecutor for PaperTrader {
             // after close, so we read from the locked snapshot.
             max_hold_until: locked.max_hold_until,
         };
+
+        auto_trader_db::notifications::insert_trade_closed(&mut *tx, &trade).await?;
+        tx.commit().await?;
 
         tracing::info!(
             "Paper CLOSE: {} {} pnl={} reason={:?}",
