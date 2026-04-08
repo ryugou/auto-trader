@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   useReactTable,
@@ -7,15 +7,12 @@ import {
   flexRender,
 } from '@tanstack/react-table'
 import { api } from '../api/client'
-import type { TradeRow, TradeEvent } from '../api/types'
+import type { PaperAccount, TradeRow, TradeEvent } from '../api/types'
 
 interface TradeTableProps {
-  filters: {
-    exchange?: string
-    paper_account_id?: string
-    from?: string
-    to?: string
-  }
+  account: PaperAccount
+  from?: string
+  to?: string
 }
 
 const col = createColumnHelper<TradeRow>()
@@ -52,8 +49,35 @@ function holdingTime(entry: string, exit: string | null): string {
   return `${days}d${hours % 24}h`
 }
 
+// Render a balance with the appropriate currency glyph. JPY rounds to
+// integer (the trader never books sub-yen amounts); everything else
+// keeps two decimals. Unknown currencies fall back to a trailing code
+// so the value is still readable instead of silently hidden.
+function formatBalance(amount: string | undefined, currency: string): string {
+  if (amount == null) return '-'
+  const n = Number(amount)
+  if (Number.isNaN(n)) return '-'
+  if (currency === 'JPY') {
+    return `¥${Math.round(n).toLocaleString()}`
+  }
+  if (currency === 'USD') {
+    return `$${n.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`
+  }
+  return `${n.toLocaleString()} ${currency}`
+}
+
+// Strip trailing zeros from the leverage value (stored as a decimal
+// string like "5.00") so the header reads "5x" instead of "5.00x".
+function formatLeverage(leverage: string): string {
+  const n = Number(leverage)
+  if (Number.isNaN(n)) return `${leverage}x`
+  return `${n}x`
+}
+
 function buildColumns(
-  accountMap: Map<string, string>,
   expanded: Set<string>,
   toggle: (id: string) => void,
 ) {
@@ -78,8 +102,6 @@ function buildColumns(
             className="text-gray-400 hover:text-gray-200 transition-transform"
             style={{ transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}
           >
-            {/* Right-pointing chevron; CSS rotates it 90° when expanded
-                so the same icon is reused for both states. */}
             <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
               <path d="M4 2 L8 6 L4 10 Z" />
             </svg>
@@ -92,23 +114,6 @@ function buildColumns(
       cell: (info) => formatDate(info.getValue()),
     }),
     col.accessor('strategy_name', { header: '戦略' }),
-    col.accessor('paper_account_id', {
-      header: '口座',
-      cell: (info) => {
-        const id = info.getValue()
-        if (!id) return '-'
-        return accountMap.get(id) ?? '-'
-      },
-    }),
-    col.accessor('account_type', {
-      header: '種別',
-      cell: (info) => {
-        const t = info.getValue()
-        if (t === 'paper') return 'ペーパー'
-        if (t === 'live') return '通常'
-        return '-'
-      },
-    }),
     col.accessor('pair', { header: 'ペア' }),
     col.accessor('direction', {
       header: '方向',
@@ -175,21 +180,14 @@ function buildColumns(
   ]
 }
 
-export default function TradeTable({ filters }: TradeTableProps) {
-  const [page, setPage] = useState(1)
-  const perPage = 20
+const PER_PAGE = 10
+
+export default function TradeTable({ account, from, to }: TradeTableProps) {
   // IDs of trades whose timeline is expanded. Plain Set instead of
   // TanStack's expanded-row API because each child needs its own
   // independent fetch and we want to avoid carrying the lazy-load
   // state through the table model.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-
-  useEffect(() => {
-    setPage(1)
-    // Reset expansion when filters change so a stale row id doesn't
-    // briefly show up over the new result set.
-    setExpanded(new Set())
-  }, [filters])
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => {
@@ -200,29 +198,20 @@ export default function TradeTable({ filters }: TradeTableProps) {
     })
   }
 
-  const { data: accounts } = useQuery({
-    queryKey: ['accounts'],
-    queryFn: () => api.accounts.list(),
-  })
-
-  const accountMap = useMemo(() => {
-    const m = new Map<string, string>()
-    accounts?.forEach((a) => m.set(a.id, a.name))
-    return m
-  }, [accounts])
-
   const columns = useMemo(
-    () => buildColumns(accountMap, expanded, toggleExpanded),
-    [accountMap, expanded],
+    () => buildColumns(expanded, toggleExpanded),
+    [expanded],
   )
 
   const { data, isLoading } = useQuery({
-    queryKey: ['trades', filters, page],
+    queryKey: ['trades', { accountId: account.id, from, to }],
     queryFn: () =>
       api.trades.list({
-        ...filters,
-        page: String(page),
-        per_page: String(perPage),
+        paper_account_id: account.id,
+        from,
+        to,
+        page: '1',
+        per_page: String(PER_PAGE),
       }),
   })
 
@@ -233,10 +222,47 @@ export default function TradeTable({ filters }: TradeTableProps) {
     getCoreRowModel: getCoreRowModel(),
   })
 
-  const totalPages = data ? Math.ceil(data.total / perPage) : 0
+  const isPaper = account.account_type === 'paper'
+  const typeBadge = isPaper ? 'ペーパー' : '通常'
+  const typeBadgeClass = isPaper
+    ? 'bg-gray-700 text-gray-200'
+    : 'bg-sky-900 text-sky-200'
 
   return (
     <div className="bg-gray-900 rounded-lg shadow overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-gray-800">
+        <div className="flex items-center gap-2">
+          <h3 className="text-base font-semibold text-gray-100">{account.name}</h3>
+          <span
+            className={`text-xs font-medium px-2 py-0.5 rounded ${typeBadgeClass}`}
+          >
+            {typeBadge}
+          </span>
+        </div>
+        <div className="text-xs text-gray-400 flex flex-wrap gap-x-3 gap-y-1">
+          {account.evaluated_balance != null && (
+            <span>
+              評価額{' '}
+              <span className="text-gray-100 font-mono">
+                {formatBalance(account.evaluated_balance, account.currency)}
+              </span>
+            </span>
+          )}
+          <span>
+            残高{' '}
+            <span className="text-gray-100 font-mono">
+              {formatBalance(account.current_balance, account.currency)}
+            </span>
+          </span>
+          <span>
+            レバレッジ{' '}
+            <span className="text-gray-100 font-mono">
+              {formatLeverage(account.leverage)}
+            </span>
+          </span>
+        </div>
+      </div>
+
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -298,32 +324,6 @@ export default function TradeTable({ filters }: TradeTableProps) {
           </tbody>
         </table>
       </div>
-
-      {/* End of table body */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between px-4 py-3 border-t border-gray-800">
-          <span className="text-sm text-gray-400">
-            {data?.total ?? 0} 件中 {(page - 1) * perPage + 1}-
-            {Math.min(page * perPage, data?.total ?? 0)} 件
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page <= 1}
-              className="px-3 py-1 text-sm bg-gray-800 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              前へ
-            </button>
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages}
-              className="px-3 py-1 text-sm bg-gray-800 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              次へ
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -430,12 +430,6 @@ function TradeEventTimeline({ tradeId }: { tradeId: string }) {
         </thead>
         <tbody>
           {data.events.map((ev) => (
-            // Composite key: kind + timestamp uniquely identifies an
-            // event within a single trade's timeline (a trade can only
-            // OPEN/CLOSE once, and overnight fees can only fire once
-            // per UTC midnight). Index keys would be unstable across
-            // refetches that grow the timeline (open trade accruing a
-            // new overnight fee).
             <tr key={`${ev.kind}:${ev.occurred_at}`} className="border-t border-gray-800/40">
               <td className={`py-1 font-mono ${eventColor(ev.kind)}`}>
                 {eventLabel(ev.kind)}
@@ -461,8 +455,6 @@ function TradeEventTimeline({ tradeId }: { tradeId: string }) {
               </td>
             </tr>
           ))}
-          {/* Open trades have no CLOSE row yet — make that explicit so
-              the user understands the timeline is intentionally short. */}
           {data.events.every((e) => e.kind !== 'close') && (
             <tr className="border-t border-gray-800/40">
               <td colSpan={6} className="py-1 text-center text-gray-500 italic">
