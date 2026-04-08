@@ -5,6 +5,7 @@ import type {
   PairStats,
   HourlyWinrate,
   TradesResponse,
+  TradeEventsResponse,
   PositionResponse,
   PaperAccount,
   CreatePaperAccount,
@@ -76,6 +77,8 @@ export const api = {
   trades: {
     list: (params: Record<string, string | undefined> = {}) =>
       get<TradesResponse>(`/api/trades${qs(params)}`),
+    events: (id: string) =>
+      get<TradeEventsResponse>(`/api/trades/${id}/events`),
   },
   positions: {
     list: () => get<PositionResponse[]>('/api/positions'),

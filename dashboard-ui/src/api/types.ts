@@ -111,6 +111,20 @@ export interface TradesResponse {
   per_page: number
 }
 
+export interface TradeEvent {
+  kind: 'open' | 'overnight_fee' | 'close'
+  occurred_at: string
+  price: string | null
+  quantity: string | null
+  direction: string | null
+  cash_delta: string | null
+  pnl_amount: string | null
+}
+
+export interface TradeEventsResponse {
+  events: TradeEvent[]
+}
+
 export interface PositionResponse {
   trade_id: string
   strategy_name: string
