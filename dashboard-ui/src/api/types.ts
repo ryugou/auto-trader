@@ -164,3 +164,30 @@ export interface BalanceHistoryAccount {
 export interface BalanceHistoryResponse {
   accounts: BalanceHistoryAccount[]
 }
+
+export interface Notification {
+  id: string
+  kind: 'trade_opened' | 'trade_closed'
+  trade_id: string
+  paper_account_id: string
+  strategy_name: string
+  pair: string
+  direction: 'long' | 'short'
+  price: string
+  pnl_amount: string | null
+  exit_reason: string | null
+  created_at: string
+  read_at: string | null
+}
+
+export interface NotificationsResponse {
+  items: Notification[]
+  total: number
+  unread_count: number
+  page: number
+  limit: number
+}
+
+export interface NotificationUnreadCountResponse {
+  count: number
+}
