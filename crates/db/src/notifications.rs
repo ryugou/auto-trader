@@ -165,8 +165,12 @@ pub async fn list(
          FROM notifications WHERE 1=1",
     );
     apply_filters(&mut select_qb, unread_only, kind_filter, from_ts, to_ts);
+    // ORDER BY has a stable tie-breaker on `id` so pagination doesn't
+    // drop or duplicate rows when multiple notifications share the
+    // same `created_at` timestamp (rare in practice, but two
+    // simultaneous open/close events can land in the same tick).
     select_qb
-        .push(" ORDER BY created_at DESC LIMIT ")
+        .push(" ORDER BY created_at DESC, id DESC LIMIT ")
         .push_bind(limit)
         .push(" OFFSET ")
         .push_bind(offset);

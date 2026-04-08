@@ -3,6 +3,13 @@
 -- purged after 30 days by the daily batch. Display fields are
 -- denormalized (copied from trades + paper_accounts at write time)
 -- so the dashboard dropdown can render without a JOIN.
+--
+-- The `gen_random_uuid()` default relies on Postgres 13+ where it
+-- is part of core (no extension required). The project pins
+-- Postgres 16 via docker-compose.yml, so this is safe without a
+-- `CREATE EXTENSION pgcrypto`. Adding that line would pull a
+-- runtime permission dependency in for no benefit on a supported
+-- Postgres version.
 CREATE TABLE notifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     kind TEXT NOT NULL CHECK (kind IN ('trade_opened', 'trade_closed')),
