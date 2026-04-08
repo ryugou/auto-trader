@@ -7,6 +7,22 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+    insert_trade_with_executor(&mut *conn, trade).await
+}
+
+/// Insert a trade row using a caller-provided executor (a transaction
+/// or a connection). Used by `PaperTrader::execute_with_quantity` to
+/// keep the trade INSERT atomic with the balance update + event row,
+/// without duplicating the column / serialization logic in the
+/// executor crate.
+pub async fn insert_trade_with_executor<'e, E>(
+    executor: E,
+    trade: &Trade,
+) -> anyhow::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         r#"INSERT INTO trades
            (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
@@ -19,7 +35,7 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
     .bind(trade.exchange.as_str())
-    .bind(serde_json::to_string(&trade.direction)?.trim_matches('"'))
+    .bind(serde_json::to_string(&trade.direction)?.trim_matches('"').to_string())
     .bind(trade.entry_price)
     .bind(trade.exit_price)
     .bind(trade.stop_loss)
@@ -38,10 +54,10 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
             .trim_matches('"')
             .to_string()
     }))
-    .bind(serde_json::to_string(&trade.mode).unwrap_or_default().trim_matches('"'))
-    .bind(serde_json::to_string(&trade.status).unwrap_or_default().trim_matches('"'))
+    .bind(serde_json::to_string(&trade.mode).unwrap_or_default().trim_matches('"').to_string())
+    .bind(serde_json::to_string(&trade.status).unwrap_or_default().trim_matches('"').to_string())
     .bind(trade.max_hold_until)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }

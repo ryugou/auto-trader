@@ -346,15 +346,24 @@ pub async fn get_evaluated_balance(
            open_pnl AS (
                -- For crypto (quantity is set): PnL = price_diff * quantity
                -- For FX (quantity is NULL): PnL = price_diff * leverage (matches close_position)
+               --
+               -- TRUNC is applied **per row** (not on the SUM) so that
+               -- the dashboard view matches what `close_position` would
+               -- write to the ledger if every open trade closed at its
+               -- current mark price. SUM(TRUNC(...)) ≠ TRUNC(SUM(...))
+               -- on multi-position accounts (two +0.6 yen positions
+               -- should display 0, not 1).
                SELECT
                    t.paper_account_id,
                    SUM(
-                       CASE WHEN t.direction = 'long'
-                           THEN (COALESCE(lp.close, t.entry_price) - t.entry_price)
-                                * COALESCE(t.quantity, t.leverage)
-                           ELSE (t.entry_price - COALESCE(lp.close, t.entry_price))
-                                * COALESCE(t.quantity, t.leverage)
-                       END
+                       TRUNC(
+                           CASE WHEN t.direction = 'long'
+                               THEN (COALESCE(lp.close, t.entry_price) - t.entry_price)
+                                    * COALESCE(t.quantity, t.leverage)
+                               ELSE (t.entry_price - COALESCE(lp.close, t.entry_price))
+                                    * COALESCE(t.quantity, t.leverage)
+                           END
+                       )
                    ) AS unrealized_pnl
                FROM trades t
                LEFT JOIN latest_prices lp
@@ -365,7 +374,10 @@ pub async fn get_evaluated_balance(
            locked AS (
                SELECT
                    t.paper_account_id,
-                   SUM(t.quantity * t.entry_price / t.leverage) AS locked_margin
+                   -- Must match PaperTrader::execute_with_quantity's
+                   -- truncate_yen on margin; otherwise the dashboard
+                   -- locked-margin view drifts 1 yen per open position.
+                   SUM(TRUNC(t.quantity * t.entry_price / t.leverage)) AS locked_margin
                FROM trades t
                WHERE t.status = 'open'
                  AND t.paper_account_id = $1
@@ -375,6 +387,12 @@ pub async fn get_evaluated_balance(
            )
            SELECT
                pa.current_balance,
+               -- All three components are already integer-yen
+               -- (current_balance via truncate_yen on every write,
+               -- locked_margin via per-row TRUNC, unrealized_pnl via
+               -- per-row TRUNC inside open_pnl). The sum is therefore
+               -- exact and the displayed parts always reconcile with
+               -- the displayed total.
                COALESCE(op.unrealized_pnl, 0) AS unrealized_pnl,
                pa.current_balance
                    + COALESCE(lm.locked_margin, 0)

@@ -390,7 +390,7 @@ mod tests {
         );
         // First push the drop into history
         let _ = s.on_price(&drop).await;
-        let exits = s.on_open_positions(&[pos.clone()], &drop).await;
+        let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
         assert_eq!(exits.len(), 1, "expected trailing channel exit");
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
         assert_eq!(exits[0].close_price, dec!(10500000));

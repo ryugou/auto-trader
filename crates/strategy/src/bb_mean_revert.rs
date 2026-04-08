@@ -345,7 +345,7 @@ mod tests {
         let pos = make_position("bb", "FX_BTC_JPY", Direction::Long, dec!(9500000));
         // Mark price now back at 10M (≥ middle SMA20 = 10M) → exit
         let event = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
-        let exits = s.on_open_positions(&[pos.clone()], &event).await;
+        let exits = s.on_open_positions(std::slice::from_ref(&pos), &event).await;
         assert_eq!(exits.len(), 1, "expected 1 mean-reached exit");
         assert_eq!(exits[0].trade_id, pos.trade.id);
         assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);

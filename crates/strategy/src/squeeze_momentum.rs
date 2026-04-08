@@ -375,7 +375,7 @@ mod tests {
         // Sharp drop below EMA21
         let drop = make_event("FX_BTC_JPY", dec!(9000000), dec!(9050000), dec!(8950000));
         let _ = s.on_price(&drop).await;
-        let exits = s.on_open_positions(&[pos.clone()], &drop).await;
+        let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
         assert_eq!(exits.len(), 1, "expected EMA trailing exit");
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
     }

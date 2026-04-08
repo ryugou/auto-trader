@@ -7,9 +7,17 @@
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Truncate a yen amount toward zero to whole yen. All yen-denominated
+/// figures written to the DB (balance, pnl, fees, margin) go through
+/// this helper so the ledger never carries fractional yen — the
+/// dashboard and reconstruction logic treat yen as integer throughout.
+fn truncate_yen(amount: Decimal) -> Decimal {
+    amount.round_dp_with_strategy(0, RoundingStrategy::ToZero)
+}
 
 pub struct PaperTrader {
     pool: PgPool,
@@ -68,8 +76,21 @@ impl PaperTrader {
         quantity: Decimal,
     ) -> anyhow::Result<Trade> {
         let leverage = self.leverage().await?;
+        // Defensive: leverage should always be >= 1 in practice (the
+        // paper_accounts.leverage column has a sensible default and
+        // crypto/FX inputs are validated upstream), but a corrupted row
+        // would cause a divide-by-zero in the margin formula below.
+        // Bail loudly instead of silently producing nonsense margin.
+        if leverage <= Decimal::ZERO {
+            anyhow::bail!(
+                "paper account {} has non-positive leverage {leverage}, refusing to open trade",
+                self.paper_account_id
+            );
+        }
         let entry_at = Utc::now();
-        let margin = quantity * signal.entry_price / leverage;
+        // Margin is yen-denominated; truncate to whole yen so the
+        // dashboard / balance ledger never carries fractional yen.
+        let margin = truncate_yen(quantity * signal.entry_price / leverage);
         let trade = Trade {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
@@ -97,42 +118,8 @@ impl PaperTrader {
         // Insert the trade row, deduct margin, and write the
         // balance-history event in a single transaction so a crash
         // can't leave us with a position whose margin we forgot to lock.
-        let direction_str = match trade.direction {
-            Direction::Long => "long",
-            Direction::Short => "short",
-        };
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            r#"INSERT INTO trades
-               (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
-                stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
-                entry_at, exit_at, pnl_pips, pnl_amount,
-                exit_reason, mode, status, max_hold_until)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
-        )
-        .bind(trade.id)
-        .bind(&trade.strategy_name)
-        .bind(&trade.pair.0)
-        .bind(trade.exchange.as_str())
-        .bind(direction_str)
-        .bind(trade.entry_price)
-        .bind(trade.exit_price)
-        .bind(trade.stop_loss)
-        .bind(trade.take_profit)
-        .bind(trade.quantity)
-        .bind(trade.leverage)
-        .bind(trade.fees)
-        .bind(trade.paper_account_id)
-        .bind(trade.entry_at)
-        .bind(trade.exit_at)
-        .bind(trade.pnl_pips)
-        .bind(trade.pnl_amount)
-        .bind::<Option<String>>(None)
-        .bind("paper")
-        .bind("open")
-        .bind(trade.max_hold_until)
-        .execute(&mut *tx)
-        .await?;
+        auto_trader_db::trades::insert_trade_with_executor(&mut *tx, &trade).await?;
 
         // Deduct the margin from current_balance so the dashboard's
         // "free cash" view is correct.
@@ -210,7 +197,7 @@ impl PaperTrader {
         for row in rows {
             let quantity = row.quantity.unwrap_or(Decimal::ONE);
             let notional = row.entry_price * quantity;
-            let fee = notional * fee_rate;
+            let fee = truncate_yen(notional * fee_rate);
             if fee == Decimal::ZERO {
                 continue;
             }
@@ -383,11 +370,11 @@ impl OrderExecutor for PaperTrader {
         let leverage = locked.leverage;
         let (pnl_pips, pnl_amount) = if let Some(quantity) = locked.quantity {
             // Crypto/quantity-based: pnl = price_diff * quantity
-            (None, price_diff * quantity)
+            (None, truncate_yen(price_diff * quantity))
         } else {
             // FX: pip-based calculation
             let pnl_pips = Self::price_diff_to_pips(&pair, price_diff);
-            (Some(pnl_pips), price_diff * leverage)
+            (Some(pnl_pips), truncate_yen(price_diff * leverage))
         };
 
         let exit_at = Utc::now();
@@ -428,9 +415,13 @@ impl OrderExecutor for PaperTrader {
         // FX trades have `quantity = NULL`; their margin is implicit and
         // was never deducted on open, so the refund step is skipped for
         // them.
+        // Must match the (already-truncated) margin that was locked on
+        // open; otherwise the dashboard balance drifts by 1 yen per
+        // round-trip. execute_with_quantity calls truncate_yen on the
+        // same formula, so we do exactly the same here.
         let margin_refund = match locked.quantity {
             Some(q) if locked.leverage > Decimal::ZERO => {
-                q * locked.entry_price / locked.leverage
+                truncate_yen(q * locked.entry_price / locked.leverage)
             }
             _ => Decimal::ZERO,
         };

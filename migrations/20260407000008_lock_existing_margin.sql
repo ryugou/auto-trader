@@ -12,27 +12,40 @@
 -- Only crypto-style trades (with a non-NULL `quantity`) participate.
 -- FX paper trades stored quantity as NULL and never had a notional
 -- margin tied to the cash balance, so they are skipped here.
+--
+-- `mode = 'paper'` is added as defence-in-depth: the balance-lock
+-- accounting is a paper-trader concern (live trades never touch
+-- `paper_accounts.current_balance`), and we don't want a rogue
+-- live row with a paper_account_id to double-charge a paper account.
+--
+-- Amounts are TRUNC'd to whole yen to match the new
+-- PaperTrader::truncate_yen contract — otherwise the retroactive
+-- lock would write fractional yen that the live code path would
+-- never produce, and the balance ledger would drift by sub-yen
+-- amounts on the first round-trip.
 BEGIN;
 
 INSERT INTO paper_account_events (paper_account_id, event_type, amount, occurred_at, reference_id)
 SELECT
     t.paper_account_id,
     'margin_lock',
-    -(t.quantity * t.entry_price / t.leverage),
+    -TRUNC(t.quantity * t.entry_price / t.leverage),
     t.entry_at,
     t.id
 FROM trades t
 WHERE t.status = 'open'
+  AND t.mode = 'paper'
   AND t.paper_account_id IS NOT NULL
   AND t.quantity IS NOT NULL
   AND t.leverage > 0;
 
 UPDATE paper_accounts pa
    SET current_balance = current_balance - (
-        SELECT COALESCE(SUM(t.quantity * t.entry_price / t.leverage), 0)
+        SELECT COALESCE(SUM(TRUNC(t.quantity * t.entry_price / t.leverage)), 0)
           FROM trades t
          WHERE t.paper_account_id = pa.id
            AND t.status = 'open'
+           AND t.mode = 'paper'
            AND t.quantity IS NOT NULL
            AND t.leverage > 0
     ),
@@ -41,6 +54,7 @@ UPDATE paper_accounts pa
     SELECT 1 FROM trades t
      WHERE t.paper_account_id = pa.id
        AND t.status = 'open'
+       AND t.mode = 'paper'
        AND t.quantity IS NOT NULL
        AND t.leverage > 0
  );
