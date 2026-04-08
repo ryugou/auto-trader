@@ -191,3 +191,27 @@ export interface NotificationsResponse {
 export interface NotificationUnreadCountResponse {
   count: number
 }
+
+export interface MarketPrice {
+  exchange: string
+  pair: string
+  price: string
+  ts: string
+}
+
+export interface MarketPricesResponse {
+  prices: MarketPrice[]
+}
+
+export type MarketFeedStatus = 'healthy' | 'stale' | 'missing'
+
+export interface MarketFeedHealth {
+  exchange: string
+  pair: string
+  status: MarketFeedStatus
+  last_tick_age_secs: number | null
+}
+
+export interface MarketFeedHealthResponse {
+  feeds: MarketFeedHealth[]
+}

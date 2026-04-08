@@ -15,6 +15,8 @@ import type {
   Strategy,
   NotificationsResponse,
   NotificationUnreadCountResponse,
+  MarketPricesResponse,
+  MarketFeedHealthResponse,
 } from './types'
 
 const BASE = ''
@@ -110,5 +112,12 @@ export const api = {
       get<NotificationUnreadCountResponse>(`/api/notifications/unread-count`),
     markAllRead: () =>
       post<{ marked: number }>(`/api/notifications/mark-all-read`, {}),
+  },
+  market: {
+    prices: () => get<MarketPricesResponse>(`/api/market/prices`),
+  },
+  health: {
+    marketFeed: () =>
+      get<MarketFeedHealthResponse>(`/api/health/market-feed`),
   },
 }
