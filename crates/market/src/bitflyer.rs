@@ -2,6 +2,7 @@ use auto_trader_core::event::PriceEvent;
 use auto_trader_core::types::{Exchange, Pair};
 use crate::candle_builder::CandleBuilder;
 use crate::indicators;
+use crate::RawTick;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -32,14 +33,6 @@ struct TickerMessage {
     volume: Decimal,
     timestamp: String,
 }
-
-/// One raw tick observed on the websocket. Sent (best-effort) to a
-/// subscriber that wants every price update — typically the
-/// dashboard `PriceStore` for freshness monitoring. Distinct from
-/// the M5-aggregated `PriceEvent` channel, which only fires on
-/// candle boundaries and is therefore unsuitable for "is the feed
-/// alive right now?" health checks.
-pub type RawTick = (Pair, Decimal, chrono::DateTime<chrono::Utc>);
 
 pub struct BitflyerMonitor {
     ws_url: String,
