@@ -17,16 +17,38 @@ function describe(f: MarketFeedHealth): string {
 }
 
 export default function MarketFeedHealthBanner() {
-  const { data } = useQuery({
+  const { data, isError, isLoading } = useQuery({
     queryKey: ['market-feed-health'],
     queryFn: () => api.health.marketFeed(),
   })
 
-  // While the very first request is in flight we have no data — do
-  // not flash a banner. The next 15s tick will give us a real
-  // answer; a brief blind window is better than a false-positive
-  // alarm on every page load.
-  if (!data) return null
+  // Distinguish three states carefully because this banner is the
+  // whole point of the feature — silently hiding on a failed
+  // request would defeat it:
+  //   1. isLoading AND no data yet → brief blind window, render
+  //      nothing (next 15s poll fills it in; better than
+  //      false-positive on every first paint).
+  //   2. isError → the monitoring API itself is unreachable. That
+  //      is a louder failure than a single feed being stale and
+  //      MUST be visible; otherwise the operator thinks everything
+  //      is fine while the whole monitoring loop is dead.
+  //   3. data present → walk the feed list; show banner only when
+  //      at least one feed is non-healthy.
+  if (isError) {
+    return (
+      <div
+        role="alert"
+        className="bg-red-700 text-white px-4 py-2 text-sm font-semibold border-b border-red-900"
+      >
+        <div className="max-w-7xl mx-auto flex items-center gap-2">
+          <span aria-hidden>⚠️</span>
+          <span>監視 API 到達不可 (/api/health/market-feed)</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (isLoading || !data) return null
 
   const degraded = data.feeds.filter((f) => f.status !== 'healthy')
   if (degraded.length === 0) return null

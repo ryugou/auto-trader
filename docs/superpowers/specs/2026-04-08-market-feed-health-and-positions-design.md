@@ -18,9 +18,12 @@
 
 - 新規 Rust `PriceStore` と AppState 拡張
 - `GET /api/market/prices`、`GET /api/health/market-feed` の 2 エンドポイント
-- React 側の `MarketFeedHealthBanner` コンポーネント（全ページ共通）
-- Positions 改修（タブ移動、含み損益列、列名変更、整数化）
+- React 側の `MarketFeedHealthBanner` コンポーネント（全ページ共通）。ヘルス API 自体に到達できない場合も専用のエラーバナーを表示する (fail-silent 禁止)
+- Positions 改修（タブ移動、含み損益列、純損益列、列名変更、整数化）
+- Positions API (`PositionResponse`) に `fees` フィールドを追加して純損益計算の入力にする
+- Positions ページで `/api/market/prices` 到達失敗時の警告バナー
 - TradeTable 改修（PnL 列削除、純損益リネーム、整数化）
+- 評価額の色分け: Accounts ページ + TradeTable per-account 見出しの両方で、`evaluated_balance` を `initial_balance` と比較して緑 / 赤 / 中立に色付け
 
 ## 非スコープ
 
@@ -31,19 +34,22 @@
 - `close_position` の `price_diff × leverage` ゴミ分岐の除去（現行コードパスに到達しないデッドコードなので放置）
 - Overview / Analysis / Accounts / Strategies ページの変更
 
-## 含み損益ルール
+## 含み損益・純損益ルール
 
 **単一ルール:**
 
 ```
 含み損益 = (current_price - entry_price) × quantity     （LONG）
          = (entry_price - current_price) × quantity     （SHORT）
+
+純損益   = 含み損益 - 累計 fees
 ```
 
 - 小数点以下切り捨て（整数表示）
 - crypto / FX 共通。両方とも trades テーブルの `quantity` カラムに数量が保存される前提（`PositionSizer::calculate_quantity` を通って `execute_with_quantity` で INSERT される現行トレードフローがこれを保証）
-- `trades.quantity IS NULL` の行に遭遇したら（現状の実データには存在しないが防御的に）含み損益を `-` 表示
-- `current_price` が取得できない行は含み損益を `-` 表示。運用者はバナー側で既にアラートを受けているので、この行の値を詳細に制御する意味はない
+- `trades.quantity IS NULL` の行に遭遇したら（現状の実データには存在しないが防御的に）含み損益・純損益ともに `-` 表示
+- `current_price` が取得できない行は含み損益・純損益ともに `-` 表示。運用者はバナー側で既にアラートを受けているので、この行の値を詳細に制御する意味はない
+- `fees` は `trades.fees` カラムからそのまま読み出す（overnight_fee などが累計された値）。Positions API の `PositionResponse` に新規フィールドとして追加
 
 ## アーキテクチャ
 
@@ -186,14 +192,14 @@ impl PriceStore {
 **ファイル:** `dashboard-ui/src/pages/Positions.tsx`
 
 - `useQuery(['market-prices'])` で現在価格を取得
-- 既存のテーブルに新列「**含み損益**」を追加（既存の `エントリー価格` の右、`数量` の次）
-- 各行の含み損益計算:
-  - prices から `(exchange, pair)` 一致のエントリを探す
-  - 無ければ `-`
-  - 有れば `sign × (current - entry) × quantity`（LONG: sign=+1, SHORT: sign=-1）、整数切り捨て
-  - profit / loss で緑 / 赤
+- 既存のテーブルに 2 つの新列を追加:「**含み損益**」「**純損益**」
+- 各行の計算:
+  - 含み損益: prices から `(exchange, pair)` 一致を探し、`sign × (current - entry) × quantity`（LONG: sign=+1、SHORT: sign=-1）、整数切り捨て。無ければ `-`
+  - 純損益: 含み損益 - `Number(position.fees)`。含み損益が `-` なら純損益も `-`
+  - profit / loss / zero で緑 / 赤 / 灰
 - 列名変更: `SL` → `損切りライン`、`TP` → `利確ライン`
-- 数値表示は全カラムとも `Math.round(...).toLocaleString()` で整数化（エントリー価格、SL/TP、数量）
+- 数値表示は全カラムとも `Math.round(...).toLocaleString()` で整数化
+- `/api/market/prices` が `isError` のときはテーブル上部に専用の警告ボックスを表示（ヘルスバナーとは別経路なので独立して surface）
 - ヘッダーでのソート順変更なし
 
 ### フロントエンド: TradeTable 改修
@@ -202,8 +208,23 @@ impl PriceStore {
 
 - `pnl_amount` カラムを buildColumns から削除
 - `net_pnl` のヘッダー文字列を `'Net PnL'` → `'純損益'` に変更
-- `fees` カラムの数値表示を `formatNum` から `Math.round(Number(...)).toLocaleString()` ベースの新 helper に変更（既存 `formatNum` を更新するか、新 helper `formatInt` を追加）
+- `fees` カラムの数値表示を `formatNum` から `Math.round(Number(...)).toLocaleString()` ベースの新 helper に変更（新 helper `formatInt` を追加）
 - `entry_price` / `exit_price` / `quantity` も整数表示
+- per-account 見出しの `評価額` を `evaluated_balance` と `initial_balance` の比較で色分け（up=緑、down=赤、equal=中立）
+
+### フロントエンド: Accounts ページ改修
+
+**ファイル:** `dashboard-ui/src/pages/Accounts.tsx`
+
+- `評価額` 列を TradeTable 見出しと同じロジックで色分け（up=緑、down=赤、数値 NaN のときは中立）
+- それ以外の列は変更なし
+
+### バックエンド: Positions API
+
+**ファイル:** `crates/app/src/api/positions.rs`
+
+- `PositionResponse` に `fees: Decimal` フィールドを追加（`trade.fees` からそのまま読み出し）
+- `dashboard-ui/src/api/types.ts` の `PositionResponse` も `fees: string` を追加
 
 ### フロントエンド: タブ並び替え
 
@@ -258,20 +279,22 @@ const navItems = [
 
 ## 既存コードへの影響
 
-- `crates/app/src/main.rs`: AppState 拡張、PriceStore 生成、price_rx ループに 1 行追加
-- `crates/app/src/api/mod.rs`: mod 追加 + 2 ルート
+- `crates/app/src/main.rs`: AppState 拡張、PriceStore 生成、price_rx ループに update 呼び出し追加、expected_feeds 構築
+- `crates/app/src/api/mod.rs`: mod 追加 + AppState に price_store + 2 ルート
 - `crates/app/src/api/market.rs`: 新規
 - `crates/app/src/api/health.rs`: 新規
+- `crates/app/src/api/positions.rs`: PositionResponse に `fees` フィールド追加
 - `crates/app/src/price_store.rs`: 新規
 - `dashboard-ui/src/App.tsx`: nav 並び替え + banner 配置
-- `dashboard-ui/src/pages/Positions.tsx`: 列追加 + 列名 + 整数化
-- `dashboard-ui/src/components/TradeTable.tsx`: 列削除 + 列名 + 整数化
-- `dashboard-ui/src/api/types.ts`: Market / Health 型追加
+- `dashboard-ui/src/pages/Positions.tsx`: 含み損益 + 純損益列追加、列名変更、整数化、価格 API エラー時の警告ボックス
+- `dashboard-ui/src/pages/Accounts.tsx`: 評価額列の色分け
+- `dashboard-ui/src/components/TradeTable.tsx`: PnL 削除、純損益リネーム、整数化、per-account 見出しの評価額色分け
+- `dashboard-ui/src/api/types.ts`: Market / Health 型追加、PositionResponse に `fees`
 - `dashboard-ui/src/api/client.ts`: API 関数追加
-- `dashboard-ui/src/components/MarketFeedHealthBanner.tsx`: 新規
+- `dashboard-ui/src/components/MarketFeedHealthBanner.tsx`: 新規（ヘルス API 到達不可時の専用分岐あり）
 - `crates/core/src/types.rs`: 変更なし
 - `crates/executor/src/paper.rs`: 変更なし
-- 他ページ (Overview, Analysis, Accounts, Strategies): 影響なし
+- 他ページ (Overview, Analysis, Strategies): 影響なし
 
 ## 将来の拡張余地
 

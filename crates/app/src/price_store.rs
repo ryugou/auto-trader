@@ -99,7 +99,13 @@ impl PriceStore {
                 let (status, age) = match observed {
                     None => (FeedStatus::Missing, None),
                     Some(tick) => {
-                        let age_secs = (now - tick.ts).num_seconds();
+                        // Clamp to 0 so an upstream clock skew that
+                        // produces a future-dated tick does not get
+                        // reported as a negative age (and does not
+                        // accidentally look healthy just because the
+                        // negative is less than the 60s threshold).
+                        let raw_age = (now - tick.ts).num_seconds();
+                        let age_secs = raw_age.max(0);
                         let status = if age_secs <= STALE_THRESHOLD_SECS {
                             FeedStatus::Healthy
                         } else {
@@ -205,6 +211,22 @@ mod tests {
         let report = store.health_at(now).await;
         assert_eq!(report[0].status, FeedStatus::Stale);
         assert_eq!(report[0].last_tick_age_secs, Some(61));
+    }
+
+    #[tokio::test]
+    async fn health_clamps_future_timestamp_to_zero() {
+        // An upstream clock-skewed feed that reports a timestamp in
+        // the future must not show up as "-5s old" — we clamp to
+        // zero and keep reporting healthy (the real problem is
+        // upstream, not this feed going stale).
+        let k = key(Exchange::BitflyerCfd, "FX_BTC_JPY");
+        let store = PriceStore::new(vec![k.clone()]);
+        let now = Utc.with_ymd_and_hms(2026, 4, 8, 12, 0, 0).unwrap();
+        let future = now + chrono::Duration::seconds(5);
+        store.update(k.clone(), tick(11_500_000, future)).await;
+        let report = store.health_at(now).await;
+        assert_eq!(report[0].status, FeedStatus::Healthy);
+        assert_eq!(report[0].last_tick_age_secs, Some(0));
     }
 
     #[tokio::test]

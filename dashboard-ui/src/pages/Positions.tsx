@@ -67,7 +67,7 @@ export default function Positions() {
     queryFn: () => api.positions.list(),
   })
 
-  const { data: pricesData } = useQuery({
+  const { data: pricesData, isError: pricesError } = useQuery({
     queryKey: ['market-prices'],
     queryFn: () => api.market.prices(),
   })
@@ -122,6 +122,16 @@ export default function Positions() {
       </div>
 
       <PageFilters value={filters} onChange={setFilters} />
+
+      {pricesError && (
+        <div
+          role="alert"
+          className="bg-red-900/60 border border-red-700 text-red-200 px-4 py-2 rounded text-sm"
+        >
+          ⚠️ 現在価格 API (/api/market/prices) に到達できません。含み損益 / 純損益は
+          正しく計算できていません。
+        </div>
+      )}
 
       <div className="bg-gray-900 rounded-lg shadow overflow-hidden">
         <div className="overflow-x-auto">
