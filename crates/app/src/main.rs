@@ -1,5 +1,8 @@
 mod api;
+mod enriched_ingest;
 mod price_store;
+mod regime;
+mod wilson;
 
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
