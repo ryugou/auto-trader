@@ -1,6 +1,3 @@
-// Items here are used from enriched_ingest, weekly_batch, and main.rs (Task 7).
-#![allow(dead_code)]
-
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};

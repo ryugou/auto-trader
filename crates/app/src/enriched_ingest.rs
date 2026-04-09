@@ -1,7 +1,3 @@
-// Items in this module are wired into main.rs in Task 7. Until then
-// the compiler sees them as unused in the binary context.
-#![allow(dead_code)]
-
 use crate::regime;
 use auto_trader_core::types::{Direction, ExitReason, Trade};
 use rust_decimal::Decimal;

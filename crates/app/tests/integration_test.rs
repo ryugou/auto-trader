@@ -38,7 +38,7 @@ async fn channel_pipeline() {
         max_hold_until: None,
     };
 
-    signal_tx.send(SignalEvent { signal: signal.clone() }).await.unwrap();
+    signal_tx.send(SignalEvent { signal: signal.clone(), indicators: std::collections::HashMap::new() }).await.unwrap();
     let received = signal_rx.recv().await.unwrap();
     assert_eq!(received.signal.pair, Pair::new("USD_JPY"));
     assert_eq!(received.signal.direction, Direction::Long);

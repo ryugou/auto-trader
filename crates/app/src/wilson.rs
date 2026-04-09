@@ -1,6 +1,3 @@
-// Used from weekly_batch.rs (Task 6) and main.rs wiring (Task 7).
-#![allow(dead_code)]
-
 /// Wilson Score lower bound for a binomial proportion.
 ///
 /// Gives a conservative estimate of the true win rate given

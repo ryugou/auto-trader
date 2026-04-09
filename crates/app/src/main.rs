@@ -219,6 +219,30 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
+            name if name.starts_with("donchian_trend_evolve") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                let params: serde_json::Value = sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
+                    "SELECT params FROM strategy_params WHERE strategy_name = $1"
+                )
+                .bind(&sc.name)
+                .fetch_optional(&pool)
+                .await
+                .unwrap_or(None)
+                .map(|j| j.0)
+                .unwrap_or_else(|| serde_json::json!({
+                    "entry_channel": 20, "exit_channel": 10,
+                    "sl_pct": 0.03, "allocation_pct": 1.0, "atr_baseline_bars": 50
+                }));
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(
+                        sc.name.clone(),
+                        pairs,
+                        params,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
             name if name.starts_with("donchian_trend") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
                 engine.add_strategy(
@@ -286,6 +310,10 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v.iter().map(|s| Pair::new(s)).collect())
         .unwrap_or_default();
 
+    let mut bitflyer_highs_seed: std::collections::HashMap<String, Vec<Decimal>> =
+        std::collections::HashMap::new();
+    let mut bitflyer_lows_seed: std::collections::HashMap<String, Vec<Decimal>> =
+        std::collections::HashMap::new();
     let mut bitflyer_closes_seed: std::collections::HashMap<String, Vec<Decimal>> =
         std::collections::HashMap::new();
 
@@ -329,8 +357,12 @@ async fn main() -> anyhow::Result<()> {
             if candles.is_empty() {
                 continue;
             }
-            // Feed bitflyer indicator cache: just the closes.
+            // Feed bitflyer indicator cache: highs, lows, and closes.
+            let highs: Vec<Decimal> = candles.iter().map(|c| c.high).collect();
+            let lows: Vec<Decimal> = candles.iter().map(|c| c.low).collect();
             let closes: Vec<Decimal> = candles.iter().map(|c| c.close).collect();
+            bitflyer_highs_seed.insert(pair.0.clone(), highs);
+            bitflyer_lows_seed.insert(pair.0.clone(), lows);
             bitflyer_closes_seed.insert(pair.0.clone(), closes);
 
             // Feed strategy engine: PriceEvent so indicator history populates.
@@ -493,7 +525,11 @@ async fn main() -> anyhow::Result<()> {
                 price_tx.clone(),
             )
             .with_db(pool.clone())
-            .with_closes_seed(std::mem::take(&mut bitflyer_closes_seed))
+            .with_candle_seed(
+                std::mem::take(&mut bitflyer_highs_seed),
+                std::mem::take(&mut bitflyer_lows_seed),
+                std::mem::take(&mut bitflyer_closes_seed),
+            )
             .with_raw_tick_sink(raw_tick_tx.clone());
             Some(tokio::spawn(async move {
                 if let Err(e) = bf_monitor.run().await {
@@ -1014,23 +1050,40 @@ async fn main() -> anyhow::Result<()> {
                     Ok(trade) => {
                         if let Some(vp) = vegapunk_client_exec.clone() {
                             let trade_clone = trade.clone();
+                            let indicators_clone = signal_event.indicators.clone();
+                            let exec_pool = executor_pool.clone();
                             tokio::spawn(async move {
-                                let mut vp = vp.lock().await;
-                                let direction_str = match trade_clone.direction {
-                                    Direction::Long => "ロング",
-                                    Direction::Short => "ショート",
-                                };
-                                let text = format!(
-                                    "[{}] {} {} 判断。trade_id: {}。エントリー価格: {}。qty: {}。SL: {}、TP: {}。戦略: {}",
-                                    trade_clone.exchange, trade_clone.pair, direction_str,
-                                    trade_clone.id, trade_clone.entry_price,
-                                    trade_clone.quantity.map(|q| q.to_string()).unwrap_or_default(),
-                                    trade_clone.stop_loss, trade_clone.take_profit,
-                                    trade_clone.strategy_name
+                                // Save entry_indicators to DB (with regime classification)
+                                let mut ind_map = indicators_clone
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
+                                    .collect::<serde_json::Map<_, _>>();
+                                ind_map.insert(
+                                    "regime".to_string(),
+                                    serde_json::Value::String(
+                                        crate::regime::classify(&indicators_clone).as_str().to_string(),
+                                    ),
                                 );
+                                let ind_json = serde_json::Value::Object(ind_map);
+                                if let Err(e) = sqlx::query(
+                                    "UPDATE trades SET entry_indicators = $1 WHERE id = $2",
+                                )
+                                .bind(&ind_json)
+                                .bind(trade_clone.id)
+                                .execute(&exec_pool)
+                                .await
+                                {
+                                    tracing::warn!("failed to save entry_indicators: {e}");
+                                }
+
+                                let mut vp = vp.lock().await;
+                                let text = crate::enriched_ingest::format_trade_open(&trade_clone, &indicators_clone);
                                 let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
                                 let timestamp = chrono::Utc::now().to_rfc3339();
-                                if let Err(e) = vp.ingest_raw(&text, "trade_signal", &channel, &timestamp).await {
+                                if let Err(e) = vp
+                                    .ingest_raw(&text, "trade_signal", &channel, &timestamp)
+                                    .await
+                                {
                                     tracing::warn!("vegapunk ingest failed for trade open: {e}");
                                 }
                             });
@@ -1068,7 +1121,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TradeAction::Closed { .. } => {
                     let t = &trade_event.trade;
-                    if let (Some(_exit_price), Some(exit_at), Some(pnl_amount), Some(exit_reason)) =
+                    if let (Some(_exit_price), Some(exit_at), Some(pnl_amount), Some(_exit_reason)) =
                         (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
                     {
                         // Upsert daily summary
@@ -1098,28 +1151,75 @@ async fn main() -> anyhow::Result<()> {
                         // Fire-and-forget Vegapunk ingestion (don't block DB recording)
                         if let Some(vp) = vegapunk_client_recorder.clone() {
                             let t = t.clone();
+                            let close_pool = recorder_pool.clone();
                             tokio::spawn(async move {
-                                let mut vp = vp.lock().await;
-                                let direction_str = match t.direction {
-                                    Direction::Long => "ロング",
-                                    Direction::Short => "ショート",
-                                };
-                                let holding = exit_at.signed_duration_since(t.entry_at);
-                                let pnl_display = t.pnl_pips
-                                    .map(|p| format!("{p} pips"))
-                                    .unwrap_or_else(|| format!("{pnl_amount} JPY"));
-                                let text = format!(
-                                    "[{}] {} {} 決済。trade_id: {}。{:?}。PnL: {}。保有時間: {}秒。戦略: {}",
-                                    t.exchange, t.pair, direction_str,
-                                    t.id, exit_reason,
-                                    pnl_display,
-                                    holding.num_seconds(),
-                                    t.strategy_name,
+                                // Fetch entry_indicators from DB
+                                let entry_ind: Option<serde_json::Value> = sqlx::query_scalar(
+                                    "SELECT entry_indicators FROM trades WHERE id = $1",
+                                )
+                                .bind(t.id)
+                                .fetch_optional(&close_pool)
+                                .await
+                                .unwrap_or(None)
+                                .flatten();
+
+                                // Fetch account balance context
+                                let (bal, init): (Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>) =
+                                    match t.paper_account_id {
+                                        Some(aid) => sqlx::query_as::<_, (rust_decimal::Decimal, rust_decimal::Decimal)>(
+                                            "SELECT current_balance, initial_balance FROM paper_accounts WHERE id = $1",
+                                        )
+                                        .bind(aid)
+                                        .fetch_optional(&close_pool)
+                                        .await
+                                        .unwrap_or(None)
+                                        .map(|(b, i)| (Some(b), Some(i)))
+                                        .unwrap_or((None, None)),
+                                        None => (None, None),
+                                    };
+
+                                let text = crate::enriched_ingest::format_trade_close(
+                                    &t,
+                                    entry_ind.as_ref(),
+                                    bal,
+                                    init,
                                 );
                                 let channel = format!("{}-trades", t.pair.0.to_lowercase());
-                                let timestamp = exit_at.to_rfc3339();
-                                if let Err(e) = vp.ingest_raw(&text, "trade_result", &channel, &timestamp).await {
+                                let timestamp = t
+                                    .exit_at
+                                    .map(|e| e.to_rfc3339())
+                                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+                                let mut vp = vp.lock().await;
+                                if let Err(e) = vp
+                                    .ingest_raw(&text, "trade_result", &channel, &timestamp)
+                                    .await
+                                {
                                     tracing::warn!("vegapunk ingest failed for trade close: {e}");
+                                }
+
+                                // Auto-feedback if this trade had a Vegapunk search attached
+                                let search_id: Option<String> = sqlx::query_scalar(
+                                    "SELECT vegapunk_search_id FROM trades WHERE id = $1",
+                                )
+                                .bind(t.id)
+                                .fetch_optional(&close_pool)
+                                .await
+                                .unwrap_or(None)
+                                .flatten();
+
+                                if let Some(sid) = search_id {
+                                    let rating = crate::enriched_ingest::compute_feedback_rating(&t);
+                                    let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;
+                                    let regime = entry_ind
+                                        .as_ref()
+                                        .and_then(|i| i.get("regime"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let comment = format!("PnL: {net_pnl}, regime: {regime}");
+                                    if let Err(e) = vp.feedback(&sid, rating, &comment).await {
+                                        tracing::warn!("vegapunk feedback failed: {e}");
+                                    }
                                 }
                             });
                         }
@@ -1132,6 +1232,16 @@ async fn main() -> anyhow::Result<()> {
     // Task: Daily batch (max_drawdown calculation at UTC 0:00)
     // On startup, idempotently recompute last 7 days to cover any missed batches.
     // update_daily_max_drawdown is safe to re-run (overwrites max_drawdown).
+    let vegapunk_client_daily: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
+        vegapunk_base.as_ref().map(|base| {
+            Arc::new(Mutex::new(
+                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(base, &config.vegapunk.schema),
+            ))
+        });
+    let vegapunk_client_weekly = vegapunk_client_daily.clone();
+    let gemini_api_url = config.gemini.as_ref().map(|g| g.api_url.clone()).unwrap_or_default();
+    let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+    let gemini_model = config.gemini.as_ref().map(|g| g.model.clone()).unwrap_or_default();
     let daily_pool = pool.clone();
     let daily_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -1174,6 +1284,37 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!("failed to purge old read notifications: {e}"),
                 }
+
+                // Daily: Vegapunk Merge for community detection consolidation
+                if let Some(vp) = vegapunk_client_daily.clone() {
+                    tokio::spawn(async move {
+                        let mut client = vp.lock().await;
+                        if let Err(e) = client.merge().await {
+                            tracing::warn!("daily vegapunk merge failed: {e}");
+                        } else {
+                            tracing::info!("daily vegapunk merge completed");
+                        }
+                    });
+                }
+
+                // Weekly (Sunday JST): run evolution batch
+                // `weekday()` requires the `Datelike` trait to be in scope.
+                use chrono::Datelike as _;
+                let jst_weekday = (chrono::Utc::now() + chrono::Duration::hours(9))
+                    .weekday();
+                if jst_weekday == chrono::Weekday::Sun
+                    && let Err(e) = crate::weekly_batch::run(
+                        &daily_pool,
+                        vegapunk_client_weekly.as_ref(),
+                        &gemini_api_url,
+                        &gemini_api_key,
+                        &gemini_model,
+                    )
+                    .await
+                {
+                    tracing::error!("weekly evolution batch failed: {e}");
+                }
+
                 last_date = now_date;
             }
         }
