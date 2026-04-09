@@ -1,20 +1,22 @@
+use crate::oanda::OandaClient;
+use crate::{indicators, RawTick};
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::types::{Exchange, Pair};
-use crate::indicators;
-use crate::oanda::OandaClient;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 pub struct MarketMonitor {
-    client: OandaClient,
+    client: Arc<OandaClient>,
     pairs: Vec<Pair>,
     interval_secs: u64,
     timeframe: String,
     tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
+    raw_tick_tx: Option<mpsc::Sender<RawTick>>,
 }
 
 impl MarketMonitor {
@@ -26,12 +28,13 @@ impl MarketMonitor {
         tx: mpsc::Sender<PriceEvent>,
     ) -> Self {
         Self {
-            client,
+            client: Arc::new(client),
             pairs,
             interval_secs,
             timeframe: timeframe.to_string(),
             tx,
             pool: None,
+            raw_tick_tx: None,
         }
     }
 
@@ -40,7 +43,39 @@ impl MarketMonitor {
         self
     }
 
+    /// Subscribe to the OANDA pricing stream so raw ticks flow into
+    /// the dashboard's `PriceStore` for feed-health monitoring,
+    /// independent of the M-series candle cadence the strategy
+    /// engine consumes. See `OandaClient::stream_prices` for the
+    /// NDJSON + HEARTBEAT handling details.
+    pub fn with_raw_tick_sink(mut self, tx: mpsc::Sender<RawTick>) -> Self {
+        self.raw_tick_tx = Some(tx);
+        self
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
+        // Background raw-tick streamer. Runs for the lifetime of
+        // this monitor, reconnecting with a 5-second backoff on
+        // error. Only spawned when a sink is actually configured.
+        if let Some(tx) = self.raw_tick_tx.clone() {
+            let client = self.client.clone();
+            let pairs = self.pairs.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = client.stream_prices(&pairs, tx.clone()).await {
+                        tracing::warn!(
+                            "OANDA price stream error (reconnecting in 5s): {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            "OANDA price stream ended cleanly (reconnecting in 5s)"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            });
+        }
+
         let mut tick = interval(Duration::from_secs(self.interval_secs));
         loop {
             tick.tick().await;
