@@ -19,6 +19,9 @@ pub struct PositionResponse {
     pub stop_loss: Decimal,
     pub take_profit: Decimal,
     pub quantity: Option<Decimal>,
+    /// Accumulated fees on this open position (overnight fees, etc.).
+    /// Used by the Positions page to compute 純損益 = 含み損益 - fees.
+    pub fees: Decimal,
     pub entry_at: DateTime<Utc>,
     pub paper_account_id: Option<Uuid>,
 }
@@ -54,6 +57,7 @@ pub async fn list(
                 stop_loss: t.stop_loss,
                 take_profit: t.take_profit,
                 quantity: t.quantity,
+                fees: t.fees,
                 entry_at: t.entry_at,
                 paper_account_id: t.paper_account_id,
             }

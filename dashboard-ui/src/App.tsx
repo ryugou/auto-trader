@@ -8,6 +8,7 @@ import Positions from './pages/Positions'
 import Strategies from './pages/Strategies'
 import Notifications from './pages/Notifications'
 import NotificationBell from './components/NotificationBell'
+import MarketFeedHealthBanner from './components/MarketFeedHealthBanner'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,10 +29,10 @@ const queryClient = new QueryClient({
 
 const navItems = [
   { to: '/', label: '概要' },
+  { to: '/positions', label: 'ポジション' },
   { to: '/trades', label: 'トレード' },
   { to: '/analysis', label: '分析' },
   { to: '/accounts', label: '口座' },
-  { to: '/positions', label: 'ポジション' },
   { to: '/strategies', label: '戦略' },
 ]
 
@@ -73,6 +74,7 @@ function App() {
               <NotificationBell />
             </div>
           </header>
+          <MarketFeedHealthBanner />
           <main className="max-w-7xl mx-auto p-4">
             <Routes>
               <Route path="/" element={<Overview />} />

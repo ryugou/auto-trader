@@ -92,6 +92,7 @@ export default function Accounts() {
               ) : (
                 accounts.map((a) => {
                   const unrealized = a.unrealized_pnl ? Number(a.unrealized_pnl) : 0
+                  const initial = Number(a.initial_balance)
                   const evaluated = a.evaluated_balance
                     ? Number(a.evaluated_balance)
                     : Number(a.current_balance)
@@ -101,6 +102,17 @@ export default function Accounts() {
                       : unrealized < 0
                         ? 'text-red-400'
                         : 'text-gray-300'
+                  // Color the evaluated balance relative to the
+                  // initial balance so "am I up or down overall?"
+                  // is visible at a glance on the account list.
+                  const evaluatedColor =
+                    Number.isNaN(evaluated) || Number.isNaN(initial)
+                      ? ''
+                      : evaluated > initial
+                        ? 'text-emerald-400'
+                        : evaluated < initial
+                          ? 'text-red-400'
+                          : ''
                   return (
                   <tr key={a.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                     <td className="px-4 py-2 font-medium">{a.name}</td>
@@ -124,7 +136,7 @@ export default function Accounts() {
                       {unrealized >= 0 ? '+' : ''}
                       {Math.round(unrealized).toLocaleString()}
                     </td>
-                    <td className="px-4 py-2 text-right font-medium">
+                    <td className={`px-4 py-2 text-right font-medium ${evaluatedColor}`}>
                       {Math.round(evaluated).toLocaleString()}
                     </td>
                     <td className="px-4 py-2 text-right">{a.leverage}x</td>
