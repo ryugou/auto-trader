@@ -5,6 +5,8 @@ use serde::Deserialize;
 use std::str::FromStr;
 
 use crate::provider::MarketDataProvider;
+use crate::RawTick;
+use tokio::sync::mpsc;
 
 pub struct OandaClient {
     client: reqwest::Client,
@@ -179,6 +181,147 @@ impl OandaClient {
         let bid = Decimal::from_str(bid_str)?;
         let ask = Decimal::from_str(ask_str)?;
         Ok((bid + ask) / Decimal::from(2))
+    }
+
+    /// Open the OANDA pricing stream for the given instruments and
+    /// forward every tick into `tx`. The endpoint is NDJSON: one
+    /// JSON object per line, typed either `"PRICE"` (a real tick)
+    /// or `"HEARTBEAT"` (a 5-second keep-alive with no price).
+    ///
+    /// We handle `HEARTBEAT` by re-sending the last observed `PRICE`
+    /// with the heartbeat's own timestamp. This keeps the
+    /// dashboard's feed-health 60-second threshold green during
+    /// quiet periods (e.g. the hour after NY close on Friday) when
+    /// the price legitimately isn't moving.
+    ///
+    /// Returns `Err` on connection / parse / send failures; the
+    /// caller is expected to reconnect with backoff.
+    pub async fn stream_prices(
+        &self,
+        instruments: &[Pair],
+        tx: mpsc::Sender<RawTick>,
+    ) -> anyhow::Result<()> {
+        use futures_util::StreamExt;
+
+        if instruments.is_empty() {
+            return Ok(());
+        }
+        let instrument_list = instruments
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let url = format!(
+            "{}/v3/accounts/{}/pricing/stream",
+            self.base_url, self.account_id
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("instruments", instrument_list.as_str())])
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        // Cache of the last real PRICE per instrument, used to
+        // rebroadcast on HEARTBEAT so the freshness watchdog stays
+        // green during quiet periods.
+        let mut last_price: std::collections::HashMap<String, Decimal> =
+            std::collections::HashMap::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buf.extend_from_slice(&chunk);
+            // Split on newlines — the stream is NDJSON.
+            while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=nl).collect();
+                let line_str = std::str::from_utf8(&line)?.trim();
+                if line_str.is_empty() {
+                    continue;
+                }
+                let msg: serde_json::Value = match serde_json::from_str(line_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "OANDA pricing stream: failed to parse line: {e}"
+                        );
+                        continue;
+                    }
+                };
+                let msg_type = msg["type"].as_str().unwrap_or("");
+                let time_str = msg["time"].as_str().unwrap_or("");
+                let ts = match chrono::DateTime::parse_from_rfc3339(time_str) {
+                    Ok(t) => t.with_timezone(&chrono::Utc),
+                    Err(_) => continue,
+                };
+                match msg_type {
+                    "PRICE" => {
+                        let instrument = match msg["instrument"].as_str() {
+                            Some(s) => s.to_string(),
+                            None => continue,
+                        };
+                        let bid = msg["bids"]
+                            .as_array()
+                            .and_then(|a| a.first())
+                            .and_then(|b| b["price"].as_str())
+                            .and_then(|s| Decimal::from_str(s).ok());
+                        let ask = msg["asks"]
+                            .as_array()
+                            .and_then(|a| a.first())
+                            .and_then(|a| a["price"].as_str())
+                            .and_then(|s| Decimal::from_str(s).ok());
+                        let (Some(bid), Some(ask)) = (bid, ask) else {
+                            continue;
+                        };
+                        let mid = (bid + ask) / Decimal::from(2);
+                        last_price.insert(instrument.clone(), mid);
+                        let pair = Pair::new(&instrument);
+                        match tx.try_send((pair, mid, ts)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::debug!(
+                                    "OANDA raw tick sink full, dropping tick"
+                                );
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::warn!("OANDA raw tick sink closed");
+                                return Ok(());
+                            }
+                        }
+                    }
+                    "HEARTBEAT" => {
+                        // Rebroadcast the most recent real PRICE on
+                        // every instrument we have seen, with the
+                        // heartbeat's own timestamp. Skip instruments
+                        // whose first PRICE has not arrived yet.
+                        for (instrument, price) in &last_price {
+                            let pair = Pair::new(instrument);
+                            match tx.try_send((pair, *price, ts)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    tracing::debug!(
+                                        "OANDA raw tick sink full on heartbeat rebroadcast"
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    tracing::warn!(
+                                        "OANDA raw tick sink closed on heartbeat"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Unknown message type — ignore.
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
