@@ -37,6 +37,16 @@ function formatNum(value: string | null): string {
   return Number(value).toLocaleString()
 }
 
+// Integer-only display used across the main trade table rows. The
+// trader never books sub-unit amounts for crypto/FX at the
+// reporting layer, so dropping the decimals is just noise removal.
+function formatInt(value: string | null): string {
+  if (!value) return '-'
+  const n = Number(value)
+  if (Number.isNaN(n)) return '-'
+  return Math.round(n).toLocaleString()
+}
+
 function holdingTime(entry: string, exit: string | null): string {
   if (!exit) return '-'
   const ms = new Date(exit).getTime() - new Date(entry).getTime()
@@ -133,36 +143,23 @@ function buildColumns(
     }),
     col.accessor('entry_price', {
       header: 'エントリー',
-      cell: (info) => formatNum(info.getValue()),
+      cell: (info) => formatInt(info.getValue()),
     }),
     col.accessor('exit_price', {
       header: 'エグジット',
-      cell: (info) => formatNum(info.getValue()),
+      cell: (info) => formatInt(info.getValue()),
     }),
     col.accessor('quantity', {
       header: '数量',
-      cell: (info) => formatNum(info.getValue()),
-    }),
-    col.accessor('pnl_amount', {
-      header: 'PnL',
-      cell: (info) => {
-        const val = info.getValue()
-        if (!val) return '-'
-        const n = Number(val)
-        return (
-          <span className={n >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-            {n >= 0 ? '+' : ''}{Math.round(n).toLocaleString()}
-          </span>
-        )
-      },
+      cell: (info) => formatInt(info.getValue()),
     }),
     col.accessor('fees', {
       header: '手数料',
-      cell: (info) => formatNum(info.getValue()),
+      cell: (info) => formatInt(info.getValue()),
     }),
     col.display({
       id: 'net_pnl',
-      header: 'Net PnL',
+      header: '純損益',
       cell: (info) => {
         const row = info.row.original
         if (!row.pnl_amount) return '-'
@@ -282,14 +279,29 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
           </span>
         </div>
         <div className="text-xs text-gray-400 flex flex-wrap gap-x-3 gap-y-1">
-          {account.evaluated_balance != null && (
-            <span>
-              評価額{' '}
-              <span className="text-gray-100 font-mono">
-                {formatBalance(account.evaluated_balance, account.currency)}
+          {account.evaluated_balance != null && (() => {
+            // Color the evaluated balance relative to the initial
+            // balance so at-a-glance you can see if the account is
+            // up or down overall. Use the same green/red scheme as
+            // other +/- indicators across the dashboard.
+            const evaluated = Number(account.evaluated_balance)
+            const initial = Number(account.initial_balance)
+            const balanceClass = Number.isNaN(evaluated) || Number.isNaN(initial)
+              ? 'text-gray-100'
+              : evaluated > initial
+                ? 'text-emerald-400'
+                : evaluated < initial
+                  ? 'text-red-400'
+                  : 'text-gray-100'
+            return (
+              <span>
+                評価額{' '}
+                <span className={`${balanceClass} font-mono`}>
+                  {formatBalance(account.evaluated_balance, account.currency)}
+                </span>
               </span>
-            </span>
-          )}
+            )
+          })()}
           <span>
             残高{' '}
             <span className="text-gray-100 font-mono">

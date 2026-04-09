@@ -135,6 +135,7 @@ export interface PositionResponse {
   quantity: string | null
   stop_loss: string
   take_profit: string
+  fees: string
   entry_at: string
   paper_account_id: string | null
   paper_account_name: string
