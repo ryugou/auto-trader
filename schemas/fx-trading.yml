@@ -36,6 +36,36 @@ nodes:
       name: { type: string, required: true }
       description: { type: string }
       version: { type: string }
+      param_set: { type: string }           # aggressive / normal / safe / weekNN
+      entry_channel: { type: string }       # "20"
+      exit_channel: { type: string }        # "10"
+      sl_pct: { type: string }              # "0.03"
+      allocation_pct: { type: string }      # "1.00"
+      atr_baseline_bars: { type: string }   # "50"
+
+  MarketRegime:
+    attributes:
+      regime_type: { type: string, required: true }  # trend / range / high_vol / event_window
+      period_start: { type: string }
+      period_end: { type: string }
+      atr_percentile: { type: string }
+      adx_avg: { type: string }
+
+  MarketAnalysis:
+    attributes:
+      summary: { type: string, required: true }
+      timeframe: { type: string }
+      analysis_type: { type: string }
+      regime_ref: { type: string }  # MarketRegime への参照
+      atr: { type: string }
+      adx: { type: string }
+
+  ParamChange:
+    attributes:
+      summary: { type: string, required: true }   # "SL_PCT 0.03→0.04, ENTRY_CHANNEL 20→18"
+      rationale: { type: string, required: true }  # "RSI 70超ロングの3連敗を受けてSL拡大"
+      changed_at: { type: string }
+      week_label: { type: string }                 # "2026-W16"
 
 edges:
   BASED_ON: { from: TradeDecision, to: MarketAnalysis }
@@ -44,6 +74,10 @@ edges:
   USED_STRATEGY: { from: TradeDecision, to: Strategy }
   CONTRADICTS: { from: MarketAnalysis, to: MarketAnalysis }
   SUPERSEDES: { from: TradeDecision, to: TradeDecision }
+  OCCURRED_IN: { from: TradeDecision, to: MarketRegime }   # そのトレードのレジーム
+  CHANGED_FROM: { from: ParamChange, to: Strategy }        # 変更前の Strategy
+  CHANGED_TO: { from: ParamChange, to: Strategy }          # 変更後の Strategy
+  MOTIVATED_BY: { from: ParamChange, to: TradeResult }     # この結果がきっかけで変更
 
 traceable_pairs:
   - claim: TradeDecision
@@ -52,3 +86,9 @@ traceable_pairs:
   - claim: TradeDecision
     evidence: TradeResult
     edge: RESULTED_IN
+  - claim: ParamChange
+    evidence: TradeResult
+    edge: MOTIVATED_BY
+  - claim: TradeDecision
+    evidence: MarketRegime
+    edge: OCCURRED_IN
