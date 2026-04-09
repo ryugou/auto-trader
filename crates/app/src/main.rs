@@ -52,6 +52,14 @@ async fn main() -> anyhow::Result<()> {
     // process actually launches.
     let mut expected_feeds: Vec<crate::price_store::FeedKey> = Vec::new();
 
+    // Channel for raw bitflyer ticks. Unbounded + best-effort
+    // send so the websocket loop never stalls. Created early so
+    // that BitflyerMonitor can take a clone of the sender during
+    // its setup block; the drain task is spawned later, after
+    // PriceStore is constructed.
+    let (raw_tick_tx, mut raw_tick_rx) =
+        mpsc::unbounded_channel::<auto_trader_market::bitflyer::RawTick>();
+
     // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
     let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
@@ -479,7 +487,8 @@ async fn main() -> anyhow::Result<()> {
                 price_tx.clone(),
             )
             .with_db(pool.clone())
-            .with_closes_seed(std::mem::take(&mut bitflyer_closes_seed));
+            .with_closes_seed(std::mem::take(&mut bitflyer_closes_seed))
+            .with_raw_tick_sink(raw_tick_tx.clone());
             Some(tokio::spawn(async move {
                 if let Err(e) = bf_monitor.run().await {
                     tracing::error!("bitflyer monitor error: {e}");
@@ -494,9 +503,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the price store once all monitor setup has had a chance
     // to populate `expected_feeds`. The store is shared between the
-    // engine task (which writes ticks into it) and the API server
-    // (which reads snapshots + health from it).
+    // raw-tick drain task (which writes every websocket tick into
+    // it) and the API server (which reads snapshots + health from
+    // it). Note: the engine task does NOT write into the store
+    // anymore, because it only sees M5-aggregated PriceEvents which
+    // are too coarse for the 60s freshness threshold.
     let price_store = crate::price_store::PriceStore::new(expected_feeds);
+
+    // Drain task: pull every raw bitflyer tick from the channel
+    // created earlier and write it into the PriceStore for the
+    // dashboard's market-feed health view. Runs forever as long
+    // as the BitflyerMonitor is alive.
+    let raw_tick_store = price_store.clone();
+    let _raw_tick_drain_handle = tokio::spawn(async move {
+        while let Some((pair, price, ts)) = raw_tick_rx.recv().await {
+            raw_tick_store
+                .update(
+                    crate::price_store::FeedKey::new(
+                        auto_trader_core::types::Exchange::BitflyerCfd,
+                        pair,
+                    ),
+                    crate::price_store::LatestTick { price, ts },
+                )
+                .await;
+        }
+    });
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
     let (macro_tx, _) = tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
@@ -681,7 +712,6 @@ async fn main() -> anyhow::Result<()> {
     let (exit_tx, mut exit_rx) =
         mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
     let engine_pool = pool.clone();
-    let price_store_for_engine = price_store.clone();
 
     // Task: Strategy engine (price -> signal) + forward to position monitors
     // Also receives macro updates from broadcast channel.
@@ -694,22 +724,6 @@ async fn main() -> anyhow::Result<()> {
                 price = price_rx.recv() => {
                     match price {
                         Some(event) => {
-                            // Snapshot this tick into the in-memory
-                            // store so the dashboard health endpoint
-                            // can tell whether each configured feed
-                            // is fresh.
-                            price_store_for_engine
-                                .update(
-                                    crate::price_store::FeedKey::new(
-                                        event.exchange,
-                                        event.pair.clone(),
-                                    ),
-                                    crate::price_store::LatestTick {
-                                        price: event.candle.close,
-                                        ts: event.timestamp,
-                                    },
-                                )
-                                .await;
                             // Forward to FX position monitor (FX events only)
                             if event.exchange == auto_trader_core::types::Exchange::Oanda
                                 && price_monitor_tx.send(event.clone()).await.is_err()

@@ -33,6 +33,14 @@ struct TickerMessage {
     timestamp: String,
 }
 
+/// One raw tick observed on the websocket. Sent (best-effort) to a
+/// subscriber that wants every price update — typically the
+/// dashboard `PriceStore` for freshness monitoring. Distinct from
+/// the M5-aggregated `PriceEvent` channel, which only fires on
+/// candle boundaries and is therefore unsuitable for "is the feed
+/// alive right now?" health checks.
+pub type RawTick = (Pair, Decimal, chrono::DateTime<chrono::Utc>);
+
 pub struct BitflyerMonitor {
     ws_url: String,
     pairs: Vec<Pair>,
@@ -40,6 +48,7 @@ pub struct BitflyerMonitor {
     tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
     closes_seed: HashMap<String, Vec<Decimal>>,
+    raw_tick_tx: Option<mpsc::UnboundedSender<RawTick>>,
 }
 
 impl BitflyerMonitor {
@@ -56,6 +65,7 @@ impl BitflyerMonitor {
             tx,
             pool: None,
             closes_seed: HashMap::new(),
+            raw_tick_tx: None,
         }
     }
 
@@ -69,6 +79,17 @@ impl BitflyerMonitor {
     /// loading and ordering the closes (oldest → newest).
     pub fn with_closes_seed(mut self, seed: HashMap<String, Vec<Decimal>>) -> Self {
         self.closes_seed = seed;
+        self
+    }
+
+    /// Subscribe to raw per-tick price updates (one event per
+    /// websocket message), independent of M5 candle aggregation.
+    /// Use this for feed health monitoring where the consumer needs
+    /// sub-second freshness, not 5-minute candle cadence. The
+    /// channel is unbounded + try_send so a slow consumer cannot
+    /// stall the websocket loop.
+    pub fn with_raw_tick_sink(mut self, tx: mpsc::UnboundedSender<RawTick>) -> Self {
+        self.raw_tick_tx = Some(tx);
         self
     }
 
@@ -167,6 +188,20 @@ impl BitflyerMonitor {
             let size = ticker.volume;
             let ts = chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?
                 .with_timezone(&chrono::Utc);
+
+            // Push the raw tick to the freshness sink BEFORE candle
+            // aggregation. The candle pipeline only emits PriceEvent
+            // on M5 boundaries, so a sink that depends on it would
+            // see at most one update every 5 minutes — useless for
+            // a 60-second feed-health threshold. try_send is
+            // intentional: if the consumer can't keep up we drop
+            // ticks rather than block the websocket loop.
+            if let Some(sink) = &self.raw_tick_tx {
+                // Construct Pair from product_code; the builders
+                // map keys this on the same string, so this is
+                // always a valid pair we are configured to track.
+                let _ = sink.send((Pair::new(product_code), price, ts));
+            }
 
             // on_tick returns completed candle when period boundary is crossed
             let from_tick = builder.on_tick(price, size, ts);
