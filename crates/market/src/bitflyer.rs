@@ -48,7 +48,7 @@ pub struct BitflyerMonitor {
     tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
     closes_seed: HashMap<String, Vec<Decimal>>,
-    raw_tick_tx: Option<mpsc::UnboundedSender<RawTick>>,
+    raw_tick_tx: Option<mpsc::Sender<RawTick>>,
 }
 
 impl BitflyerMonitor {
@@ -86,9 +86,10 @@ impl BitflyerMonitor {
     /// websocket message), independent of M5 candle aggregation.
     /// Use this for feed health monitoring where the consumer needs
     /// sub-second freshness, not 5-minute candle cadence. The
-    /// channel is unbounded + try_send so a slow consumer cannot
-    /// stall the websocket loop.
-    pub fn with_raw_tick_sink(mut self, tx: mpsc::UnboundedSender<RawTick>) -> Self {
+    /// monitor uses `try_send`, so if the channel is full the tick
+    /// is dropped (with a warn) instead of stalling the websocket
+    /// loop.
+    pub fn with_raw_tick_sink(mut self, tx: mpsc::Sender<RawTick>) -> Self {
         self.raw_tick_tx = Some(tx);
         self
     }
@@ -200,7 +201,16 @@ impl BitflyerMonitor {
                 // Construct Pair from product_code; the builders
                 // map keys this on the same string, so this is
                 // always a valid pair we are configured to track.
-                let _ = sink.send((Pair::new(product_code), price, ts));
+                // try_send returns Err on either Full or Closed:
+                // Full means the consumer fell behind (drop tick,
+                // log warn — better than blocking trading), Closed
+                // means the receiver was dropped (sink is dead,
+                // log once and stop trying — but the per-tick warn
+                // is fine for now since this only happens during
+                // shutdown).
+                if let Err(e) = sink.try_send((Pair::new(product_code), price, ts)) {
+                    tracing::warn!("raw tick sink send failed: {e}");
+                }
             }
 
             // on_tick returns completed candle when period boundary is crossed

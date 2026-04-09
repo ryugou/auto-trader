@@ -52,13 +52,15 @@ async fn main() -> anyhow::Result<()> {
     // process actually launches.
     let mut expected_feeds: Vec<crate::price_store::FeedKey> = Vec::new();
 
-    // Channel for raw bitflyer ticks. Unbounded + best-effort
-    // send so the websocket loop never stalls. Created early so
-    // that BitflyerMonitor can take a clone of the sender during
-    // its setup block; the drain task is spawned later, after
+    // Channel for raw bitflyer ticks. Bounded so that a stalled
+    // consumer cannot grow memory without bound, but the websocket
+    // loop uses `try_send` and drops (with a warn) on full so it
+    // never stalls the trading path. Created early so that
+    // BitflyerMonitor can take a clone of the sender during its
+    // setup block; the drain task is spawned later, after
     // PriceStore is constructed.
     let (raw_tick_tx, mut raw_tick_rx) =
-        mpsc::unbounded_channel::<auto_trader_market::bitflyer::RawTick>();
+        mpsc::channel::<auto_trader_market::bitflyer::RawTick>(1024);
 
     // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
@@ -712,6 +714,15 @@ async fn main() -> anyhow::Result<()> {
     let (exit_tx, mut exit_rx) =
         mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
     let engine_pool = pool.clone();
+    // Engine still updates PriceStore from the (M5-cadence) candle
+    // PriceEvent path. For bitflyer this is redundant with the
+    // raw-tick drain (latest write wins, both are cheap), but for
+    // any other exchange that does NOT have a raw-tick sink wired
+    // up — currently OANDA — this is the only path that keeps the
+    // store populated at all. Removing it again would silently
+    // break OANDA's market-feed health and Positions display the
+    // moment OANDA is re-enabled.
+    let price_store_for_engine = price_store.clone();
 
     // Task: Strategy engine (price -> signal) + forward to position monitors
     // Also receives macro updates from broadcast channel.
@@ -724,6 +735,25 @@ async fn main() -> anyhow::Result<()> {
                 price = price_rx.recv() => {
                     match price {
                         Some(event) => {
+                            // Update PriceStore from the candle path.
+                            // For exchanges with no raw-tick sink
+                            // (currently OANDA) this is the only
+                            // refresh source. For bitflyer it is
+                            // redundant with the raw-tick drain;
+                            // both are cheap and the latest write
+                            // wins.
+                            price_store_for_engine
+                                .update(
+                                    crate::price_store::FeedKey::new(
+                                        event.exchange,
+                                        event.pair.clone(),
+                                    ),
+                                    crate::price_store::LatestTick {
+                                        price: event.candle.close,
+                                        ts: event.timestamp,
+                                    },
+                                )
+                                .await;
                             // Forward to FX position monitor (FX events only)
                             if event.exchange == auto_trader_core::types::Exchange::Oanda
                                 && price_monitor_tx.send(event.clone()).await.is_err()
