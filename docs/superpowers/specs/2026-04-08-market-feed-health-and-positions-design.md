@@ -32,7 +32,7 @@
 - 価格フィード停止時にトレーダーの open/close 処理を自動停止する制御
 - FX (OANDA) の再有効化
 - `close_position` の `price_diff × leverage` ゴミ分岐の除去（現行コードパスに到達しないデッドコードなので放置）
-- Overview / Analysis / Accounts / Strategies ページの変更
+- Overview / Analysis / Strategies ページの変更（Accounts は評価額の色分けのみスコープ内、その他の列・フィルタ・CRUD は非スコープ）
 
 ## 含み損益・純損益ルール
 
@@ -45,7 +45,7 @@
 純損益   = 含み損益 - 累計 fees
 ```
 
-- 小数点以下切り捨て（整数表示）
+- 整数表示（`Math.round` による四捨五入。表示レイヤーでのみ丸めるので内部計算は Decimal の精度を保つ）
 - crypto / FX 共通。両方とも trades テーブルの `quantity` カラムに数量が保存される前提（`PositionSizer::calculate_quantity` を通って `execute_with_quantity` で INSERT される現行トレードフローがこれを保証）
 - `trades.quantity IS NULL` の行に遭遇したら（現状の実データには存在しないが防御的に）含み損益・純損益ともに `-` 表示
 - `current_price` が取得できない行は含み損益・純損益ともに `-` 表示。運用者はバナー側で既にアラートを受けているので、この行の値を詳細に制御する意味はない

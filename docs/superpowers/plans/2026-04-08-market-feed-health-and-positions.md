@@ -10,6 +10,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-08-market-feed-health-and-positions-design.md`
 
+> **Post-implementation note (2026-04-09):** scope was expanded
+> during implementation at the user's request. The shipped PR also:
+> (a) adds `fees` to `PositionResponse` (Rust DTO + TS type) and a
+> `純損益` column alongside `含み損益` on the Positions page,
+> (b) colors `evaluated_balance` on both the TradeTable per-account
+> header and the Accounts page relative to `initial_balance`, and
+> (c) surfaces API errors explicitly (banner raises a dedicated
+> "監視 API 到達不可" alarm on health-endpoint errors, Positions
+> page shows a warning box on market-prices errors). The task
+> bodies below reflect the original plan — see the spec for the
+> authoritative post-implementation behavior.
+
 ---
 
 ## File Structure
