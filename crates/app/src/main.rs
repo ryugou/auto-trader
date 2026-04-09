@@ -59,8 +59,10 @@ async fn main() -> anyhow::Result<()> {
     // BitflyerMonitor can take a clone of the sender during its
     // setup block; the drain task is spawned later, after
     // PriceStore is constructed.
-    let (raw_tick_tx, mut raw_tick_rx) =
-        mpsc::channel::<auto_trader_market::bitflyer::RawTick>(1024);
+    let (bf_raw_tick_tx, mut bf_raw_tick_rx) =
+        mpsc::channel::<auto_trader_market::RawTick>(1024);
+    let (oanda_raw_tick_tx, mut oanda_raw_tick_rx) =
+        mpsc::channel::<auto_trader_market::RawTick>(1024);
 
     // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
@@ -103,7 +105,8 @@ async fn main() -> anyhow::Result<()> {
                     FX_TIMEFRAME,
                     price_tx.clone(),
                 )
-                .with_db(pool.clone()))
+                .with_db(pool.clone())
+                .with_raw_tick_sink(oanda_raw_tick_tx.clone()))
             }
             _ => {
                 tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
@@ -214,6 +217,31 @@ async fn main() -> anyhow::Result<()> {
                     sc.mode.clone(),
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
+            name if name.starts_with("donchian_trend_fx") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                let allocation_pct = sc
+                    .params
+                    .get("allocation_pct")
+                    .and_then(|v| v.as_float())
+                    .and_then(|f| Decimal::try_from(f).ok())
+                    .unwrap_or_else(|| Decimal::new(5, 1));
+                engine.add_strategy(
+                    Box::new(
+                        auto_trader_strategy::donchian_trend_fx::DonchianTrendFxV1::new(
+                            sc.name.clone(),
+                            pairs,
+                            allocation_pct,
+                        ),
+                    ),
+                    sc.mode.clone(),
+                );
+                tracing::info!(
+                    "strategy registered: {} (mode={}, allocation_pct={})",
+                    sc.name,
+                    sc.mode,
+                    allocation_pct
+                );
             }
             name if name.starts_with("donchian_trend") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
@@ -490,7 +518,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .with_db(pool.clone())
             .with_closes_seed(std::mem::take(&mut bitflyer_closes_seed))
-            .with_raw_tick_sink(raw_tick_tx.clone());
+            .with_raw_tick_sink(bf_raw_tick_tx.clone());
             Some(tokio::spawn(async move {
                 if let Err(e) = bf_monitor.run().await {
                     tracing::error!("bitflyer monitor error: {e}");
@@ -516,13 +544,31 @@ async fn main() -> anyhow::Result<()> {
     // created earlier and write it into the PriceStore for the
     // dashboard's market-feed health view. Runs forever as long
     // as the BitflyerMonitor is alive.
-    let raw_tick_store = price_store.clone();
-    let _raw_tick_drain_handle = tokio::spawn(async move {
-        while let Some((pair, price, ts)) = raw_tick_rx.recv().await {
-            raw_tick_store
+    let bf_raw_tick_store = price_store.clone();
+    let _bf_raw_tick_drain_handle = tokio::spawn(async move {
+        while let Some((pair, price, ts)) = bf_raw_tick_rx.recv().await {
+            bf_raw_tick_store
                 .update(
                     crate::price_store::FeedKey::new(
                         auto_trader_core::types::Exchange::BitflyerCfd,
+                        pair,
+                    ),
+                    crate::price_store::LatestTick { price, ts },
+                )
+                .await;
+        }
+    });
+
+    // Parallel OANDA raw-tick drain: keeps PriceStore populated with
+    // the latest FX tick so dashboard freshness checks work for FX
+    // feeds too.
+    let oanda_raw_tick_store = price_store.clone();
+    let _oanda_raw_tick_drain_handle = tokio::spawn(async move {
+        while let Some((pair, price, ts)) = oanda_raw_tick_rx.recv().await {
+            oanda_raw_tick_store
+                .update(
+                    crate::price_store::FeedKey::new(
+                        auto_trader_core::types::Exchange::Oanda,
                         pair,
                     ),
                     crate::price_store::LatestTick { price, ts },
@@ -579,11 +625,114 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // FX position monitor removed: FX paper trading is currently disabled.
-    // Drain the forwarded FX price channel so senders do not block.
+    // FX position monitor — single task, DB-driven.
+    //
+    // Mirrors the crypto position monitor below: re-read the open-
+    // trade list on every price tick and close positions whose
+    // SL/TP/time-limit has been hit. Filters by Exchange::Oanda so
+    // crypto trades never touch this path.
+    let fx_monitor_pool = pool.clone();
+    let fx_monitor_trade_tx = trade_tx.clone();
     let mut price_monitor_rx = price_monitor_rx;
     let pos_monitor_handle = tokio::spawn(async move {
-        while price_monitor_rx.recv().await.is_some() {}
+        while let Some(event) = price_monitor_rx.recv().await {
+            let current_price = event.candle.close;
+            let open_trades = match auto_trader_db::trades::list_open_with_account_name(
+                &fx_monitor_pool,
+            ).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("fx monitor: failed to list open trades: {e}");
+                    continue;
+                }
+            };
+            for owned in open_trades {
+                let trade = owned.trade;
+                if trade.exchange != Exchange::Oanda || trade.pair != event.pair {
+                    continue;
+                }
+                let Some(account_id) = trade.paper_account_id else {
+                    continue;
+                };
+                let now = chrono::Utc::now();
+                let time_limit_hit = trade
+                    .max_hold_until
+                    .is_some_and(|deadline| now >= deadline);
+
+                let mut exit_reason = match trade.direction {
+                    Direction::Long => {
+                        if current_price <= trade.stop_loss {
+                            Some(auto_trader_core::types::ExitReason::SlHit)
+                        } else if current_price >= trade.take_profit {
+                            Some(auto_trader_core::types::ExitReason::TpHit)
+                        } else {
+                            None
+                        }
+                    }
+                    Direction::Short => {
+                        if current_price >= trade.stop_loss {
+                            Some(auto_trader_core::types::ExitReason::SlHit)
+                        } else if current_price <= trade.take_profit {
+                            Some(auto_trader_core::types::ExitReason::TpHit)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if exit_reason.is_none() && time_limit_hit {
+                    exit_reason =
+                        Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
+                }
+                if let Some(reason) = exit_reason {
+                    let exit_price = match reason {
+                        auto_trader_core::types::ExitReason::SlHit => trade.stop_loss,
+                        auto_trader_core::types::ExitReason::TpHit => trade.take_profit,
+                        _ => current_price,
+                    };
+                    let trader = PaperTrader::new(
+                        fx_monitor_pool.clone(),
+                        Exchange::Oanda,
+                        account_id,
+                    );
+                    match trader
+                        .close_position(&trade.id.to_string(), reason, exit_price)
+                        .await
+                    {
+                        Ok(closed_trade) => {
+                            tracing::info!(
+                                "fx position closed: {} {} {:?} at {} ({:?})",
+                                closed_trade.strategy_name,
+                                closed_trade.pair,
+                                closed_trade.direction,
+                                exit_price,
+                                reason
+                            );
+                            if let Err(e) = fx_monitor_trade_tx
+                                .send(TradeEvent {
+                                    trade: closed_trade,
+                                    action: TradeAction::Closed {
+                                        exit_price,
+                                        exit_reason: reason,
+                                    },
+                                })
+                                .await
+                            {
+                                tracing::error!(
+                                    "trade channel send failed for fx position close: {e}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "fx close_position skipped/failed for trade {}: {e}",
+                                trade.id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        tracing::info!("fx position monitor: price channel closed, stopping");
     });
 
     // Task: Crypto position monitor — single task, DB-driven.
