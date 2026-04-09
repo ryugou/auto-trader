@@ -2,6 +2,7 @@ mod api;
 mod enriched_ingest;
 mod price_store;
 mod regime;
+mod weekly_batch;
 mod wilson;
 
 use auto_trader_core::config::AppConfig;
