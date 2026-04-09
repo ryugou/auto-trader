@@ -75,7 +75,7 @@ function App() {
             </div>
           </header>
           <MarketFeedHealthBanner />
-          <main className="max-w-7xl mx-auto p-4">
+          <main className="px-[15px] py-4">
             <Routes>
               <Route path="/" element={<Overview />} />
               <Route path="/trades" element={<Trades />} />
