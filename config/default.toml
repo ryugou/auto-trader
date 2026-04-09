@@ -14,7 +14,9 @@ interval_secs = 60
 # backfill_days = 7  # startup時にmax_drawdownを再計算する日数（デフォルト: 7）
 
 [pairs]
-fx = ["USD_JPY", "EUR_USD"]
+# Scoped to USD_JPY for the initial FX enablement PR.
+# EUR_JPY and GBP_JPY are planned as the immediate follow-up PR.
+fx = ["USD_JPY"]
 crypto = ["FX_BTC_JPY"]
 
 [bitflyer]
@@ -93,6 +95,22 @@ mode = "paper"
 pairs = ["FX_BTC_JPY"]
 # 攻め (high risk).
 params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 21, squeeze_bars = 6 }
+
+[[strategies]]
+name = "donchian_trend_fx_normal"
+enabled = true
+mode = "paper"
+pairs = ["USD_JPY"]
+# FX 通常: allocation 0.50 (証拠金維持率 SL 後 200%、保守)
+params = { allocation_pct = 0.50 }
+
+[[strategies]]
+name = "donchian_trend_fx_aggressive"
+enabled = true
+mode = "paper"
+pairs = ["USD_JPY"]
+# FX 攻め: allocation 0.80 (証拠金維持率 SL 後 120%、フル寄り)
+params = { allocation_pct = 0.80 }
 
 # Paper accounts are managed in the database (paper_accounts table).
 # Initial accounts are seeded by migration. Use the REST API to manage:
