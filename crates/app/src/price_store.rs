@@ -69,9 +69,25 @@ impl PriceStore {
         })
     }
 
+    /// Insert a new tick, but only if it is strictly newer than the
+    /// last one we already have for this feed. The two callers (raw
+    /// websocket tick path and M5 candle path) can interleave with
+    /// out-of-order timestamps — bitflyer raw ticks carry real
+    /// wall-clock time, while the candle path stamps the period
+    /// START. Without this guard, a candle that completes right
+    /// after a fresh tick would overwrite the fresh timestamp with
+    /// a 5-minute-old one, briefly making the feed look stale.
     pub async fn update(&self, key: FeedKey, tick: LatestTick) {
         let mut guard = self.latest.write().await;
-        guard.insert(key, tick);
+        match guard.get(&key) {
+            Some(existing) if existing.ts >= tick.ts => {
+                // Equal or older — drop the incoming write so the
+                // store always reflects the newest known tick.
+            }
+            _ => {
+                guard.insert(key, tick);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -164,6 +180,29 @@ mod tests {
         let got = store.get(&k).await.unwrap();
         assert_eq!(got.price, Decimal::from(11_600_000));
         assert_eq!(got.ts, t2);
+    }
+
+    #[tokio::test]
+    async fn update_drops_older_or_equal_timestamp() {
+        // The two writers (raw tick path and M5 candle path) can
+        // interleave with out-of-order timestamps. The store must
+        // always reflect the newest known tick, so an older or
+        // equal incoming write must be ignored.
+        let store = PriceStore::new(vec![]);
+        let k = key(Exchange::BitflyerCfd, "FX_BTC_JPY");
+        let newer = Utc.with_ymd_and_hms(2026, 4, 8, 12, 0, 30).unwrap();
+        let older = Utc.with_ymd_and_hms(2026, 4, 8, 12, 0, 0).unwrap();
+        store.update(k.clone(), tick(11_600_000, newer)).await;
+        // Older write should be a no-op.
+        store.update(k.clone(), tick(11_500_000, older)).await;
+        let got = store.get(&k).await.unwrap();
+        assert_eq!(got.price, Decimal::from(11_600_000));
+        assert_eq!(got.ts, newer);
+        // Equal timestamp also drops (so we don't churn for an
+        // exact-duplicate write).
+        store.update(k.clone(), tick(11_700_000, newer)).await;
+        let got = store.get(&k).await.unwrap();
+        assert_eq!(got.price, Decimal::from(11_600_000));
     }
 
     #[tokio::test]

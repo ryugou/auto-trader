@@ -201,15 +201,23 @@ impl BitflyerMonitor {
                 // Construct Pair from product_code; the builders
                 // map keys this on the same string, so this is
                 // always a valid pair we are configured to track.
-                // try_send returns Err on either Full or Closed:
-                // Full means the consumer fell behind (drop tick,
-                // log warn — better than blocking trading), Closed
-                // means the receiver was dropped (sink is dead,
-                // log once and stop trying — but the per-tick warn
-                // is fine for now since this only happens during
-                // shutdown).
-                if let Err(e) = sink.try_send((Pair::new(product_code), price, ts)) {
-                    tracing::warn!("raw tick sink send failed: {e}");
+                match sink.try_send((Pair::new(product_code), price, ts)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Drain task is briefly behind. Drop the
+                        // tick (the next one is seconds away) and
+                        // log at debug — warning every tick during
+                        // a slow consumer would flood the log.
+                        tracing::debug!("raw tick sink full, dropping tick");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Receiver dropped — usually shutdown. Warn
+                        // once-per-tick is acceptable here because
+                        // it should not happen during normal
+                        // operation, and during shutdown the log
+                        // window is short.
+                        tracing::warn!("raw tick sink closed");
+                    }
                 }
             }
 
