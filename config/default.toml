@@ -3,11 +3,11 @@ api_url = "https://api-fxpractice.oanda.com"
 account_id = ""  # set via OANDA_ACCOUNT_ID env var
 
 [vegapunk]
-endpoint = "http://vegapunk:6840"
+endpoint = "http://vegapunk.local:6840"
 schema = "fx-trading"
 
 [database]
-url = "postgresql://auto-trader:auto-trader@db:5432/auto_trader"
+url = "postgresql://auto-trader:auto-trader@localhost:15432/auto_trader"
 
 [monitor]
 interval_secs = 60
