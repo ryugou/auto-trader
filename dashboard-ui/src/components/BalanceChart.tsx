@@ -80,6 +80,7 @@ export default function BalanceChart({ accountType }: Props) {
               tick={{ fill: '#9ca3af', fontSize: 12 }}
               tickLine={false}
               tickFormatter={(v: number) => `${Math.round(v).toLocaleString()}`}
+              domain={[(min: number) => Math.floor((min - 500) / 500) * 500, (max: number) => Math.ceil((max + 500) / 500) * 500]}
             />
             <Tooltip
               contentStyle={{
