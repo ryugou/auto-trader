@@ -22,12 +22,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Checkout submodules
-        # The proto submodule may be in a separate (potentially private)
-        # repo whose default GITHUB_TOKEN scope doesn't reach. Rewrite
-        # the URL with our SUBMODULE_PAT so the recursive init can
-        # authenticate consistently regardless of the proto repo's
-        # visibility.
         run: |
           git config --global url."https://x-access-token:${{ secrets.SUBMODULE_PAT }}@github.com/".insteadOf "https://github.com/"
           git submodule update --init --recursive
@@ -53,6 +50,8 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Checkout submodules
         run: |
           git config --global url."https://x-access-token:${{ secrets.SUBMODULE_PAT }}@github.com/".insteadOf "https://github.com/"
