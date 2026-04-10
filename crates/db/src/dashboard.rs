@@ -440,10 +440,15 @@ pub async fn get_balance_history(
                    )::date AS date
                ),
                daily_delta AS (
+                   -- Only realized P&L events (trade_close + overnight_fee).
+                   -- Margin lock/release are excluded so the chart shows
+                   -- the account's true value growth, not the cash dips
+                   -- from opening positions.
                    SELECT DATE(occurred_at) AS date,
                           SUM(amount) AS daily_net
                    FROM paper_account_events
                    WHERE paper_account_id = $1
+                     AND event_type IN ('trade_close', 'overnight_fee')
                    GROUP BY DATE(occurred_at)
                )
                SELECT

@@ -64,7 +64,7 @@ export default function BalanceChart({ accountType }: Props) {
 
   return (
     <div className="bg-gray-900 rounded-lg p-4 shadow">
-      <h3 className="text-sm text-gray-400 mb-3">口座残高推移</h3>
+      <h3 className="text-sm text-gray-400 mb-3">口座損益推移（実現損益）</h3>
       {chartData.length === 0 ? (
         <p className="text-gray-500 text-center py-16">データがありません</p>
       ) : (
