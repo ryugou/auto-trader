@@ -31,6 +31,8 @@ services:
       - "127.0.0.1:3001:3001"
     volumes:
       - ./config:/app/config:ro
+    extra_hosts:
+      - "vegapunk:100.82.189.127"
     restart: unless-stopped
 
 volumes:
