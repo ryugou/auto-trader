@@ -38,7 +38,7 @@ method = "risk_based"
 risk_rate = 0.02
 
 [gemini]
-model = "gemini-2.0-flash"
+model = "gemini-2.5-flash"
 api_url = "https://generativelanguage.googleapis.com"
 
 [macro_analyst]
