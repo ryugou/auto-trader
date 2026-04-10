@@ -1051,6 +1051,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(vp) = vegapunk_client_exec.clone() {
                             let trade_clone = trade.clone();
                             let indicators_clone = signal_event.indicators.clone();
+                            let alloc_pct = signal.allocation_pct;
                             let exec_pool = executor_pool.clone();
                             tokio::spawn(async move {
                                 // Save entry_indicators to DB (with regime classification)
@@ -1077,7 +1078,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 let mut vp = vp.lock().await;
-                                let text = crate::enriched_ingest::format_trade_open(&trade_clone, &indicators_clone);
+                                let text = crate::enriched_ingest::format_trade_open(&trade_clone, &indicators_clone, Some(alloc_pct));
                                 let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
                                 let timestamp = chrono::Utc::now().to_rfc3339();
                                 if let Err(e) = vp

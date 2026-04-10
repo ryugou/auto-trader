@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 /// Format an enriched ingest text for trade OPEN events.
 /// Includes indicators, regime classification, and SMA deviation.
-pub fn format_trade_open(trade: &Trade, indicators: &HashMap<String, Decimal>) -> String {
+pub fn format_trade_open(trade: &Trade, indicators: &HashMap<String, Decimal>, allocation_pct: Option<Decimal>) -> String {
     let dir = match trade.direction {
         Direction::Long => "ロング",
         Direction::Short => "ショート",
@@ -19,11 +19,12 @@ pub fn format_trade_open(trade: &Trade, indicators: &HashMap<String, Decimal>) -
         }
     });
 
-    // allocation_pct lives on Signal, not Trade. Default to "100" (the
-    // donchian/crypto strategies all use allocation_pct=1.0).
+    let alloc_display = allocation_pct
+        .map(|a| format!("{}", (a * Decimal::from(100)).round()))
+        .unwrap_or_else(|| "N/A".to_string());
     let mut text = format!(
         "[{}] {} {} エントリー。\n\
-         ▸ 戦略: {} (allocation: 100%)\n\
+         ▸ 戦略: {} (allocation: {}%)\n\
          ▸ 価格: {} / SL: {} / TP: {}\n\
          ▸ 数量: {}\n\
          ▸ レジーム: {}\n\
@@ -32,6 +33,7 @@ pub fn format_trade_open(trade: &Trade, indicators: &HashMap<String, Decimal>) -
         trade.pair,
         dir,
         trade.strategy_name,
+        alloc_display,
         trade.entry_price,
         trade.stop_loss,
         trade.take_profit,

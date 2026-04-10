@@ -36,17 +36,24 @@ impl DonchianTrendEvolveV1 {
     /// Falls back to the baseline `donchian_trend_v1` defaults for any
     /// missing key.
     pub fn new(name: String, pairs: Vec<Pair>, params: serde_json::Value) -> Self {
-        let entry_channel = params["entry_channel"].as_u64().unwrap_or(20) as usize;
-        let exit_channel = params["exit_channel"].as_u64().unwrap_or(10) as usize;
+        // Clamp all params to safe ranges so a bad LLM proposal
+        // that slipped past weekly_batch validation can't produce
+        // dangerous signals.
+        let entry_channel = (params["entry_channel"].as_u64().unwrap_or(20) as usize).clamp(10, 30);
+        let exit_channel = (params["exit_channel"].as_u64().unwrap_or(10) as usize).clamp(5, 15);
         let sl_pct = params["sl_pct"]
             .as_f64()
             .and_then(|v| Decimal::try_from(v).ok())
-            .unwrap_or(dec!(0.03));
+            .unwrap_or(dec!(0.03))
+            .max(dec!(0.01))
+            .min(dec!(0.10));
         let allocation_pct = params["allocation_pct"]
             .as_f64()
             .and_then(|v| Decimal::try_from(v).ok())
-            .unwrap_or(dec!(1.00));
-        let atr_baseline_bars = params["atr_baseline_bars"].as_u64().unwrap_or(50) as usize;
+            .unwrap_or(dec!(1.00))
+            .max(dec!(0.50))
+            .min(dec!(1.00));
+        let atr_baseline_bars = (params["atr_baseline_bars"].as_u64().unwrap_or(50) as usize).clamp(20, 100);
         Self {
             name,
             pairs,

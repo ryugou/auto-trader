@@ -92,7 +92,12 @@ pub async fn run(
         proposal.rationale
     );
 
-    // 6. Persist proposed params
+    // 6. Validate and persist proposed params
+    if let Err(e) = validate_params(&proposal.params) {
+        tracing::warn!("weekly_batch: LLM proposed invalid params, rejecting: {e}");
+        tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
+        return Ok(());
+    }
     persist_params(pool, STRATEGY, &proposal.params)
         .await
         .context("persist_params")?;
@@ -163,6 +168,7 @@ async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalys
         WHERE exit_at > NOW() - INTERVAL '7 days'
           AND entry_indicators IS NOT NULL
           AND entry_indicators->>'regime' IS NOT NULL
+          AND strategy_name LIKE 'donchian_trend%'
         GROUP BY entry_indicators->>'regime'
         "#,
     )
@@ -183,6 +189,37 @@ async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalys
         })
         .collect();
     Ok(analyses)
+}
+
+/// Validate that LLM-proposed params are within safe bounds.
+/// Rejects any proposal with out-of-range values to prevent the
+/// evolve strategy from running with dangerous parameters.
+fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
+    let entry = params["entry_channel"].as_u64().unwrap_or(20);
+    let exit = params["exit_channel"].as_u64().unwrap_or(10);
+    let sl = params["sl_pct"].as_f64().unwrap_or(0.03);
+    let alloc = params["allocation_pct"].as_f64().unwrap_or(1.0);
+    let baseline = params["atr_baseline_bars"].as_u64().unwrap_or(50);
+
+    if !(10..=30).contains(&entry) {
+        anyhow::bail!("entry_channel {entry} out of range [10, 30]");
+    }
+    if !(5..=15).contains(&exit) {
+        anyhow::bail!("exit_channel {exit} out of range [5, 15]");
+    }
+    if !(0.0..=0.10).contains(&sl) || sl <= 0.0 {
+        anyhow::bail!("sl_pct {sl} out of range (0.0, 0.10]");
+    }
+    if !(0.50..=1.0).contains(&alloc) {
+        anyhow::bail!("allocation_pct {alloc} out of range [0.50, 1.0]");
+    }
+    if !(20..=100).contains(&baseline) {
+        anyhow::bail!("atr_baseline_bars {baseline} out of range [20, 100]");
+    }
+    if exit >= entry {
+        anyhow::bail!("exit_channel ({exit}) must be < entry_channel ({entry})");
+    }
+    Ok(())
 }
 
 /// Load the current JSON params blob for a strategy from `strategy_params`.
@@ -355,7 +392,7 @@ async fn call_gemini(
         anyhow::bail!("Gemini API key is not configured");
     }
 
-    let url = format!("{api_url}/v1beta/models/{model}:generateContent?key={api_key}");
+    let url = format!("{api_url}/v1beta/models/{model}:generateContent");
     let body = serde_json::json!({
         "contents": [{"parts": [{"text": prompt}]}]
     });
@@ -363,6 +400,7 @@ async fn call_gemini(
     let http_client = reqwest::Client::new();
     let response = http_client
         .post(&url)
+        .header("x-goog-api-key", api_key)
         .json(&body)
         .send()
         .await
