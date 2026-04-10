@@ -54,7 +54,7 @@ impl StrategyEngine {
                 continue;
             }
             if let Some(signal) = slot.strategy.on_price(event).await
-                && let Err(e) = self.signal_tx.send(SignalEvent { signal }).await
+                && let Err(e) = self.signal_tx.send(SignalEvent { signal, indicators: event.indicators.clone() }).await
             {
                 tracing::error!("signal channel closed, dropping signal: {e}");
             }
@@ -86,7 +86,7 @@ impl StrategyEngine {
             }
             // 1) New entry signal
             if let Some(signal) = slot.strategy.on_price(event).await
-                && let Err(e) = self.signal_tx.send(SignalEvent { signal }).await
+                && let Err(e) = self.signal_tx.send(SignalEvent { signal, indicators: event.indicators.clone() }).await
             {
                 tracing::error!("signal channel closed, dropping signal: {e}");
             }

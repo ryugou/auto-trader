@@ -48,6 +48,8 @@ pub struct BitflyerMonitor {
     tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
     closes_seed: HashMap<String, Vec<Decimal>>,
+    highs_seed: HashMap<String, Vec<Decimal>>,
+    lows_seed: HashMap<String, Vec<Decimal>>,
     raw_tick_tx: Option<mpsc::Sender<RawTick>>,
 }
 
@@ -65,6 +67,8 @@ impl BitflyerMonitor {
             tx,
             pool: None,
             closes_seed: HashMap::new(),
+            highs_seed: HashMap::new(),
+            lows_seed: HashMap::new(),
             raw_tick_tx: None,
         }
     }
@@ -74,11 +78,33 @@ impl BitflyerMonitor {
         self
     }
 
-    /// Pre-populate per-pair `closes_map` so SMA/RSI indicators can fire from
-    /// the very first live candle after restart. Caller is responsible for
-    /// loading and ordering the closes (oldest → newest).
+    /// Pre-populate per-pair `closes_map` (and derive matching highs/lows from
+    /// the same candle history) so indicators can fire from the very first live
+    /// candle after restart. Caller is responsible for loading and ordering
+    /// the closes (oldest → newest).
+    ///
+    /// For the new ATR/ADX indicators highs and lows are required.
+    /// When only closes are available (e.g. legacy callers), the seed
+    /// approximates high = low = close, which degrades ATR/ADX quality but
+    /// does not panic. The canonical path in `main.rs` passes full `Candle`
+    /// structs via `with_candle_seed`.
     pub fn with_closes_seed(mut self, seed: HashMap<String, Vec<Decimal>>) -> Self {
         self.closes_seed = seed;
+        self
+    }
+
+    /// Pre-populate candle history (closes + highs + lows) from the DB warmup
+    /// path. Preferred over `with_closes_seed` when the caller has full candle
+    /// data available (which is always the case in the app composition layer).
+    pub fn with_candle_seed(
+        mut self,
+        highs: HashMap<String, Vec<Decimal>>,
+        lows: HashMap<String, Vec<Decimal>>,
+        closes: HashMap<String, Vec<Decimal>>,
+    ) -> Self {
+        self.closes_seed = closes;
+        self.highs_seed = highs;
+        self.lows_seed = lows;
         self
     }
 
@@ -102,12 +128,11 @@ impl BitflyerMonitor {
                 CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, self.timeframe.clone()),
             );
         }
-        // Seed indicator state from caller-provided history (loaded once in
-        // app composition layer alongside the strategy engine warmup) so we
-        // don't have to wait ma_long_period × timeframe minutes after every
-        // restart before SMA/RSI can fire. Move the seed out instead of
-        // cloning so we don't keep a duplicate copy of every warmup vector.
+        // Seed indicator state from caller-provided history. Move out rather
+        // than cloning to avoid duplicate copies of every warmup vector.
         let mut closes_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.closes_seed);
+        let mut highs_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.highs_seed);
+        let mut lows_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.lows_seed);
         for (pair, closes) in &closes_map {
             tracing::info!(
                 "bitflyer warmup: seeded {} {} closes for {}",
@@ -120,7 +145,7 @@ impl BitflyerMonitor {
         let mut backoff_secs = 1u64;
 
         loop {
-            match self.connect_and_stream(&mut builders, &mut closes_map).await {
+            match self.connect_and_stream(&mut builders, &mut closes_map, &mut highs_map, &mut lows_map).await {
                 Ok(()) => {
                     if self.tx.is_closed() {
                         tracing::info!("price channel closed, stopping bitflyer monitor");
@@ -150,6 +175,8 @@ impl BitflyerMonitor {
         &self,
         builders: &mut HashMap<String, CandleBuilder>,
         closes_map: &mut HashMap<String, Vec<Decimal>>,
+        highs_map: &mut HashMap<String, Vec<Decimal>>,
+        lows_map: &mut HashMap<String, Vec<Decimal>>,
     ) -> anyhow::Result<()> {
         let (ws, _) = connect_async(&self.ws_url).await?;
         let (mut write, mut read) = ws.split();
@@ -239,6 +266,18 @@ impl BitflyerMonitor {
                     closes.drain(..closes.len() - 200);
                 }
 
+                let highs = highs_map.entry(product_code.clone()).or_default();
+                highs.push(candle.high);
+                if highs.len() > 200 {
+                    highs.drain(..highs.len() - 200);
+                }
+
+                let lows = lows_map.entry(product_code.clone()).or_default();
+                lows.push(candle.low);
+                if lows.len() > 200 {
+                    lows.drain(..lows.len() - 200);
+                }
+
                 let mut indicator_map = HashMap::new();
                 if let Some(v) = indicators::sma(closes, 20) {
                     indicator_map.insert("sma_20".to_string(), v);
@@ -248,6 +287,49 @@ impl BitflyerMonitor {
                 }
                 if let Some(v) = indicators::rsi(closes, 14) {
                     indicator_map.insert("rsi_14".to_string(), v);
+                }
+                if let Some(v) = indicators::atr(highs, lows, closes, 14) {
+                    indicator_map.insert("atr_14".to_string(), v);
+                }
+                if let Some(v) = indicators::adx(highs, lows, closes, 14) {
+                    indicator_map.insert("adx_14".to_string(), v);
+                }
+                // BB width as percentage of SMA20
+                if let Some((bb_lo, bb_mid, bb_up)) =
+                    indicators::bollinger_bands(closes, 20, Decimal::from(2))
+                    && bb_mid > Decimal::ZERO
+                {
+                    let bb_width_pct = (bb_up - bb_lo) / bb_mid * Decimal::from(100);
+                    indicator_map.insert("bb_width_pct".to_string(), bb_width_pct);
+                }
+                // ATR percentile: rank of current ATR within the last 50 ATR values
+                if let Some(current_atr) = indicator_map.get("atr_14").copied() {
+                    let lookback = 50.min(closes.len());
+                    if lookback >= 15 {
+                        let mut atr_count_below = 0u32;
+                        let mut atr_total = 0u32;
+                        for end in (closes.len() - lookback)..closes.len() {
+                            if end >= 14
+                                && let Some(past_atr) = indicators::atr(
+                                    &highs[..=end],
+                                    &lows[..=end],
+                                    &closes[..=end],
+                                    14,
+                                )
+                            {
+                                atr_total += 1;
+                                if past_atr < current_atr {
+                                    atr_count_below += 1;
+                                }
+                            }
+                        }
+                        if atr_total > 0 {
+                            let pct = Decimal::from(atr_count_below)
+                                / Decimal::from(atr_total)
+                                * Decimal::from(100);
+                            indicator_map.insert("atr_percentile".to_string(), pct);
+                        }
+                    }
                 }
 
                 let event = PriceEvent {

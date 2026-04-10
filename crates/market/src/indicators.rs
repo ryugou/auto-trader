@@ -143,6 +143,86 @@ pub fn donchian_channel(
     Some((lower, upper))
 }
 
+/// Average Directional Index (ADX). Measures trend strength regardless
+/// of direction. ADX > 25 suggests a trending market, < 20 suggests
+/// range-bound. Requires `period * 2 + 1` bars minimum.
+pub fn adx(
+    highs: &[Decimal],
+    lows: &[Decimal],
+    closes: &[Decimal],
+    period: usize,
+) -> Option<Decimal> {
+    if highs.len() < period * 2 + 1
+        || lows.len() < period * 2 + 1
+        || closes.len() < period * 2 + 1
+    {
+        return None;
+    }
+    let len = highs.len();
+    let mut plus_dm_vals = Vec::with_capacity(len - 1);
+    let mut minus_dm_vals = Vec::with_capacity(len - 1);
+    let mut tr_vals = Vec::with_capacity(len - 1);
+    for i in 1..len {
+        let high_diff = highs[i] - highs[i - 1];
+        let low_diff = lows[i - 1] - lows[i];
+        let plus_dm = if high_diff > low_diff && high_diff > Decimal::ZERO {
+            high_diff
+        } else {
+            Decimal::ZERO
+        };
+        let minus_dm = if low_diff > high_diff && low_diff > Decimal::ZERO {
+            low_diff
+        } else {
+            Decimal::ZERO
+        };
+        let hl = highs[i] - lows[i];
+        let hc = (highs[i] - closes[i - 1]).abs();
+        let lc = (lows[i] - closes[i - 1]).abs();
+        let tr = hl.max(hc).max(lc);
+        plus_dm_vals.push(plus_dm);
+        minus_dm_vals.push(minus_dm);
+        tr_vals.push(tr);
+    }
+    if plus_dm_vals.len() < period * 2 {
+        return None;
+    }
+    // Wilder's smoothing for +DM, -DM, TR
+    let p = Decimal::from(period as i64);
+    let mut smooth_plus: Decimal = plus_dm_vals[..period].iter().sum();
+    let mut smooth_minus: Decimal = minus_dm_vals[..period].iter().sum();
+    let mut smooth_tr: Decimal = tr_vals[..period].iter().sum();
+
+    let mut dx_vals = Vec::new();
+    for i in period..plus_dm_vals.len() {
+        smooth_plus = smooth_plus - smooth_plus / p + plus_dm_vals[i];
+        smooth_minus = smooth_minus - smooth_minus / p + minus_dm_vals[i];
+        smooth_tr = smooth_tr - smooth_tr / p + tr_vals[i];
+        if smooth_tr == Decimal::ZERO {
+            continue;
+        }
+        let plus_di = smooth_plus / smooth_tr * Decimal::from(100);
+        let minus_di = smooth_minus / smooth_tr * Decimal::from(100);
+        let di_sum = plus_di + minus_di;
+        if di_sum == Decimal::ZERO {
+            dx_vals.push(Decimal::ZERO);
+        } else {
+            let dx = ((plus_di - minus_di).abs() / di_sum) * Decimal::from(100);
+            dx_vals.push(dx);
+        }
+    }
+    if dx_vals.len() < period {
+        return None;
+    }
+    // First ADX = SMA of first `period` DX values
+    let first_adx: Decimal = dx_vals[..period].iter().sum::<Decimal>() / p;
+    // Smooth subsequent ADX values with Wilder's method
+    let mut adx_val = first_adx;
+    for dx in &dx_vals[period..] {
+        adx_val = (adx_val * (p - Decimal::ONE) + dx) / p;
+    }
+    Some(adx_val)
+}
+
 /// Keltner Channels. Returns (lower, middle, upper).
 ///
 /// Uses EMA(period) of closes as the middle line and ATR(period) × `atr_mult`

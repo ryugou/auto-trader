@@ -15,6 +15,7 @@ pub struct PriceEvent {
 #[derive(Debug, Clone)]
 pub struct SignalEvent {
     pub signal: Signal,
+    pub indicators: HashMap<String, Decimal>,
 }
 
 #[derive(Debug, Clone)]

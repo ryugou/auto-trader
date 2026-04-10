@@ -87,6 +87,15 @@ pairs = ["FX_BTC_JPY"]
 params = { entry_channel = 20, exit_channel = 10, atr_period = 14, atr_baseline_bars = 50 }
 
 [[strategies]]
+name = "donchian_trend_evolve_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+# Evolve: Vegapunk 学習ループで週次パラメータ自動更新。
+# 実行時パラメータは DB (strategy_params テーブル) から読む。
+params = { entry_channel = 20, exit_channel = 10, sl_pct = 0.03, allocation_pct = 1.00, atr_baseline_bars = 50 }
+
+[[strategies]]
 name = "squeeze_momentum_v1"
 enabled = true
 mode = "paper"
