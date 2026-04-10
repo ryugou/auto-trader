@@ -48,7 +48,11 @@ const KC_PERIOD: usize = 20;
 const KC_ATR_MULT: Decimal = dec!(1.5);
 const ATR_PERIOD: usize = 14;
 const EMA_TRAIL_PERIOD: usize = 21;
-const SQUEEZE_BARS: usize = 6;
+/// Lowered from 6 → 3 to increase trade frequency. The original
+/// 6-bar requirement made squeeze detection too rare (4 trades in
+/// 5 days vs donchian's 8). 3 bars still confirms a genuine
+/// compression (not noise) while roughly doubling signal rate.
+const SQUEEZE_BARS: usize = 3;
 /// Bars looked back for the historical-needed minimum (kept for the
 /// `len < needed + 2` guard even though SL is now flat-percentage).
 const SWING_LOOKBACK: usize = 5;
