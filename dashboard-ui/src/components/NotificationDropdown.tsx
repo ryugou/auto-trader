@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
@@ -40,12 +41,13 @@ function formatSignedInt(value: string | null): string {
   return `${sign}${Math.round(n).toLocaleString()}`
 }
 
-function renderBody(n: Notification): React.ReactNode {
+function renderBody(n: Notification, accountName: string): React.ReactNode {
   const dir = n.direction.toUpperCase()
   const price = Number(n.price).toLocaleString()
   if (n.kind === 'trade_opened') {
     return (
       <span>
+        <span className="text-gray-300 font-medium">{accountName}</span>{' '}
         <span className="text-sky-400 font-mono">OPEN</span>{' '}
         {n.pair}{' '}
         <span className={n.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>
@@ -59,13 +61,13 @@ function renderBody(n: Notification): React.ReactNode {
   const pnlClass = pnlNum >= 0 ? 'text-emerald-400' : 'text-red-400'
   return (
     <span>
+      <span className="text-gray-300 font-medium">{accountName}</span>{' '}
       <span className="text-amber-400 font-mono">CLOSE</span>{' '}
       {n.pair}{' '}
       <span className={n.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>
         {dir}
       </span>{' '}
       <span className={`font-mono ${pnlClass}`}>{formatSignedInt(n.pnl_amount)}</span>
-      {n.exit_reason && <span className="text-gray-500"> ({n.exit_reason})</span>}
     </span>
   )
 }
@@ -74,10 +76,19 @@ export default function NotificationDropdown({ open }: NotificationDropdownProps
   const { data, isLoading } = useQuery({
     queryKey: ['notifications', { limit: 20 }],
     queryFn: () => api.notifications.list({ limit: '20', page: '1' }),
-    // Only fetch while the dropdown is actually open to avoid
-    // thrashing when the user isn't looking at it.
     enabled: open,
   })
+
+  const { data: accounts } = useQuery({
+    queryKey: ['accounts'],
+    queryFn: () => api.accounts.list(),
+  })
+
+  const accountMap = useMemo(() => {
+    const m = new Map<string, string>()
+    accounts?.forEach((a) => m.set(a.id, a.name))
+    return m
+  }, [accounts])
 
   if (!open) return null
 
@@ -92,22 +103,25 @@ export default function NotificationDropdown({ open }: NotificationDropdownProps
         ) : !data || data.items.length === 0 ? (
           <div className="px-4 py-6 text-center text-xs text-gray-500">通知はありません</div>
         ) : (
-          data.items.map((n) => (
-            <div
-              key={n.id}
-              className={`px-4 py-2 border-b border-gray-800/60 last:border-b-0 ${
-                n.read_at == null ? 'bg-sky-950/40' : ''
-              }`}
-            >
-              <div className="text-xs text-gray-100">{renderBody(n)}</div>
+          data.items.map((n) => {
+            const accountName = accountMap.get(n.paper_account_id ?? '') ?? '-'
+            return (
               <div
-                className="text-[10px] text-gray-500 mt-0.5"
-                title={formatAbsoluteJst(n.created_at)}
+                key={n.id}
+                className={`px-4 py-2 border-b border-gray-800/60 last:border-b-0 ${
+                  n.read_at == null ? 'bg-sky-950/40' : ''
+                }`}
               >
-                {n.strategy_name} · {formatRelativeTime(n.created_at)}
+                <div className="text-xs text-gray-100">{renderBody(n, accountName)}</div>
+                <div
+                  className="text-[10px] text-gray-500 mt-0.5"
+                  title={formatAbsoluteJst(n.created_at)}
+                >
+                  {formatRelativeTime(n.created_at)}
+                </div>
               </div>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
       <div className="px-4 py-2 border-t border-gray-800 text-right">
