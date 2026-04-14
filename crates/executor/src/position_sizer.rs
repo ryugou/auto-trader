@@ -182,13 +182,7 @@ mod tests {
         );
         // > 100% allocation rejected (it's a bug — caller should clamp)
         assert_eq!(
-            s.calculate_quantity(
-                &p,
-                dec!(100000),
-                dec!(10000000),
-                dec!(2),
-                dec!(1.5)
-            ),
+            s.calculate_quantity(&p, dec!(100000), dec!(10000000), dec!(2), dec!(1.5)),
             None
         );
     }

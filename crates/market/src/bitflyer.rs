@@ -1,7 +1,7 @@
-use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Exchange, Pair};
 use crate::candle_builder::CandleBuilder;
 use crate::indicators;
+use auto_trader_core::event::PriceEvent;
+use auto_trader_core::types::{Exchange, Pair};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -145,7 +145,15 @@ impl BitflyerMonitor {
         let mut backoff_secs = 1u64;
 
         loop {
-            match self.connect_and_stream(&mut builders, &mut closes_map, &mut highs_map, &mut lows_map).await {
+            match self
+                .connect_and_stream(
+                    &mut builders,
+                    &mut closes_map,
+                    &mut highs_map,
+                    &mut lows_map,
+                )
+                .await
+            {
                 Ok(()) => {
                     if self.tx.is_closed() {
                         tracing::info!("price channel closed, stopping bitflyer monitor");
@@ -324,8 +332,7 @@ impl BitflyerMonitor {
                             }
                         }
                         if atr_total > 0 {
-                            let pct = Decimal::from(atr_count_below)
-                                / Decimal::from(atr_total)
+                            let pct = Decimal::from(atr_count_below) / Decimal::from(atr_total)
                                 * Decimal::from(100);
                             indicator_map.insert("atr_percentile".to_string(), pct);
                         }

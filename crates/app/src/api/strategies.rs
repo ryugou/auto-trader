@@ -1,8 +1,8 @@
 use super::{ApiError, AppState};
 use auto_trader_db::strategies::{self, Strategy};
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

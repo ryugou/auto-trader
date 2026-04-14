@@ -1,8 +1,8 @@
 use super::{ApiError, AppState};
 use crate::api::filters::DashboardFilter;
 use auto_trader_db::dashboard;
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -99,10 +99,9 @@ pub async fn balance_history(
     State(state): State<AppState>,
     Query(filter): Query<DashboardFilter>,
 ) -> Result<Json<BalanceHistoryResponse>, ApiError> {
-    let accounts =
-        dashboard::get_balance_history(&state.pool, filter.account_type.as_deref())
-            .await
-            .map_err(ApiError::from)?;
+    let accounts = dashboard::get_balance_history(&state.pool, filter.account_type.as_deref())
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(BalanceHistoryResponse { accounts }))
 }
 

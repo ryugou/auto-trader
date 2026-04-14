@@ -40,7 +40,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/dashboard/summary", get(dashboard::summary))
         .route("/dashboard/pnl-history", get(dashboard::pnl_history))
-        .route("/dashboard/balance-history", get(dashboard::balance_history))
+        .route(
+            "/dashboard/balance-history",
+            get(dashboard::balance_history),
+        )
         .route("/dashboard/strategies", get(dashboard::strategies))
         .route("/dashboard/pairs", get(dashboard::pairs))
         .route("/dashboard/hourly-winrate", get(dashboard::hourly_winrate))
@@ -127,8 +130,7 @@ impl From<anyhow::Error> for ApiError {
                     Some("23503") => match pg_err.constraint() {
                         Some("paper_accounts_strategy_fk") => ApiError(
                             StatusCode::BAD_REQUEST,
-                            "strategy not found in catalog (see GET /api/strategies)"
-                                .to_string(),
+                            "strategy not found in catalog (see GET /api/strategies)".to_string(),
                         ),
                         _ => ApiError(
                             StatusCode::CONFLICT,

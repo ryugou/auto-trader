@@ -5,7 +5,11 @@ use std::collections::HashMap;
 
 /// Format an enriched ingest text for trade OPEN events.
 /// Includes indicators, regime classification, and SMA deviation.
-pub fn format_trade_open(trade: &Trade, indicators: &HashMap<String, Decimal>, allocation_pct: Option<Decimal>) -> String {
+pub fn format_trade_open(
+    trade: &Trade,
+    indicators: &HashMap<String, Decimal>,
+    allocation_pct: Option<Decimal>,
+) -> String {
     let dir = match trade.direction {
         Direction::Long => "ロング",
         Direction::Short => "ショート",

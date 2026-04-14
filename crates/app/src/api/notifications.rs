@@ -1,7 +1,7 @@
 use super::{ApiError, AppState};
 use auto_trader_db::notifications::{self as notifs_db, Notification};
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -77,10 +77,9 @@ pub async fn list(
         }
     };
 
-    let (items, total) =
-        notifs_db::list(&state.pool, limit, offset, unread_only, kind, from, to)
-            .await
-            .map_err(ApiError::from)?;
+    let (items, total) = notifs_db::list(&state.pool, limit, offset, unread_only, kind, from, to)
+        .await
+        .map_err(ApiError::from)?;
     let unread_count = notifs_db::unread_count(&state.pool)
         .await
         .map_err(ApiError::from)?;

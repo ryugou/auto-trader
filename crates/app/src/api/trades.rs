@@ -2,9 +2,9 @@ use super::{ApiError, AppState};
 use crate::api::filters::TradeFilter;
 use auto_trader_db::dashboard::{self, TradeRow};
 use auto_trader_db::trades::{self as trades_db, TradeEvent};
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Serialize;
 use uuid::Uuid;
 

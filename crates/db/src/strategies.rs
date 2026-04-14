@@ -57,11 +57,10 @@ pub async fn get_strategy(pool: &PgPool, name: &str) -> anyhow::Result<Option<St
 /// paper-account create/update path so users can't store references to
 /// strategies that the runtime cannot resolve.
 pub async fn strategy_exists(pool: &PgPool, name: &str) -> anyhow::Result<bool> {
-    let row: (bool,) =
-        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM strategies WHERE name = $1)")
-            .bind(name)
-            .fetch_one(pool)
-            .await?;
+    let row: (bool,) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM strategies WHERE name = $1)")
+        .bind(name)
+        .fetch_one(pool)
+        .await?;
     Ok(row.0)
 }
 

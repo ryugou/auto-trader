@@ -107,9 +107,7 @@ pub async fn run(
          根拠: {}\n\
          期待効果: {}\n\
          新パラメータ: {}",
-        proposal.rationale,
-        proposal.expected_effect,
-        proposal.params,
+        proposal.rationale, proposal.expected_effect, proposal.params,
     );
     insert_system_notification(pool, &notification_message)
         .await
@@ -225,13 +223,12 @@ fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
 /// Load the current JSON params blob for a strategy from `strategy_params`.
 /// Returns an empty object `{}` when no row exists yet.
 async fn load_current_params(pool: &PgPool, strategy: &str) -> anyhow::Result<serde_json::Value> {
-    let row: Option<sqlx::types::Json<serde_json::Value>> = sqlx::query_scalar(
-        "SELECT params FROM strategy_params WHERE strategy_name = $1",
-    )
-    .bind(strategy)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("SELECT strategy_params for {strategy}"))?;
+    let row: Option<sqlx::types::Json<serde_json::Value>> =
+        sqlx::query_scalar("SELECT params FROM strategy_params WHERE strategy_name = $1")
+            .bind(strategy)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("SELECT strategy_params for {strategy}"))?;
 
     Ok(row.map(|j| j.0).unwrap_or_else(|| serde_json::json!({})))
 }
@@ -422,9 +419,7 @@ async fn call_gemini(
     let generated_text = raw
         .pointer("/candidates/0/content/parts/0/text")
         .and_then(|v| v.as_str())
-        .with_context(|| {
-            format!("extract text from Gemini response; raw={response_text:.200}")
-        })?;
+        .with_context(|| format!("extract text from Gemini response; raw={response_text:.200}"))?;
 
     // The model is instructed to return JSON only; try parsing directly.
     // If the model wraps it in a code fence, strip that too.
@@ -443,10 +438,7 @@ fn extract_json(text: &str) -> &str {
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
     {
-        inner
-            .trim_start()
-            .trim_end_matches("```")
-            .trim()
+        inner.trim_start().trim_end_matches("```").trim()
     } else {
         trimmed
     }

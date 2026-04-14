@@ -1,14 +1,14 @@
 use super::{ApiError, AppState};
 use auto_trader_db::dashboard;
 use auto_trader_db::paper_accounts::{
-    self, normalize_currency, validate_initial_balance, CreatePaperAccount, PaperAccount,
-    UpdatePaperAccount,
+    self, CreatePaperAccount, PaperAccount, UpdatePaperAccount, normalize_currency,
+    validate_initial_balance,
 };
 use auto_trader_db::strategies;
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;

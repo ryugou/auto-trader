@@ -1,12 +1,12 @@
-use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Exchange, Pair};
 use crate::indicators;
 use crate::oanda::OandaClient;
+use auto_trader_core::event::PriceEvent;
+use auto_trader_core::types::{Exchange, Pair};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 pub struct MarketMonitor {
     client: OandaClient,
@@ -63,7 +63,7 @@ impl MarketMonitor {
         let candles = self.client.get_candles(pair, &self.timeframe, 100).await?;
         let latest = match candles.last() {
             Some(c) => c.clone(),
-            None => return Ok(()),  // no complete candles
+            None => return Ok(()), // no complete candles
         };
 
         // Save candles to DB for backtest data accumulation
@@ -112,12 +112,8 @@ impl MarketMonitor {
                 let mut atr_total = 0u32;
                 for end in (closes.len() - lookback)..closes.len() {
                     if end >= 14
-                        && let Some(past_atr) = indicators::atr(
-                            &highs[..=end],
-                            &lows[..=end],
-                            &closes[..=end],
-                            14,
-                        )
+                        && let Some(past_atr) =
+                            indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], 14)
                     {
                         atr_total += 1;
                         if past_atr < current_atr {
@@ -126,8 +122,7 @@ impl MarketMonitor {
                     }
                 }
                 if atr_total > 0 {
-                    let pct = Decimal::from(atr_count_below)
-                        / Decimal::from(atr_total)
+                    let pct = Decimal::from(atr_count_below) / Decimal::from(atr_total)
                         * Decimal::from(100);
                     indicators.insert("atr_percentile".to_string(), pct);
                 }

@@ -15,19 +15,30 @@ pub struct BacktestReport {
 }
 
 impl BacktestReport {
-    pub fn from_trades_with_failures(trades: Vec<Trade>, initial_balance: Decimal, final_balance: Decimal, execution_failures: usize) -> Self {
-        let closed: Vec<&Trade> = trades.iter()
+    pub fn from_trades_with_failures(
+        trades: Vec<Trade>,
+        initial_balance: Decimal,
+        final_balance: Decimal,
+        execution_failures: usize,
+    ) -> Self {
+        let closed: Vec<&Trade> = trades
+            .iter()
             .filter(|t| t.status == TradeStatus::Closed)
             .collect();
 
         let total_trades = closed.len();
-        let wins = closed.iter().filter(|t| t.pnl_amount.unwrap_or_default() > Decimal::ZERO).count();
+        let wins = closed
+            .iter()
+            .filter(|t| t.pnl_amount.unwrap_or_default() > Decimal::ZERO)
+            .count();
         let losses = total_trades - wins;
-        let win_rate = if total_trades > 0 { wins as f64 / total_trades as f64 } else { 0.0 };
+        let win_rate = if total_trades > 0 {
+            wins as f64 / total_trades as f64
+        } else {
+            0.0
+        };
 
-        let total_pnl = closed.iter()
-            .filter_map(|t| t.pnl_amount)
-            .sum::<Decimal>();
+        let total_pnl = closed.iter().filter_map(|t| t.pnl_amount).sum::<Decimal>();
 
         // Max drawdown from equity curve
         let mut peak = initial_balance;
@@ -35,22 +46,31 @@ impl BacktestReport {
         let mut equity = initial_balance;
         for t in &closed {
             equity += t.pnl_amount.unwrap_or_default();
-            if equity > peak { peak = equity; }
+            if equity > peak {
+                peak = equity;
+            }
             let dd = peak - equity;
-            if dd > max_dd { max_dd = dd; }
+            if dd > max_dd {
+                max_dd = dd;
+            }
         }
 
-        let gross_profit: Decimal = closed.iter()
+        let gross_profit: Decimal = closed
+            .iter()
             .filter_map(|t| t.pnl_amount)
             .filter(|p| *p > Decimal::ZERO)
             .sum();
-        let gross_loss: Decimal = closed.iter()
+        let gross_loss: Decimal = closed
+            .iter()
             .filter_map(|t| t.pnl_amount)
             .filter(|p| *p < Decimal::ZERO)
             .map(|p| p.abs())
             .sum();
         let profit_factor = if gross_loss > Decimal::ZERO {
-            (gross_profit / gross_loss).to_string().parse().unwrap_or(0.0)
+            (gross_profit / gross_loss)
+                .to_string()
+                .parse()
+                .unwrap_or(0.0)
         } else if gross_profit > Decimal::ZERO {
             f64::INFINITY
         } else {
@@ -58,15 +78,25 @@ impl BacktestReport {
         };
 
         Self {
-            total_trades, wins, losses, execution_failures, win_rate,
-            total_pnl, max_drawdown: max_dd,
-            initial_balance, final_balance, profit_factor,
+            total_trades,
+            wins,
+            losses,
+            execution_failures,
+            win_rate,
+            total_pnl,
+            max_drawdown: max_dd,
+            initial_balance,
+            final_balance,
+            profit_factor,
         }
     }
 
     pub fn print_summary(&self) {
         println!("=== Backtest Report ===");
-        println!("Trades: {} (W:{} L:{} Err:{})", self.total_trades, self.wins, self.losses, self.execution_failures);
+        println!(
+            "Trades: {} (W:{} L:{} Err:{})",
+            self.total_trades, self.wins, self.losses, self.execution_failures
+        );
         println!("Win Rate: {:.1}%", self.win_rate * 100.0);
         println!("Total PnL: {}", self.total_pnl);
         println!("Max Drawdown: {}", self.max_drawdown);

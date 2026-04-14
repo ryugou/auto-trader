@@ -67,13 +67,23 @@ fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEve
 /// squeeze strategies a clear breakout. Returns the slice up to (but
 /// not including) the breakout candle so callers can warm the strategy
 /// first.
-fn flat_then_trend(base: Decimal, flat_bars: usize, trend_step: Decimal, trend_bars: usize) -> Vec<PriceEvent> {
+fn flat_then_trend(
+    base: Decimal,
+    flat_bars: usize,
+    trend_step: Decimal,
+    trend_bars: usize,
+) -> Vec<PriceEvent> {
     let mut out = Vec::with_capacity(flat_bars + trend_bars);
     for i in 0..flat_bars {
         // Tiny zig-zag so ATR isn't literally zero.
         let drift = if i % 2 == 0 { dec!(1000) } else { dec!(-1000) };
         let close = base + drift;
-        out.push(make_event(close, close + dec!(2000), close - dec!(2000), i as i64));
+        out.push(make_event(
+            close,
+            close + dec!(2000),
+            close - dec!(2000),
+            i as i64,
+        ));
     }
     for i in 0..trend_bars {
         let close = base + trend_step * Decimal::from((i + 1) as u64);
@@ -95,10 +105,7 @@ fn flat_then_trend(base: Decimal, flat_bars: usize, trend_step: Decimal, trend_b
 /// to a non-zero quantity on the live account profile.
 #[tokio::test]
 async fn donchian_signal_passes_sizer_on_30k_account() {
-    let mut strat = DonchianTrendV1::new(
-        "donchian_trend_v1".to_string(),
-        vec![Pair::new(PAIR)],
-    );
+    let mut strat = DonchianTrendV1::new("donchian_trend_v1".to_string(), vec![Pair::new(PAIR)]);
     let sizer = live_account_sizer();
 
     // Warm up with 100 flat bars around 11M, then push a clear upside
@@ -112,7 +119,8 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
         }
     }
 
-    let signal = emitted.expect("donchian_trend_v1 must emit at least one entry signal in this trend setup");
+    let signal =
+        emitted.expect("donchian_trend_v1 must emit at least one entry signal in this trend setup");
 
     let qty = sizer.calculate_quantity(
         &signal.pair,
@@ -136,10 +144,8 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
 /// on the live 30k JPY account.
 #[tokio::test]
 async fn squeeze_signal_passes_sizer_on_30k_account() {
-    let mut strat = SqueezeMomentumV1::new(
-        "squeeze_momentum_v1".to_string(),
-        vec![Pair::new(PAIR)],
-    );
+    let mut strat =
+        SqueezeMomentumV1::new("squeeze_momentum_v1".to_string(), vec![Pair::new(PAIR)]);
     let sizer = live_account_sizer();
 
     // 80 ultra-flat bars to force BB inside KC (build a sustained
@@ -148,7 +154,12 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         .map(|i| make_event(dec!(11000000), dec!(11000100), dec!(10999900), i))
         .collect();
     // Big up-bar that releases the squeeze with positive momentum.
-    events.push(make_event(dec!(11500000), dec!(11600000), dec!(11000000), 80));
+    events.push(make_event(
+        dec!(11500000),
+        dec!(11600000),
+        dec!(11000000),
+        80,
+    ));
 
     let mut emitted = None;
     for event in &events {
@@ -158,7 +169,8 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         }
     }
 
-    let signal = emitted.expect("squeeze_momentum_v1 must emit a signal after a squeeze release with momentum");
+    let signal = emitted
+        .expect("squeeze_momentum_v1 must emit a signal after a squeeze release with momentum");
     let qty = sizer.calculate_quantity(
         &signal.pair,
         ACCOUNT_BALANCE,
@@ -179,10 +191,7 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
 /// on the live 30k JPY account.
 #[tokio::test]
 async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
-    let mut strat = BbMeanRevertV1::new(
-        "bb_mean_revert_v1".to_string(),
-        vec![Pair::new(PAIR)],
-    );
+    let mut strat = BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![Pair::new(PAIR)]);
     let sizer = live_account_sizer();
 
     // Warm up with 30 flat candles around 11M. Then a sharp drop that
@@ -191,7 +200,12 @@ async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
         .map(|i| make_event(dec!(11000000), dec!(11005000), dec!(10995000), i))
         .collect();
     // Crash bar: close well below recent lows + lower low than prev bar.
-    events.push(make_event(dec!(10000000), dec!(10050000), dec!(9950000), 30));
+    events.push(make_event(
+        dec!(10000000),
+        dec!(10050000),
+        dec!(9950000),
+        30,
+    ));
 
     let mut emitted = None;
     for event in &events {
