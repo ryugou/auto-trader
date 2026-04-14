@@ -2,30 +2,36 @@
 //!
 //! These tests use sqlx::test (real Postgres) + wiremock (fake bitFlyer API).
 //!
-//! NOTE: Tests that require full DB execution (insert_trade, lock_margin, etc.)
-//! are marked `#[ignore]` and will be enabled in PR-1 Task 6 when the DB
-//! functions are implemented. Tests that only exercise PriceStore / API routing
-//! logic can run as unit tests independently.
-//!
 //! Test setup convention:
 //!   - dry_run=true tests: only need PriceStore to be populated
 //!   - dry_run=false tests: need wiremock for send_child_order + get_executions
 
-use auto_trader_core::types::{Direction, Exchange, Pair, Signal};
+use auto_trader_core::config::PairConfig;
+use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, Trade, TradeStatus};
+use auto_trader_executor::trader::Trader;
+use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
+use auto_trader_notify::Notifier;
 use chrono::Utc;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Build a minimal Signal for testing.
+///
+/// Uses "bb_mean_revert_v1" as strategy_name because that strategy is seeded
+/// by the migration and satisfies the trades.strategy_name FK constraint.
 #[allow(dead_code)]
 fn make_signal(pair: &str, direction: Direction) -> Signal {
     Signal {
-        strategy_name: "test_strategy".to_string(),
+        strategy_name: "bb_mean_revert_v1".to_string(),
         pair: Pair::new(pair),
         direction,
         stop_loss_pct: dec!(0.03),
@@ -56,6 +62,127 @@ async fn seed_price_store(
         )
         .await;
     store
+}
+
+/// Seed a live trading_account into the DB and return its UUID.
+///
+/// Uses the existing strategy seed from the migration (bb_mean_revert_v1).
+async fn seed_live_account(pool: &PgPool) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO trading_accounts
+               (id, name, account_type, exchange, strategy,
+                initial_balance, current_balance, leverage, currency)
+           VALUES ($1, 'live_test', 'live', 'bitflyer_cfd', 'bb_mean_revert_v1',
+                   30000, 30000, 2, 'JPY')"#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .expect("seed_live_account failed");
+    id
+}
+
+/// Build a minimal pair_configs map for FX_BTC_JPY.
+fn btc_pair_configs() -> HashMap<String, PairConfig> {
+    let mut m = HashMap::new();
+    m.insert(
+        "FX_BTC_JPY".to_string(),
+        PairConfig {
+            price_unit: dec!(1),
+            min_order_size: dec!(0.001),
+        },
+    );
+    m
+}
+
+/// Build a Trader in live mode using a wiremock server URI.
+fn build_live_trader(
+    pool: PgPool,
+    account_id: Uuid,
+    server_uri: String,
+    price_store: Arc<PriceStore>,
+) -> Trader {
+    let api = Arc::new(BitflyerPrivateApi::new_for_test(
+        server_uri,
+        "k".to_string(),
+        "s".to_string(),
+    ));
+    let notifier = Arc::new(Notifier::new(None));
+    Trader::new(
+        pool,
+        Exchange::BitflyerCfd,
+        account_id,
+        api,
+        price_store,
+        notifier,
+        btc_pair_configs(),
+        false, // dry_run = false → live mode
+    )
+}
+
+/// Seed one open Long trade directly into the DB and return the Trade value.
+async fn seed_open_trade(
+    pool: &PgPool,
+    account_id: Uuid,
+    entry_price: Decimal,
+    quantity: Decimal,
+) -> Trade {
+    let trade = Trade {
+        id: Uuid::new_v4(),
+        account_id,
+        strategy_name: "bb_mean_revert_v1".to_string(),
+        pair: Pair::new("FX_BTC_JPY"),
+        exchange: Exchange::BitflyerCfd,
+        direction: Direction::Long,
+        entry_price,
+        exit_price: None,
+        stop_loss: entry_price * dec!(0.97),
+        take_profit: None,
+        quantity,
+        leverage: dec!(2),
+        fees: dec!(0),
+        entry_at: Utc::now(),
+        exit_at: None,
+        pnl_amount: None,
+        exit_reason: None,
+        status: TradeStatus::Open,
+        max_hold_until: None,
+    };
+    sqlx::query(
+        r#"INSERT INTO trades
+               (id, account_id, strategy_name, pair, exchange, direction,
+                entry_price, exit_price, stop_loss, take_profit,
+                quantity, leverage, fees, entry_at, exit_at,
+                pnl_amount, exit_reason, status, max_hold_until)
+           VALUES ($1, $2, $3, $4, $5, $6,
+                   $7, $8, $9, $10,
+                   $11, $12, $13, $14, $15,
+                   $16, $17, $18, $19)"#,
+    )
+    .bind(trade.id)
+    .bind(trade.account_id)
+    .bind(&trade.strategy_name)
+    .bind(&trade.pair.0)
+    .bind(trade.exchange.as_str())
+    .bind("long")
+    .bind(trade.entry_price)
+    .bind(trade.exit_price)
+    .bind(trade.stop_loss)
+    .bind(trade.take_profit)
+    .bind(trade.quantity)
+    .bind(trade.leverage)
+    .bind(trade.fees)
+    .bind(trade.entry_at)
+    .bind(trade.exit_at)
+    .bind(trade.pnl_amount)
+    .bind(trade.exit_reason.map(|_| "manual"))
+    .bind("open")
+    .bind(trade.max_hold_until)
+    .execute(pool)
+    .await
+    .expect("seed_open_trade failed");
+    trade
 }
 
 // ---------------------------------------------------------------------------
@@ -178,36 +305,83 @@ async fn poll_executions_calculates_weighted_average() {
 
 /// End-to-end Trader::execute test with wiremock and real DB.
 ///
-/// This test requires a live Postgres instance (sqlx::test) and a wiremock
-/// server for the bitFlyer API. It is marked `#[ignore]` until the DB
-/// functions (insert_trade, lock_margin) are implemented in PR-1 Task 6.
-///
 /// Scenario:
-///   - wiremock: send_child_order → acceptance_id
-///   - wiremock: get_executions → price=11_505_000, size=0.005
-///   - Trader::execute(Long) → Trade.entry_price == 11_505_000
-#[tokio::test]
-#[ignore = "requires DB functions from PR-1 Task 6; enable after Task 6 lands"]
-async fn live_execute_calls_api_and_uses_actual_fill_price() {
-    // TODO(Task 6): Implement with sqlx::test pool + wiremock.
-    //
-    // Setup:
-    //   let server = wiremock::MockServer::start().await;
-    //   wiremock::Mock::given(wiremock::matchers::method("POST"))
-    //       .and(wiremock::matchers::path("/v1/me/sendchildorder"))
-    //       .respond_with(wiremock::ResponseTemplate::new(200)
-    //           .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF123"})))
-    //       .mount(&server).await;
-    //   wiremock::Mock::given(wiremock::matchers::method("GET"))
-    //       .and(wiremock::matchers::path_regex(r"/v1/me/getexecutions.*"))
-    //       .respond_with(wiremock::ResponseTemplate::new(200)
-    //           .set_body_json(serde_json::json!([{"price":"11505000","size":"0.005","id":1,"child_order_id":"x","side":"BUY","commission":"0","exec_date":"2026-01-01","child_order_acceptance_id":"JRF123"}])))
-    //       .mount(&server).await;
-    //   let api = Arc::new(BitflyerPrivateApi::new_for_test(server.uri(), "k".into(), "s".into()));
-    //   let trader = Trader::new(pool, Exchange::BitflyerCfd, account_id, api, price_store, notifier, pair_configs, false);
-    //   let trade = trader.execute(&make_signal("FX_BTC_JPY", Direction::Long)).await.unwrap();
-    //   assert_eq!(trade.entry_price, dec!(11_505_000));
-    todo!()
+///   - wiremock: send_child_order → acceptance_id "JRF123"
+///   - wiremock: get_executions → price=11_505_000, size=0.005, side=BUY
+///   - Trader::execute(Long) → Trade.entry_price == dec!(11_505_000)
+///   - DB にも trade が insert され status='open'
+#[sqlx::test(migrations = "../../migrations")]
+async fn live_execute_calls_api_and_uses_actual_fill_price(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // sendchildorder → acceptance_id
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF123"})),
+        )
+        .mount(&server)
+        .await;
+
+    // getexecutions → 1 fill
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 1,
+                "child_order_id": "JOR1",
+                "side": "BUY",
+                "price": "11505000",
+                "size": "0.005",
+                "commission": "0",
+                "exec_date": "2026-01-01T00:00:00",
+                "child_order_acceptance_id": "JRF123"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    // seed DB: live account
+    let account_id = seed_live_account(&pool).await;
+
+    // PriceStore: live mode でも position sizing に hint_price が必要
+    let bid = dec!(11_500_000);
+    let ask = dec!(11_500_500);
+    let price_store = seed_price_store(bid, ask).await;
+
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    let signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let trade = trader
+        .execute(&signal)
+        .await
+        .expect("execute should succeed");
+
+    // API の実約定価格を使っていること
+    assert_eq!(
+        trade.entry_price,
+        dec!(11505000),
+        "entry_price must be API fill price, not hint_price"
+    );
+    // API の実数量を使っていること
+    assert_eq!(
+        trade.quantity,
+        dec!(0.005),
+        "quantity must match API fill size"
+    );
+    assert_eq!(trade.status, TradeStatus::Open);
+
+    // DB にも insert されていること
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account failed");
+    assert_eq!(open_trades.len(), 1, "exactly 1 open trade must be in DB");
+    assert_eq!(open_trades[0].id, trade.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,13 +390,65 @@ async fn live_execute_calls_api_and_uses_actual_fill_price() {
 
 /// Verify that Trader::execute returns Err when get_executions never returns fills.
 ///
-/// Marked `#[ignore]` for the same reason as Test 6.
-#[tokio::test]
-#[ignore = "requires DB functions from PR-1 Task 6; enable after Task 6 lands"]
-async fn live_execute_times_out_if_no_execution_returned() {
-    // TODO(Task 6): Implement with wiremock that always returns [] for get_executions.
-    // Trader.execute should return Err("timed out"), and no Trade should be inserted.
-    todo!()
+/// wiremock always returns [] → poll_executions times out after 5 seconds.
+/// No Trade is inserted into the DB.
+///
+/// NOTE: This test intentionally waits ~5 seconds for the internal timeout.
+#[sqlx::test(migrations = "../../migrations")]
+async fn live_execute_times_out_if_no_execution_returned(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // sendchildorder succeeds
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_TIMEOUT"})),
+        )
+        .mount(&server)
+        .await;
+
+    // getexecutions always returns empty array
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+    let bid = dec!(11_500_000);
+    let ask = dec!(11_500_500);
+    let price_store = seed_price_store(bid, ask).await;
+
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    let signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let result = trader.execute(&signal).await;
+
+    // execute must fail with timeout error
+    assert!(
+        result.is_err(),
+        "execute must return Err when no executions returned"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("timed out"),
+        "error must mention timeout, got: {err_msg}"
+    );
+
+    // DB に trade が insert されていないこと
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account failed");
+    assert_eq!(
+        open_trades.len(),
+        0,
+        "no trade must be inserted when execution times out"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,12 +457,87 @@ async fn live_execute_times_out_if_no_execution_returned() {
 
 /// Verify that close_position uses the live API fill price.
 ///
-/// Marked `#[ignore]` pending Task 6.
-#[tokio::test]
-#[ignore = "requires DB functions from PR-1 Task 6; enable after Task 6 lands"]
-async fn live_close_calls_api_and_uses_actual_fill_price() {
-    // TODO(Task 6): Implement with wiremock + sqlx::test.
-    // Scenario: seed 1 open Long trade, wiremock returns fill @ 11_608_000,
-    // close_position → exit_price == 11_608_000.
-    todo!()
+/// Scenario:
+///   - seed: 1 open Long trade (entry_price=11_500_000, qty=0.005)
+///   - wiremock: send_child_order (反対売買 SELL) → "JRF_CLOSE"
+///   - wiremock: get_executions → price=11_608_000, size=0.005, side=SELL
+///   - close_position → exit_price = dec!(11_608_000)
+///   - pnl = (11_608_000 - 11_500_000) × 0.005 = 540
+#[sqlx::test(migrations = "../../migrations")]
+async fn live_close_calls_api_and_uses_actual_fill_price(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // sendchildorder (反対売買 SELL) → acceptance_id
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_CLOSE"})),
+        )
+        .mount(&server)
+        .await;
+
+    // getexecutions → SELL fill @ 11_608_000
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 2,
+                "child_order_id": "JOR_CLOSE",
+                "side": "SELL",
+                "price": "11608000",
+                "size": "0.005",
+                "commission": "0",
+                "exec_date": "2026-01-01T00:01:00",
+                "child_order_acceptance_id": "JRF_CLOSE"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+
+    // PriceStore は close_position 内では dry_run=true 時のみ参照されるが、
+    // Trader::new に渡すために生成する (close_position 自体は使わない)
+    let price_store = PriceStore::new(vec![]);
+
+    // DB に open Long trade を直接 seed
+    let open_trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    let closed_trade = trader
+        .close_position(&open_trade.id.to_string(), ExitReason::Manual)
+        .await
+        .expect("close_position should succeed");
+
+    // exit_price は API の実約定価格
+    assert_eq!(
+        closed_trade.exit_price,
+        Some(dec!(11608000)),
+        "exit_price must be API fill price"
+    );
+
+    // pnl = (11_608_000 - 11_500_000) * 0.005 = 540
+    assert_eq!(
+        closed_trade.pnl_amount,
+        Some(dec!(540)),
+        "pnl_amount must be 540 for Long (11_608_000 - 11_500_000) * 0.005"
+    );
+
+    assert_eq!(closed_trade.status, TradeStatus::Closed);
+
+    // DB でも closed になっていること
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account failed");
+    assert_eq!(
+        open_trades.len(),
+        0,
+        "no open trades must remain after close"
+    );
 }
