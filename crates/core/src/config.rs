@@ -23,6 +23,10 @@ pub struct AppConfig {
     pub macro_analyst: Option<MacroAnalystConfig>,
     #[serde(default)]
     pub gemini: Option<GeminiConfig>,
+    #[serde(default)]
+    pub risk: Option<RiskConfig>,
+    #[serde(default)]
+    pub live: Option<LiveConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -91,6 +95,12 @@ pub struct GeminiConfig {
 pub struct BitflyerConfig {
     pub ws_url: String,
     pub api_url: String,
+    /// BITFLYER_API_KEY env から埋める。config/default.toml には書かない。
+    #[serde(skip, default)]
+    pub api_key: Option<String>,
+    /// BITFLYER_API_SECRET env から埋める。config/default.toml には書かない。
+    #[serde(skip, default)]
+    pub api_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -103,6 +113,30 @@ pub struct PairConfig {
 pub struct PositionSizingConfig {
     pub method: String,
     pub risk_rate: Decimal,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RiskConfig {
+    /// 本日 (JST) のクローズ済み pnl 合計がこの比率 (×初期残高) を
+    /// 下回ったら Kill Switch 発動。
+    pub daily_loss_limit_pct: Decimal,
+    /// price tick の鮮度上限 (秒)。超過時は新規シグナル拒否。
+    pub price_freshness_secs: u64,
+    /// Kill Switch を自動解除する JST 時刻 (0 = 0:00)。
+    pub kill_switch_release_jst_hour: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LiveConfig {
+    /// true の時のみ LiveTrader を起動する。account_type='live' の
+    /// アカウントが存在すれば main.rs 起動時に true でなければ fatal。
+    pub enabled: bool,
+    /// true 中は発注直前で no-op し通知のみ出す (DryRunTrader)。
+    /// LIVE_DRY_RUN env が設定されていれば env 優先。
+    pub dry_run: bool,
+    pub execution_poll_interval_secs: u64,
+    pub reconciler_interval_secs: u64,
+    pub balance_sync_interval_secs: u64,
 }
 
 impl AppConfig {
@@ -145,7 +179,10 @@ pairs = ["USD_JPY"]
 params = { holding_days_max = 14 }
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.oanda.as_ref().unwrap().api_url, "https://api-fxpractice.oanda.com");
+        assert_eq!(
+            config.oanda.as_ref().unwrap().api_url,
+            "https://api-fxpractice.oanda.com"
+        );
         assert_eq!(config.strategies.len(), 1);
         assert_eq!(config.strategies[0].name, "swing_llm_v1");
         assert_eq!(config.pairs.active, vec!["USD_JPY"]);
@@ -195,9 +232,93 @@ mode = "paper"
 pairs = ["FX_BTC_JPY"]
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.bitflyer.as_ref().unwrap().ws_url, "wss://ws.lightstream.bitflyer.com/json-rpc");
+        assert_eq!(
+            config.bitflyer.as_ref().unwrap().ws_url,
+            "wss://ws.lightstream.bitflyer.com/json-rpc"
+        );
         assert_eq!(config.pairs.crypto.as_ref().unwrap().len(), 1);
-        assert_eq!(config.pair_config.get("FX_BTC_JPY").unwrap().price_unit.to_string(), "1");
-        assert_eq!(config.position_sizing.as_ref().unwrap().risk_rate.to_string(), "0.02");
+        assert_eq!(
+            config
+                .pair_config
+                .get("FX_BTC_JPY")
+                .unwrap()
+                .price_unit
+                .to_string(),
+            "1"
+        );
+        assert_eq!(
+            config
+                .position_sizing
+                .as_ref()
+                .unwrap()
+                .risk_rate
+                .to_string(),
+            "0.02"
+        );
+    }
+
+    #[test]
+    fn parse_config_with_risk_and_live() {
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://u:p@localhost/auto_trader"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+active = ["USD_JPY"]
+
+[risk]
+daily_loss_limit_pct = 0.05
+price_freshness_secs = 60
+kill_switch_release_jst_hour = 0
+
+[live]
+enabled = false
+dry_run = true
+execution_poll_interval_secs = 3
+reconciler_interval_secs = 300
+balance_sync_interval_secs = 300
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let risk = cfg.risk.expect("risk section should parse");
+        assert_eq!(risk.price_freshness_secs, 60);
+        let live = cfg.live.expect("live section should parse");
+        assert!(!live.enabled);
+        assert!(live.dry_run);
+    }
+
+    #[test]
+    fn bitflyer_config_api_key_starts_as_none() {
+        // config ファイル側で書いても #[serde(skip)] で無視される
+        let toml_str = r#"
+[vegapunk]
+endpoint = "x"
+schema = "x"
+[database]
+url = "x"
+[monitor]
+interval_secs = 1
+[pairs]
+active = []
+[bitflyer]
+ws_url = "wss://example"
+api_url = "https://example"
+api_key = "LEAKED"
+api_secret = "LEAKED"
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let bf = cfg.bitflyer.unwrap();
+        assert_eq!(bf.ws_url, "wss://example");
+        assert!(bf.api_key.is_none(), "api_key must only come from env");
+        assert!(
+            bf.api_secret.is_none(),
+            "api_secret must only come from env"
+        );
     }
 }
