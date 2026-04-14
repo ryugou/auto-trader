@@ -11,13 +11,18 @@ use uuid::Uuid;
 pub struct Notification {
     pub id: Uuid,
     pub kind: String,
-    pub trade_id: Option<Uuid>,
-    pub account_id: Option<Uuid>,
-    pub strategy_name: Option<String>,
-    pub pair: Option<String>,
-    pub direction: Option<String>,
-    pub price: Option<Decimal>,
+    /// Non-nullable in DB for both trade_opened and trade_closed (see
+    /// `notifications` CHECK constraints in the unified_rewrite migration).
+    pub trade_id: Uuid,
+    pub account_id: Uuid,
+    pub strategy_name: String,
+    pub pair: String,
+    pub direction: String,
+    pub price: Decimal,
+    /// Only populated for kind='trade_closed' (DB CHECK
+    /// `notifications_close_requires_pnl_and_reason`).
     pub pnl_amount: Option<Decimal>,
+    /// Only populated for kind='trade_closed'.
     pub exit_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub read_at: Option<DateTime<Utc>>,

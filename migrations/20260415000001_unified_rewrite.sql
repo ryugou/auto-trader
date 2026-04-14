@@ -4,6 +4,12 @@
 
 BEGIN;
 
+-- 0) gen_random_uuid() requires pgcrypto on stock Postgres (<13). Older
+--    dev instances that never ran an earlier migration needing it would
+--    fail on the DEFAULT gen_random_uuid() in account_events / notifications.
+--    Idempotent — no-op on DBs that already have it.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- 1) drop old tables and types
 DROP TABLE IF EXISTS paper_account_events CASCADE;
 DROP TABLE IF EXISTS trades CASCADE;

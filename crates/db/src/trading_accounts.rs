@@ -145,6 +145,16 @@ pub async fn create_account(
     pool: &PgPool,
     req: &CreateTradingAccount,
 ) -> anyhow::Result<TradingAccount> {
+    // Defense in depth: `create_account` is callable from non-HTTP paths
+    // (CLI, tests, future internal callers), and the HTTP deserializer does
+    // not constrain this field. Reject invalid values here so a bad string
+    // never reaches the DB CHECK constraint.
+    if req.account_type != "paper" && req.account_type != "live" {
+        anyhow::bail!(
+            "invalid account_type '{}' (must be 'paper' or 'live')",
+            req.account_type
+        );
+    }
     let currency = normalize_currency(&req.currency);
     if let Err(msg) = validate_initial_balance(&currency, req.initial_balance) {
         anyhow::bail!(msg);

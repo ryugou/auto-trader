@@ -4,24 +4,22 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Row type for the drawdown query: (strategy, pair, exchange, account_id, account_type, pnl).
-type DrawdownRow = (
-    String,
-    String,
-    String,
-    Option<Uuid>,
-    Option<String>,
-    Decimal,
-);
+///
+/// `account_id` and `account_type` are non-optional: `trades.account_id` is
+/// NOT NULL with an FK to `trading_accounts`, and the query uses INNER JOIN.
+/// A row here that can't resolve its account is a DB integrity violation;
+/// we let the query error out rather than silently default to "paper".
+type DrawdownRow = (String, String, String, Uuid, String, Decimal);
 
 pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
     // Get all closed trades for the UTC date, ordered by exit_at.
-    // JOIN trading_accounts to fetch account_type in a single query, avoiding
-    // an N+1 SELECT per group (Copilot WARN #6).
+    // INNER JOIN trading_accounts — `trades.account_id` is NOT NULL FK, so
+    // a missing account row is DB corruption, not a "maybe-paper" fallback.
     let rows: Vec<DrawdownRow> = sqlx::query_as(
         "SELECT t.strategy_name, t.pair, t.exchange, t.account_id,
                     ta.account_type, t.pnl_amount
              FROM trades t
-             LEFT JOIN trading_accounts ta ON t.account_id = ta.id
+             INNER JOIN trading_accounts ta ON t.account_id = ta.id
              WHERE t.status = 'closed'
                AND t.exit_at >= ($1::date AT TIME ZONE 'UTC')
                AND t.exit_at < (($1::date + INTERVAL '1 day') AT TIME ZONE 'UTC')
@@ -32,8 +30,8 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
     .await?;
 
     // Group by (strategy, pair, exchange, account_id) and calculate max drawdown per group.
-    type GroupKey = (String, String, String, Option<Uuid>);
-    let mut groups: std::collections::HashMap<GroupKey, (Vec<Decimal>, Option<String>)> =
+    type GroupKey = (String, String, String, Uuid);
+    let mut groups: std::collections::HashMap<GroupKey, (Vec<Decimal>, String)> =
         std::collections::HashMap::new();
     for (strategy, pair, exchange, account_id, account_type, pnl) in rows {
         let entry = groups
@@ -57,14 +55,13 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
             }
         }
 
-        // account_type is already JOIN-fetched; fall back to "paper" when NULL.
-        let mode_str: &str = account_type.as_deref().unwrap_or("paper");
+        let mode_str: &str = account_type.as_str();
 
         // Try to update existing row first.
         let result = sqlx::query(
             "UPDATE daily_summary SET max_drawdown = $1
              WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND mode = $5
-               AND exchange = $6 AND account_id IS NOT DISTINCT FROM $7",
+               AND exchange = $6 AND account_id = $7",
         )
         .bind(max_dd)
         .bind(date)
@@ -85,44 +82,24 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                     (count + 1, wins + win, pnl_sum + *pnl)
                 },
             );
-            if let Some(aid) = account_id {
-                sqlx::query(
-                    r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                       ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
-                       SET max_drawdown = $10"#,
-                )
-                .bind(date)
-                .bind(strategy.as_str())
-                .bind(pair.as_str())
-                .bind(mode_str)
-                .bind(exchange.as_str())
-                .bind(aid)
-                .bind(total_trades as i32)
-                .bind(total_wins as i32)
-                .bind(total_pnl)
-                .bind(max_dd)
-                .execute(pool)
-                .await?;
-            } else {
-                sqlx::query(
-                    r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, trade_count, win_count, total_pnl, max_drawdown)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                       ON CONFLICT ON CONSTRAINT daily_summary_no_account_unique DO UPDATE
-                       SET max_drawdown = $9"#,
-                )
-                .bind(date)
-                .bind(strategy.as_str())
-                .bind(pair.as_str())
-                .bind(mode_str)
-                .bind(exchange.as_str())
-                .bind(total_trades as i32)
-                .bind(total_wins as i32)
-                .bind(total_pnl)
-                .bind(max_dd)
-                .execute(pool)
-                .await?;
-            }
+            sqlx::query(
+                r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
+                   SET max_drawdown = $10"#,
+            )
+            .bind(date)
+            .bind(strategy.as_str())
+            .bind(pair.as_str())
+            .bind(mode_str)
+            .bind(exchange.as_str())
+            .bind(*account_id)
+            .bind(total_trades as i32)
+            .bind(total_wins as i32)
+            .bind(total_pnl)
+            .bind(max_dd)
+            .execute(pool)
+            .await?;
         }
     }
 
