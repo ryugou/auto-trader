@@ -67,6 +67,10 @@ pub struct BalanceDriftEvent {
     pub account_name: String,
     pub db_balance: Decimal,
     pub exchange_balance: Decimal,
+    /// 残高の乖離率 **パーセンテージ値** (例: `5` = 5%、`0.5` = 0.5%)。
+    /// `db_balance / exchange_balance - 1` の **×100 済み** の値を渡すこと。
+    /// format_for_slack は `{}%` として表示するので、呼び出し側で小数
+    /// (0.05 = 5%) を渡すと Slack には `0.05%` と出て 100 倍のズレになる。
     pub diff_pct: Decimal,
 }
 
@@ -81,6 +85,12 @@ pub struct DryRunOrderEvent {
 }
 
 /// 通知イベント。Slack には各イベントごとに整形された文面で送る。
+///
+/// **Slack 4000 文字上限ポリシー**: format_for_slack はリスト系イベント
+/// (`StartupReconciliationDiff`) で ID 一覧を埋め込まず `.len()` のみ
+/// 表示する方針。巨大な ID 一覧を本文に含めて truncate で末尾欠落する
+/// より、件数を出して詳細は DB 照会へ誘導する方が安全。新バリアントを
+/// 追加する際もこのポリシーに従うこと。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NotifyEvent {
@@ -93,6 +103,24 @@ pub enum NotifyEvent {
     StartupReconciliationDiff(StartupReconciliationDiffEvent),
     BalanceDrift(BalanceDriftEvent),
     DryRunOrder(DryRunOrderEvent),
+}
+
+impl NotifyEvent {
+    /// イベント種別の short name。失敗ログ等で可読性が高い値を返す。
+    /// `std::mem::discriminant` より人間可読で、将来 serde 実装変更にも耐える。
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            NotifyEvent::OrderFilled(_) => "order_filled",
+            NotifyEvent::OrderFailed(_) => "order_failed",
+            NotifyEvent::PositionClosed(_) => "position_closed",
+            NotifyEvent::KillSwitchTriggered(_) => "kill_switch_triggered",
+            NotifyEvent::KillSwitchReleased(_) => "kill_switch_released",
+            NotifyEvent::WebSocketDisconnected(_) => "websocket_disconnected",
+            NotifyEvent::StartupReconciliationDiff(_) => "startup_reconciliation_diff",
+            NotifyEvent::BalanceDrift(_) => "balance_drift",
+            NotifyEvent::DryRunOrder(_) => "dry_run_order",
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -132,9 +160,22 @@ impl Notifier {
         }
     }
 
+    /// Slack Webhook にイベントを送信する。
+    ///
+    /// **呼び出し側規約 (PR 2 以降で厳守)**:
+    /// - `OrderFilled` / `DryRunOrder` など高頻度・低重要度: `tokio::spawn`
+    ///   で fire-and-forget (`let _ = notifier.send(ev).await;`)
+    /// - `KillSwitchTriggered` / `BalanceDrift` / `StartupReconciliationDiff`
+    ///   など critical: `.await` で結果を確認し、失敗時は DB
+    ///   `notifications` テーブル (UI ベル) に backstop 書き込み
+    /// - リトライは本メソッド内で行わない。配線側の責務。
     pub async fn send(&self, event: NotifyEvent) -> Result<(), NotifyError> {
+        let variant = event.variant_name();
         let Some(url) = &self.slack_webhook_url else {
-            tracing::debug!(?event, "notify: slack webhook not configured, skipping");
+            tracing::debug!(
+                event = variant,
+                "notify: slack webhook not configured, skipping"
+            );
             return Ok(());
         };
         let text = format_for_slack(&event);
@@ -145,12 +186,20 @@ impl Notifier {
             .json(&body)
             .send()
             .await
+            .inspect_err(
+                |e| tracing::warn!(event = variant, error = %e, "notify: slack http error"),
+            )
             .map_err(NotifyError::Http)?;
         let status = resp.status();
         if !status.is_success() {
-            tracing::warn!(status = status.as_u16(), "notify: slack returned non-2xx");
+            tracing::warn!(
+                event = variant,
+                status = status.as_u16(),
+                "notify: slack returned non-2xx"
+            );
             return Err(NotifyError::Status(status.as_u16()));
         }
+        tracing::debug!(event = variant, "notify: slack ok");
         Ok(())
     }
 }
