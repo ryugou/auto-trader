@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_indicators JSONB,
     -- vegapunk semantic search id for evolution traceability
     vegapunk_search_id UUID,
+    -- timestamp at which `acquire_close_lock` transitioned this trade from
+    -- 'open' to 'closing'. Cleared on `release_close_lock` (rollback) or when
+    -- status reaches 'closed'. A `closing` row whose `closing_started_at` is
+    -- older than `STALE_CLOSING_THRESHOLD_SECS` (5 min) is treated as orphaned
+    -- by `acquire_close_lock` (cancellation-safe self-healing).
+    closing_started_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS trades_account_status ON trades (account_id, status);

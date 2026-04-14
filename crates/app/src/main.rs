@@ -1316,7 +1316,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 // Auto-feedback if this trade had a Vegapunk search attached
-                                let search_id: Option<String> = sqlx::query_scalar(
+                                let search_id: Option<uuid::Uuid> = sqlx::query_scalar(
                                     "SELECT vegapunk_search_id FROM trades WHERE id = $1",
                                 )
                                 .bind(t.id)
@@ -1326,6 +1326,7 @@ async fn main() -> anyhow::Result<()> {
                                 .flatten();
 
                                 if let Some(sid) = search_id {
+                                    let sid = sid.to_string();
                                     let rating =
                                         crate::enriched_ingest::compute_feedback_rating(&t);
                                     let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;

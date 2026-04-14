@@ -125,6 +125,19 @@ where
     row.map(|r| r.try_into()).transpose()
 }
 
+/// Stale `closing` lock recovery threshold (seconds).
+///
+/// A trade left in `status='closing'` longer than this is considered
+/// orphaned (e.g. process crashed mid-close, future cancelled, etc.)
+/// and `acquire_close_lock` is allowed to re-acquire it. Five minutes
+/// is generous: a healthy close path completes in ~1 s (single
+/// `send_child_order` + `get_executions` poll within 5 s timeout).
+///
+/// PR-2's reconciler will provide a more aggressive sweep for these,
+/// but this self-healing path ensures a single crashed Trader cannot
+/// permanently strand a trade.
+pub const STALE_CLOSING_THRESHOLD_SECS: i64 = 300;
+
 /// Acquire close ownership for a trade by atomically transitioning
 /// `status` from `open` to `closing`.
 ///
@@ -132,6 +145,14 @@ where
 /// trade is not in `open` status (already closed by another concurrent
 /// path, or never existed). The caller MUST proceed to either
 /// `update_trade_closed` (success) or `release_close_lock` (rollback).
+///
+/// **Cancellation safety**: if the original lock holder's future is
+/// dropped (cancellation, panic, process crash) without calling
+/// `release_close_lock`, the trade would normally remain stuck in
+/// `closing` forever. To prevent this, the WHERE clause also accepts
+/// rows already in `closing` status whose `created_at` is older than
+/// `STALE_CLOSING_THRESHOLD_SECS` ago — adopting the orphan instead
+/// of leaking it.
 ///
 /// This is the **only** correct entry point for closing a trade in
 /// live mode: it prevents two concurrent close paths from both
@@ -146,8 +167,18 @@ where
 {
     let row = sqlx::query_as::<_, TradeRow>(
         r#"UPDATE trades
-           SET status = 'closing'
-           WHERE id = $1 AND account_id = $2 AND status = 'open'
+           SET status = 'closing',
+               closing_started_at = NOW()
+           WHERE id = $1
+             AND account_id = $2
+             AND (
+               status = 'open'
+               OR (
+                 status = 'closing'
+                 AND closing_started_at IS NOT NULL
+                 AND closing_started_at < NOW() - ($3 || ' seconds')::INTERVAL
+               )
+             )
            RETURNING id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                      stop_loss, take_profit, quantity, leverage, fees, account_id,
                      entry_at, exit_at, pnl_amount,
@@ -155,6 +186,7 @@ where
     )
     .bind(trade_id)
     .bind(account_id)
+    .bind(STALE_CLOSING_THRESHOLD_SECS.to_string())
     .fetch_optional(executor)
     .await?;
     row.map(|r| r.try_into()).transpose()
@@ -170,7 +202,9 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
-        r#"UPDATE trades SET status = 'open'
+        r#"UPDATE trades
+           SET status = 'open',
+               closing_started_at = NULL
            WHERE id = $1 AND status = 'closing'"#,
     )
     .bind(trade_id)
@@ -247,7 +281,8 @@ where
                pnl_amount = $4,
                exit_reason = $5,
                fees = $6,
-               status = 'closed'
+               status = 'closed',
+               closing_started_at = NULL
            WHERE id = $1 AND status IN ('open', 'closing')"#,
     )
     .bind(trade_id)

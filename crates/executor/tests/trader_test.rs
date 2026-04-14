@@ -795,13 +795,27 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
     let trade_id_a = trade_id.clone();
     let trade_id_b = trade_id.clone();
 
+    // Force both tasks to reach close_position at the same instant so
+    // acquire_close_lock truly races at the DB level (without the
+    // barrier, scheduling could let one task complete entirely before
+    // the other even started, defeating the test's purpose).
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let barrier_a = Arc::clone(&barrier);
+    let barrier_b = Arc::clone(&barrier);
+
     let task_a = {
         let trader = Arc::clone(&trader_a);
-        tokio::spawn(async move { trader.close_position(&trade_id_a, ExitReason::Manual).await })
+        tokio::spawn(async move {
+            barrier_a.wait().await;
+            trader.close_position(&trade_id_a, ExitReason::Manual).await
+        })
     };
     let task_b = {
         let trader = Arc::clone(&trader_b);
-        tokio::spawn(async move { trader.close_position(&trade_id_b, ExitReason::Manual).await })
+        tokio::spawn(async move {
+            barrier_b.wait().await;
+            trader.close_position(&trade_id_b, ExitReason::Manual).await
+        })
     };
 
     let (res_a, res_b) = tokio::join!(task_a, task_b);

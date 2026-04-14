@@ -388,8 +388,9 @@ impl OrderExecutor for Trader {
         };
 
         // Phase 3: CAS update + ledger in a single transaction.
-        // update_trade_closed uses WHERE status = 'open' — rows_affected == 0
-        // means another concurrent close already won this race; we bail.
+        // update_trade_closed accepts WHERE status IN ('open', 'closing'),
+        // so we (the lock holder, status='closing') will succeed while any
+        // other path that lost Phase 1's CAS would already have been rejected.
         let price_diff = match trade.direction {
             Direction::Long => exit_price - trade.entry_price,
             Direction::Short => trade.entry_price - exit_price,
