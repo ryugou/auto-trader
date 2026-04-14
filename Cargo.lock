@@ -117,6 +117,7 @@ dependencies = [
  "auto-trader-executor",
  "auto-trader-macro-analyst",
  "auto-trader-market",
+ "auto-trader-notify",
  "auto-trader-strategy",
  "auto-trader-vegapunk",
  "axum",

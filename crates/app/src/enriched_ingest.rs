@@ -40,11 +40,11 @@ pub fn format_trade_open(
         alloc_display,
         trade.entry_price,
         trade.stop_loss,
-        trade.take_profit,
         trade
-            .quantity
-            .map(|q| q.to_string())
+            .take_profit
+            .map(|v| v.to_string())
             .unwrap_or_else(|| "-".to_string()),
+        trade.quantity,
         regime.as_str(),
     );
 
