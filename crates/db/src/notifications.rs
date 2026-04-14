@@ -47,12 +47,26 @@ where
 }
 
 /// Insert a `trade_closed` notification.
+///
+/// Returns an error if the trade is missing fields that are required for
+/// a close-event row (`exit_price`, `pnl_amount`, `exit_reason`). The DB
+/// CHECK constraint `notifications_close_requires_pnl_and_reason` would
+/// reject the insert anyway, but failing in Rust gives a clearer error
+/// message and avoids round-trip cost on bad data.
 pub async fn insert_trade_closed<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    let exit_price = trade.exit_price.ok_or_else(|| {
+        anyhow::anyhow!("insert_trade_closed: trade {} has no exit_price", trade.id)
+    })?;
+    let pnl_amount = trade.pnl_amount.ok_or_else(|| {
+        anyhow::anyhow!("insert_trade_closed: trade {} has no pnl_amount", trade.id)
+    })?;
+    let exit_reason = trade.exit_reason.ok_or_else(|| {
+        anyhow::anyhow!("insert_trade_closed: trade {} has no exit_reason", trade.id)
+    })?;
     let direction = trade.direction.as_str();
-    let exit_reason_str = trade.exit_reason.map(|r| r.as_str());
     sqlx::query(
         r#"INSERT INTO notifications
                (kind, trade_id, account_id, strategy_name, pair, direction, price,
@@ -64,9 +78,9 @@ where
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
     .bind(direction)
-    .bind(trade.exit_price)
-    .bind(trade.pnl_amount)
-    .bind(exit_reason_str)
+    .bind(exit_price)
+    .bind(pnl_amount)
+    .bind(exit_reason.as_str())
     .execute(executor)
     .await?;
     Ok(())

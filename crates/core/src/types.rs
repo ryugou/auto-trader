@@ -191,7 +191,10 @@ pub struct Trade {
     pub exit_at: Option<DateTime<Utc>>,
     pub pnl_amount: Option<Decimal>,
     pub exit_reason: Option<ExitReason>,
-    /// Open / Closed only.
+    /// Trade lifecycle status: Open → Closing (live close in flight) → Closed.
+    /// Closing is a short-lived intermediate held while the exchange API
+    /// fill is pending; the 5-min stale-lock recovery in
+    /// `db::trades::acquire_close_lock` adopts orphans automatically.
     pub status: TradeStatus,
     /// Optional time-based fail-safe — see `Signal::max_hold_until`.
     #[serde(default)]

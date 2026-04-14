@@ -44,7 +44,13 @@ CREATE TABLE IF NOT EXISTS trading_accounts (
     current_balance NUMERIC NOT NULL,
     leverage NUMERIC NOT NULL CHECK (leverage >= 1),
     currency TEXT NOT NULL DEFAULT 'JPY',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- DB-level safety net: JPY accounts must start with enough balance to
+    -- cover margin + a sane buffer so a misconfigured INSERT can't create
+    -- a 1-yen "live" account. Mirrors the validate_initial_balance check
+    -- in crates/db/src/trading_accounts.rs (10,000 JPY minimum).
+    CONSTRAINT trading_accounts_jpy_min_balance
+        CHECK (currency <> 'JPY' OR initial_balance >= 10000)
 );
 
 -- 5) trades (clean)
@@ -97,19 +103,26 @@ CREATE TABLE IF NOT EXISTS account_events (
 CREATE INDEX IF NOT EXISTS account_events_account_time ON account_events (account_id, occurred_at DESC);
 
 -- 7) notifications (UI ベル、クリーン再作成)
+-- Tightened from the looser PR-1 first cut: kind is bounded to the two
+-- shapes the UI knows how to render, trade_id / account_id / strategy_name /
+-- pair / direction / price are NOT NULL because both kinds always have
+-- them, and trade_closed additionally requires pnl_amount + exit_reason
+-- (enforced via the CHECK constraint).
 CREATE TABLE IF NOT EXISTS notifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kind TEXT NOT NULL,
-    account_id UUID REFERENCES trading_accounts(id),
-    trade_id UUID REFERENCES trades(id),
-    strategy_name TEXT,
-    pair TEXT,
-    direction TEXT,
-    price NUMERIC,
+    kind TEXT NOT NULL CHECK (kind IN ('trade_opened', 'trade_closed')),
+    account_id UUID NOT NULL REFERENCES trading_accounts(id),
+    trade_id UUID NOT NULL REFERENCES trades(id),
+    strategy_name TEXT NOT NULL,
+    pair TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('long', 'short')),
+    price NUMERIC NOT NULL,
     pnl_amount NUMERIC,
     exit_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    read_at TIMESTAMPTZ
+    read_at TIMESTAMPTZ,
+    CONSTRAINT notifications_close_requires_pnl_and_reason
+        CHECK (kind <> 'trade_closed' OR (pnl_amount IS NOT NULL AND exit_reason IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS notifications_unread ON notifications (created_at DESC) WHERE read_at IS NULL;
 

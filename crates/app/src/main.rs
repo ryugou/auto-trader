@@ -509,11 +509,31 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+
+            // Fail-fast safety gate: if any `account_type='live'` row exists,
+            // [live].enabled MUST be true. Otherwise a misconfigured deploy
+            // would place real orders the instant BITFLYER_API_KEY/SECRET
+            // are set, with no config-level guard. We refuse to start.
+            let has_live = db_accounts.iter().any(|p| p.account_type == "live");
+            if has_live {
+                let live_enabled = config.live.as_ref().is_some_and(|l| l.enabled);
+                if !live_enabled {
+                    anyhow::bail!(
+                        "refusing to start: account_type='live' row(s) present in DB but [live].enabled is false (or [live] section missing). Set [live].enabled=true (and optionally [live].dry_run=true to force-simulate) before restarting."
+                    );
+                }
+            }
         }
         Err(e) => {
             tracing::error!("failed to list trading accounts at startup: {e}");
         }
     }
+
+    // Global dry-run override: if [live].dry_run=true, ALL accounts
+    // (paper *and* live) run in dry-run mode. Paper is always dry-run by
+    // account_type; live is only dry-run when this flag is set. Captured
+    // by copy into the dispatch loops (bool is Copy).
+    let live_forces_dry_run: bool = config.live.as_ref().is_some_and(|l| l.dry_run);
 
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(
@@ -705,6 +725,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_price_store = price_store.clone();
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
+    let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -740,7 +761,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-                let dry_run = account_type == "paper";
+                let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
                 // when the wall clock passes the deadline. Tagged with
@@ -966,6 +987,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_price_store = price_store.clone();
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
+    let exit_live_forces_dry_run = live_forces_dry_run;
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade joined with account info in one query so we
@@ -1004,7 +1026,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-            let dry_run = account_type == "paper";
+            let dry_run = account_type == "paper" || exit_live_forces_dry_run;
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
@@ -1069,6 +1091,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_price_store = price_store.clone();
     let executor_notifier = notifier.clone();
     let executor_position_sizer = shared_position_sizer.clone();
+    let executor_live_forces_dry_run = live_forces_dry_run;
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1116,7 +1139,7 @@ async fn main() -> anyhow::Result<()> {
                 if exchange != Exchange::BitflyerCfd {
                     continue;
                 }
-                let dry_run = pac.account_type == "paper";
+                let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
                 let trader = UnifiedTrader::new(
                     executor_pool.clone(),
                     exchange,
