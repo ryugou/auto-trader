@@ -232,9 +232,8 @@ mod tests {
     #[tokio::test]
     async fn send_without_webhook_is_noop() {
         let n = Notifier::new(None);
-        let ev = NotifyEvent::WebSocketDisconnected(WebSocketDisconnectedEvent {
-            duration_secs: 30,
-        });
+        let ev =
+            NotifyEvent::WebSocketDisconnected(WebSocketDisconnectedEvent { duration_secs: 30 });
         // webhook が None なので即 Ok(())
         n.send(ev).await.unwrap();
     }
