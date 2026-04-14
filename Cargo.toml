@@ -54,5 +54,10 @@ auto-trader-macro-analyst = { path = "crates/macro-analyst" }
 auto-trader-backtest = { path = "crates/backtest" }
 auto-trader-notify = { path = "crates/notify" }
 
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+governor = "0.6"
+
 # test helpers (reserved for PR 2+)
 wiremock = "0.6"
