@@ -66,8 +66,12 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_at TIMESTAMPTZ,
     pnl_amount NUMERIC,
     exit_reason TEXT,
-    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    status TEXT NOT NULL CHECK (status IN ('open', 'closing', 'closed')),
     max_hold_until TIMESTAMPTZ,
+    -- entry indicator snapshot (JSON) used by vegapunk learning loop
+    entry_indicators JSONB,
+    -- vegapunk semantic search id for evolution traceability
+    vegapunk_search_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS trades_account_status ON trades (account_id, status);

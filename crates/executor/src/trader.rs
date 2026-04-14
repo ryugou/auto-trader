@@ -349,19 +349,43 @@ impl OrderExecutor for Trader {
     async fn close_position(&self, id: &str, exit_reason: ExitReason) -> anyhow::Result<Trade> {
         let uuid = Uuid::parse_str(id)?;
 
-        // Phase 1: Read the open trade (non-locking SELECT).
-        // Race protection is achieved in Phase 3 via CAS (WHERE status = 'open').
-        let trade = auto_trader_db::trades::get_trade_for_close(&self.pool, uuid, self.account_id)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "trade {id} not found, already closed, or belongs to another account"
-                )
-            })?;
+        // Phase 1: CAS lock — atomically transition open → closing.
+        // This is the ownership token that prevents concurrent close paths
+        // from BOTH dispatching opposite-side orders to the exchange.
+        // If we don't get the lock, another close already won this race.
+        let trade = auto_trader_db::trades::acquire_close_lock(
+            &self.pool,
+            uuid,
+            self.account_id,
+        )
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "trade {id} not in 'open' state (already closed/closing or belongs to another account)"
+            )
+        })?;
 
-        // Phase 2: Execute live fill outside the DB transaction to avoid
-        // holding a long lock while waiting for the exchange API.
-        let exit_price = self.fill_close(&trade).await?;
+        // Phase 2: Execute live fill outside the DB transaction. This is
+        // safe because the trade is now status='closing' — no other path
+        // will reach fill_close for this trade until we release the lock.
+        let exit_price = match self.fill_close(&trade).await {
+            Ok(price) => price,
+            Err(e) => {
+                // Roll back the lock so future close attempts can retry.
+                if let Err(release_err) =
+                    auto_trader_db::trades::release_close_lock(&self.pool, uuid).await
+                {
+                    tracing::error!(
+                        trade_id = %uuid,
+                        original_error = %e,
+                        release_error = %release_err,
+                        "fill_close failed AND release_close_lock failed; \
+                         trade is stuck in 'closing' status — manual intervention required"
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         // Phase 3: CAS update + ledger in a single transaction.
         // update_trade_closed uses WHERE status = 'open' — rows_affected == 0

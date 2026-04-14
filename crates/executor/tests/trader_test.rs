@@ -720,3 +720,115 @@ async fn apply_overnight_fee_is_atomic(pool: PgPool) {
         "exactly 1 overnight_fee event must be recorded"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 12: TRUE concurrent close — only 1 API call reaches exchange
+// ---------------------------------------------------------------------------
+
+/// Regression test for codex review CRITICAL finding.
+///
+/// Two `close_position` calls on the same trade run concurrently via
+/// `tokio::spawn`. The acquire_close_lock CAS must ensure that **only one
+/// reaches the exchange API** (i.e. wiremock receives exactly 1
+/// send_child_order). The other must bail before fill_close.
+///
+/// This is the actual safety-critical test: the old `lock → fill → CAS`
+/// design failed because both concurrent paths would dispatch orders
+/// before the DB CAS arbitrated the winner.
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_close_dispatches_api_once(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Strict: only 1 send_child_order is allowed. expect(1) panics on drop
+    // if 0 or 2+ calls arrive.
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_CONC"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 99,
+                "child_order_id": "JOR_CONC",
+                "side": "SELL",
+                "price": "11600000",
+                "size": "0.005",
+                "commission": "0",
+                "exec_date": "2026-01-01T00:00:00",
+                "child_order_acceptance_id": "JRF_CONC"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+
+    // Build two independent Trader instances pointing at the same DB + same
+    // wiremock server, then race them with tokio::spawn.
+    let trader_a = Arc::new(build_live_trader(
+        pool.clone(),
+        account_id,
+        server.uri(),
+        PriceStore::new(vec![]),
+    ));
+    let trader_b = Arc::new(build_live_trader(
+        pool.clone(),
+        account_id,
+        server.uri(),
+        PriceStore::new(vec![]),
+    ));
+
+    let trade_id = trade.id.to_string();
+    let trade_id_a = trade_id.clone();
+    let trade_id_b = trade_id.clone();
+
+    let task_a = {
+        let trader = Arc::clone(&trader_a);
+        tokio::spawn(async move { trader.close_position(&trade_id_a, ExitReason::Manual).await })
+    };
+    let task_b = {
+        let trader = Arc::clone(&trader_b);
+        tokio::spawn(async move { trader.close_position(&trade_id_b, ExitReason::Manual).await })
+    };
+
+    let (res_a, res_b) = tokio::join!(task_a, task_b);
+    let res_a = res_a.expect("task A panicked");
+    let res_b = res_b.expect("task B panicked");
+
+    // Exactly one Ok and one Err
+    let oks = [&res_a, &res_b].iter().filter(|r| r.is_ok()).count();
+    let errs = [&res_a, &res_b].iter().filter(|r| r.is_err()).count();
+    assert_eq!(
+        oks, 1,
+        "exactly 1 close must succeed (got {oks} ok / {errs} err)"
+    );
+    assert_eq!(
+        errs, 1,
+        "exactly 1 close must fail (got {oks} ok / {errs} err)"
+    );
+
+    // The losing close must NOT have dispatched a second API call.
+    // wiremock's expect(1) on POST sendchildorder would panic on drop if
+    // 2 calls arrived — so reaching this assertion proves the CAS lock held.
+
+    // Final DB state must show closed
+    let final_status: String = sqlx::query_scalar("SELECT status FROM trades WHERE id = $1")
+        .bind(trade.id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch final status");
+    assert_eq!(final_status, "closed", "trade must be closed at the end");
+}

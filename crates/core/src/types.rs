@@ -66,6 +66,11 @@ impl std::fmt::Display for Direction {
 #[serde(rename_all = "snake_case")]
 pub enum TradeStatus {
     Open,
+    /// 中間ロック状態: Trader が close を確定する前に取引所 API へ
+    /// 反対売買を発注している間、他の close 経路が並行で同じ trade に
+    /// 発注しないよう所有権を CAS で取得した状態。
+    /// API 失敗時は Open に戻す。成功時は Closed に遷移する。
+    Closing,
     Closed,
 }
 
@@ -75,6 +80,7 @@ impl TradeStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             TradeStatus::Open => "open",
+            TradeStatus::Closing => "closing",
             TradeStatus::Closed => "closed",
         }
     }

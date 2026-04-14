@@ -125,6 +125,60 @@ where
     row.map(|r| r.try_into()).transpose()
 }
 
+/// Acquire close ownership for a trade by atomically transitioning
+/// `status` from `open` to `closing`.
+///
+/// Returns the locked `Trade` on success. Returns `None` when the
+/// trade is not in `open` status (already closed by another concurrent
+/// path, or never existed). The caller MUST proceed to either
+/// `update_trade_closed` (success) or `release_close_lock` (rollback).
+///
+/// This is the **only** correct entry point for closing a trade in
+/// live mode: it prevents two concurrent close paths from both
+/// dispatching opposite-side orders to the exchange.
+pub async fn acquire_close_lock<'e, E>(
+    executor: E,
+    trade_id: Uuid,
+    account_id: Uuid,
+) -> anyhow::Result<Option<Trade>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row = sqlx::query_as::<_, TradeRow>(
+        r#"UPDATE trades
+           SET status = 'closing'
+           WHERE id = $1 AND account_id = $2 AND status = 'open'
+           RETURNING id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                     stop_loss, take_profit, quantity, leverage, fees, account_id,
+                     entry_at, exit_at, pnl_amount,
+                     exit_reason, status, created_at, max_hold_until"#,
+    )
+    .bind(trade_id)
+    .bind(account_id)
+    .fetch_optional(executor)
+    .await?;
+    row.map(|r| r.try_into()).transpose()
+}
+
+/// Release a close lock by transitioning `closing` back to `open`.
+///
+/// Called when the exchange API call failed and we must NOT close the
+/// trade. The status returns to `open` so subsequent close attempts can
+/// retry.
+pub async fn release_close_lock<'e, E>(executor: E, trade_id: Uuid) -> anyhow::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"UPDATE trades SET status = 'open'
+           WHERE id = $1 AND status = 'closing'"#,
+    )
+    .bind(trade_id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Apply an overnight fee for a single trade inside a transaction.
 ///
 /// Atomically:
@@ -194,7 +248,7 @@ where
                exit_reason = $5,
                fees = $6,
                status = 'closed'
-           WHERE id = $1 AND status = 'open'"#,
+           WHERE id = $1 AND status IN ('open', 'closing')"#,
     )
     .bind(trade_id)
     .bind(exit_price)
@@ -611,6 +665,7 @@ impl TryFrom<TradeRow> for Trade {
         };
         let status = match r.status.as_str() {
             "open" => TradeStatus::Open,
+            "closing" => TradeStatus::Closing,
             "closed" => TradeStatus::Closed,
             other => anyhow::bail!("unknown status: {other}"),
         };
