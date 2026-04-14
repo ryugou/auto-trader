@@ -1,16 +1,18 @@
 use crate::report::BacktestReport;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
-use auto_trader_core::types::{
-    Direction, Exchange, ExitReason, Pair, Trade, TradeMode, TradeStatus,
-};
+use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Sentinel UUID used for SimTrader's in-memory backtest trades.
+/// Backtest trades are never persisted to DB, so account_id is a placeholder.
+const BACKTEST_ACCOUNT_ID: Uuid = Uuid::nil();
+
 /// In-memory simulated trader used for backtests only.
-/// This is deliberately separate from the production `PaperTrader`, which is
+/// This is deliberately separate from the production `Trader`, which is
 /// DB-backed. Backtests run fully in-memory on historical candles and do not
 /// (and should not) touch persistent storage.
 ///
@@ -35,33 +37,42 @@ impl SimTrader {
         }
     }
 
-    fn open(&mut self, signal: &auto_trader_core::types::Signal, now: DateTime<Utc>) -> Trade {
+    fn open(
+        &mut self,
+        signal: &auto_trader_core::types::Signal,
+        entry_price: Decimal,
+        now: DateTime<Utc>,
+    ) -> Trade {
+        // Compute SL/TP from the actual candle close price passed by the caller.
+        let stop_loss = match signal.direction {
+            Direction::Long => entry_price * (Decimal::ONE - signal.stop_loss_pct),
+            Direction::Short => entry_price * (Decimal::ONE + signal.stop_loss_pct),
+        };
+        let take_profit = signal.take_profit_pct.map(|pct| match signal.direction {
+            Direction::Long => entry_price * (Decimal::ONE + pct),
+            Direction::Short => entry_price * (Decimal::ONE - pct),
+        });
         let trade = Trade {
             id: Uuid::new_v4(),
+            account_id: BACKTEST_ACCOUNT_ID,
             strategy_name: signal.strategy_name.clone(),
             pair: signal.pair.clone(),
             exchange: self.exchange,
             direction: signal.direction,
-            entry_price: signal.entry_price,
+            entry_price,
             exit_price: None,
-            stop_loss: signal.stop_loss,
-            take_profit: signal.take_profit,
-            quantity: None,
+            stop_loss,
+            take_profit,
+            quantity: Decimal::ONE, // placeholder — backtest doesn't size
             leverage: self.leverage,
             fees: Decimal::ZERO,
-            paper_account_id: None,
             entry_at: now,
             exit_at: None,
-            pnl_pips: None,
             pnl_amount: None,
             exit_reason: None,
-            mode: TradeMode::Backtest,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
-            child_order_acceptance_id: None,
-            child_order_id: None,
         };
-        trade.status.assert_valid_for_mode(trade.mode);
         self.positions.insert(trade.id, trade.clone());
         trade
     }
@@ -87,21 +98,13 @@ impl SimTrader {
             Direction::Short => trade.entry_price - exit_price,
         };
 
-        let pip_size = if trade.pair.0.contains("JPY") {
-            Decimal::new(1, 2)
-        } else {
-            Decimal::new(1, 4)
-        };
-        let pnl_pips = price_diff / pip_size;
         let pnl_amount = price_diff * self.leverage;
 
         trade.exit_price = Some(exit_price);
         trade.exit_at = Some(now);
-        trade.pnl_pips = Some(pnl_pips);
         trade.pnl_amount = Some(pnl_amount);
         trade.exit_reason = Some(reason);
         trade.status = TradeStatus::Closed;
-        trade.status.assert_valid_for_mode(trade.mode);
 
         self.balance += pnl_amount;
         Ok(trade)
@@ -176,8 +179,8 @@ impl BacktestRunner {
                     Direction::Long => {
                         if candle.low <= t.stop_loss {
                             Some((ExitReason::SlHit, t.stop_loss))
-                        } else if candle.high >= t.take_profit {
-                            Some((ExitReason::TpHit, t.take_profit))
+                        } else if t.take_profit.is_some_and(|tp| candle.high >= tp) {
+                            Some((ExitReason::TpHit, t.take_profit.expect("checked above")))
                         } else {
                             None
                         }
@@ -185,8 +188,8 @@ impl BacktestRunner {
                     Direction::Short => {
                         if candle.high >= t.stop_loss {
                             Some((ExitReason::SlHit, t.stop_loss))
-                        } else if candle.low <= t.take_profit {
-                            Some((ExitReason::TpHit, t.take_profit))
+                        } else if t.take_profit.is_some_and(|tp| candle.low <= tp) {
+                            Some((ExitReason::TpHit, t.take_profit.expect("checked above")))
                         } else {
                             None
                         }
@@ -206,7 +209,7 @@ impl BacktestRunner {
                     .iter()
                     .any(|t| t.strategy_name == signal.strategy_name && t.pair == signal.pair);
                 if !has_pos {
-                    let trade = trader.open(&signal, candle.timestamp);
+                    let trade = trader.open(&signal, candle.close, candle.timestamp);
                     trades.push(trade);
                 }
             }

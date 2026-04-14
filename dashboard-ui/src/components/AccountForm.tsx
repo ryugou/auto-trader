@@ -2,15 +2,15 @@ import { useState, useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type {
-  CreatePaperAccount,
-  PaperAccount,
-  UpdatePaperAccount,
+  CreateTradingAccount,
+  TradingAccount,
+  UpdateTradingAccount,
 } from '../api/types'
 
 interface Props {
-  account?: PaperAccount | null
-  onCreate?: (data: CreatePaperAccount) => void
-  onUpdate?: (data: UpdatePaperAccount) => void
+  account?: TradingAccount | null
+  onCreate?: (data: CreateTradingAccount) => void
+  onUpdate?: (data: UpdateTradingAccount) => void
   onCancel: () => void
 }
 

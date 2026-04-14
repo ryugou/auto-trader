@@ -117,6 +117,7 @@ dependencies = [
  "auto-trader-executor",
  "auto-trader-macro-analyst",
  "auto-trader-market",
+ "auto-trader-notify",
  "auto-trader-strategy",
  "auto-trader-vegapunk",
  "axum",
@@ -192,6 +193,8 @@ dependencies = [
  "anyhow",
  "auto-trader-core",
  "auto-trader-db",
+ "auto-trader-market",
+ "auto-trader-notify",
  "chrono",
  "rust_decimal",
  "rust_decimal_macros",
@@ -201,6 +204,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

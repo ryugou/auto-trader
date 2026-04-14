@@ -1,3 +1,7 @@
+-- NOTE: This migration is superseded by 20260415000001_unified_rewrite.
+-- The unified rewrite drops all tables modified here and rebuilds them with
+-- a clean schema. This file is retained for history only.
+
 -- Live trading support schema additions.
 -- - Extend trade_status with 'pending' (order sent, waiting on fill)
 --   and 'inconsistent' (DB <-> exchange divergence, manual fix needed).

@@ -10,10 +10,11 @@ use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_db::pool::create_pool;
-use auto_trader_executor::paper::PaperTrader;
-use auto_trader_executor::position_sizer::PositionSizer;
+use auto_trader_executor::trader::Trader as UnifiedTrader;
+use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
+use auto_trader_notify::Notifier;
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -54,6 +55,22 @@ async fn main() -> anyhow::Result<()> {
     // Database
     let pool = create_pool(&config.database.url).await?;
     tracing::info!("database connected");
+
+    // BitflyerPrivateApi — used by UnifiedTrader for live order placement.
+    // Always constructed so Trader can be initialized uniformly;
+    // dry_run=true accounts never call into the API.
+    let bitflyer_api: Arc<BitflyerPrivateApi> =
+        Arc::new(if let Some(bf) = config.bitflyer.as_ref() {
+            let api_key = bf.api_key.clone().unwrap_or_default();
+            let api_secret = bf.api_secret.clone().unwrap_or_default();
+            BitflyerPrivateApi::new(api_key, api_secret)
+        } else {
+            BitflyerPrivateApi::new(String::new(), String::new())
+        });
+
+    // Notifier — Slack Webhook for operator alerts.
+    let slack_webhook_url = std::env::var("SLACK_WEBHOOK_URL").ok();
+    let notifier: Arc<Notifier> = Arc::new(Notifier::new(slack_webhook_url));
 
     // Build the expected feed list — (exchange, pair) tuples this
     // process is configured to monitor. The health endpoint uses
@@ -467,16 +484,17 @@ async fn main() -> anyhow::Result<()> {
     // executor gate is relaxed.
     //
     // Log the accounts currently present at startup for visibility only.
-    match auto_trader_db::paper_accounts::list_paper_accounts(&pool).await {
+    match auto_trader_db::trading_accounts::list_all(&pool).await {
         Ok(db_accounts) => {
             if db_accounts.is_empty() {
-                tracing::info!("no paper accounts found in DB at startup");
+                tracing::info!("no trading accounts found in DB at startup");
             }
             for pac in &db_accounts {
                 tracing::info!(
-                    "paper account: {} (id={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
+                    "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
                     pac.name,
                     pac.id,
+                    pac.account_type,
                     pac.exchange,
                     pac.strategy,
                     pac.current_balance,
@@ -485,26 +503,53 @@ async fn main() -> anyhow::Result<()> {
                 );
                 if !registered_strategies.iter().any(|s| s == &pac.strategy) {
                     tracing::warn!(
-                        "paper account '{}' references strategy '{}' which is not registered; signals for this strategy will be skipped",
+                        "trading account '{}' references strategy '{}' which is not registered; signals for this strategy will be skipped",
                         pac.name,
                         pac.strategy
                     );
                 }
             }
+
+            // Fail-fast safety gate: if any `account_type='live'` row exists,
+            // [live].enabled MUST be true. Otherwise a misconfigured deploy
+            // would place real orders the instant BITFLYER_API_KEY/SECRET
+            // are set, with no config-level guard. We refuse to start.
+            let has_live = db_accounts.iter().any(|p| p.account_type == "live");
+            if has_live {
+                let live_enabled = config.live.as_ref().is_some_and(|l| l.enabled);
+                if !live_enabled {
+                    anyhow::bail!(
+                        "refusing to start: account_type='live' row(s) present in DB but [live].enabled is false (or [live] section missing). Set [live].enabled=true (and optionally [live].dry_run=true to force-simulate) before restarting."
+                    );
+                }
+            }
         }
         Err(e) => {
-            tracing::error!("failed to list paper accounts at startup: {e}");
+            tracing::error!("failed to list trading accounts at startup: {e}");
         }
     }
 
-    // PositionSizer for crypto. Pure capacity-based — the strategy
-    // declares its own `allocation_pct` on each Signal, no global
-    // risk_rate, no chart info passed in.
-    let min_order_sizes: HashMap<Pair, Decimal> = config
-        .pair_config
-        .iter()
-        .map(|(k, v)| (Pair::new(k), v.min_order_size))
-        .collect();
+    // Global dry-run override: if [live].dry_run=true (or the LIVE_DRY_RUN
+    // env var is truthy), ALL accounts (paper *and* live) run in dry-run
+    // mode. Paper is always dry-run by account_type; live is only dry-run
+    // when this flag is set. `LIVE_DRY_RUN` env wins over config per the
+    // doc comment on `LiveConfig::dry_run`. Captured by copy into the
+    // dispatch loops (bool is Copy).
+    let live_forces_dry_run: bool = match std::env::var("LIVE_DRY_RUN") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                tracing::warn!(
+                    "ignoring invalid LIVE_DRY_RUN='{}' (expected true/false); falling back to [live].dry_run from config",
+                    other
+                );
+                config.live.as_ref().is_some_and(|l| l.dry_run)
+            }
+        },
+        Err(_) => config.live.as_ref().is_some_and(|l| l.dry_run),
+    };
+
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(
             "position_sizing config (method='{}', risk_rate={}) is ignored — sizing is now per-strategy via Signal.allocation_pct",
@@ -512,7 +557,23 @@ async fn main() -> anyhow::Result<()> {
             ps.risk_rate
         );
     }
-    let position_sizer = Arc::new(PositionSizer::new(min_order_sizes));
+
+    // pair_configs for UnifiedTrader (min_order_size etc.)
+    let pair_configs: Arc<HashMap<String, auto_trader_core::config::PairConfig>> =
+        Arc::new(config.pair_config.clone());
+
+    // Pre-compute the PositionSizer once at startup and share via Arc.
+    // Per-tick reconstruction (every SL/TP check, every strategy exit, every
+    // signal dispatch) was wasting per-iteration allocations + hashing.
+    let shared_position_sizer: Arc<auto_trader_executor::position_sizer::PositionSizer> = {
+        let min_order_sizes: HashMap<Pair, Decimal> = pair_configs
+            .iter()
+            .map(|(k, v)| (Pair::new(k), v.min_order_size))
+            .collect();
+        Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
+            min_order_sizes,
+        ))
+    };
 
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
@@ -591,14 +652,19 @@ async fn main() -> anyhow::Result<()> {
     // as the BitflyerMonitor is alive.
     let raw_tick_store = price_store.clone();
     let _raw_tick_drain_handle = tokio::spawn(async move {
-        while let Some((pair, price, ts)) = raw_tick_rx.recv().await {
+        while let Some(tick) = raw_tick_rx.recv().await {
             raw_tick_store
                 .update(
                     crate::price_store::FeedKey::new(
                         auto_trader_core::types::Exchange::BitflyerCfd,
-                        pair,
+                        tick.pair,
                     ),
-                    crate::price_store::LatestTick { price, ts },
+                    crate::price_store::LatestTick {
+                        price: tick.ltp,
+                        best_bid: tick.best_bid,
+                        best_ask: tick.best_ask,
+                        ts: tick.ts,
+                    },
                 )
                 .await;
         }
@@ -670,6 +736,11 @@ async fn main() -> anyhow::Result<()> {
     let (crypto_price_tx, mut crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
     let crypto_monitor_pool = pool.clone();
     let crypto_monitor_trade_tx = trade_tx.clone();
+    let crypto_monitor_bitflyer_api = bitflyer_api.clone();
+    let crypto_monitor_price_store = price_store.clone();
+    let crypto_monitor_notifier = notifier.clone();
+    let crypto_monitor_position_sizer = shared_position_sizer.clone();
+    let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -688,9 +759,24 @@ async fn main() -> anyhow::Result<()> {
                 if trade.exchange != Exchange::BitflyerCfd || trade.pair != event.pair {
                     continue;
                 }
-                let Some(account_id) = trade.paper_account_id else {
-                    continue;
+                let account_id = trade.account_id;
+                // account_type comes from the JOIN in list_open_with_account_name —
+                // no extra DB round-trip needed. A missing JOIN result means the
+                // account row was deleted; skip rather than silently degrade to
+                // paper mode (same rationale as the old get_account path).
+                let account_type = match owned.account_type.as_deref() {
+                    Some(t) => t.to_owned(),
+                    None => {
+                        tracing::warn!(
+                            "skipping close for trade {}: account {} not found in JOIN result",
+                            trade.id,
+                            account_id
+                        );
+                        continue;
+                    }
                 };
+                let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+                let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
                 // when the wall clock passes the deadline. Tagged with
@@ -703,7 +789,7 @@ async fn main() -> anyhow::Result<()> {
                     Direction::Long => {
                         if current_price <= trade.stop_loss {
                             Some(auto_trader_core::types::ExitReason::SlHit)
-                        } else if current_price >= trade.take_profit {
+                        } else if trade.take_profit.is_some_and(|tp| current_price >= tp) {
                             Some(auto_trader_core::types::ExitReason::TpHit)
                         } else {
                             None
@@ -712,7 +798,7 @@ async fn main() -> anyhow::Result<()> {
                     Direction::Short => {
                         if current_price >= trade.stop_loss {
                             Some(auto_trader_core::types::ExitReason::SlHit)
-                        } else if current_price <= trade.take_profit {
+                        } else if trade.take_profit.is_some_and(|tp| current_price <= tp) {
                             Some(auto_trader_core::types::ExitReason::TpHit)
                         } else {
                             None
@@ -723,21 +809,20 @@ async fn main() -> anyhow::Result<()> {
                     exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
-                    let exit_price = match reason {
-                        auto_trader_core::types::ExitReason::SlHit => trade.stop_loss,
-                        auto_trader_core::types::ExitReason::TpHit => trade.take_profit,
-                        _ => current_price,
-                    };
-                    let trader = PaperTrader::new(
+                    let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
                         Exchange::BitflyerCfd,
                         account_id,
+                        account_name,
+                        crypto_monitor_bitflyer_api.clone(),
+                        crypto_monitor_price_store.clone(),
+                        crypto_monitor_notifier.clone(),
+                        crypto_monitor_position_sizer.clone(),
+                        dry_run,
                     );
-                    match trader
-                        .close_position(&trade.id.to_string(), reason, exit_price)
-                        .await
-                    {
+                    match trader.close_position(&trade.id.to_string(), reason).await {
                         Ok(closed_trade) => {
+                            let exit_price = closed_trade.exit_price.unwrap_or(current_price);
                             tracing::info!(
                                 "position closed: {} {} {:?} at {} ({:?})",
                                 closed_trade.strategy_name,
@@ -753,6 +838,7 @@ async fn main() -> anyhow::Result<()> {
                                         exit_price,
                                         exit_reason: reason,
                                     },
+                                    account_type: Some(account_type.clone()),
                                 })
                                 .await
                             {
@@ -823,6 +909,8 @@ async fn main() -> anyhow::Result<()> {
                                     ),
                                     crate::price_store::LatestTick {
                                         price: event.candle.close,
+                                        best_bid: event.candle.best_bid,
+                                        best_ask: event.candle.best_ask,
                                         ts: event.timestamp,
                                     },
                                 )
@@ -910,16 +998,28 @@ async fn main() -> anyhow::Result<()> {
     // the daily summary and the analytics dashboard.
     let exit_pool = pool.clone();
     let exit_trade_tx = trade_tx.clone();
+    let exit_bitflyer_api = bitflyer_api.clone();
+    let exit_price_store = price_store.clone();
+    let exit_notifier = notifier.clone();
+    let exit_position_sizer = shared_position_sizer.clone();
+    let exit_live_forces_dry_run = live_forces_dry_run;
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
-            // Look up the trade so we know which account / pair to close
-            // against and at what price.
-            let trade = match auto_trader_db::trades::get_trade_by_id(&exit_pool, exit.trade_id)
-                .await
+            // Look up the trade joined with account info in one query so we
+            // avoid a separate get_account() call (N+1 elimination).
+            let owned = match auto_trader_db::trades::get_open_trade_with_account(
+                &exit_pool,
+                exit.trade_id,
+            )
+            .await
             {
-                Ok(Some(t)) => t,
+                Ok(Some(r)) => r,
                 Ok(None) => {
-                    tracing::warn!("exit signal references missing trade {}", exit.trade_id);
+                    // Either missing or already closed (SL/TP fired in the same tick).
+                    tracing::debug!(
+                        "exit signal references missing/closed trade {}",
+                        exit.trade_id
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -927,32 +1027,38 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
             };
-            if trade.status != auto_trader_core::types::TradeStatus::Open {
-                // Already closed (e.g. SL/TP fired in the same tick from
-                // the position monitor). Nothing to do.
-                continue;
-            }
-            let Some(account_id) = trade.paper_account_id else {
-                tracing::warn!(
-                    "exit signal targets non-paper trade {} — strategy-driven exits only support paper accounts",
-                    trade.id
-                );
-                continue;
+            let trade = owned.trade;
+            let account_id = trade.account_id;
+            let account_type = match owned.account_type.as_deref() {
+                Some(t) => t.to_owned(),
+                None => {
+                    tracing::warn!(
+                        "skipping strategy exit for trade {}: account {} not found in JOIN result",
+                        trade.id,
+                        account_id
+                    );
+                    continue;
+                }
             };
-            let trader = auto_trader_executor::paper::PaperTrader::new(
+            let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+            let dry_run = account_type == "paper" || exit_live_forces_dry_run;
+            let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
                 account_id,
+                account_name,
+                exit_bitflyer_api.clone(),
+                exit_price_store.clone(),
+                exit_notifier.clone(),
+                exit_position_sizer.clone(),
+                dry_run,
             );
             // Map the strategy-specific reason onto the ExitReason enum
             // so the trade row carries true attribution
             // (StrategyMeanReached / StrategyTrailingChannel / …) instead
             // of being squashed to Manual.
             let reason = exit.reason.to_exit_reason();
-            match trader
-                .close_position(&trade.id.to_string(), reason, exit.close_price)
-                .await
-            {
+            match trader.close_position(&trade.id.to_string(), reason).await {
                 Ok(closed) => {
                     tracing::info!(
                         "strategy exit: {} {} {:?} reason={} entry={} exit={}",
@@ -973,6 +1079,7 @@ async fn main() -> anyhow::Result<()> {
                                 exit_price,
                                 exit_reason: reason,
                             },
+                            account_type: Some(account_type.clone()),
                         })
                         .await
                         .is_err()
@@ -989,13 +1096,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Signal executor (signal -> trade)
     // Enforces 1-pair-1-position per strategy per account at execution time.
-    // Only crypto paper_accounts are supported — FX paper trading is disabled.
+    // Both paper and live accounts (trading_accounts) are supported.
     //
     // Account list is re-read from the DB on every signal so REST API changes
-    // (add/update/delete paper_accounts) are picked up without restart.
+    // (add/update/delete trading_accounts) are picked up without restart.
     let executor_pool = pool.clone();
-    let executor_sizer = position_sizer.clone();
     let trade_tx_clone = trade_tx.clone();
+    let executor_bitflyer_api = bitflyer_api.clone();
+    let executor_price_store = price_store.clone();
+    let executor_notifier = notifier.clone();
+    let executor_position_sizer = shared_position_sizer.clone();
+    let executor_live_forces_dry_run = live_forces_dry_run;
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1012,16 +1123,16 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Re-read accounts from the DB for each signal.
-            let db_accounts =
-                match auto_trader_db::paper_accounts::list_paper_accounts(&executor_pool).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!("executor: failed to list paper accounts: {e}");
-                        continue;
-                    }
-                };
+            let db_accounts = match auto_trader_db::trading_accounts::list_all(&executor_pool).await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("executor: failed to list trading accounts: {e}");
+                    continue;
+                }
+            };
 
-            // Crypto: dispatch signal only to paper_accounts bound to this strategy.
+            // Crypto: dispatch signal only to accounts bound to this strategy.
             let mut matched = false;
             for pac in &db_accounts {
                 if pac.strategy != signal.strategy_name {
@@ -1032,7 +1143,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(e) => e,
                     None => {
                         tracing::warn!(
-                            "skipping paper account {} ({}): unknown exchange '{}'",
+                            "skipping account {} ({}): unknown exchange '{}'",
                             pac.name,
                             pac.id,
                             pac.exchange
@@ -1043,10 +1154,21 @@ async fn main() -> anyhow::Result<()> {
                 if exchange != Exchange::BitflyerCfd {
                     continue;
                 }
-                let account = PaperTrader::new(executor_pool.clone(), exchange, pac.id);
-                let name = &pac.name;
+                let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
+                let trader = UnifiedTrader::new(
+                    executor_pool.clone(),
+                    exchange,
+                    pac.id,
+                    pac.name.clone(),
+                    executor_bitflyer_api.clone(),
+                    executor_price_store.clone(),
+                    executor_notifier.clone(),
+                    executor_position_sizer.clone(),
+                    dry_run,
+                );
+                let name = pac.name.clone();
                 matched = true;
-                let positions = account.open_positions().await.unwrap_or_default();
+                let positions = trader.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
                     p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
                 });
@@ -1060,27 +1182,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                // Use values from the fresh DB read above rather than round-tripping.
-                let balance = pac.current_balance;
-                let leverage = pac.leverage;
-                let quantity = executor_sizer.calculate_quantity(
-                    &signal.pair,
-                    balance,
-                    signal.entry_price,
-                    leverage,
-                    signal.allocation_pct,
-                );
-                let Some(qty) = quantity else {
-                    tracing::info!(
-                        "position sizing rejected signal for account {}: {} {}",
-                        name,
-                        signal.strategy_name,
-                        signal.pair
-                    );
-                    continue;
-                };
-
-                match account.execute_with_quantity(signal, qty).await {
+                match trader.execute(signal).await {
                     Ok(trade) => {
                         if let Some(vp) = vegapunk_client_exec.clone() {
                             let trade_clone = trade.clone();
@@ -1134,6 +1236,7 @@ async fn main() -> anyhow::Result<()> {
                             .send(TradeEvent {
                                 trade,
                                 action: TradeAction::Opened,
+                                account_type: Some(pac.account_type.clone()),
                             })
                             .await
                         {
@@ -1145,7 +1248,7 @@ async fn main() -> anyhow::Result<()> {
             }
             if !matched {
                 tracing::warn!(
-                    "crypto signal from '{}' had no matching paper_account",
+                    "crypto signal from '{}' had no matching trading account",
                     signal.strategy_name
                 );
             }
@@ -1175,20 +1278,13 @@ async fn main() -> anyhow::Result<()> {
                     {
                         // Upsert daily summary
                         let date = exit_at.date_naive();
-                        let mode_str = t.mode.as_str();
                         let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
-                        // Look up account_type for this trade (paper / live).
-                        // Fall back to None if the account was deleted or this
-                        // is an FX trade without a paper_account_id.
-                        let account_type = match t.paper_account_id {
-                            Some(aid) => auto_trader_db::paper_accounts::get_account_type(
-                                &recorder_pool,
-                                aid,
-                            )
-                            .await
-                            .unwrap_or(None),
-                            None => None,
-                        };
+                        // account_type is carried on the event from the executor/monitor
+                        // that emitted it — no extra DB round-trip required.
+                        let account_id = t.account_id;
+                        let account_type = trade_event.account_type.clone();
+                        // mode is now derived from account_type ("paper" → "paper", "live" → "live")
+                        let mode_str = account_type.as_deref().unwrap_or("paper");
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool,
                             date,
@@ -1196,7 +1292,7 @@ async fn main() -> anyhow::Result<()> {
                             &t.pair.0,
                             mode_str,
                             t.exchange.as_str(),
-                            t.paper_account_id,
+                            Some(account_id),
                             account_type.as_deref(),
                             1,
                             win,
@@ -1221,20 +1317,22 @@ async fn main() -> anyhow::Result<()> {
                                 .unwrap_or(None)
                                 .flatten();
 
-                                // Fetch account balance context
-                                let (bal, init): (Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>) =
-                                    match t.paper_account_id {
-                                        Some(aid) => sqlx::query_as::<_, (rust_decimal::Decimal, rust_decimal::Decimal)>(
-                                            "SELECT current_balance, initial_balance FROM paper_accounts WHERE id = $1",
-                                        )
-                                        .bind(aid)
-                                        .fetch_optional(&close_pool)
-                                        .await
-                                        .unwrap_or(None)
-                                        .map(|(b, i)| (Some(b), Some(i)))
-                                        .unwrap_or((None, None)),
-                                        None => (None, None),
-                                    };
+                                // Fetch account balance context from trading_accounts
+                                let (bal, init): (
+                                    Option<rust_decimal::Decimal>,
+                                    Option<rust_decimal::Decimal>,
+                                ) = {
+                                    let aid = t.account_id;
+                                    sqlx::query_as::<_, (rust_decimal::Decimal, rust_decimal::Decimal)>(
+                                        "SELECT current_balance, initial_balance FROM trading_accounts WHERE id = $1",
+                                    )
+                                    .bind(aid)
+                                    .fetch_optional(&close_pool)
+                                    .await
+                                    .unwrap_or(None)
+                                    .map(|(b, i)| (Some(b), Some(i)))
+                                    .unwrap_or((None, None))
+                                };
 
                                 let text = crate::enriched_ingest::format_trade_close(
                                     &t,
@@ -1257,7 +1355,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 // Auto-feedback if this trade had a Vegapunk search attached
-                                let search_id: Option<String> = sqlx::query_scalar(
+                                let search_id: Option<uuid::Uuid> = sqlx::query_scalar(
                                     "SELECT vegapunk_search_id FROM trades WHERE id = $1",
                                 )
                                 .bind(t.id)
@@ -1267,6 +1365,7 @@ async fn main() -> anyhow::Result<()> {
                                 .flatten();
 
                                 if let Some(sid) = search_id {
+                                    let sid = sid.to_string();
                                     let rating =
                                         crate::enriched_ingest::compute_feedback_rating(&t);
                                     let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;
@@ -1402,24 +1501,27 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             let today = chrono::Utc::now().date_naive();
             if today != last_date {
-                let accounts = match auto_trader_db::paper_accounts::list_paper_accounts(
-                    &overnight_pool,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!("overnight fee: failed to list paper accounts: {e}");
-                        last_date = today;
+                // Apply overnight fees only to paper accounts (live accounts
+                // pay fees directly to the exchange; we don't deduct them here).
+                let accounts =
+                    match auto_trader_db::trading_accounts::list_all(&overnight_pool).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!("overnight fee: failed to list trading accounts: {e}");
+                            last_date = today;
+                            continue;
+                        }
+                    };
+                for pac in accounts {
+                    // Only paper accounts get overnight fees applied in-app.
+                    if pac.account_type != "paper" {
                         continue;
                     }
-                };
-                for pac in accounts {
                     let exchange = match exchange_from_str(&pac.exchange) {
                         Some(e) => e,
                         None => {
                             tracing::warn!(
-                                "overnight fee: skipping paper account {} ({}): unknown exchange '{}'",
+                                "overnight fee: skipping account {} ({}): unknown exchange '{}'",
                                 pac.name,
                                 pac.id,
                                 pac.exchange
@@ -1430,15 +1532,65 @@ async fn main() -> anyhow::Result<()> {
                     if exchange != Exchange::BitflyerCfd {
                         continue;
                     }
-                    let trader = PaperTrader::new(overnight_pool.clone(), exchange, pac.id);
-                    match trader.apply_overnight_fees(fee_rate).await {
-                        Ok(fees) if fees > Decimal::ZERO => {
-                            tracing::info!("overnight fee applied: {} = {} JPY", pac.name, fees);
-                        }
-                        Ok(_) => {}
+                    // Compute fee for each open trade: fee = entry_price * quantity * fee_rate
+                    let open_trades = match auto_trader_db::trades::get_open_trades_by_account(
+                        &overnight_pool,
+                        pac.id,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
                         Err(e) => {
-                            tracing::error!("overnight fee failed for {}: {e}", pac.name)
+                            tracing::error!(
+                                "overnight fee: failed to list open trades for {}: {e}",
+                                pac.name
+                            );
+                            continue;
                         }
+                    };
+                    let mut total_fee = Decimal::ZERO;
+                    for trade in &open_trades {
+                        let fee = (trade.entry_price * trade.quantity * fee_rate)
+                            .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+                        if fee.is_zero() {
+                            continue;
+                        }
+                        // Apply overnight fee atomically: trades.fees CAS +
+                        // balance deduction + account_events insert in one tx.
+                        // apply_overnight_fee returns Ok(None) if the trade
+                        // closed between the open-list fetch above and this
+                        // tx (the CAS on `status='open'` skips it cleanly so
+                        // a closing trade never gets double-charged).
+                        let result = async {
+                            let mut tx = overnight_pool.begin().await?;
+                            let applied = auto_trader_db::trades::apply_overnight_fee(
+                                &mut tx, pac.id, trade.id, fee,
+                            )
+                            .await?;
+                            tx.commit().await?;
+                            anyhow::Ok(applied)
+                        }
+                        .await;
+                        match result {
+                            Ok(Some(_new_balance)) => {
+                                total_fee += fee;
+                            }
+                            Ok(None) => {
+                                tracing::debug!(
+                                    "overnight fee: skipping trade {} — closed before fee tx",
+                                    trade.id
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "overnight fee: apply_overnight_fee failed for trade {}: {e}",
+                                    trade.id
+                                );
+                            }
+                        }
+                    }
+                    if total_fee > Decimal::ZERO {
+                        tracing::info!("overnight fee applied: {} = {} JPY", pac.name, total_fee);
                     }
                 }
                 last_date = today;

@@ -7,9 +7,9 @@ import type {
   TradesResponse,
   TradeEventsResponse,
   PositionResponse,
-  PaperAccount,
-  CreatePaperAccount,
-  UpdatePaperAccount,
+  TradingAccount,
+  CreateTradingAccount,
+  UpdateTradingAccount,
   DashboardFilter,
   BalanceHistoryResponse,
   Strategy,
@@ -88,13 +88,13 @@ export const api = {
     list: () => get<PositionResponse[]>('/api/positions'),
   },
   accounts: {
-    list: () => get<PaperAccount[]>('/api/paper-accounts'),
-    get: (id: string) => get<PaperAccount>(`/api/paper-accounts/${id}`),
-    create: (data: CreatePaperAccount) =>
-      post<PaperAccount>('/api/paper-accounts', data),
-    update: (id: string, data: UpdatePaperAccount) =>
-      put<PaperAccount>(`/api/paper-accounts/${id}`, data),
-    delete: (id: string) => del(`/api/paper-accounts/${id}`),
+    list: () => get<TradingAccount[]>('/api/trading-accounts'),
+    get: (id: string) => get<TradingAccount>(`/api/trading-accounts/${id}`),
+    create: (data: CreateTradingAccount) =>
+      post<TradingAccount>('/api/trading-accounts', data),
+    update: (id: string, data: UpdateTradingAccount) =>
+      put<TradingAccount>(`/api/trading-accounts/${id}`, data),
+    delete: (id: string) => del(`/api/trading-accounts/${id}`),
   },
   strategies: {
     list: (category?: 'fx' | 'crypto') =>

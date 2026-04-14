@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 auto-trader-core = { workspace = true }
 auto-trader-db = { workspace = true }
+auto-trader-market = { workspace = true }
+auto-trader-notify = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -19,3 +21,13 @@ sqlx = { workspace = true }
 [dev-dependencies]
 rust_decimal_macros = "1"
 serde_json = { workspace = true }
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+sqlx = { workspace = true }
+auto-trader-core = { workspace = true }
+auto-trader-db = { workspace = true }
+auto-trader-market = { workspace = true }
+auto-trader-notify = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }

@@ -5,7 +5,7 @@ use uuid::Uuid;
 #[allow(dead_code)]
 pub struct DashboardFilter {
     pub exchange: Option<String>,
-    pub paper_account_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
     pub account_type: Option<String>,
     pub strategy: Option<String>,
     pub pair: Option<String>,
@@ -16,7 +16,7 @@ pub struct DashboardFilter {
 #[derive(Debug, Deserialize, Default)]
 pub struct TradeFilter {
     pub exchange: Option<String>,
-    pub paper_account_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
     pub strategy: Option<String>,
     pub pair: Option<String>,
     pub status: Option<String>,

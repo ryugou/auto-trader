@@ -29,11 +29,11 @@ pub fn router(state: AppState) -> Router {
 
     let api_routes = Router::new()
         .route(
-            "/paper-accounts",
+            "/trading-accounts",
             get(accounts::list).post(accounts::create),
         )
         .route(
-            "/paper-accounts/:id",
+            "/trading-accounts/:id",
             get(accounts::get_one)
                 .put(accounts::update)
                 .delete(accounts::remove),
@@ -123,12 +123,12 @@ impl From<anyhow::Error> for ApiError {
                     Some("23505") => ApiError(StatusCode::CONFLICT, "duplicate name".to_string()),
                     // FK violation. Disambiguate by constraint name so the
                     // message reflects which relationship was violated:
-                    //  - paper_accounts_strategy_fk: catalog reference (400,
+                    //  - trading_accounts_strategy_fkey: catalog reference (400,
                     //    user fixable by picking a valid strategy)
-                    //  - everything else (e.g. trades→paper_accounts): we
+                    //  - everything else (e.g. trades→trading_accounts): we
                     //    treat it as a delete-blocked-by-children case
                     Some("23503") => match pg_err.constraint() {
-                        Some("paper_accounts_strategy_fk") => ApiError(
+                        Some("trading_accounts_strategy_fkey") => ApiError(
                             StatusCode::BAD_REQUEST,
                             "strategy not found in catalog (see GET /api/strategies)".to_string(),
                         ),

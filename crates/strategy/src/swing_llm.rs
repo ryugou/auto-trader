@@ -1,6 +1,6 @@
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{MacroUpdate, Strategy};
-use auto_trader_core::types::{Direction, OrderType, Pair, Signal};
+use auto_trader_core::types::{Direction, Pair, Signal};
 use auto_trader_vegapunk::client::VegapunkClient;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -157,6 +157,35 @@ impl SwingLLMv1 {
             return Ok(None);
         }
 
+        // LLM-provided values are untrusted input. Reject non-finite,
+        // non-positive, or absurdly large pip offsets before they flow into
+        // `stop_loss_pct = sl / entry` at the call site, where a zero /
+        // negative / NaN would produce an inverted or invalid SL/TP at
+        // execution time. Upper bound 10000 pips = ~100 JPY or ~1.00
+        // non-JPY — anything beyond is clearly a model hallucination.
+        const MAX_PIPS: f64 = 10_000.0;
+        if !sl_pips.is_finite()
+            || !tp_pips.is_finite()
+            || sl_pips <= 0.0
+            || tp_pips <= 0.0
+            || sl_pips > MAX_PIPS
+            || tp_pips > MAX_PIPS
+        {
+            tracing::warn!(
+                "swing_llm: rejecting decision with invalid pip offsets (sl_pips={}, tp_pips={})",
+                sl_pips,
+                tp_pips
+            );
+            return Ok(None);
+        }
+        if current_price <= Decimal::ZERO {
+            tracing::warn!(
+                "swing_llm: rejecting decision with non-positive entry price {}",
+                current_price
+            );
+            return Ok(None);
+        }
+
         let direction = match action {
             "long" => Direction::Long,
             "short" => Direction::Short,
@@ -215,22 +244,19 @@ impl Strategy for SwingLLMv1 {
 
         match result {
             Ok(Some((direction, entry, sl, tp, confidence))) => {
-                let (stop_loss, take_profit) = match direction {
-                    Direction::Long => (entry - sl, entry + tp),
-                    Direction::Short => (entry + sl, entry - tp),
-                };
+                // Convert absolute pip offsets to fill-price fractions.
+                let stop_loss_pct = sl / entry;
+                let take_profit_pct = tp / entry;
                 Some(Signal {
                     strategy_name: self.name.clone(),
                     pair: event.pair.clone(),
                     direction,
-                    entry_price: entry,
-                    stop_loss,
-                    take_profit,
+                    stop_loss_pct,
+                    take_profit_pct: Some(take_profit_pct),
                     confidence,
                     timestamp: event.timestamp,
                     allocation_pct: rust_decimal::Decimal::new(5, 1), // 0.5
                     max_hold_until: None,
-                    order_type: OrderType::Market,
                 })
             }
             Ok(None) => None,

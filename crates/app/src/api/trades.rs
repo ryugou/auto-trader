@@ -26,7 +26,7 @@ pub async fn list(
     let (trades, total) = dashboard::get_trades(
         &state.pool,
         filter.exchange.as_deref(),
-        filter.paper_account_id,
+        filter.account_id,
         filter.strategy.as_deref(),
         filter.pair.as_deref(),
         filter.status.as_deref(),

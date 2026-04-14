@@ -62,105 +62,26 @@ impl std::fmt::Display for Direction {
     }
 }
 
-/// 注文種別。戦略が Signal 生成時に選択する。
-///
-/// - `Market`: 成行注文。取引所がその瞬間の気配値で約定させる。
-///   スリッページが発生しうるが、約定確実性が高い。
-/// - `Limit { price }`: 指値注文。指定価格以下 (Long) / 以上 (Short)
-///   でのみ約定する。未約定リスクあり。
-///
-/// JSON 形式は internally-tagged (`{"type": "market"}` /
-/// `{"type": "limit", "price": "100.5"}`) — これは strategy ログや
-/// /api/signals への出力でも人間可読性を保つため。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OrderType {
-    #[default]
-    Market,
-    Limit {
-        price: Decimal,
-    },
-}
-
-impl OrderType {
-    /// 指値注文を構築する。price が 0 以下の場合は Err を返し、
-    /// 戦略側の計算バグ / 取引所側の異常レスポンスを型境界で弾く。
-    /// `unreachable!()` / `todo!()` で済ませない理由は PR 1 Batch A
-    /// レビューの FOLLOWUP 参照。
-    pub fn limit(price: Decimal) -> Result<Self, InvalidOrderTypeError> {
-        if price <= Decimal::ZERO {
-            return Err(InvalidOrderTypeError::NonPositiveLimitPrice(price));
-        }
-        Ok(OrderType::Limit { price })
-    }
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum InvalidOrderTypeError {
-    #[error("limit order price must be > 0, got {0}")]
-    NonPositiveLimitPrice(Decimal),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradeMode {
-    Live,
-    Paper,
-    Backtest,
-}
-
-impl TradeMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TradeMode::Live => "live",
-            TradeMode::Paper => "paper",
-            TradeMode::Backtest => "backtest",
-        }
-    }
-}
-
-impl std::fmt::Display for TradeMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeStatus {
     Open,
+    /// 中間ロック状態: Trader が close を確定する前に取引所 API へ
+    /// 反対売買を発注している間、他の close 経路が並行で同じ trade に
+    /// 発注しないよう所有権を CAS で取得した状態。
+    /// API 失敗時は Open に戻す。成功時は Closed に遷移する。
+    Closing,
     Closed,
-    /// 注文を取引所に送信済みで約定確認待ち (live のみ)。
-    Pending,
-    /// DB と取引所で状態が食い違い、手動対処が必要。
-    Inconsistent,
 }
 
 impl TradeStatus {
-    /// Paper / backtest は Open / Closed のみ許容。Live 専用の Pending /
-    /// Inconsistent を paper/backtest で誤って書き込んだら debug_assert で
-    /// 即死させる。
-    ///
-    /// 本番 (`--release`) では debug_assert は no-op になるため、PR 2 以降で
-    /// 状態遷移関数 (`fn transition(from, to) -> Result<TradeStatus>`) を
-    /// 導入して遷移不可能状態を締める予定。このガードはそれまでの暫定措置。
-    pub fn assert_valid_for_mode(self, mode: TradeMode) {
-        if matches!(mode, TradeMode::Paper | TradeMode::Backtest) {
-            debug_assert!(
-                matches!(self, TradeStatus::Open | TradeStatus::Closed),
-                "paper/backtest trade must not have status {self:?}"
-            );
-        }
-    }
-
     /// DB bind 時 / SQL 比較で使う静的文字列。`serde_json::to_string` の
     /// round-trip (`"open"` → `open`) を踏まず 1 アロケーションで済む。
     pub fn as_str(&self) -> &'static str {
         match self {
             TradeStatus::Open => "open",
+            TradeStatus::Closing => "closing",
             TradeStatus::Closed => "closed",
-            TradeStatus::Pending => "pending",
-            TradeStatus::Inconsistent => "inconsistent",
         }
     }
 }
@@ -191,14 +112,35 @@ pub enum ExitReason {
     StrategyTimeLimit,
 }
 
+impl ExitReason {
+    /// DB bind / display string — avoids `serde_json::to_string` + `trim_matches('"')` round-trip.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExitReason::TpHit => "tp_hit",
+            ExitReason::SlHit => "sl_hit",
+            ExitReason::Manual => "manual",
+            ExitReason::SignalReverse => "signal_reverse",
+            ExitReason::StrategyMeanReached => "strategy_mean_reached",
+            ExitReason::StrategyTrailingChannel => "strategy_trailing_channel",
+            ExitReason::StrategyTrailingMa => "strategy_trailing_ma",
+            ExitReason::StrategyIndicatorReversal => "strategy_indicator_reversal",
+            ExitReason::StrategyTimeLimit => "strategy_time_limit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
     pub strategy_name: String,
     pub pair: Pair,
     pub direction: Direction,
-    pub entry_price: Decimal,
-    pub stop_loss: Decimal,
-    pub take_profit: Decimal,
+    /// Stop-loss distance as a fraction of fill price (required).
+    /// e.g. 0.005 means SL at fill_price × (1 ∓ 0.005).
+    pub stop_loss_pct: Decimal,
+    /// Take-profit distance as a fraction of fill price.
+    /// `None` for strategies using dynamic exit logic.
+    #[serde(default)]
+    pub take_profit_pct: Option<Decimal>,
     pub confidence: f64,
     pub timestamp: DateTime<Utc>,
     /// Fraction of leveraged account capacity the strategy wants to
@@ -218,10 +160,6 @@ pub struct Signal {
     /// "stale" trades (e.g. mean-reversion 24h, vol-breakout 48h).
     #[serde(default)]
     pub max_hold_until: Option<DateTime<Utc>>,
-    /// 注文種別 (Market / Limit)。Signal を出した戦略が選ぶ。
-    /// 既存の JSON を読み込むと Market に default される (後方互換)。
-    #[serde(default)]
-    pub order_type: OrderType,
 }
 
 fn default_allocation_pct() -> Decimal {
@@ -233,75 +171,34 @@ fn default_allocation_pct() -> Decimal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
     pub id: Uuid,
+    /// Links to trading_accounts; account_type on that row carries Live/Paper/Backtest.
+    pub account_id: Uuid,
     pub strategy_name: String,
     pub pair: Pair,
     pub exchange: Exchange,
     pub direction: Direction,
+    /// Actual fill price at entry.
     pub entry_price: Decimal,
+    /// Actual fill price at exit.
     pub exit_price: Option<Decimal>,
     pub stop_loss: Decimal,
-    pub take_profit: Decimal,
-    pub quantity: Option<Decimal>,
+    /// None for strategies using dynamic exit logic.
+    pub take_profit: Option<Decimal>,
+    pub quantity: Decimal,
     pub leverage: Decimal,
     pub fees: Decimal,
-    pub paper_account_id: Option<Uuid>,
     pub entry_at: DateTime<Utc>,
     pub exit_at: Option<DateTime<Utc>>,
-    pub pnl_pips: Option<Decimal>,
     pub pnl_amount: Option<Decimal>,
     pub exit_reason: Option<ExitReason>,
-    pub mode: TradeMode,
+    /// Trade lifecycle status: Open → Closing (live close in flight) → Closed.
+    /// Closing is a short-lived intermediate held while the exchange API
+    /// fill is pending; the 5-min stale-lock recovery in
+    /// `db::trades::acquire_close_lock` adopts orphans automatically.
     pub status: TradeStatus,
     /// Optional time-based fail-safe — see `Signal::max_hold_until`.
     #[serde(default)]
     pub max_hold_until: Option<DateTime<Utc>>,
-    /// bitFlyer 注文受付 ID (sendchildorder のレスポンス)。
-    /// Paper トレードでは None。
-    #[serde(default)]
-    pub child_order_acceptance_id: Option<String>,
-    /// bitFlyer 注文 ID (約定確定後に getchildorders から取得)。
-    /// Paper トレードでは None。pending 中も None。
-    #[serde(default)]
-    pub child_order_id: Option<String>,
-}
-
-/// テスト専用の Default 実装。
-/// 本番コードからは呼ばれないよう `#[cfg(test)]` でガード済み。
-/// (PR 2 以降で Trade にフィールドを足しても、戦略 / backtest /
-/// paper のテスト固有 Trade リテラルを全書き換えしないで済むよう、
-/// ベースライン Trade を用意する。)
-///
-/// `feature = "testing"` は廃止。production build に `Trade::default()`
-/// (entry_price=0 など無効値) が露出するのを防ぐため `#[cfg(test)]` のみ。
-#[cfg(test)]
-impl Default for Trade {
-    fn default() -> Self {
-        Self {
-            id: Uuid::nil(),
-            strategy_name: String::from("test_strategy"),
-            pair: Pair::new("FX_BTC_JPY"),
-            exchange: Exchange::BitflyerCfd,
-            direction: Direction::Long,
-            entry_price: rust_decimal::Decimal::ZERO,
-            exit_price: None,
-            stop_loss: rust_decimal::Decimal::ZERO,
-            take_profit: rust_decimal::Decimal::ZERO,
-            quantity: None,
-            leverage: rust_decimal::Decimal::ONE,
-            fees: rust_decimal::Decimal::ZERO,
-            paper_account_id: None,
-            entry_at: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
-            exit_at: None,
-            pnl_pips: None,
-            pnl_amount: None,
-            exit_reason: None,
-            mode: TradeMode::Paper,
-            status: TradeStatus::Open,
-            max_hold_until: None,
-            child_order_acceptance_id: None,
-            child_order_id: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +216,14 @@ pub struct Candle {
     pub low: Decimal,
     pub close: Decimal,
     pub volume: Option<u64>,
+    /// Best bid price at candle close. `None` for data sources that do not
+    /// provide bid/ask (e.g. OANDA mid-price candles).
+    #[serde(default)]
+    pub best_bid: Option<Decimal>,
+    /// Best ask price at candle close. `None` for data sources that do not
+    /// provide bid/ask (e.g. OANDA mid-price candles).
+    #[serde(default)]
+    pub best_ask: Option<Decimal>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -359,14 +264,12 @@ mod tests {
             strategy_name: "test".to_string(),
             pair: Pair::new("USD_JPY"),
             direction: Direction::Long,
-            entry_price: dec!(150.00),
-            stop_loss: dec!(149.50),
-            take_profit: dec!(151.00),
+            stop_loss_pct: dec!(0.005),
+            take_profit_pct: Some(dec!(0.01)),
             confidence: 0.8,
             timestamp: Utc::now(),
             allocation_pct: dec!(0.5),
             max_hold_until: None,
-            order_type: OrderType::Market,
         };
         let json = serde_json::to_string(&signal).unwrap();
         let back: Signal = serde_json::from_str(&json).unwrap();
@@ -375,167 +278,12 @@ mod tests {
     }
 
     #[test]
-    fn order_type_serializes_market() {
-        let json = serde_json::to_string(&OrderType::Market).unwrap();
-        assert_eq!(json, r#"{"type":"market"}"#);
-    }
-
-    #[test]
-    fn order_type_serializes_limit_with_price() {
-        let ot = OrderType::Limit { price: dec!(100.5) };
-        let json = serde_json::to_string(&ot).unwrap();
-        assert_eq!(json, r#"{"type":"limit","price":"100.5"}"#);
-    }
-
-    #[test]
-    fn order_type_roundtrip_market() {
-        let ot = OrderType::Market;
-        let json = serde_json::to_string(&ot).unwrap();
-        let back: OrderType = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, OrderType::Market));
-    }
-
-    #[test]
-    fn order_type_roundtrip_limit() {
-        let ot = OrderType::Limit {
-            price: dec!(150.25),
-        };
-        let json = serde_json::to_string(&ot).unwrap();
-        let back: OrderType = serde_json::from_str(&json).unwrap();
-        match back {
-            OrderType::Limit { price } => assert_eq!(price, dec!(150.25)),
-            _ => panic!("expected Limit"),
-        }
-    }
-
-    #[test]
-    fn signal_defaults_order_type_to_market_when_absent() {
-        // 既存コードが生成した Signal JSON (order_type フィールドなし)
-        // は OrderType::Market に既定化されることを検証する。
-        let legacy_json = r#"{
-            "strategy_name": "legacy",
-            "pair": "USD_JPY",
-            "direction": "long",
-            "entry_price": "150.00",
-            "stop_loss": "149.50",
-            "take_profit": "151.00",
-            "confidence": 0.8,
-            "timestamp": "2024-01-01T00:00:00Z",
-            "allocation_pct": "0.5"
-        }"#;
-        let signal: Signal = serde_json::from_str(legacy_json).unwrap();
-        assert!(matches!(signal.order_type, OrderType::Market));
-    }
-
-    #[test]
-    fn signal_serializes_with_explicit_order_type() {
-        let signal = Signal {
-            strategy_name: "s".to_string(),
-            pair: Pair::new("USD_JPY"),
-            direction: Direction::Long,
-            entry_price: dec!(150.0),
-            stop_loss: dec!(149.0),
-            take_profit: dec!(151.0),
-            confidence: 0.8,
-            timestamp: Utc::now(),
-            allocation_pct: dec!(0.5),
-            max_hold_until: None,
-            order_type: OrderType::Limit { price: dec!(150.5) },
-        };
-        let json = serde_json::to_string(&signal).unwrap();
-        assert!(json.contains(r#""order_type":{"type":"limit","price":"150.5"}"#));
-    }
-
-    #[test]
-    fn trade_status_serializes_pending() {
-        let json = serde_json::to_string(&TradeStatus::Pending).unwrap();
-        assert_eq!(json, r#""pending""#);
-    }
-
-    #[test]
-    fn trade_status_serializes_inconsistent() {
-        let json = serde_json::to_string(&TradeStatus::Inconsistent).unwrap();
-        assert_eq!(json, r#""inconsistent""#);
-    }
-
-    #[test]
-    fn trade_status_roundtrip_all_variants() {
-        for status in [
-            TradeStatus::Open,
-            TradeStatus::Closed,
-            TradeStatus::Pending,
-            TradeStatus::Inconsistent,
-        ] {
+    fn trade_status_roundtrip() {
+        for status in [TradeStatus::Open, TradeStatus::Closing, TradeStatus::Closed] {
             let json = serde_json::to_string(&status).unwrap();
             let back: TradeStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, status);
         }
-    }
-
-    #[test]
-    fn assert_valid_for_mode_accepts_paper_open() {
-        TradeStatus::Open.assert_valid_for_mode(TradeMode::Paper);
-        TradeStatus::Closed.assert_valid_for_mode(TradeMode::Paper);
-    }
-
-    #[test]
-    fn assert_valid_for_mode_accepts_backtest_open() {
-        TradeStatus::Open.assert_valid_for_mode(TradeMode::Backtest);
-        TradeStatus::Closed.assert_valid_for_mode(TradeMode::Backtest);
-    }
-
-    #[test]
-    fn assert_valid_for_mode_accepts_live_all_statuses() {
-        // Live は 4 バリアント全て許容
-        TradeStatus::Pending.assert_valid_for_mode(TradeMode::Live);
-        TradeStatus::Open.assert_valid_for_mode(TradeMode::Live);
-        TradeStatus::Closed.assert_valid_for_mode(TradeMode::Live);
-        TradeStatus::Inconsistent.assert_valid_for_mode(TradeMode::Live);
-    }
-
-    #[test]
-    #[should_panic(expected = "paper/backtest trade must not have status")]
-    fn assert_valid_for_mode_panics_on_paper_pending() {
-        TradeStatus::Pending.assert_valid_for_mode(TradeMode::Paper);
-    }
-
-    #[test]
-    #[should_panic(expected = "paper/backtest trade must not have status")]
-    fn assert_valid_for_mode_panics_on_paper_inconsistent() {
-        TradeStatus::Inconsistent.assert_valid_for_mode(TradeMode::Paper);
-    }
-
-    #[test]
-    #[should_panic(expected = "paper/backtest trade must not have status")]
-    fn assert_valid_for_mode_panics_on_backtest_pending() {
-        TradeStatus::Pending.assert_valid_for_mode(TradeMode::Backtest);
-    }
-
-    #[test]
-    fn trade_default_produces_paper_open_with_none_order_ids() {
-        let t = Trade::default();
-        assert_eq!(t.mode, TradeMode::Paper);
-        assert_eq!(t.status, TradeStatus::Open);
-        assert!(t.child_order_acceptance_id.is_none());
-        assert!(t.child_order_id.is_none());
-        assert_eq!(t.direction, Direction::Long);
-        assert_eq!(t.exchange, Exchange::BitflyerCfd);
-    }
-
-    #[test]
-    fn order_type_limit_new_accepts_positive_price() {
-        let ot = OrderType::limit(dec!(100.5)).unwrap();
-        assert!(matches!(ot, OrderType::Limit { price } if price == dec!(100.5)));
-    }
-
-    #[test]
-    fn order_type_limit_new_rejects_zero() {
-        assert!(OrderType::limit(Decimal::ZERO).is_err());
-    }
-
-    #[test]
-    fn order_type_limit_new_rejects_negative() {
-        assert!(OrderType::limit(dec!(-1)).is_err());
     }
 
     #[test]
@@ -548,15 +296,39 @@ mod tests {
             "strategy_name": "legacy",
             "pair": "USD_JPY",
             "direction": "long",
-            "entry_price": "150.00",
-            "stop_loss": "149.50",
-            "take_profit": "151.00",
+            "stop_loss_pct": "0.005",
             "confidence": 0.8,
             "timestamp": "2024-01-01T00:00:00Z"
         }"#;
-        let signal: Signal =
-            serde_json::from_str(legacy_json).expect("legacy Signal must deserialize");
+        let signal: Signal = serde_json::from_str(legacy_json).expect("Signal must deserialize");
         assert_eq!(signal.allocation_pct, dec!(0.5));
         assert!(signal.max_hold_until.is_none());
+        assert!(signal.take_profit_pct.is_none());
+    }
+
+    #[test]
+    fn signal_with_take_profit_pct_roundtrip() {
+        let signal = Signal {
+            strategy_name: "s".to_string(),
+            pair: Pair::new("USD_JPY"),
+            direction: Direction::Short,
+            stop_loss_pct: dec!(0.005),
+            take_profit_pct: Some(dec!(0.015)),
+            confidence: 0.75,
+            timestamp: Utc::now(),
+            allocation_pct: dec!(0.3),
+            max_hold_until: None,
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        let back: Signal = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.take_profit_pct, Some(dec!(0.015)));
+        assert_eq!(back.stop_loss_pct, dec!(0.005));
+    }
+
+    #[test]
+    fn trade_status_as_str() {
+        assert_eq!(TradeStatus::Open.as_str(), "open");
+        assert_eq!(TradeStatus::Closing.as_str(), "closing");
+        assert_eq!(TradeStatus::Closed.as_str(), "closed");
     }
 }

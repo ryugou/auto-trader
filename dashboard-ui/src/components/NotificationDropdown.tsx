@@ -104,7 +104,7 @@ export default function NotificationDropdown({ open }: NotificationDropdownProps
           <div className="px-4 py-6 text-center text-xs text-gray-500">通知はありません</div>
         ) : (
           data.items.map((n) => {
-            const accountName = accountMap.get(n.paper_account_id ?? '') ?? '-'
+            const accountName = accountMap.get(n.account_id ?? '') ?? '-'
             return (
               <div
                 key={n.id}

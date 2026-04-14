@@ -267,6 +267,8 @@ mod tests {
             low: dec!(1),
             close: dec!(1),
             volume: Some(0),
+            best_bid: None,
+            best_ask: None,
             timestamp: Utc::now(),
         };
         let events = vec![

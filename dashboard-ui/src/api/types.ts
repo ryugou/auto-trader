@@ -1,4 +1,4 @@
-export interface PaperAccount {
+export interface TradingAccount {
   id: string
   name: string
   exchange: string
@@ -7,25 +7,24 @@ export interface PaperAccount {
   currency: string
   leverage: string
   strategy: string
-  account_type: string
+  account_type: 'paper' | 'live'
   created_at: string
-  updated_at: string
-  // Enriched fields from GET /api/paper-accounts
+  // Enriched fields from GET /api/trading-accounts
   unrealized_pnl?: string
   evaluated_balance?: string
 }
 
-export interface CreatePaperAccount {
+export interface CreateTradingAccount {
   name: string
   exchange: string
   initial_balance: string
   leverage: string
   strategy: string
-  account_type: string
+  account_type: 'paper' | 'live'
   currency?: string
 }
 
-export interface UpdatePaperAccount {
+export interface UpdateTradingAccount {
   name?: string
   leverage?: string
   strategy?: string
@@ -40,7 +39,6 @@ export interface Strategy {
   algorithm: string
   default_params: Record<string, unknown>
   created_at: string
-  updated_at: string
 }
 
 export interface SummaryResponse {
@@ -90,16 +88,17 @@ export interface TradeRow {
   entry_price: string
   exit_price: string | null
   stop_loss: string
-  take_profit: string
-  quantity: string | null
+  // null for dynamic-exit strategies (mean-revert / trailing channel etc.)
+  take_profit: string | null
+  // Required after the unified rewrite — every trade has an actual fill quantity.
+  quantity: string
   leverage: string
   fees: string
   pnl_amount: string | null
-  pnl_pips: string | null
   entry_at: string
   exit_at: string | null
   exit_reason: string | null
-  paper_account_id: string | null
+  account_id: string
   account_type: string | null
   status: string
 }
@@ -132,18 +131,20 @@ export interface PositionResponse {
   exchange: string
   direction: string
   entry_price: string
-  quantity: string | null
+  // Required after the unified rewrite — open trades always have a quantity.
+  quantity: string
   stop_loss: string
+  // null for dynamic-exit strategies.
   take_profit: string | null
   fees: string
   entry_at: string
-  paper_account_id: string | null
-  paper_account_name: string
+  account_id: string
+  account_name: string
 }
 
 export interface DashboardFilter {
   exchange?: string
-  paper_account_id?: string
+  account_id?: string
   account_type?: string
   strategy?: string
   pair?: string
@@ -170,7 +171,7 @@ export interface Notification {
   id: string
   kind: 'trade_opened' | 'trade_closed'
   trade_id: string
-  paper_account_id: string
+  account_id: string
   strategy_name: string
   pair: string
   direction: 'long' | 'short'

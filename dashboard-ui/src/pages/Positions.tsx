@@ -94,8 +94,8 @@ export default function Positions() {
   const filtered = (positions ?? []).filter((p) => {
     if (filters.exchange && p.exchange !== filters.exchange) return false
     if (
-      filters.paper_account_id &&
-      p.paper_account_id !== filters.paper_account_id
+      filters.account_id &&
+      p.account_id !== filters.account_id
     )
       return false
     if (filters.from) {
@@ -220,7 +220,7 @@ export default function Positions() {
                         })}
                       </td>
                       <td className="px-4 py-2 text-gray-300">
-                        {p.paper_account_name || '-'}
+                        {p.account_name || '-'}
                       </td>
                     </tr>
                   )

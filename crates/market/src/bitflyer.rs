@@ -24,9 +24,7 @@ struct TickerParams {
 #[derive(serde::Deserialize)]
 struct TickerMessage {
     product_code: String,
-    #[allow(dead_code)]
     best_bid: Decimal,
-    #[allow(dead_code)]
     best_ask: Decimal,
     ltp: Decimal,
     volume: Decimal,
@@ -39,7 +37,14 @@ struct TickerMessage {
 /// the M5-aggregated `PriceEvent` channel, which only fires on
 /// candle boundaries and is therefore unsuitable for "is the feed
 /// alive right now?" health checks.
-pub type RawTick = (Pair, Decimal, chrono::DateTime<chrono::Utc>);
+#[derive(Debug, Clone)]
+pub struct RawTick {
+    pub pair: Pair,
+    pub ltp: Decimal,
+    pub best_bid: Option<Decimal>,
+    pub best_ask: Option<Decimal>,
+    pub ts: chrono::DateTime<chrono::Utc>,
+}
 
 pub struct BitflyerMonitor {
     ws_url: String,
@@ -222,6 +227,8 @@ impl BitflyerMonitor {
 
             let price = ticker.ltp;
             let size = ticker.volume;
+            let best_bid = Some(ticker.best_bid);
+            let best_ask = Some(ticker.best_ask);
             let ts = chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?
                 .with_timezone(&chrono::Utc);
 
@@ -236,7 +243,13 @@ impl BitflyerMonitor {
                 // Construct Pair from product_code; the builders
                 // map keys this on the same string, so this is
                 // always a valid pair we are configured to track.
-                match sink.try_send((Pair::new(product_code), price, ts)) {
+                match sink.try_send(RawTick {
+                    pair: Pair::new(product_code),
+                    ltp: price,
+                    best_bid,
+                    best_ask,
+                    ts,
+                }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         // Drain task is briefly behind. Drop the
@@ -257,8 +270,8 @@ impl BitflyerMonitor {
             }
 
             // on_tick returns completed candle when period boundary is crossed
-            let from_tick = builder.on_tick(price, size, ts);
-            let from_complete = builder.try_complete(ts);
+            let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
+            let from_complete = builder.try_complete(ts, best_bid, best_ask);
             let completed = from_tick.or(from_complete);
 
             if let Some(candle) = completed {

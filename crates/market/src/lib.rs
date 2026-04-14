@@ -4,4 +4,5 @@ pub mod candle_builder;
 pub mod indicators;
 pub mod monitor;
 pub mod oanda;
+pub mod price_store;
 pub mod provider;

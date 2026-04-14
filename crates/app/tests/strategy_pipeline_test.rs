@@ -6,7 +6,7 @@
 //! strategies could not actually open positions on the production paper
 //! accounts. The fix decoupled the layers entirely:
 //!
-//! - Signal layer = chart only (price levels, allocation_pct).
+//! - Signal layer = chart only (stop_loss_pct, allocation_pct).
 //! - Execution layer = balance only (sizer ignores everything chart).
 //!
 //! Each test uses the same account profile as the live paper accounts:
@@ -17,7 +17,8 @@
 //!
 //! and walks the strategy through enough warmup candles to reach a
 //! realistic indicator state, then verifies that *whenever the strategy
-//! emits a signal, the sizer accepts it*.
+//! emits a signal, the sizer accepts it* (using a representative price
+//! since Signal no longer carries entry_price — that is resolved at fill time).
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
@@ -35,6 +36,8 @@ const PAIR: &str = "FX_BTC_JPY";
 const ACCOUNT_BALANCE: Decimal = dec!(30000);
 const LEVERAGE: Decimal = dec!(2);
 const MIN_LOT: Decimal = dec!(0.001);
+// Representative BTC price for sizer tests (Signal no longer carries entry_price)
+const HINT_PRICE: Decimal = dec!(11000000);
 
 fn live_account_sizer() -> PositionSizer {
     let mut min_sizes = HashMap::new();
@@ -57,6 +60,8 @@ fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEve
             low,
             close,
             volume: Some(0),
+            best_bid: None,
+            best_ask: None,
             timestamp: ts,
         },
         indicators: HashMap::new(),
@@ -101,7 +106,7 @@ fn flat_then_trend(
 /// could not place trades on the 30k JPY paper account because the
 /// old risk-based sizer rejected the strategy's signal. The fix moved
 /// to pure capacity sizing — this test verifies the strategy's signal
-/// (now with `entry × 3%` flat SL and `allocation_pct = 0.6`) sizes
+/// (now with `stop_loss_pct` and `allocation_pct = 0.6`) sizes
 /// to a non-zero quantity on the live account profile.
 #[tokio::test]
 async fn donchian_signal_passes_sizer_on_30k_account() {
@@ -122,26 +127,28 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
     let signal =
         emitted.expect("donchian_trend_v1 must emit at least one entry signal in this trend setup");
 
+    // Use a representative price (HINT_PRICE) since Signal no longer carries entry_price.
+    // The sizer only needs a price to compute quantity; the actual fill price is determined
+    // at execution time from the PriceStore.
     let qty = sizer.calculate_quantity(
         &signal.pair,
         ACCOUNT_BALANCE,
-        signal.entry_price,
+        HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
     );
     assert!(
         qty.is_some(),
-        "donchian signal must size to >0 on a 30k JPY account (entry={}, allocation_pct={})",
-        signal.entry_price,
+        "donchian signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        HINT_PRICE,
         signal.allocation_pct
     );
     let qty = qty.unwrap();
     assert!(qty >= MIN_LOT, "quantity {qty} must be at least {MIN_LOT}");
 }
 
-/// Same regression check for squeeze_momentum_v1: with flat 4% SL and
-/// `allocation_pct = 0.9`, the squeeze release signal must size to >0
-/// on the live 30k JPY account.
+/// Same regression check for squeeze_momentum_v1: with `allocation_pct = 0.9`,
+/// the squeeze release signal must size to >0 on the live 30k JPY account.
 #[tokio::test]
 async fn squeeze_signal_passes_sizer_on_30k_account() {
     let mut strat =
@@ -174,21 +181,20 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
     let qty = sizer.calculate_quantity(
         &signal.pair,
         ACCOUNT_BALANCE,
-        signal.entry_price,
+        HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
     );
     assert!(
         qty.is_some(),
-        "squeeze signal must size to >0 on a 30k JPY account (entry={}, allocation_pct={})",
-        signal.entry_price,
+        "squeeze signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        HINT_PRICE,
         signal.allocation_pct
     );
 }
 
-/// Same regression check for bb_mean_revert_v1: with flat 2% SL and
-/// `allocation_pct = 0.3`, the BB-extreme reversal must size to >0
-/// on the live 30k JPY account.
+/// Same regression check for bb_mean_revert_v1: with `allocation_pct = 0.3`,
+/// the BB-extreme reversal must size to >0 on the live 30k JPY account.
 #[tokio::test]
 async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
     let mut strat = BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![Pair::new(PAIR)]);
@@ -219,14 +225,14 @@ async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
     let qty = sizer.calculate_quantity(
         &signal.pair,
         ACCOUNT_BALANCE,
-        signal.entry_price,
+        HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
     );
     assert!(
         qty.is_some(),
-        "bb_mean_revert signal must size to >0 on a 30k JPY account (entry={}, allocation_pct={})",
-        signal.entry_price,
+        "bb_mean_revert signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        HINT_PRICE,
         signal.allocation_pct
     );
 }

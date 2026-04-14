@@ -31,4 +31,8 @@ pub enum TradeAction {
 pub struct TradeEvent {
     pub trade: Trade,
     pub action: TradeAction,
+    /// Account type string ("paper" / "live") carried alongside the trade so
+    /// downstream consumers (e.g. daily-summary recorder) do not need a
+    /// separate `get_account()` DB call per event.
+    pub account_type: Option<String>,
 }

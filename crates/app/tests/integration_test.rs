@@ -31,14 +31,12 @@ async fn channel_pipeline() {
         strategy_name: "test".to_string(),
         pair: Pair::new("USD_JPY"),
         direction: Direction::Long,
-        entry_price: dec!(150.00),
-        stop_loss: dec!(149.50),
-        take_profit: dec!(151.00),
+        stop_loss_pct: dec!(0.003),
+        take_profit_pct: Some(dec!(0.006)),
         confidence: 0.8,
         timestamp: Utc::now(),
         allocation_pct: dec!(0.5),
         max_hold_until: None,
-        order_type: OrderType::Market,
     };
 
     signal_tx

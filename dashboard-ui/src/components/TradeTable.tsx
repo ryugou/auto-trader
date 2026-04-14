@@ -7,10 +7,10 @@ import {
   flexRender,
 } from '@tanstack/react-table'
 import { api } from '../api/client'
-import type { PaperAccount, TradeRow, TradeEvent } from '../api/types'
+import type { TradingAccount, TradeRow, TradeEvent } from '../api/types'
 
 interface TradeTableProps {
-  account: PaperAccount
+  account: TradingAccount
   from?: string
   to?: string
 }
@@ -216,7 +216,7 @@ export default function TradeTable({ account, from, to }: TradeTableProps) {
     queryKey: ['trades', { accountId: account.id, from, to, page }],
     queryFn: () =>
       api.trades.list({
-        paper_account_id: account.id,
+        account_id: account.id,
         from,
         to,
         page: String(page),

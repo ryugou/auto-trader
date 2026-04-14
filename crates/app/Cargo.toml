@@ -9,6 +9,7 @@ auto-trader-db = { workspace = true }
 auto-trader-market = { workspace = true }
 auto-trader-strategy = { workspace = true }
 auto-trader-executor = { workspace = true }
+auto-trader-notify = { workspace = true }
 auto-trader-vegapunk = { workspace = true }
 auto-trader-macro-analyst = { workspace = true }
 tokio = { workspace = true }

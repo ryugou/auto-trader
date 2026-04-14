@@ -80,6 +80,8 @@ impl TryFrom<CandleRow> for Candle {
             low: r.low,
             close: r.close,
             volume: r.volume.map(|v| v as u64),
+            best_bid: None, // DB candles do not store bid/ask (history is mid-price)
+            best_ask: None,
             timestamp: r.timestamp,
         })
     }

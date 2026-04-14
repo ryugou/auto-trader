@@ -1,4 +1,4 @@
-use crate::types::{Position, Signal, Trade};
+use crate::types::{ExitReason, Position, Signal, Trade};
 
 pub trait OrderExecutor: Send + Sync + 'static {
     fn execute(
@@ -11,7 +11,6 @@ pub trait OrderExecutor: Send + Sync + 'static {
     fn close_position(
         &self,
         id: &str,
-        exit_reason: crate::types::ExitReason,
-        exit_price: rust_decimal::Decimal,
+        exit_reason: ExitReason,
     ) -> impl std::future::Future<Output = anyhow::Result<Trade>> + Send;
 }
