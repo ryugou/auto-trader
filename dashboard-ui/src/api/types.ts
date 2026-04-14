@@ -88,16 +88,17 @@ export interface TradeRow {
   entry_price: string
   exit_price: string | null
   stop_loss: string
-  take_profit: string
-  quantity: string | null
+  // null for dynamic-exit strategies (mean-revert / trailing channel etc.)
+  take_profit: string | null
+  // Required after the unified rewrite — every trade has an actual fill quantity.
+  quantity: string
   leverage: string
   fees: string
   pnl_amount: string | null
-  pnl_pips: string | null
   entry_at: string
   exit_at: string | null
   exit_reason: string | null
-  account_id: string | null
+  account_id: string
   account_type: string | null
   status: string
 }
@@ -130,12 +131,14 @@ export interface PositionResponse {
   exchange: string
   direction: string
   entry_price: string
-  quantity: string | null
+  // Required after the unified rewrite — open trades always have a quantity.
+  quantity: string
   stop_loss: string
+  // null for dynamic-exit strategies.
   take_profit: string | null
   fees: string
   entry_at: string
-  account_id: string | null
+  account_id: string
   account_name: string
 }
 

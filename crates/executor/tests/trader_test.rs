@@ -105,8 +105,9 @@ fn build_live_trader(
         "s".to_string(),
     ));
     let notifier = Arc::new(Notifier::new(None));
-    let position_sizer =
-        auto_trader_executor::position_sizer::PositionSizer::new(btc_pair_configs());
+    let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
+        btc_pair_configs(),
+    ));
     Trader::new(
         pool,
         Exchange::BitflyerCfd,
@@ -131,8 +132,9 @@ fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceSt
         "s".to_string(),
     ));
     let notifier = Arc::new(Notifier::new(None));
-    let position_sizer =
-        auto_trader_executor::position_sizer::PositionSizer::new(btc_pair_configs());
+    let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
+        btc_pair_configs(),
+    ));
     Trader::new(
         pool,
         Exchange::BitflyerCfd,

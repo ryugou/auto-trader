@@ -527,6 +527,19 @@ async fn main() -> anyhow::Result<()> {
     let pair_configs: Arc<HashMap<String, auto_trader_core::config::PairConfig>> =
         Arc::new(config.pair_config.clone());
 
+    // Pre-compute the PositionSizer once at startup and share via Arc.
+    // Per-tick reconstruction (every SL/TP check, every strategy exit, every
+    // signal dispatch) was wasting per-iteration allocations + hashing.
+    let shared_position_sizer: Arc<auto_trader_executor::position_sizer::PositionSizer> = {
+        let min_order_sizes: HashMap<Pair, Decimal> = pair_configs
+            .iter()
+            .map(|(k, v)| (Pair::new(k), v.min_order_size))
+            .collect();
+        Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
+            min_order_sizes,
+        ))
+    };
+
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
             Arc::new(Mutex::new(
@@ -691,7 +704,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_bitflyer_api = bitflyer_api.clone();
     let crypto_monitor_price_store = price_store.clone();
     let crypto_monitor_notifier = notifier.clone();
-    let crypto_monitor_pair_configs = pair_configs.clone();
+    let crypto_monitor_position_sizer = shared_position_sizer.clone();
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -760,10 +773,6 @@ async fn main() -> anyhow::Result<()> {
                     exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
-                    let min_order_sizes: HashMap<Pair, Decimal> = crypto_monitor_pair_configs
-                        .iter()
-                        .map(|(k, v)| (Pair::new(k), v.min_order_size))
-                        .collect();
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
                         Exchange::BitflyerCfd,
@@ -772,7 +781,7 @@ async fn main() -> anyhow::Result<()> {
                         crypto_monitor_bitflyer_api.clone(),
                         crypto_monitor_price_store.clone(),
                         crypto_monitor_notifier.clone(),
-                        auto_trader_executor::position_sizer::PositionSizer::new(min_order_sizes),
+                        crypto_monitor_position_sizer.clone(),
                         dry_run,
                     );
                     match trader.close_position(&trade.id.to_string(), reason).await {
@@ -956,7 +965,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_bitflyer_api = bitflyer_api.clone();
     let exit_price_store = price_store.clone();
     let exit_notifier = notifier.clone();
-    let exit_pair_configs = pair_configs.clone();
+    let exit_position_sizer = shared_position_sizer.clone();
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade joined with account info in one query so we
@@ -996,10 +1005,6 @@ async fn main() -> anyhow::Result<()> {
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
             let dry_run = account_type == "paper";
-            let min_order_sizes: HashMap<Pair, Decimal> = exit_pair_configs
-                .iter()
-                .map(|(k, v)| (Pair::new(k), v.min_order_size))
-                .collect();
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
@@ -1008,7 +1013,7 @@ async fn main() -> anyhow::Result<()> {
                 exit_bitflyer_api.clone(),
                 exit_price_store.clone(),
                 exit_notifier.clone(),
-                auto_trader_executor::position_sizer::PositionSizer::new(min_order_sizes),
+                exit_position_sizer.clone(),
                 dry_run,
             );
             // Map the strategy-specific reason onto the ExitReason enum
@@ -1063,7 +1068,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_bitflyer_api = bitflyer_api.clone();
     let executor_price_store = price_store.clone();
     let executor_notifier = notifier.clone();
-    let executor_pair_configs = pair_configs.clone();
+    let executor_position_sizer = shared_position_sizer.clone();
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1112,10 +1117,6 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let dry_run = pac.account_type == "paper";
-                let min_order_sizes: HashMap<Pair, Decimal> = executor_pair_configs
-                    .iter()
-                    .map(|(k, v)| (Pair::new(k), v.min_order_size))
-                    .collect();
                 let trader = UnifiedTrader::new(
                     executor_pool.clone(),
                     exchange,
@@ -1124,7 +1125,7 @@ async fn main() -> anyhow::Result<()> {
                     executor_bitflyer_api.clone(),
                     executor_price_store.clone(),
                     executor_notifier.clone(),
-                    auto_trader_executor::position_sizer::PositionSizer::new(min_order_sizes),
+                    executor_position_sizer.clone(),
                     dry_run,
                 );
                 let name = pac.name.clone();

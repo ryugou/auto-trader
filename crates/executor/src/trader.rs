@@ -43,8 +43,10 @@ pub struct Trader {
     api: Arc<BitflyerPrivateApi>,
     price_store: Arc<PriceStore>,
     notifier: Arc<Notifier>,
-    /// Cached at construction time; one PositionSizer per Trader lifetime.
-    position_sizer: PositionSizer,
+    /// Shared PositionSizer — pre-built at startup, every per-tick task
+    /// holds an `Arc::clone` instead of reconstructing the inner
+    /// HashMap on every signal/SL/TP check.
+    position_sizer: Arc<PositionSizer>,
     dry_run: bool,
 }
 
@@ -58,7 +60,7 @@ impl Trader {
         api: Arc<BitflyerPrivateApi>,
         price_store: Arc<PriceStore>,
         notifier: Arc<Notifier>,
-        position_sizer: PositionSizer,
+        position_sizer: Arc<PositionSizer>,
         dry_run: bool,
     ) -> Self {
         Self {
@@ -507,15 +509,18 @@ impl OrderExecutor for Trader {
             );
             let notifier = self.notifier.clone();
             let account_name = self.account_name.clone();
+            let strategy_name = trade.strategy_name.clone();
+            let pair = trade.pair.clone();
             let trade_id = trade.id;
-            let reason =
-                format!("close DB tx failed after exchange fill (trade stuck in 'closing'): {e}");
+            let reason = format!(
+                "close DB tx failed after exchange fill (trade {trade_id} stuck in 'closing'): {e}"
+            );
             tokio::spawn(async move {
                 let ev = auto_trader_notify::NotifyEvent::OrderFailed(
                     auto_trader_notify::OrderFailedEvent {
                         account_name,
-                        strategy_name: String::new(),
-                        pair: auto_trader_core::types::Pair::new(&format!("trade:{trade_id}")),
+                        strategy_name,
+                        pair,
                         reason,
                     },
                 );
