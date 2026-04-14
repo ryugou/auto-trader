@@ -8,7 +8,9 @@
 --   re-apply existing halts.
 
 -- Pattern B: status is TEXT without CHECK constraint (confirmed in Step 1).
--- No existing CHECK constraint to drop, so we add a new one.
+-- DROP IF EXISTS keeps the migration idempotent for DR / manual re-runs;
+-- ADD CONSTRAINT itself has no IF NOT EXISTS in PostgreSQL 16.
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_status_check;
 ALTER TABLE trades
     ADD CONSTRAINT trades_status_check
     CHECK (status IN ('pending', 'open', 'closed', 'inconsistent'));
@@ -21,9 +23,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS trades_one_active_per_strategy_pair
     ON trades (paper_account_id, strategy_name, pair)
     WHERE status IN ('pending', 'open');
 
+-- risk_halts is an audit log: halt history must survive account
+-- deletion attempts. ON DELETE RESTRICT blocks paper_accounts
+-- deletion if any halt row references it — forcing the operator
+-- to consciously archive or reassign halts before removing an
+-- account. CASCADE would silently wipe the audit trail.
 CREATE TABLE IF NOT EXISTS risk_halts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    paper_account_id UUID NOT NULL REFERENCES paper_accounts(id),
+    paper_account_id UUID NOT NULL REFERENCES paper_accounts(id) ON DELETE RESTRICT,
     reason TEXT NOT NULL,
     triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     halted_until TIMESTAMPTZ NOT NULL,
