@@ -91,7 +91,7 @@ pub struct GeminiConfig {
     // api_key is read from GEMINI_API_KEY env var (1Password + direnv)
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct BitflyerConfig {
     pub ws_url: String,
     pub api_url: String,
@@ -101,6 +101,23 @@ pub struct BitflyerConfig {
     /// BITFLYER_API_SECRET env から埋める。config/default.toml には書かない。
     #[serde(skip, default)]
     pub api_secret: Option<String>,
+}
+
+// Debug を derive せず手書きすることで、将来 `tracing::debug!("{:?}", cfg)`
+// や panic の unwrap メッセージから api_key / api_secret が漏洩する事故を
+// 型レベルで防ぐ。
+impl std::fmt::Debug for BitflyerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitflyerConfig")
+            .field("ws_url", &self.ws_url)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***redacted***"))
+            .field(
+                "api_secret",
+                &self.api_secret.as_ref().map(|_| "***redacted***"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -144,6 +161,45 @@ impl AppConfig {
         let content = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&content)?;
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn bitflyer_config_debug_redacts_api_key_and_secret() {
+        let cfg = BitflyerConfig {
+            ws_url: "wss://example".to_string(),
+            api_url: "https://example".to_string(),
+            api_key: Some("AKIA_SHOULD_NEVER_APPEAR".to_string()),
+            api_secret: Some("SUPER_SECRET_SHOULD_NEVER_APPEAR".to_string()),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("AKIA_SHOULD_NEVER_APPEAR"),
+            "api_key leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("SUPER_SECRET_SHOULD_NEVER_APPEAR"),
+            "api_secret leaked: {rendered}"
+        );
+        assert!(rendered.contains("redacted"));
+        assert!(rendered.contains("wss://example"));
+    }
+
+    #[test]
+    fn bitflyer_config_debug_shows_none_when_unset() {
+        let cfg = BitflyerConfig {
+            ws_url: "wss://example".to_string(),
+            api_url: "https://example".to_string(),
+            api_key: None,
+            api_secret: None,
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("api_key: None"));
+        assert!(rendered.contains("api_secret: None"));
     }
 }
 
