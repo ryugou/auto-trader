@@ -792,8 +792,13 @@ async fn apply_overnight_fee_is_atomic(pool: PgPool) {
             .expect("apply_overnight_fee failed");
     tx.commit().await.expect("commit tx");
 
-    // 1. Returned balance must equal initial - fee
-    assert_eq!(new_balance, dec!(29_900), "new_balance must be 30000 - 100");
+    // 1. Returned balance must be Some(initial - fee) — None means the trade
+    //    was not in 'open' status and the fee was skipped.
+    assert_eq!(
+        new_balance,
+        Some(dec!(29_900)),
+        "new_balance must be Some(30000 - 100) for an open live trade"
+    );
 
     // 2. Account balance in DB must be updated
     let db_balance: rust_decimal::Decimal =

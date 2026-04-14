@@ -85,7 +85,10 @@ pub async fn lock_margin(
     )
     .bind(account_id)
     .bind(trade_id)
-    .bind(margin_amount)
+    // Cash delta is negative — locking margin removes free cash from the
+    // account. Storing the sign correctly keeps SUM(amount) reconcilable
+    // against current_balance for ledger invariants.
+    .bind(-margin_amount)
     .bind(new_balance)
     .execute(&mut *tx)
     .await?;
@@ -150,9 +153,9 @@ pub const STALE_CLOSING_THRESHOLD_SECS: i64 = 300;
 /// dropped (cancellation, panic, process crash) without calling
 /// `release_close_lock`, the trade would normally remain stuck in
 /// `closing` forever. To prevent this, the WHERE clause also accepts
-/// rows already in `closing` status whose `created_at` is older than
-/// `STALE_CLOSING_THRESHOLD_SECS` ago — adopting the orphan instead
-/// of leaking it.
+/// rows already in `closing` status whose `closing_started_at` is older
+/// than `STALE_CLOSING_THRESHOLD_SECS` ago — adopting the orphan
+/// instead of leaking it.
 ///
 /// This is the **only** correct entry point for closing a trade in
 /// live mode: it prevents two concurrent close paths from both
@@ -176,7 +179,7 @@ where
                OR (
                  status = 'closing'
                  AND closing_started_at IS NOT NULL
-                 AND closing_started_at < NOW() - ($3 || ' seconds')::INTERVAL
+                 AND closing_started_at < NOW() - INTERVAL '1 second' * $3
                )
              )
            RETURNING id, strategy_name, pair, exchange, direction, entry_price, exit_price,
@@ -186,7 +189,7 @@ where
     )
     .bind(trade_id)
     .bind(account_id)
-    .bind(STALE_CLOSING_THRESHOLD_SECS.to_string())
+    .bind(STALE_CLOSING_THRESHOLD_SECS)
     .fetch_optional(executor)
     .await?;
     row.map(|r| r.try_into()).transpose()
@@ -216,18 +219,45 @@ where
 /// Apply an overnight fee for a single trade inside a transaction.
 ///
 /// Atomically:
-///   1. Deducts `fee_amount` from `trading_accounts.current_balance`
-///   2. Increments `trades.fees` for the given trade
-///   3. Inserts an `account_events` row with `event_type = 'overnight_fee'`
+///   1. Verifies the trade is still `status='open'` and belongs to the
+///      account (CAS via `WHERE id=$1 AND account_id=$2 AND status='open'`).
+///      Returns `Ok(None)` and skips all side effects if the trade has
+///      closed or transitioned to `closing` between the caller's open-list
+///      fetch and this transaction (preventing fee on an already-closed
+///      trade).
+///   2. Deducts `fee_amount` from `trading_accounts.current_balance`
+///   3. Increments `trades.fees` for the given trade
+///   4. Inserts an `account_events` row with `event_type = 'overnight_fee'`
 ///
-/// Returns the account's new balance after the deduction.
+/// Returns `Ok(Some(new_balance))` when the fee was applied, `Ok(None)`
+/// when the trade was no longer open and nothing was changed.
 pub async fn apply_overnight_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
     trade_id: Uuid,
     fee_amount: Decimal,
-) -> anyhow::Result<Decimal> {
-    // 1. Deduct from balance (SELECT … FOR UPDATE implicitly via UPDATE)
+) -> anyhow::Result<Option<Decimal>> {
+    // 1. Increment fees with CAS — bails out cleanly if the trade is no
+    //    longer open. The UPDATE is the lock; PostgreSQL takes the row
+    //    lock implicitly during the modify, so a concurrent close that
+    //    also writes this row will serialise behind us (and lose the CAS
+    //    if we go first, or vice versa).
+    let trade_updated = sqlx::query(
+        "UPDATE trades SET fees = fees + $3
+         WHERE id = $1 AND account_id = $2 AND status = 'open'",
+    )
+    .bind(trade_id)
+    .bind(account_id)
+    .bind(fee_amount)
+    .execute(&mut *tx)
+    .await?;
+
+    if trade_updated.rows_affected() == 0 {
+        // Trade is closed/closing or not on this account → skip.
+        return Ok(None);
+    }
+
+    // 2. Deduct from balance (SELECT … FOR UPDATE implicitly via UPDATE)
     let new_balance: Decimal = sqlx::query_scalar(
         r#"UPDATE trading_accounts
            SET current_balance = current_balance - $2
@@ -238,13 +268,6 @@ pub async fn apply_overnight_fee(
     .bind(fee_amount)
     .fetch_one(&mut *tx)
     .await?;
-
-    // 2. Accumulate fee on the trade row
-    sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
-        .bind(trade_id)
-        .bind(fee_amount)
-        .execute(&mut *tx)
-        .await?;
 
     // 3. Record in account_events (amount is negative to indicate outflow)
     sqlx::query(
@@ -258,7 +281,7 @@ pub async fn apply_overnight_fee(
     .execute(&mut *tx)
     .await?;
 
-    Ok(new_balance)
+    Ok(Some(new_balance))
 }
 
 /// Update a trade to closed state inside the given transaction.

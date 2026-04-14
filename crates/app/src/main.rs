@@ -1516,27 +1516,39 @@ async fn main() -> anyhow::Result<()> {
                         if fee.is_zero() {
                             continue;
                         }
-                        // Apply overnight fee atomically: balance deduction +
-                        // trades.fees increment + account_events insert in one tx.
-                        // This prevents race conditions with concurrent close_position calls.
+                        // Apply overnight fee atomically: trades.fees CAS +
+                        // balance deduction + account_events insert in one tx.
+                        // apply_overnight_fee returns Ok(None) if the trade
+                        // closed between the open-list fetch above and this
+                        // tx (the CAS on `status='open'` skips it cleanly so
+                        // a closing trade never gets double-charged).
                         let result = async {
                             let mut tx = overnight_pool.begin().await?;
-                            auto_trader_db::trades::apply_overnight_fee(
+                            let applied = auto_trader_db::trades::apply_overnight_fee(
                                 &mut tx, pac.id, trade.id, fee,
                             )
                             .await?;
                             tx.commit().await?;
-                            anyhow::Ok(())
+                            anyhow::Ok(applied)
                         }
                         .await;
-                        if let Err(e) = result {
-                            tracing::error!(
-                                "overnight fee: apply_overnight_fee failed for trade {}: {e}",
-                                trade.id
-                            );
-                            continue;
+                        match result {
+                            Ok(Some(_new_balance)) => {
+                                total_fee += fee;
+                            }
+                            Ok(None) => {
+                                tracing::debug!(
+                                    "overnight fee: skipping trade {} — closed before fee tx",
+                                    trade.id
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "overnight fee: apply_overnight_fee failed for trade {}: {e}",
+                                    trade.id
+                                );
+                            }
                         }
-                        total_fee += fee;
                     }
                     if total_fee > Decimal::ZERO {
                         tracing::info!("overnight fee applied: {} = {} JPY", pac.name, total_fee);
