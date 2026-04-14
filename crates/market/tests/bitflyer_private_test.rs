@@ -209,3 +209,97 @@ async fn get_executions_returns_list() {
     assert_eq!(execs.len(), 1);
     assert_eq!(execs[0].price, dec!(11500000));
 }
+
+#[tokio::test]
+async fn get_positions_returns_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getpositions"))
+        .and(query_param("product_code", "FX_BTC_JPY"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{
+                "product_code": "FX_BTC_JPY",
+                "side": "BUY",
+                "price": "11500000",
+                "size": "0.01",
+                "commission": "0",
+                "swap_point_accumulate": "0",
+                "require_collateral": "57500",
+                "open_date": "2026-04-14T10:04:45.011",
+                "leverage": "2",
+                "pnl": "0",
+                "sfd": "0"
+            }]"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let positions = api.get_positions("FX_BTC_JPY").await.unwrap();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].size, dec!(0.01));
+    assert_eq!(positions[0].product_code, "FX_BTC_JPY");
+}
+
+#[tokio::test]
+async fn get_collateral_returns_struct() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getcollateral"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "collateral": "30000",
+                "open_position_pnl": "-123",
+                "require_collateral": "15000",
+                "keep_rate": "2.0"
+            }"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let c = api.get_collateral().await.unwrap();
+    assert_eq!(c.collateral, dec!(30000));
+    assert_eq!(c.open_position_pnl, dec!(-123));
+}
+
+#[tokio::test]
+async fn cancel_child_order_returns_unit_on_200() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/me/cancelchildorder"))
+        .and(header_exists("ACCESS-SIGN"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    api.cancel_child_order("FX_BTC_JPY", "JRF20260414-050237-639234")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancel_child_order_unknown_id_maps_to_order_not_found() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/me/cancelchildorder"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_string(
+                r#"{"status":-208,"error_message":"Order not found","data":null}"#,
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let err = api
+        .cancel_child_order("FX_BTC_JPY", "bogus")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BitflyerApiError::OrderNotFound(_)));
+}

@@ -414,6 +414,47 @@ impl BitflyerPrivateApi {
         serde_json::from_str(&text)
             .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
     }
+
+    /// `GET /v1/me/getpositions` — 保有建玉一覧 (FX/CFD 専用)。
+    pub async fn get_positions(
+        &self,
+        product_code: &str,
+    ) -> Result<Vec<ExchangePosition>, BitflyerApiError> {
+        let path = format!("/v1/me/getpositions?product_code={}", product_code);
+        let text = self.request("GET", &path, "").await?;
+        serde_json::from_str(&text)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+    }
+
+    /// `GET /v1/me/getcollateral` — 証拠金の現在状態。
+    pub async fn get_collateral(&self) -> Result<Collateral, BitflyerApiError> {
+        let text = self.request("GET", "/v1/me/getcollateral", "").await?;
+        serde_json::from_str(&text)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+    }
+
+    /// `POST /v1/me/cancelchildorder` — 未約定注文をキャンセルする。
+    /// 成功時は 2xx 空 body が返るため、型上は `()` を返す。
+    pub async fn cancel_child_order(
+        &self,
+        product_code: &str,
+        child_order_acceptance_id: &str,
+    ) -> Result<(), BitflyerApiError> {
+        #[derive(Serialize)]
+        struct CancelRequest<'a> {
+            product_code: &'a str,
+            child_order_acceptance_id: &'a str,
+        }
+        let body = serde_json::to_string(&CancelRequest {
+            product_code,
+            child_order_acceptance_id,
+        })
+        .map_err(|e| BitflyerApiError::InvalidResponse(format!("serialize: {e}")))?;
+        let _ = self
+            .request("POST", "/v1/me/cancelchildorder", &body)
+            .await?;
+        Ok(())
+    }
 }
 
 /// HTTP レスポンスの `Retry-After` ヘッダから待機時間を解析する。
