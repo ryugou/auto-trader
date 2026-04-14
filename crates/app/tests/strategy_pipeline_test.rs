@@ -57,6 +57,8 @@ fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEve
             low,
             close,
             volume: Some(0),
+            best_bid: None,
+            best_ask: None,
             timestamp: ts,
         },
         indicators: HashMap::new(),

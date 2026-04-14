@@ -129,6 +129,8 @@ impl OandaClient {
                 low: Decimal::from_str(&c.mid.l)?,
                 close: Decimal::from_str(&c.mid.c)?,
                 volume: c.volume,
+                best_bid: None, // OANDA mid-price candles do not carry bid/ask
+                best_ask: None,
                 timestamp,
             });
         }

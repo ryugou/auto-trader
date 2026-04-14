@@ -32,7 +32,13 @@ impl FeedKey {
 
 #[derive(Debug, Clone)]
 pub struct LatestTick {
+    /// Last traded price (LTP).
     pub price: Decimal,
+    /// Best bid at the time of the tick. `None` for sources without bid/ask
+    /// (e.g. OANDA mid-price).
+    pub best_bid: Option<Decimal>,
+    /// Best ask at the time of the tick. `None` for sources without bid/ask.
+    pub best_ask: Option<Decimal>,
     pub ts: DateTime<Utc>,
 }
 
@@ -96,6 +102,18 @@ impl PriceStore {
         guard.get(key).cloned()
     }
 
+    /// Return `(bid, ask)` for the given pair only when both sides are present.
+    /// Returns `None` if the feed has never been observed, or if the stored
+    /// tick does not carry bid/ask (e.g. OANDA mid-price data).
+    pub async fn latest_bid_ask(&self, key: &FeedKey) -> Option<(Decimal, Decimal)> {
+        let guard = self.latest.read().await;
+        let tick = guard.get(key)?;
+        match (tick.best_bid, tick.best_ask) {
+            (Some(bid), Some(ask)) => Some((bid, ask)),
+            _ => None,
+        }
+    }
+
     pub async fn snapshot(&self) -> Vec<(FeedKey, LatestTick)> {
         let guard = self.latest.read().await;
         guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -151,6 +169,8 @@ mod tests {
     fn tick(price: i64, ts: DateTime<Utc>) -> LatestTick {
         LatestTick {
             price: Decimal::from(price),
+            best_bid: None,
+            best_ask: None,
             ts,
         }
     }

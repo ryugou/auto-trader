@@ -591,14 +591,19 @@ async fn main() -> anyhow::Result<()> {
     // as the BitflyerMonitor is alive.
     let raw_tick_store = price_store.clone();
     let _raw_tick_drain_handle = tokio::spawn(async move {
-        while let Some((pair, price, ts)) = raw_tick_rx.recv().await {
+        while let Some(tick) = raw_tick_rx.recv().await {
             raw_tick_store
                 .update(
                     crate::price_store::FeedKey::new(
                         auto_trader_core::types::Exchange::BitflyerCfd,
-                        pair,
+                        tick.pair,
                     ),
-                    crate::price_store::LatestTick { price, ts },
+                    crate::price_store::LatestTick {
+                        price: tick.ltp,
+                        best_bid: tick.best_bid,
+                        best_ask: tick.best_ask,
+                        ts: tick.ts,
+                    },
                 )
                 .await;
         }
@@ -823,6 +828,8 @@ async fn main() -> anyhow::Result<()> {
                                     ),
                                     crate::price_store::LatestTick {
                                         price: event.candle.close,
+                                        best_bid: event.candle.best_bid,
+                                        best_ask: event.candle.best_ask,
                                         ts: event.timestamp,
                                     },
                                 )

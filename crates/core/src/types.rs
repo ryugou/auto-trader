@@ -190,6 +190,14 @@ pub struct Candle {
     pub low: Decimal,
     pub close: Decimal,
     pub volume: Option<u64>,
+    /// Best bid price at candle close. `None` for data sources that do not
+    /// provide bid/ask (e.g. OANDA mid-price candles).
+    #[serde(default)]
+    pub best_bid: Option<Decimal>,
+    /// Best ask price at candle close. `None` for data sources that do not
+    /// provide bid/ask (e.g. OANDA mid-price candles).
+    #[serde(default)]
+    pub best_ask: Option<Decimal>,
     pub timestamp: DateTime<Utc>,
 }
 

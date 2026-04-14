@@ -273,6 +273,8 @@ mod tests {
                 low,
                 close,
                 volume: Some(0),
+                best_bid: None,
+                best_ask: None,
                 timestamp: Utc::now(),
             },
             indicators: HashMap::new(),
