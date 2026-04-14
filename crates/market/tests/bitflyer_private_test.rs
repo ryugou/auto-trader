@@ -110,3 +110,102 @@ async fn send_child_order_invalid_api_key_maps_to_typed_error() {
     let err = api.send_child_order(req).await.unwrap_err();
     assert!(matches!(err, BitflyerApiError::InvalidApiKey));
 }
+
+use wiremock::matchers::query_param;
+
+#[tokio::test]
+async fn get_child_orders_returns_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getchildorders"))
+        .and(query_param("product_code", "FX_BTC_JPY"))
+        .and(query_param(
+            "child_order_acceptance_id",
+            "JRF20260414-050237-639234",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{
+                "id": 1,
+                "child_order_id": "JOR20260414-050237-639234",
+                "product_code": "FX_BTC_JPY",
+                "side": "BUY",
+                "child_order_type": "MARKET",
+                "price": "0",
+                "average_price": "11500000",
+                "size": "0.01",
+                "child_order_state": "COMPLETED",
+                "expire_date": "2026-05-14T07:25:47",
+                "child_order_date": "2026-04-14T08:45:47",
+                "child_order_acceptance_id": "JRF20260414-050237-639234",
+                "outstanding_size": "0",
+                "cancel_size": "0",
+                "executed_size": "0.01",
+                "total_commission": "0"
+            }]"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let orders = api
+        .get_child_orders("FX_BTC_JPY", "JRF20260414-050237-639234")
+        .await
+        .unwrap();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0].child_order_id, "JOR20260414-050237-639234");
+    assert_eq!(orders[0].executed_size, dec!(0.01));
+}
+
+#[tokio::test]
+async fn get_child_orders_empty_list_is_ok() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getchildorders"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let orders = api
+        .get_child_orders("FX_BTC_JPY", "unknown_id")
+        .await
+        .unwrap();
+    assert!(orders.is_empty());
+}
+
+#[tokio::test]
+async fn get_executions_returns_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getexecutions"))
+        .and(query_param("product_code", "FX_BTC_JPY"))
+        .and(query_param(
+            "child_order_acceptance_id",
+            "JRF20260414-050237-639234",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{
+                "id": 99,
+                "child_order_id": "JOR20260414-050237-639234",
+                "side": "BUY",
+                "price": "11500000",
+                "size": "0.01",
+                "commission": "0",
+                "exec_date": "2026-04-14T09:57:40.397",
+                "child_order_acceptance_id": "JRF20260414-050237-639234"
+            }]"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let execs = api
+        .get_executions("FX_BTC_JPY", "JRF20260414-050237-639234")
+        .await
+        .unwrap();
+    assert_eq!(execs.len(), 1);
+    assert_eq!(execs[0].price, dec!(11500000));
+}

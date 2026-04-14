@@ -382,6 +382,38 @@ impl BitflyerPrivateApi {
         serde_json::from_str(&text)
             .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
     }
+
+    /// `GET /v1/me/getchildorders` — `child_order_acceptance_id` で特定の
+    /// 注文 (とその状態) を取得する。bitFlyer は複数件返すが、acceptance_id
+    /// で絞ると通常 1 件。
+    pub async fn get_child_orders(
+        &self,
+        product_code: &str,
+        child_order_acceptance_id: &str,
+    ) -> Result<Vec<ChildOrder>, BitflyerApiError> {
+        let path = format!(
+            "/v1/me/getchildorders?product_code={}&child_order_acceptance_id={}",
+            product_code, child_order_acceptance_id
+        );
+        let text = self.request("GET", &path, "").await?;
+        serde_json::from_str(&text)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+    }
+
+    /// `GET /v1/me/getexecutions` — 約定一覧を取得する。
+    pub async fn get_executions(
+        &self,
+        product_code: &str,
+        child_order_acceptance_id: &str,
+    ) -> Result<Vec<Execution>, BitflyerApiError> {
+        let path = format!(
+            "/v1/me/getexecutions?product_code={}&child_order_acceptance_id={}",
+            product_code, child_order_acceptance_id
+        );
+        let text = self.request("GET", &path, "").await?;
+        serde_json::from_str(&text)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+    }
 }
 
 /// HTTP レスポンスの `Retry-After` ヘッダから待機時間を解析する。
