@@ -79,3 +79,40 @@ async fn notifier_noop_when_url_none() {
     });
     notifier.send(ev).await.expect("noop should return Ok");
 }
+
+/// 回帰防止: `reqwest::Error` の Display は失敗した URL (= Slack
+/// Webhook secret) を含むため、`NotifyError::Http` に流し込む前に
+/// `without_url()` で落とす必要がある。接続先が存在しない URL
+/// (即座に connection refused を起こす 127.0.0.1:1 へ、認識可能な
+/// secret マーカーを path に入れて) POST させ、`NotifyError::Http`
+/// の Display / Debug 出力に URL / secret 文字列が含まれないこと
+/// を検証する。
+#[tokio::test]
+async fn notifier_http_error_does_not_leak_webhook_url() {
+    // 127.0.0.1:1 は通常 connection refused。path に secret マーカーを
+    // 入れることで、redact が効いていない場合に検出できる。
+    let url_with_secret_marker = "http://127.0.0.1:1/services/SECRET_TOKEN_NEVER_LEAK".to_string();
+    let notifier = Notifier::new(Some(url_with_secret_marker));
+
+    let ev = NotifyEvent::KillSwitchReleased(KillSwitchReleasedEvent {
+        account_name: "通常".into(),
+    });
+    let err = notifier
+        .send(ev)
+        .await
+        .expect_err("send should fail against closed port");
+    let rendered_display = format!("{err}");
+    let rendered_debug = format!("{err:?}");
+    assert!(
+        !rendered_display.contains("SECRET_TOKEN_NEVER_LEAK"),
+        "URL leaked in Display: {rendered_display}"
+    );
+    assert!(
+        !rendered_debug.contains("SECRET_TOKEN_NEVER_LEAK"),
+        "URL leaked in Debug: {rendered_debug}"
+    );
+    assert!(
+        !rendered_display.contains("127.0.0.1:1"),
+        "host:port leaked in Display: {rendered_display}"
+    );
+}
