@@ -11,9 +11,18 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- 1) drop old tables and types
+-- Include the *newly-introduced* tables (trading_accounts, account_events)
+-- in the drop list too: if a prior attempt at this migration partially
+-- succeeded or a dev manually reset the _sqlx_migrations row, a stale
+-- version of these tables could still exist. `CREATE TABLE IF NOT EXISTS`
+-- below would then silently preserve the old schema, leading to subtle
+-- drift. Dropping up front guarantees this migration always produces
+-- the intended clean schema on re-run.
 DROP TABLE IF EXISTS paper_account_events CASCADE;
+DROP TABLE IF EXISTS account_events CASCADE;
 DROP TABLE IF EXISTS trades CASCADE;
 DROP TABLE IF EXISTS paper_accounts CASCADE;
+DROP TABLE IF EXISTS trading_accounts CASCADE;
 DROP TABLE IF EXISTS notifications CASCADE;
 DROP TABLE IF EXISTS strategy_params CASCADE;
 DROP TABLE IF EXISTS strategies CASCADE;
