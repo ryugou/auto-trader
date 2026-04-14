@@ -16,10 +16,7 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
 /// keep the trade INSERT atomic with the balance update + event row,
 /// without duplicating the column / serialization logic in the
 /// executor crate.
-pub async fn insert_trade_with_executor<'e, E>(
-    executor: E,
-    trade: &Trade,
-) -> anyhow::Result<()>
+pub async fn insert_trade_with_executor<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
@@ -84,7 +81,11 @@ pub async fn update_trade_closed(
     .bind(exit_at)
     .bind(pnl_pips)
     .bind(pnl_amount)
-    .bind(serde_json::to_string(&exit_reason).unwrap_or_default().trim_matches('"'))
+    .bind(
+        serde_json::to_string(&exit_reason)
+            .unwrap_or_default()
+            .trim_matches('"'),
+    )
     .bind(fees)
     .execute(pool)
     .await?;
@@ -467,6 +468,8 @@ impl TryFrom<TradeRow> for Trade {
         let status = match r.status.as_str() {
             "open" => TradeStatus::Open,
             "closed" => TradeStatus::Closed,
+            "pending" => TradeStatus::Pending,
+            "inconsistent" => TradeStatus::Inconsistent,
             other => anyhow::bail!("unknown status: {other}"),
         };
         let exit_reason = r

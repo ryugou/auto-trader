@@ -96,6 +96,10 @@ impl std::fmt::Display for TradeMode {
 pub enum TradeStatus {
     Open,
     Closed,
+    /// 注文を取引所に送信済みで約定確認待ち (live のみ)。
+    Pending,
+    /// DB と取引所で状態が食い違い、手動対処が必要。
+    Inconsistent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +328,32 @@ mod tests {
         };
         let json = serde_json::to_string(&signal).unwrap();
         assert!(json.contains(r#""order_type":{"type":"limit","price":"150.5"}"#));
+    }
+
+    #[test]
+    fn trade_status_serializes_pending() {
+        let json = serde_json::to_string(&TradeStatus::Pending).unwrap();
+        assert_eq!(json, r#""pending""#);
+    }
+
+    #[test]
+    fn trade_status_serializes_inconsistent() {
+        let json = serde_json::to_string(&TradeStatus::Inconsistent).unwrap();
+        assert_eq!(json, r#""inconsistent""#);
+    }
+
+    #[test]
+    fn trade_status_roundtrip_all_variants() {
+        for status in [
+            TradeStatus::Open,
+            TradeStatus::Closed,
+            TradeStatus::Pending,
+            TradeStatus::Inconsistent,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: TradeStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status);
+        }
     }
 
     #[test]
