@@ -82,6 +82,25 @@ pub enum OrderType {
     },
 }
 
+impl OrderType {
+    /// 指値注文を構築する。price が 0 以下の場合は Err を返し、
+    /// 戦略側の計算バグ / 取引所側の異常レスポンスを型境界で弾く。
+    /// `unreachable!()` / `todo!()` で済ませない理由は PR 1 Batch A
+    /// レビューの FOLLOWUP 参照。
+    pub fn limit(price: Decimal) -> Result<Self, InvalidOrderTypeError> {
+        if price <= Decimal::ZERO {
+            return Err(InvalidOrderTypeError::NonPositiveLimitPrice(price));
+        }
+        Ok(OrderType::Limit { price })
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum InvalidOrderTypeError {
+    #[error("limit order price must be > 0, got {0}")]
+    NonPositiveLimitPrice(Decimal),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeMode {
@@ -244,6 +263,42 @@ pub struct Trade {
     /// Paper トレードでは None。pending 中も None。
     #[serde(default)]
     pub child_order_id: Option<String>,
+}
+
+/// テスト専用の Default 実装。
+/// 本番コードからは呼ばれないよう `#[cfg(test)]` でガード済み。
+/// (PR 2 以降で Trade にフィールドを足しても、戦略 / backtest /
+/// paper のテスト固有 Trade リテラルを全書き換えしないで済むよう、
+/// ベースライン Trade を用意する。)
+#[cfg(any(test, feature = "testing"))]
+impl Default for Trade {
+    fn default() -> Self {
+        Self {
+            id: Uuid::nil(),
+            strategy_name: String::from("test_strategy"),
+            pair: Pair::new("FX_BTC_JPY"),
+            exchange: Exchange::BitflyerCfd,
+            direction: Direction::Long,
+            entry_price: rust_decimal::Decimal::ZERO,
+            exit_price: None,
+            stop_loss: rust_decimal::Decimal::ZERO,
+            take_profit: rust_decimal::Decimal::ZERO,
+            quantity: None,
+            leverage: rust_decimal::Decimal::ONE,
+            fees: rust_decimal::Decimal::ZERO,
+            paper_account_id: None,
+            entry_at: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            exit_at: None,
+            pnl_pips: None,
+            pnl_amount: None,
+            exit_reason: None,
+            mode: TradeMode::Paper,
+            status: TradeStatus::Open,
+            max_hold_until: None,
+            child_order_acceptance_id: None,
+            child_order_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,6 +506,33 @@ mod tests {
     #[should_panic(expected = "paper/backtest trade must not have status")]
     fn assert_valid_for_mode_panics_on_backtest_pending() {
         TradeStatus::Pending.assert_valid_for_mode(TradeMode::Backtest);
+    }
+
+    #[test]
+    fn trade_default_produces_paper_open_with_none_order_ids() {
+        let t = Trade::default();
+        assert_eq!(t.mode, TradeMode::Paper);
+        assert_eq!(t.status, TradeStatus::Open);
+        assert!(t.child_order_acceptance_id.is_none());
+        assert!(t.child_order_id.is_none());
+        assert_eq!(t.direction, Direction::Long);
+        assert_eq!(t.exchange, Exchange::BitflyerCfd);
+    }
+
+    #[test]
+    fn order_type_limit_new_accepts_positive_price() {
+        let ot = OrderType::limit(dec!(100.5)).unwrap();
+        assert!(matches!(ot, OrderType::Limit { price } if price == dec!(100.5)));
+    }
+
+    #[test]
+    fn order_type_limit_new_rejects_zero() {
+        assert!(OrderType::limit(Decimal::ZERO).is_err());
+    }
+
+    #[test]
+    fn order_type_limit_new_rejects_negative() {
+        assert!(OrderType::limit(dec!(-1)).is_err());
     }
 
     #[test]
