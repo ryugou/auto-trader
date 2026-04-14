@@ -3,10 +3,7 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn update_daily_max_drawdown(
-    pool: &PgPool,
-    date: NaiveDate,
-) -> anyhow::Result<()> {
+pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
     // Get all closed trades for the UTC date, ordered by exit_at
     let rows: Vec<(String, String, String, String, Option<Uuid>, Decimal)> = sqlx::query_as(
         "SELECT strategy_name, pair, mode, exchange, paper_account_id, pnl_amount

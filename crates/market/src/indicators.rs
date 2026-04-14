@@ -82,7 +82,12 @@ pub fn bollinger_bands(
 /// Inputs are aligned slices: `highs[i]`, `lows[i]`, `closes[i]` describe the
 /// same bar. The first ATR value is computed at index `period`, so caller
 /// must pass at least `period + 1` bars.
-pub fn atr(highs: &[Decimal], lows: &[Decimal], closes: &[Decimal], period: usize) -> Option<Decimal> {
+pub fn atr(
+    highs: &[Decimal],
+    lows: &[Decimal],
+    closes: &[Decimal],
+    period: usize,
+) -> Option<Decimal> {
     if highs.len() != lows.len() || lows.len() != closes.len() {
         return None;
     }
@@ -152,9 +157,7 @@ pub fn adx(
     closes: &[Decimal],
     period: usize,
 ) -> Option<Decimal> {
-    if highs.len() < period * 2 + 1
-        || lows.len() < period * 2 + 1
-        || closes.len() < period * 2 + 1
+    if highs.len() < period * 2 + 1 || lows.len() < period * 2 + 1 || closes.len() < period * 2 + 1
     {
         return None;
     }
@@ -269,9 +272,21 @@ mod tests {
     #[test]
     fn rsi_mixed() {
         let prices = vec![
-            dec!(44), dec!(44.34), dec!(44.09), dec!(43.61), dec!(44.33),
-            dec!(44.83), dec!(45.10), dec!(45.42), dec!(45.84), dec!(46.08),
-            dec!(45.89), dec!(46.03), dec!(45.61), dec!(46.28), dec!(46.28),
+            dec!(44),
+            dec!(44.34),
+            dec!(44.09),
+            dec!(43.61),
+            dec!(44.33),
+            dec!(44.83),
+            dec!(45.10),
+            dec!(45.42),
+            dec!(45.84),
+            dec!(46.08),
+            dec!(45.89),
+            dec!(46.03),
+            dec!(45.61),
+            dec!(46.28),
+            dec!(46.28),
         ];
         let result = rsi(&prices, 14).unwrap();
         let f = result.to_f64().unwrap();

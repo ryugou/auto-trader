@@ -21,7 +21,10 @@ pub struct SignalEvent {
 #[derive(Debug, Clone)]
 pub enum TradeAction {
     Opened,
-    Closed { exit_price: Decimal, exit_reason: ExitReason },
+    Closed {
+        exit_price: Decimal,
+        exit_reason: ExitReason,
+    },
 }
 
 #[derive(Debug, Clone)]

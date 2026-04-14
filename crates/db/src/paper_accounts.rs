@@ -97,9 +97,7 @@ pub struct UpdatePaperAccount {
 const ACCOUNT_COLUMNS: &str = "id, name, exchange, initial_balance, current_balance, currency, leverage, strategy, account_type, created_at, updated_at";
 
 pub async fn list_paper_accounts(pool: &PgPool) -> anyhow::Result<Vec<PaperAccount>> {
-    let sql = format!(
-        "SELECT {ACCOUNT_COLUMNS} FROM paper_accounts ORDER BY created_at ASC"
-    );
+    let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM paper_accounts ORDER BY created_at ASC");
     let accounts = sqlx::query_as::<_, PaperAccount>(&sql)
         .fetch_all(pool)
         .await?;
@@ -107,9 +105,7 @@ pub async fn list_paper_accounts(pool: &PgPool) -> anyhow::Result<Vec<PaperAccou
 }
 
 pub async fn get_paper_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<PaperAccount>> {
-    let sql = format!(
-        "SELECT {ACCOUNT_COLUMNS} FROM paper_accounts WHERE id = $1"
-    );
+    let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM paper_accounts WHERE id = $1");
     let account = sqlx::query_as::<_, PaperAccount>(&sql)
         .bind(id)
         .fetch_optional(pool)

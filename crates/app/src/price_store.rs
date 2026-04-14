@@ -98,10 +98,7 @@ impl PriceStore {
 
     pub async fn snapshot(&self) -> Vec<(FeedKey, LatestTick)> {
         let guard = self.latest.read().await;
-        guard
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+        guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     /// Roll the expected list against the current observed map and a

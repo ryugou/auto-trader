@@ -65,7 +65,10 @@ impl OandaClient {
                     tracing::warn!("OANDA request failed (attempt {}): {e}", attempt + 1);
                     last_err = Some(e);
                     if attempt < 2 {
-                        tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt as u32))).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            2u64.pow(attempt as u32),
+                        ))
+                        .await;
                     }
                 }
             }
@@ -133,10 +136,7 @@ impl OandaClient {
     }
 
     pub async fn get_latest_price(&self, pair: &Pair) -> anyhow::Result<Decimal> {
-        let url = format!(
-            "{}/v3/accounts/{}/pricing",
-            self.base_url, self.account_id
-        );
+        let url = format!("{}/v3/accounts/{}/pricing", self.base_url, self.account_id);
         let instrument = pair.0.clone();
         let client = self.client.clone();
         let resp: serde_json::Value = self

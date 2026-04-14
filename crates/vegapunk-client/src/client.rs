@@ -15,8 +15,7 @@ struct AuthInterceptor {
 impl tonic::service::Interceptor for AuthInterceptor {
     fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
         if let Some(token) = &self.token {
-            req.metadata_mut()
-                .insert("authorization", token.clone());
+            req.metadata_mut().insert("authorization", token.clone());
         }
         Ok(req)
     }
@@ -28,7 +27,11 @@ pub struct VegapunkClient {
 }
 
 impl VegapunkClient {
-    pub async fn connect(endpoint: &str, schema: &str, auth_token: Option<&str>) -> anyhow::Result<Self> {
+    pub async fn connect(
+        endpoint: &str,
+        schema: &str,
+        auth_token: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let channel = Endpoint::from_shared(endpoint.to_string())?
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))

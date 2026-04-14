@@ -1,6 +1,6 @@
 use super::{ApiError, AppState};
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -22,9 +22,7 @@ pub struct MarketPricesResponse {
 /// Positions page to compute unrealized P&L. Paging and large
 /// historical pulls are intentionally not supported here — this
 /// endpoint exists to be cheap and frequently polled.
-pub async fn prices(
-    State(state): State<AppState>,
-) -> Result<Json<MarketPricesResponse>, ApiError> {
+pub async fn prices(State(state): State<AppState>) -> Result<Json<MarketPricesResponse>, ApiError> {
     let snapshot = state.price_store.snapshot().await;
     let prices = snapshot
         .into_iter()
