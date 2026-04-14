@@ -10,7 +10,7 @@ use uuid::Uuid;
 #[derive(Debug, Serialize)]
 pub struct PositionResponse {
     pub trade_id: Uuid,
-    pub paper_account_name: String,
+    pub account_name: String,
     pub strategy_name: String,
     pub pair: String,
     pub exchange: String,
@@ -18,12 +18,12 @@ pub struct PositionResponse {
     pub entry_price: Decimal,
     pub stop_loss: Decimal,
     pub take_profit: Option<Decimal>,
-    pub quantity: Option<Decimal>,
+    pub quantity: Decimal,
     /// Accumulated fees on this open position (overnight fees, etc.).
     /// Used by the Positions page to compute 純損益 = 含み損益 - fees.
     pub fees: Decimal,
     pub entry_at: DateTime<Utc>,
-    pub paper_account_id: Option<Uuid>,
+    pub account_id: Uuid,
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PositionResponse>>, ApiError> {
@@ -45,25 +45,26 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PositionResp
                 .trim_matches('"')
                 .to_string();
             // Strategies that exit dynamically (mean-revert, trailing
-            // channel, etc.) park take_profit at an unreachable sentinel
-            // (entry × 1000 for Long, entry / 1000 for Short).  Expose
-            // these as null so the UI shows "-" instead of nonsense.
-            let tp_ratio = if t.entry_price.is_zero() {
-                Decimal::ONE
-            } else {
-                t.take_profit / t.entry_price
-            };
-            let take_profit = if tp_ratio > Decimal::from(100)
-                || tp_ratio < Decimal::from(1) / Decimal::from(100)
-            {
-                None
-            } else {
-                Some(t.take_profit)
-            };
+            // channel, etc.) may have no take_profit set.
+            // Also filter out unreachable sentinel values (entry × 1000
+            // for Long, entry / 1000 for Short) so the UI shows "-"
+            // instead of nonsense.
+            let take_profit = t.take_profit.and_then(|tp| {
+                if t.entry_price.is_zero() {
+                    Some(tp)
+                } else {
+                    let ratio = tp / t.entry_price;
+                    if ratio > Decimal::from(100) || ratio < Decimal::from(1) / Decimal::from(100) {
+                        None
+                    } else {
+                        Some(tp)
+                    }
+                }
+            });
 
             PositionResponse {
                 trade_id: t.id,
-                paper_account_name: row.paper_account_name.unwrap_or_default(),
+                account_name: row.account_name.unwrap_or_default(),
                 strategy_name: t.strategy_name,
                 pair: t.pair.0,
                 exchange: t.exchange.as_str().to_string(),
@@ -74,7 +75,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PositionResp
                 quantity: t.quantity,
                 fees: t.fees,
                 entry_at: t.entry_at,
-                paper_account_id: t.paper_account_id,
+                account_id: t.account_id,
             }
         })
         .collect();

@@ -1,10 +1,10 @@
 use super::{ApiError, AppState};
 use auto_trader_db::dashboard;
-use auto_trader_db::paper_accounts::{
-    self, CreatePaperAccount, PaperAccount, UpdatePaperAccount, normalize_currency,
+use auto_trader_db::strategies;
+use auto_trader_db::trading_accounts::{
+    self, CreateTradingAccount, TradingAccount, UpdateTradingAccount, normalize_currency,
     validate_initial_balance,
 };
-use auto_trader_db::strategies;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -15,7 +15,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
-pub struct PaperAccountWithBalance {
+pub struct AccountWithBalance {
     pub id: Uuid,
     pub name: String,
     pub exchange: String,
@@ -26,13 +26,12 @@ pub struct PaperAccountWithBalance {
     pub strategy: String,
     pub account_type: String,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
     pub unrealized_pnl: Decimal,
     pub evaluated_balance: Decimal,
 }
 
-impl PaperAccountWithBalance {
-    fn new(account: PaperAccount, unrealized_pnl: Decimal, evaluated_balance: Decimal) -> Self {
+impl AccountWithBalance {
+    fn new(account: TradingAccount, unrealized_pnl: Decimal, evaluated_balance: Decimal) -> Self {
         Self {
             id: account.id,
             name: account.name,
@@ -44,7 +43,6 @@ impl PaperAccountWithBalance {
             strategy: account.strategy,
             account_type: account.account_type,
             created_at: account.created_at,
-            updated_at: account.updated_at,
             unrealized_pnl,
             evaluated_balance,
         }
@@ -53,8 +51,8 @@ impl PaperAccountWithBalance {
 
 pub async fn list(
     State(state): State<AppState>,
-) -> Result<Json<Vec<PaperAccountWithBalance>>, ApiError> {
-    let accounts = paper_accounts::list_paper_accounts(&state.pool)
+) -> Result<Json<Vec<AccountWithBalance>>, ApiError> {
+    let accounts = trading_accounts::list_all(&state.pool)
         .await
         .map_err(ApiError::from)?;
 
@@ -63,7 +61,7 @@ pub async fn list(
         let eval = dashboard::get_evaluated_balance(&state.pool, account.id)
             .await
             .map_err(ApiError::from)?;
-        enriched.push(PaperAccountWithBalance::new(
+        enriched.push(AccountWithBalance::new(
             account,
             eval.unrealized_pnl,
             eval.evaluated_balance,
@@ -75,8 +73,8 @@ pub async fn list(
 pub async fn get_one(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<PaperAccountWithBalance>, ApiError> {
-    let account = paper_accounts::get_paper_account(&state.pool, id)
+) -> Result<Json<AccountWithBalance>, ApiError> {
+    let account = trading_accounts::get_account(&state.pool, id)
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError(
@@ -86,7 +84,7 @@ pub async fn get_one(
     let eval = dashboard::get_evaluated_balance(&state.pool, id)
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(PaperAccountWithBalance::new(
+    Ok(Json(AccountWithBalance::new(
         account,
         eval.unrealized_pnl,
         eval.evaluated_balance,
@@ -95,7 +93,7 @@ pub async fn get_one(
 
 pub async fn create(
     State(state): State<AppState>,
-    mut req: Json<CreatePaperAccount>,
+    mut req: Json<CreateTradingAccount>,
 ) -> Result<impl IntoResponse, ApiError> {
     if req.account_type != "paper" && req.account_type != "live" {
         return Err(ApiError(
@@ -103,16 +101,10 @@ pub async fn create(
             "account_type must be 'paper' or 'live'".to_string(),
         ));
     }
-    // Normalize currency casing (`jpy` → `JPY`) so the minimum-balance check
-    // can't be sidestepped by the client.
     req.currency = normalize_currency(&req.currency);
     if let Err(msg) = validate_initial_balance(&req.currency, req.initial_balance) {
         return Err(ApiError(StatusCode::BAD_REQUEST, msg));
     }
-    // Reject unknown strategy names so a non-UI client can't store dangling
-    // references that the runtime cannot resolve. The catalog is the source
-    // of truth for what strategies are nameable; the engine still loads
-    // their actual logic from config/default.toml.
     if !strategies::strategy_exists(&state.pool, &req.strategy)
         .await
         .map_err(ApiError::from)?
@@ -125,7 +117,7 @@ pub async fn create(
             ),
         ));
     }
-    paper_accounts::create_paper_account(&state.pool, &req)
+    trading_accounts::create_account(&state.pool, &req)
         .await
         .map(|a| (StatusCode::CREATED, Json(a)))
         .map_err(Into::into)
@@ -134,10 +126,8 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdatePaperAccount>,
-) -> Result<Json<PaperAccount>, ApiError> {
-    // If the caller is changing strategy, validate against the catalog for
-    // the same reason as create above.
+    Json(req): Json<UpdateTradingAccount>,
+) -> Result<Json<TradingAccount>, ApiError> {
     if let Some(name) = req.strategy.as_deref()
         && !strategies::strategy_exists(&state.pool, name)
             .await
@@ -148,7 +138,7 @@ pub async fn update(
             format!("strategy '{name}' not found in catalog (see GET /api/strategies)"),
         ));
     }
-    paper_accounts::update_paper_account(&state.pool, id, &req)
+    trading_accounts::update_account(&state.pool, id, &req)
         .await
         .map_err(ApiError::from)?
         .map(Json)
@@ -162,7 +152,7 @@ pub async fn remove(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let deleted = paper_accounts::delete_paper_account(&state.pool, id)
+    let deleted = trading_accounts::delete_account(&state.pool, id)
         .await
         .map_err(ApiError::from)?;
     if deleted {

@@ -34,7 +34,7 @@ pub async fn summary(
     let stats = dashboard::get_summary(
         &state.pool,
         filter.exchange.as_deref(),
-        filter.paper_account_id,
+        filter.account_id,
         filter.account_type.as_deref(),
         from,
         to,
@@ -80,7 +80,7 @@ pub async fn pnl_history(
     dashboard::get_pnl_history(
         &state.pool,
         filter.exchange.as_deref(),
-        filter.paper_account_id,
+        filter.account_id,
         filter.account_type.as_deref(),
         from,
         to,
@@ -109,40 +109,28 @@ pub async fn strategies(
     State(state): State<AppState>,
     Query(filter): Query<DashboardFilter>,
 ) -> Result<Json<Vec<dashboard::StrategyStats>>, ApiError> {
-    dashboard::get_strategy_stats(
-        &state.pool,
-        filter.exchange.as_deref(),
-        filter.paper_account_id,
-    )
-    .await
-    .map(Json)
-    .map_err(ApiError::from)
+    dashboard::get_strategy_stats(&state.pool, filter.exchange.as_deref(), filter.account_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 pub async fn pairs(
     State(state): State<AppState>,
     Query(filter): Query<DashboardFilter>,
 ) -> Result<Json<Vec<dashboard::PairStats>>, ApiError> {
-    dashboard::get_pair_stats(
-        &state.pool,
-        filter.exchange.as_deref(),
-        filter.paper_account_id,
-    )
-    .await
-    .map(Json)
-    .map_err(ApiError::from)
+    dashboard::get_pair_stats(&state.pool, filter.exchange.as_deref(), filter.account_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 pub async fn hourly_winrate(
     State(state): State<AppState>,
     Query(filter): Query<DashboardFilter>,
 ) -> Result<Json<Vec<dashboard::HourlyWinrate>>, ApiError> {
-    dashboard::get_hourly_winrate(
-        &state.pool,
-        filter.exchange.as_deref(),
-        filter.paper_account_id,
-    )
-    .await
-    .map(Json)
-    .map_err(ApiError::from)
+    dashboard::get_hourly_winrate(&state.pool, filter.exchange.as_deref(), filter.account_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
