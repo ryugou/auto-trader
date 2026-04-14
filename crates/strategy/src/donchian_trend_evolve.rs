@@ -11,7 +11,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -53,7 +53,8 @@ impl DonchianTrendEvolveV1 {
             .unwrap_or(dec!(1.00))
             .max(dec!(0.50))
             .min(dec!(1.00));
-        let atr_baseline_bars = (params["atr_baseline_bars"].as_u64().unwrap_or(50) as usize).clamp(20, 100);
+        let atr_baseline_bars =
+            (params["atr_baseline_bars"].as_u64().unwrap_or(50) as usize).clamp(20, 100);
         Self {
             name,
             pairs,
@@ -103,7 +104,9 @@ impl DonchianTrendEvolveV1 {
             if end < ATR_PERIOD + 1 {
                 continue;
             }
-            if let Some(v) = indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], ATR_PERIOD) {
+            if let Some(v) =
+                indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], ATR_PERIOD)
+            {
                 sum += v;
                 count += 1;
             }
@@ -169,6 +172,7 @@ impl Strategy for DonchianTrendEvolveV1 {
                 timestamp: event.timestamp,
                 allocation_pct: self.allocation_pct,
                 max_hold_until: None,
+                order_type: OrderType::Market,
             });
         }
         if entry < channel_low {
@@ -183,6 +187,7 @@ impl Strategy for DonchianTrendEvolveV1 {
                 timestamp: event.timestamp,
                 allocation_pct: self.allocation_pct,
                 max_hold_until: None,
+                order_type: OrderType::Market,
             });
         }
         None
@@ -293,11 +298,8 @@ mod tests {
             "allocation_pct": 0.8,
             "atr_baseline_bars": 30
         });
-        let s = DonchianTrendEvolveV1::new(
-            "test".to_string(),
-            vec![Pair::new("FX_BTC_JPY")],
-            params,
-        );
+        let s =
+            DonchianTrendEvolveV1::new("test".to_string(), vec![Pair::new("FX_BTC_JPY")], params);
         assert_eq!(s.entry_channel, 18);
         assert_eq!(s.exit_channel, 8);
         assert_eq!(s.atr_baseline_bars, 30);
@@ -339,11 +341,8 @@ mod tests {
             "allocation_pct": 0.8,
             "atr_baseline_bars": 50
         });
-        let mut s = DonchianTrendEvolveV1::new(
-            "dte".to_string(),
-            vec![Pair::new("FX_BTC_JPY")],
-            params,
-        );
+        let mut s =
+            DonchianTrendEvolveV1::new("dte".to_string(), vec![Pair::new("FX_BTC_JPY")], params);
         // 100 calm bars
         for i in 0..100 {
             let drift = Decimal::from(i % 5) * dec!(1000);
@@ -357,12 +356,7 @@ mod tests {
                 .await;
         }
         // Breakout bar
-        let breakout = make_event(
-            "FX_BTC_JPY",
-            dec!(11000000),
-            dec!(11200000),
-            dec!(10800000),
-        );
+        let breakout = make_event("FX_BTC_JPY", dec!(11000000), dec!(11200000), dec!(10800000));
         let signal = s.on_price(&breakout).await;
         assert!(signal.is_some(), "expected long breakout signal");
         let sig = signal.unwrap();

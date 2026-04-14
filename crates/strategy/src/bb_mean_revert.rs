@@ -34,7 +34,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
 use rust_decimal::Decimal;
@@ -127,10 +127,7 @@ impl Strategy for BbMeanRevertV1 {
         let sl_offset = entry * SL_PCT;
 
         // Long setup: oversold extreme + capitulation candle
-        if entry < lower
-            && rsi < RSI_LONG_THRESHOLD
-            && curr_candle.low < prev_candle.low
-        {
+        if entry < lower && rsi < RSI_LONG_THRESHOLD && curr_candle.low < prev_candle.low {
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
@@ -144,14 +141,12 @@ impl Strategy for BbMeanRevertV1 {
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
+                order_type: OrderType::Market,
             });
         }
 
         // Short setup: overbought extreme + capitulation candle
-        if entry > upper
-            && rsi > RSI_SHORT_THRESHOLD
-            && curr_candle.high > prev_candle.high
-        {
+        if entry > upper && rsi > RSI_SHORT_THRESHOLD && curr_candle.high > prev_candle.high {
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
@@ -163,6 +158,7 @@ impl Strategy for BbMeanRevertV1 {
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
+                order_type: OrderType::Market,
             });
         }
 
@@ -236,7 +232,7 @@ impl Strategy for BbMeanRevertV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::{Candle, Exchange, Pair, TradeMode, TradeStatus, Trade};
+    use auto_trader_core::types::{Candle, Exchange, Pair, Trade, TradeMode, TradeStatus};
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -317,7 +313,10 @@ mod tests {
             dec!(8990000), // lower than previous lows
         );
         let signal = s.on_price(&crash).await;
-        assert!(signal.is_some(), "expected long mean-revert signal at extreme");
+        assert!(
+            signal.is_some(),
+            "expected long mean-revert signal at extreme"
+        );
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
         // SL must be inside the 2% cap
@@ -345,7 +344,9 @@ mod tests {
         let pos = make_position("bb", "FX_BTC_JPY", Direction::Long, dec!(9500000));
         // Mark price now back at 10M (≥ middle SMA20 = 10M) → exit
         let event = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
-        let exits = s.on_open_positions(std::slice::from_ref(&pos), &event).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &event)
+            .await;
         assert_eq!(exits.len(), 1, "expected 1 mean-reached exit");
         assert_eq!(exits[0].trade_id, pos.trade.id);
         assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);

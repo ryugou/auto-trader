@@ -35,7 +35,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
 use rust_decimal::Decimal;
@@ -185,6 +185,7 @@ impl Strategy for SqueezeMomentumV1 {
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
+                order_type: OrderType::Market,
             });
         }
         // Short: negative and falling momentum
@@ -200,6 +201,7 @@ impl Strategy for SqueezeMomentumV1 {
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
+                order_type: OrderType::Market,
             });
         }
         None
@@ -349,12 +351,7 @@ mod tests {
         }
         // Sudden expansion: big up move that breaks BB outside KC AND
         // pushes close > SMA20 with rising momentum. Volume isn't tracked.
-        let breakout = make_event(
-            "FX_BTC_JPY",
-            dec!(10500000),
-            dec!(10600000),
-            dec!(10000000),
-        );
+        let breakout = make_event("FX_BTC_JPY", dec!(10500000), dec!(10600000), dec!(10000000));
         let signal = s.on_price(&breakout).await;
         assert!(signal.is_some(), "expected long squeeze-momentum signal");
         let sig = signal.unwrap();

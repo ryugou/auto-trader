@@ -14,7 +14,9 @@ use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn indicators_consistency() {
-    let prices: Vec<Decimal> = (0..100).map(|i| dec!(100) + Decimal::from(i) / dec!(10)).collect();
+    let prices: Vec<Decimal> = (0..100)
+        .map(|i| dec!(100) + Decimal::from(i) / dec!(10))
+        .collect();
     let sma20 = indicators::sma(&prices, 20).unwrap();
     let sma50 = indicators::sma(&prices, 50).unwrap();
     // In an uptrend, short MA > long MA
@@ -36,9 +38,16 @@ async fn channel_pipeline() {
         timestamp: Utc::now(),
         allocation_pct: dec!(0.5),
         max_hold_until: None,
+        order_type: OrderType::Market,
     };
 
-    signal_tx.send(SignalEvent { signal: signal.clone(), indicators: std::collections::HashMap::new() }).await.unwrap();
+    signal_tx
+        .send(SignalEvent {
+            signal: signal.clone(),
+            indicators: std::collections::HashMap::new(),
+        })
+        .await
+        .unwrap();
     let received = signal_rx.recv().await.unwrap();
     assert_eq!(received.signal.pair, Pair::new("USD_JPY"));
     assert_eq!(received.signal.direction, Direction::Long);

@@ -1,6 +1,6 @@
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{MacroUpdate, Strategy};
-use auto_trader_core::types::{Direction, Pair, Signal};
+use auto_trader_core::types::{Direction, OrderType, Pair, Signal};
 use auto_trader_vegapunk::client::VegapunkClient;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -123,7 +123,8 @@ impl SwingLLMv1 {
             "contents": [{"parts": [{"text": prompt}]}]
         });
 
-        let resp: serde_json::Value = self.gemini_client
+        let resp: serde_json::Value = self
+            .gemini_client
             .post(&url)
             .header("x-goog-api-key", &self.gemini_api_key)
             .json(&body)
@@ -204,7 +205,10 @@ impl Strategy for SwingLLMv1 {
                 self.last_check.insert(pair_key.clone(), now);
             }
             Err(_) => {
-                let count = self.consecutive_failures.entry(pair_key.clone()).or_insert(0);
+                let count = self
+                    .consecutive_failures
+                    .entry(pair_key.clone())
+                    .or_insert(0);
                 *count = count.saturating_add(1);
             }
         }
@@ -226,6 +230,7 @@ impl Strategy for SwingLLMv1 {
                     timestamp: event.timestamp,
                     allocation_pct: rust_decimal::Decimal::new(5, 1), // 0.5
                     max_hold_until: None,
+                    order_type: OrderType::Market,
                 })
             }
             Ok(None) => None,

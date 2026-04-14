@@ -54,7 +54,13 @@ impl StrategyEngine {
                 continue;
             }
             if let Some(signal) = slot.strategy.on_price(event).await
-                && let Err(e) = self.signal_tx.send(SignalEvent { signal, indicators: event.indicators.clone() }).await
+                && let Err(e) = self
+                    .signal_tx
+                    .send(SignalEvent {
+                        signal,
+                        indicators: event.indicators.clone(),
+                    })
+                    .await
             {
                 tracing::error!("signal channel closed, dropping signal: {e}");
             }
@@ -86,7 +92,13 @@ impl StrategyEngine {
             }
             // 1) New entry signal
             if let Some(signal) = slot.strategy.on_price(event).await
-                && let Err(e) = self.signal_tx.send(SignalEvent { signal, indicators: event.indicators.clone() }).await
+                && let Err(e) = self
+                    .signal_tx
+                    .send(SignalEvent {
+                        signal,
+                        indicators: event.indicators.clone(),
+                    })
+                    .await
             {
                 tracing::error!("signal channel closed, dropping signal: {e}");
             }
@@ -146,11 +158,17 @@ mod tests {
         let updates_b = Arc::new(StdMutex::new(Vec::new()));
 
         engine.add_strategy(
-            Box::new(MacroRecorder { name: "a".to_string(), updates: updates_a.clone() }),
+            Box::new(MacroRecorder {
+                name: "a".to_string(),
+                updates: updates_a.clone(),
+            }),
             "paper".to_string(),
         );
         engine.add_strategy(
-            Box::new(MacroRecorder { name: "b".to_string(), updates: updates_b.clone() }),
+            Box::new(MacroRecorder {
+                name: "b".to_string(),
+                updates: updates_b.clone(),
+            }),
             "paper".to_string(),
         );
 
@@ -174,7 +192,10 @@ mod tests {
 
         let updates = Arc::new(StdMutex::new(Vec::new()));
         engine.add_strategy(
-            Box::new(MacroRecorder { name: "disabled_strat".to_string(), updates: updates.clone() }),
+            Box::new(MacroRecorder {
+                name: "disabled_strat".to_string(),
+                updates: updates.clone(),
+            }),
             "disabled".to_string(),
         );
 

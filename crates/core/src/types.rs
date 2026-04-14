@@ -57,17 +57,14 @@ pub enum Direction {
 /// JSON 形式は internally-tagged (`{"type": "market"}` /
 /// `{"type": "limit", "price": "100.5"}`) — これは strategy ログや
 /// /api/signals への出力でも人間可読性を保つため。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OrderType {
+    #[default]
     Market,
-    Limit { price: Decimal },
-}
-
-impl Default for OrderType {
-    fn default() -> Self {
-        OrderType::Market
-    }
+    Limit {
+        price: Decimal,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,7 +277,9 @@ mod tests {
 
     #[test]
     fn order_type_roundtrip_limit() {
-        let ot = OrderType::Limit { price: dec!(150.25) };
+        let ot = OrderType::Limit {
+            price: dec!(150.25),
+        };
         let json = serde_json::to_string(&ot).unwrap();
         let back: OrderType = serde_json::from_str(&json).unwrap();
         match back {

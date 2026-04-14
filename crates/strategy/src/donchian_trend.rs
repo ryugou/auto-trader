@@ -32,7 +32,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -116,12 +116,9 @@ impl DonchianTrendV1 {
             if end < ATR_PERIOD + 1 {
                 continue;
             }
-            if let Some(v) = indicators::atr(
-                &highs[..=end],
-                &lows[..=end],
-                &closes[..=end],
-                ATR_PERIOD,
-            ) {
+            if let Some(v) =
+                indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], ATR_PERIOD)
+            {
                 sum += v;
                 count += 1;
             }
@@ -189,6 +186,7 @@ impl Strategy for DonchianTrendV1 {
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: None,
+                order_type: OrderType::Market,
             });
         }
         if entry < channel_low {
@@ -203,6 +201,7 @@ impl Strategy for DonchianTrendV1 {
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: None,
+                order_type: OrderType::Market,
             });
         }
         None
@@ -382,12 +381,7 @@ mod tests {
         // Long position from earlier
         let pos = make_position("dt", Direction::Long, dec!(11000000));
         // Now price drops below the 10-bar low.
-        let drop = make_event(
-            "FX_BTC_JPY",
-            dec!(10500000),
-            dec!(10550000),
-            dec!(10450000),
-        );
+        let drop = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));
         // First push the drop into history
         let _ = s.on_price(&drop).await;
         let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
