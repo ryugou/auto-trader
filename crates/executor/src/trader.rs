@@ -309,11 +309,10 @@ impl OrderExecutor for Trader {
         };
 
         // 6. DB 操作 (1 トランザクション)
-        // CRITICAL: exchange fill is already done at this point. If the DB tx
-        // fails the exchange has an open position with no corresponding DB
-        // record (orphan). Emit a critical Slack notification + error log so
-        // the operator can reconcile manually (or the PR-2 reconciler picks it
-        // up via position diff).
+        // In live mode, the exchange fill is already done at this point — if
+        // the DB tx fails we have an orphan exchange position requiring manual
+        // reconciliation. In dry_run mode there's no exchange order, so the
+        // failure is just a wasted simulated fill (no operator action needed).
         let db_result = async {
             let mut tx = self.pool.begin().await?;
             auto_trader_db::trades::insert_trade(&mut *tx, &trade).await?;
@@ -324,33 +323,46 @@ impl OrderExecutor for Trader {
         }
         .await;
         if let Err(ref e) = db_result {
-            tracing::error!(
-                trade_id = %trade.id,
-                account_id = %self.account_id,
-                pair = %trade.pair,
-                fill_price = %fill_price,
-                error = %e,
-                "inconsistent state: exchange filled but DB write failed — \
-                 orphan exchange position requires manual reconciliation"
-            );
-            let notifier = self.notifier.clone();
-            let account_name = self.account_name.clone();
-            let pair = trade.pair.clone();
-            let strategy_name = trade.strategy_name.clone();
-            let reason = format!("DB tx failed after exchange fill (orphan position): {e}");
-            tokio::spawn(async move {
-                let ev = auto_trader_notify::NotifyEvent::OrderFailed(
-                    auto_trader_notify::OrderFailedEvent {
-                        account_name,
-                        strategy_name,
-                        pair,
-                        reason,
-                    },
+            if self.dry_run {
+                tracing::warn!(
+                    trade_id = %trade.id,
+                    account_id = %self.account_id,
+                    pair = %trade.pair,
+                    fill_price = %fill_price,
+                    error = %e,
+                    "dry_run: simulated fill computed but DB write failed — no exchange impact"
                 );
-                if let Err(notify_err) = notifier.send(ev).await {
-                    tracing::warn!("critical notify send failed: {notify_err}");
-                }
-            });
+                // Don't notify Slack on dry_run failures — they're test/sim
+                // noise that shouldn't trigger operator action.
+            } else {
+                tracing::error!(
+                    trade_id = %trade.id,
+                    account_id = %self.account_id,
+                    pair = %trade.pair,
+                    fill_price = %fill_price,
+                    error = %e,
+                    "inconsistent state: exchange filled but DB write failed — \
+                     orphan exchange position requires manual reconciliation"
+                );
+                let notifier = self.notifier.clone();
+                let account_name = self.account_name.clone();
+                let pair = trade.pair.clone();
+                let strategy_name = trade.strategy_name.clone();
+                let reason = format!("DB tx failed after exchange fill (orphan position): {e}");
+                tokio::spawn(async move {
+                    let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                        auto_trader_notify::OrderFailedEvent {
+                            account_name,
+                            strategy_name,
+                            pair,
+                            reason,
+                        },
+                    );
+                    if let Err(notify_err) = notifier.send(ev).await {
+                        tracing::warn!("critical notify send failed: {notify_err}");
+                    }
+                });
+            }
             return Err(db_result.unwrap_err());
         }
 
@@ -497,37 +509,51 @@ impl OrderExecutor for Trader {
         }
         .await;
         if let Err(ref e) = phase3_result {
-            tracing::error!(
-                trade_id = %trade.id,
-                account_id = %self.account_id,
-                pair = %trade.pair,
-                exit_price = %exit_price,
-                error = %e,
-                "inconsistent state: exchange close filled but DB Phase 3 write failed — \
-                 trade remains in 'closing' status; stale-lock self-healing or PR-2 \
-                 reconciler will pick this up"
-            );
-            let notifier = self.notifier.clone();
-            let account_name = self.account_name.clone();
-            let strategy_name = trade.strategy_name.clone();
-            let pair = trade.pair.clone();
-            let trade_id = trade.id;
-            let reason = format!(
-                "close DB tx failed after exchange fill (trade {trade_id} stuck in 'closing'): {e}"
-            );
-            tokio::spawn(async move {
-                let ev = auto_trader_notify::NotifyEvent::OrderFailed(
-                    auto_trader_notify::OrderFailedEvent {
-                        account_name,
-                        strategy_name,
-                        pair,
-                        reason,
-                    },
+            if self.dry_run {
+                tracing::warn!(
+                    trade_id = %trade.id,
+                    account_id = %self.account_id,
+                    pair = %trade.pair,
+                    exit_price = %exit_price,
+                    error = %e,
+                    "dry_run: simulated close fill computed but DB Phase 3 failed — \
+                     trade remains in 'closing'; no exchange impact, stale-lock \
+                     self-healing will eventually free it"
                 );
-                if let Err(notify_err) = notifier.send(ev).await {
-                    tracing::warn!("critical notify send failed: {notify_err}");
-                }
-            });
+                // Don't notify Slack on dry_run failures.
+            } else {
+                tracing::error!(
+                    trade_id = %trade.id,
+                    account_id = %self.account_id,
+                    pair = %trade.pair,
+                    exit_price = %exit_price,
+                    error = %e,
+                    "inconsistent state: exchange close filled but DB Phase 3 write failed — \
+                     trade remains in 'closing' status; stale-lock self-healing or PR-2 \
+                     reconciler will pick this up"
+                );
+                let notifier = self.notifier.clone();
+                let account_name = self.account_name.clone();
+                let strategy_name = trade.strategy_name.clone();
+                let pair = trade.pair.clone();
+                let trade_id = trade.id;
+                let reason = format!(
+                    "close DB tx failed after exchange fill (trade {trade_id} stuck in 'closing'): {e}"
+                );
+                tokio::spawn(async move {
+                    let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                        auto_trader_notify::OrderFailedEvent {
+                            account_name,
+                            strategy_name,
+                            pair,
+                            reason,
+                        },
+                    );
+                    if let Err(notify_err) = notifier.send(ev).await {
+                        tracing::warn!("critical notify send failed: {notify_err}");
+                    }
+                });
+            }
             return Err(phase3_result.unwrap_err());
         }
 
