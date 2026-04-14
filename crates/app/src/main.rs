@@ -529,11 +529,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Global dry-run override: if [live].dry_run=true, ALL accounts
-    // (paper *and* live) run in dry-run mode. Paper is always dry-run by
-    // account_type; live is only dry-run when this flag is set. Captured
-    // by copy into the dispatch loops (bool is Copy).
-    let live_forces_dry_run: bool = config.live.as_ref().is_some_and(|l| l.dry_run);
+    // Global dry-run override: if [live].dry_run=true (or the LIVE_DRY_RUN
+    // env var is truthy), ALL accounts (paper *and* live) run in dry-run
+    // mode. Paper is always dry-run by account_type; live is only dry-run
+    // when this flag is set. `LIVE_DRY_RUN` env wins over config per the
+    // doc comment on `LiveConfig::dry_run`. Captured by copy into the
+    // dispatch loops (bool is Copy).
+    let live_forces_dry_run: bool = match std::env::var("LIVE_DRY_RUN") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                tracing::warn!(
+                    "ignoring invalid LIVE_DRY_RUN='{}' (expected true/false); falling back to [live].dry_run from config",
+                    other
+                );
+                config.live.as_ref().is_some_and(|l| l.dry_run)
+            }
+        },
+        Err(_) => config.live.as_ref().is_some_and(|l| l.dry_run),
+    };
 
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(

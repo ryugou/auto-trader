@@ -157,6 +157,35 @@ impl SwingLLMv1 {
             return Ok(None);
         }
 
+        // LLM-provided values are untrusted input. Reject non-finite,
+        // non-positive, or absurdly large pip offsets before they flow into
+        // `stop_loss_pct = sl / entry` at the call site, where a zero /
+        // negative / NaN would produce an inverted or invalid SL/TP at
+        // execution time. Upper bound 10000 pips = ~100 JPY or ~1.00
+        // non-JPY — anything beyond is clearly a model hallucination.
+        const MAX_PIPS: f64 = 10_000.0;
+        if !sl_pips.is_finite()
+            || !tp_pips.is_finite()
+            || sl_pips <= 0.0
+            || tp_pips <= 0.0
+            || sl_pips > MAX_PIPS
+            || tp_pips > MAX_PIPS
+        {
+            tracing::warn!(
+                "swing_llm: rejecting decision with invalid pip offsets (sl_pips={}, tp_pips={})",
+                sl_pips,
+                tp_pips
+            );
+            return Ok(None);
+        }
+        if current_price <= Decimal::ZERO {
+            tracing::warn!(
+                "swing_llm: rejecting decision with non-positive entry price {}",
+                current_price
+            );
+            return Ok(None);
+        }
+
         let direction = match action {
             "long" => Direction::Long,
             "short" => Direction::Short,

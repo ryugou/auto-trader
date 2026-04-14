@@ -144,11 +144,16 @@ pub async fn upsert_daily_summary(
         .execute(pool)
         .await?;
     } else {
-        // account_id IS NULL path — use partial unique index.
+        // account_id IS NULL path — `daily_summary_no_account_unique` is a
+        // partial unique INDEX, not a UNIQUE CONSTRAINT, so
+        // `ON CONFLICT ON CONSTRAINT <name>` would fail at runtime
+        // (Postgres only accepts constraints there). Use the column-list
+        // inference form with the matching WHERE predicate instead — Postgres
+        // matches it to the same partial index.
         sqlx::query(
             r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_type, trade_count, win_count, total_pnl)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT ON CONSTRAINT daily_summary_no_account_unique DO UPDATE
+               ON CONFLICT (date, strategy_name, pair, mode, exchange) WHERE account_id IS NULL DO UPDATE
                SET trade_count = daily_summary.trade_count + $7,
                    win_count = daily_summary.win_count + $8,
                    total_pnl = daily_summary.total_pnl + $9,
