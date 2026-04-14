@@ -6,7 +6,6 @@
 //!   - dry_run=true tests: only need PriceStore to be populated
 //!   - dry_run=false tests: need wiremock for send_child_order + get_executions
 
-use auto_trader_core::config::PairConfig;
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, Trade, TradeStatus};
 use auto_trader_executor::trader::Trader;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
@@ -84,14 +83,11 @@ async fn seed_live_account(pool: &PgPool) -> Uuid {
 }
 
 /// Build a minimal pair_configs map for FX_BTC_JPY.
-fn btc_pair_configs() -> HashMap<String, PairConfig> {
+fn btc_pair_configs() -> HashMap<auto_trader_core::types::Pair, Decimal> {
     let mut m = HashMap::new();
     m.insert(
-        "FX_BTC_JPY".to_string(),
-        PairConfig {
-            price_unit: dec!(1),
-            min_order_size: dec!(0.001),
-        },
+        auto_trader_core::types::Pair::new("FX_BTC_JPY"),
+        dec!(0.001),
     );
     m
 }
@@ -109,14 +105,17 @@ fn build_live_trader(
         "s".to_string(),
     ));
     let notifier = Arc::new(Notifier::new(None));
+    let position_sizer =
+        auto_trader_executor::position_sizer::PositionSizer::new(btc_pair_configs());
     Trader::new(
         pool,
         Exchange::BitflyerCfd,
         account_id,
+        "test_live".to_string(),
         api,
         price_store,
         notifier,
-        btc_pair_configs(),
+        position_sizer,
         false, // dry_run = false → live mode
     )
 }

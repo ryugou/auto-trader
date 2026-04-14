@@ -1,9 +1,6 @@
 //! Notification DB access.
-//!
-//! NOTE: `insert_trade_opened` / `insert_trade_closed` are stubs pending PR-1 Task 6.
-//! The `notifications` table schema changed (paper_account_id → account_id).
 
-use auto_trader_core::types::{ExitReason, Trade};
+use auto_trader_core::types::Trade;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -26,23 +23,12 @@ pub struct Notification {
     pub read_at: Option<DateTime<Utc>>,
 }
 
-#[allow(dead_code)]
-fn exit_reason_str(r: ExitReason) -> String {
-    serde_json::to_string(&r)
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_string()
-}
-
 /// Insert a `trade_opened` notification.
 pub async fn insert_trade_opened<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let direction = serde_json::to_string(&trade.direction)
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_string();
+    let direction = trade.direction.as_str();
     sqlx::query(
         r#"INSERT INTO notifications
                (kind, trade_id, account_id, strategy_name, pair, direction, price,
@@ -53,7 +39,7 @@ where
     .bind(trade.account_id)
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
-    .bind(&direction)
+    .bind(direction)
     .bind(trade.entry_price)
     .execute(executor)
     .await?;
@@ -65,11 +51,8 @@ pub async fn insert_trade_closed<'e, E>(executor: E, trade: &Trade) -> anyhow::R
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let direction = serde_json::to_string(&trade.direction)
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_string();
-    let exit_reason_str = trade.exit_reason.map(exit_reason_str);
+    let direction = trade.direction.as_str();
+    let exit_reason_str = trade.exit_reason.map(|r| r.as_str());
     sqlx::query(
         r#"INSERT INTO notifications
                (kind, trade_id, account_id, strategy_name, pair, direction, price,
@@ -80,7 +63,7 @@ where
     .bind(trade.account_id)
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
-    .bind(&direction)
+    .bind(direction)
     .bind(trade.exit_price)
     .bind(trade.pnl_amount)
     .bind(exit_reason_str)
@@ -103,19 +86,19 @@ pub async fn list(
         chrono::FixedOffset::east_opt(9 * 3600).expect("9-hour offset is always valid");
     let from_ts = from.map(|d| {
         d.and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("midnight is always valid in fixed-offset JST")
             .and_local_timezone(jst_offset)
             .single()
-            .unwrap()
+            .expect("midnight in JST fixed-offset is always valid")
             .with_timezone(&Utc)
     });
     let to_ts = to.map(|d| {
         (d + chrono::Duration::days(1))
             .and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("midnight is always valid in fixed-offset JST")
             .and_local_timezone(jst_offset)
             .single()
-            .unwrap()
+            .expect("midnight in JST fixed-offset is always valid")
             .with_timezone(&Utc)
     });
 
@@ -191,11 +174,11 @@ pub async fn purge_old_read(pool: &PgPool) -> anyhow::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use auto_trader_core::types::ExitReason;
 
     #[test]
-    fn exit_reason_str_strips_quotes() {
-        let s = exit_reason_str(ExitReason::SlHit);
+    fn exit_reason_as_str_no_quotes() {
+        let s = ExitReason::SlHit.as_str();
         assert!(!s.starts_with('"'));
         assert!(!s.ends_with('"'));
         assert!(!s.is_empty());

@@ -9,7 +9,6 @@ export interface TradingAccount {
   strategy: string
   account_type: 'paper' | 'live'
   created_at: string
-  updated_at: string
   // Enriched fields from GET /api/trading-accounts
   unrealized_pnl?: string
   evaluated_balance?: string
@@ -40,7 +39,6 @@ export interface Strategy {
   algorithm: string
   default_params: Record<string, unknown>
   created_at: string
-  updated_at: string
 }
 
 export interface SummaryResponse {

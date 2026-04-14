@@ -9,11 +9,9 @@
 //! Everything else — DB writes, balance management, margin lock,
 //! pnl computation, notifications — is identical.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use auto_trader_core::config::PairConfig;
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
@@ -39,10 +37,14 @@ pub struct Trader {
     pool: PgPool,
     exchange: Exchange,
     account_id: Uuid,
+    /// Cached at construction time so every Slack notification shows the
+    /// human-readable account name rather than the raw UUID.
+    account_name: String,
     api: Arc<BitflyerPrivateApi>,
     price_store: Arc<PriceStore>,
     notifier: Arc<Notifier>,
-    pair_configs: HashMap<String, PairConfig>,
+    /// Cached at construction time; one PositionSizer per Trader lifetime.
+    position_sizer: PositionSizer,
     dry_run: bool,
 }
 
@@ -52,20 +54,22 @@ impl Trader {
         pool: PgPool,
         exchange: Exchange,
         account_id: Uuid,
+        account_name: String,
         api: Arc<BitflyerPrivateApi>,
         price_store: Arc<PriceStore>,
         notifier: Arc<Notifier>,
-        pair_configs: HashMap<String, PairConfig>,
+        position_sizer: PositionSizer,
         dry_run: bool,
     ) -> Self {
         Self {
             pool,
             exchange,
             account_id,
+            account_name,
             api,
             price_store,
             notifier,
-            pair_configs,
+            position_sizer,
             dry_run,
         }
     }
@@ -137,6 +141,11 @@ impl Trader {
     }
 
     /// poll_executions: live のみ、send_child_order 直後に呼んで実約定価格 + 実数量を取得
+    ///
+    /// Exponential back-off starting at 100 ms (doubling each attempt, capped at
+    /// 1.6 s). bitFlyer market orders typically fill within ~100 ms, so the first
+    /// poll almost always succeeds — avoiding the 900 ms wasted by a fixed 1 s
+    /// sleep. Timeout is unchanged at 5 s.
     async fn poll_executions(
         &self,
         acceptance_id: &str,
@@ -144,6 +153,7 @@ impl Trader {
         timeout: Duration,
     ) -> anyhow::Result<(Decimal, Decimal)> {
         let start = Instant::now();
+        let mut delay = Duration::from_millis(100);
         loop {
             if start.elapsed() > timeout {
                 anyhow::bail!("get_executions timed out after {:?}", timeout);
@@ -151,15 +161,15 @@ impl Trader {
             let execs = self.api.get_executions(pair_str, acceptance_id).await?;
             if !execs.is_empty() {
                 let total_size: Decimal = execs.iter().map(|e| e.size).sum();
-                if total_size.is_zero() {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
+                if !total_size.is_zero() {
+                    let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
+                    let avg = total_notional / total_size;
+                    return Ok((avg, total_size));
                 }
-                let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
-                let avg = total_notional / total_size;
-                return Ok((avg, total_size));
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(delay).await;
+            // Double the delay each iteration, cap at 1.6 s
+            delay = (delay * 2).min(Duration::from_millis(1600));
         }
     }
 
@@ -221,13 +231,8 @@ impl OrderExecutor for Trader {
             );
         }
 
-        // 2. Position sizing
-        let min_order_sizes: HashMap<Pair, Decimal> = self
-            .pair_configs
-            .iter()
-            .map(|(k, v)| (Pair::new(k), v.min_order_size))
-            .collect();
-        let sizer = PositionSizer::new(min_order_sizes);
+        // 2. Position sizing — reuse the PositionSizer cached in the struct.
+        let sizer = &self.position_sizer;
 
         // fill_open で fill 価格を確定してから正確なサイズを計算するため、
         // まず hint price として最新 bid/ask の ask 側を使ってサイジングする。
@@ -310,7 +315,7 @@ impl OrderExecutor for Trader {
 
         // 7. Slack 通知 (fire-and-forget)
         let notifier = self.notifier.clone();
-        let account_name = account.name.clone();
+        let account_name = self.account_name.clone();
         let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
             account_name,
             trade_id: trade.id,
@@ -418,19 +423,13 @@ impl OrderExecutor for Trader {
 
         // 6. Slack 通知 (fire-and-forget)
         let notifier = self.notifier.clone();
-        let account_id = self.account_id;
         let trade_id = closed_trade.id;
-        let exit_reason_str = serde_json::to_string(&exit_reason)
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_string();
-        // account name は DB から取得済みの情報なしで構成するため account_id を文字列化
-        let account_name = account_id.to_string();
+        let account_name = self.account_name.clone();
         let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
             account_name,
             trade_id,
             pnl_amount,
-            reason: exit_reason_str,
+            reason: exit_reason.as_str().to_owned(),
         });
         tokio::spawn(async move {
             if let Err(e) = notifier.send(ev).await {

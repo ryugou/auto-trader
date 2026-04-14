@@ -20,11 +20,8 @@ pub async fn insert_trade<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let direction = serde_json::to_string(&trade.direction)
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_string();
-    let status = trade.status.as_str().to_string();
+    let direction = trade.direction.as_str();
+    let status = trade.status.as_str();
     sqlx::query(
         r#"INSERT INTO trades
                (id, account_id, strategy_name, pair, exchange, direction,
@@ -41,7 +38,7 @@ where
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
     .bind(trade.exchange.as_str())
-    .bind(&direction)
+    .bind(direction)
     .bind(trade.entry_price)
     .bind(trade.exit_price)
     .bind(trade.stop_loss)
@@ -52,13 +49,8 @@ where
     .bind(trade.entry_at)
     .bind(trade.exit_at)
     .bind(trade.pnl_amount)
-    .bind(trade.exit_reason.map(|r| {
-        serde_json::to_string(&r)
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_string()
-    }))
-    .bind(&status)
+    .bind(trade.exit_reason.map(|r| r.as_str()))
+    .bind(status)
     .bind(trade.max_hold_until)
     .execute(executor)
     .await?;
@@ -194,10 +186,6 @@ pub async fn update_trade_closed<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let reason_str = serde_json::to_string(&exit_reason)
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_string();
     let result = sqlx::query(
         r#"UPDATE trades
            SET exit_price = $2,
@@ -212,7 +200,7 @@ where
     .bind(exit_price)
     .bind(exit_at)
     .bind(pnl_amount)
-    .bind(&reason_str)
+    .bind(exit_reason.as_str())
     .bind(fees)
     .execute(executor)
     .await?;
@@ -293,14 +281,6 @@ pub async fn get_open_trades_by_account(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-// ---------------------------------------------------------------------------
-// Legacy query helpers — preserved for other callers, updated in Task 6
-// ---------------------------------------------------------------------------
-
-// TODO(PR-1 Task 6): Remove or rewrite all functions below. They reference
-// the old schema (paper_account_id, pnl_pips, mode, child_order_*) and will
-// fail against the new `trades` table.
-
 /// Fetch open trades for a (strategy, pair) pair. Used by the strategy engine.
 pub async fn get_open_trades(
     pool: &PgPool,
@@ -336,6 +316,45 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
     .fetch_optional(pool)
     .await?;
     row.map(|r| r.try_into()).transpose()
+}
+
+/// Fetch a single open trade by id, joined with account_name and account_type.
+///
+/// Returns `None` when the trade is not found or is already closed.
+/// Used by the exit executor to avoid a separate `get_account()` call.
+pub async fn get_open_trade_with_account(
+    pool: &PgPool,
+    trade_id: Uuid,
+) -> anyhow::Result<Option<OpenTradeWithAccount>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        #[sqlx(flatten)]
+        trade: TradeRow,
+        account_name: Option<String>,
+        account_type: Option<String>,
+    }
+    let row = sqlx::query_as::<_, Row>(
+        r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
+                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
+                  t.entry_at, t.exit_at, t.pnl_amount,
+                  t.exit_reason, t.status, t.created_at, t.max_hold_until,
+                  ta.name AS account_name, ta.account_type AS account_type
+           FROM trades t
+           LEFT JOIN trading_accounts ta ON t.account_id = ta.id
+           WHERE t.id = $1 AND t.status = 'open'"#,
+    )
+    .bind(trade_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| {
+        let trade: Trade = r.trade.try_into()?;
+        Ok(OpenTradeWithAccount {
+            trade,
+            account_name: r.account_name,
+            account_type: r.account_type,
+        })
+    })
+    .transpose()
 }
 
 /// Add a fee delta to trades.fees (positive delta increases fees).
@@ -468,9 +487,10 @@ pub async fn get_trade_events(
 pub struct OpenTradeWithAccount {
     pub trade: Trade,
     pub account_name: Option<String>,
+    pub account_type: Option<String>,
 }
 
-/// Fetch open trades for a single (exchange, pair) joined with account name.
+/// Fetch open trades for a single (exchange, pair) joined with account name and type.
 pub async fn list_open_with_account_name_for_pair(
     pool: &PgPool,
     exchange: &str,
@@ -481,13 +501,14 @@ pub async fn list_open_with_account_name_for_pair(
         #[sqlx(flatten)]
         trade: TradeRow,
         account_name: Option<String>,
+        account_type: Option<String>,
     }
     let rows = sqlx::query_as::<_, Row>(
         r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until,
-                  ta.name AS account_name
+                  ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
            WHERE t.status = 'open' AND t.exchange = $1 AND t.pair = $2
@@ -503,12 +524,13 @@ pub async fn list_open_with_account_name_for_pair(
             Ok(OpenTradeWithAccount {
                 trade,
                 account_name: r.account_name,
+                account_type: r.account_type,
             })
         })
         .collect()
 }
 
-/// Fetch all currently open trades joined with account name.
+/// Fetch all currently open trades joined with account name and type.
 pub async fn list_open_with_account_name(
     pool: &PgPool,
 ) -> anyhow::Result<Vec<OpenTradeWithAccount>> {
@@ -517,13 +539,14 @@ pub async fn list_open_with_account_name(
         #[sqlx(flatten)]
         trade: TradeRow,
         account_name: Option<String>,
+        account_type: Option<String>,
     }
     let rows = sqlx::query_as::<_, Row>(
         r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until,
-                  ta.name AS account_name
+                  ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
            WHERE t.status = 'open'
@@ -537,6 +560,7 @@ pub async fn list_open_with_account_name(
             Ok(OpenTradeWithAccount {
                 trade,
                 account_name: r.account_name,
+                account_type: r.account_type,
             })
         })
         .collect()
@@ -642,19 +666,19 @@ pub async fn list_trades(
         chrono::FixedOffset::east_opt(9 * 3600).expect("9-hour offset is always valid");
     let from_ts = from.map(|d| {
         d.and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("midnight is always valid in fixed-offset JST")
             .and_local_timezone(jst_offset)
             .single()
-            .unwrap()
+            .expect("midnight in JST fixed-offset is always valid")
             .with_timezone(&Utc)
     });
     let to_ts = to.map(|d| {
         (d + chrono::Duration::days(1))
             .and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("midnight is always valid in fixed-offset JST")
             .and_local_timezone(jst_offset)
             .single()
-            .unwrap()
+            .expect("midnight in JST fixed-offset is always valid")
             .with_timezone(&Utc)
     });
 

@@ -10,7 +10,6 @@ use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_db::pool::create_pool;
-use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::monitor::MarketMonitor;
@@ -516,14 +515,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // PositionSizer for crypto. Pure capacity-based — the strategy
-    // declares its own `allocation_pct` on each Signal, no global
-    // risk_rate, no chart info passed in.
-    let min_order_sizes: HashMap<Pair, Decimal> = config
-        .pair_config
-        .iter()
-        .map(|(k, v)| (Pair::new(k), v.min_order_size))
-        .collect();
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(
             "position_sizing config (method='{}', risk_rate={}) is ignored — sizing is now per-strategy via Signal.allocation_pct",
@@ -531,7 +522,6 @@ async fn main() -> anyhow::Result<()> {
             ps.risk_rate
         );
     }
-    let _position_sizer = Arc::new(PositionSizer::new(min_order_sizes));
 
     // pair_configs for UnifiedTrader (min_order_size etc.)
     let pair_configs: Arc<HashMap<String, auto_trader_core::config::PairConfig>> =
@@ -721,34 +711,23 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let account_id = trade.account_id;
-                // Determine account type (paper=dry_run, live=real orders).
-                // DB errors are NOT silently treated as dry_run=true because a
-                // live account that silently degrades to paper mode would skip
-                // real orders while still holding live positions.
-                let dry_run = match auto_trader_db::trading_accounts::get_account(
-                    &crypto_monitor_pool,
-                    account_id,
-                )
-                .await
-                {
-                    Ok(Some(acc)) => acc.account_type == "paper",
-                    Ok(None) => {
+                // account_type comes from the JOIN in list_open_with_account_name —
+                // no extra DB round-trip needed. A missing JOIN result means the
+                // account row was deleted; skip rather than silently degrade to
+                // paper mode (same rationale as the old get_account path).
+                let account_type = match owned.account_type.as_deref() {
+                    Some(t) => t.to_owned(),
+                    None => {
                         tracing::warn!(
-                            "skipping close for trade {}: account {} not found",
-                            trade.id,
-                            account_id
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "skipping close for trade {}: DB error fetching account {}: {e}",
+                            "skipping close for trade {}: account {} not found in JOIN result",
                             trade.id,
                             account_id
                         );
                         continue;
                     }
                 };
+                let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+                let dry_run = account_type == "paper";
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
                 // when the wall clock passes the deadline. Tagged with
@@ -781,14 +760,19 @@ async fn main() -> anyhow::Result<()> {
                     exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
+                    let min_order_sizes: HashMap<Pair, Decimal> = crypto_monitor_pair_configs
+                        .iter()
+                        .map(|(k, v)| (Pair::new(k), v.min_order_size))
+                        .collect();
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
                         Exchange::BitflyerCfd,
                         account_id,
+                        account_name,
                         crypto_monitor_bitflyer_api.clone(),
                         crypto_monitor_price_store.clone(),
                         crypto_monitor_notifier.clone(),
-                        (*crypto_monitor_pair_configs).clone(),
+                        auto_trader_executor::position_sizer::PositionSizer::new(min_order_sizes),
                         dry_run,
                     );
                     match trader.close_position(&trade.id.to_string(), reason).await {
@@ -809,6 +793,7 @@ async fn main() -> anyhow::Result<()> {
                                         exit_price,
                                         exit_reason: reason,
                                     },
+                                    account_type: Some(account_type.clone()),
                                 })
                                 .await
                             {
@@ -974,14 +959,21 @@ async fn main() -> anyhow::Result<()> {
     let exit_pair_configs = pair_configs.clone();
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
-            // Look up the trade so we know which account / pair to close
-            // against and at what price.
-            let trade = match auto_trader_db::trades::get_trade_by_id(&exit_pool, exit.trade_id)
-                .await
+            // Look up the trade joined with account info in one query so we
+            // avoid a separate get_account() call (N+1 elimination).
+            let owned = match auto_trader_db::trades::get_open_trade_with_account(
+                &exit_pool,
+                exit.trade_id,
+            )
+            .await
             {
-                Ok(Some(t)) => t,
+                Ok(Some(r)) => r,
                 Ok(None) => {
-                    tracing::warn!("exit signal references missing trade {}", exit.trade_id);
+                    // Either missing or already closed (SL/TP fired in the same tick).
+                    tracing::debug!(
+                        "exit signal references missing/closed trade {}",
+                        exit.trade_id
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -989,46 +981,34 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
             };
-            if trade.status != auto_trader_core::types::TradeStatus::Open {
-                // Already closed (e.g. SL/TP fired in the same tick from
-                // the position monitor). Nothing to do.
-                continue;
-            }
+            let trade = owned.trade;
             let account_id = trade.account_id;
-            // Determine account type for dry_run flag.
-            // DB errors are NOT silently treated as dry_run=true (see position
-            // monitor for detailed rationale).
-            let dry_run = match auto_trader_db::trading_accounts::get_account(
-                &exit_pool, account_id,
-            )
-            .await
-            {
-                Ok(Some(acc)) => acc.account_type == "paper",
-                Ok(None) => {
+            let account_type = match owned.account_type.as_deref() {
+                Some(t) => t.to_owned(),
+                None => {
                     tracing::warn!(
-                        "skipping strategy exit for trade {}: account {} not found",
-                        trade.id,
-                        account_id
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "skipping strategy exit for trade {}: DB error fetching account {}: {e}",
+                        "skipping strategy exit for trade {}: account {} not found in JOIN result",
                         trade.id,
                         account_id
                     );
                     continue;
                 }
             };
+            let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+            let dry_run = account_type == "paper";
+            let min_order_sizes: HashMap<Pair, Decimal> = exit_pair_configs
+                .iter()
+                .map(|(k, v)| (Pair::new(k), v.min_order_size))
+                .collect();
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
                 account_id,
+                account_name,
                 exit_bitflyer_api.clone(),
                 exit_price_store.clone(),
                 exit_notifier.clone(),
-                (*exit_pair_configs).clone(),
+                auto_trader_executor::position_sizer::PositionSizer::new(min_order_sizes),
                 dry_run,
             );
             // Map the strategy-specific reason onto the ExitReason enum
@@ -1057,6 +1037,7 @@ async fn main() -> anyhow::Result<()> {
                                 exit_price,
                                 exit_reason: reason,
                             },
+                            account_type: Some(account_type.clone()),
                         })
                         .await
                         .is_err()
@@ -1131,14 +1112,19 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let dry_run = pac.account_type == "paper";
+                let min_order_sizes: HashMap<Pair, Decimal> = executor_pair_configs
+                    .iter()
+                    .map(|(k, v)| (Pair::new(k), v.min_order_size))
+                    .collect();
                 let trader = UnifiedTrader::new(
                     executor_pool.clone(),
                     exchange,
                     pac.id,
+                    pac.name.clone(),
                     executor_bitflyer_api.clone(),
                     executor_price_store.clone(),
                     executor_notifier.clone(),
-                    (*executor_pair_configs).clone(),
+                    auto_trader_executor::position_sizer::PositionSizer::new(min_order_sizes),
                     dry_run,
                 );
                 let name = pac.name.clone();
@@ -1211,6 +1197,7 @@ async fn main() -> anyhow::Result<()> {
                             .send(TradeEvent {
                                 trade,
                                 action: TradeAction::Opened,
+                                account_type: Some(pac.account_type.clone()),
                             })
                             .await
                         {
@@ -1253,16 +1240,10 @@ async fn main() -> anyhow::Result<()> {
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
-                        // Look up account_type for this trade (paper / live).
+                        // account_type is carried on the event from the executor/monitor
+                        // that emitted it — no extra DB round-trip required.
                         let account_id = t.account_id;
-                        let account_type = auto_trader_db::trading_accounts::get_account(
-                            &recorder_pool,
-                            account_id,
-                        )
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|acc| acc.account_type);
+                        let account_type = trade_event.account_type.clone();
                         // mode is now derived from account_type ("paper" → "paper", "live" → "live")
                         let mode_str = account_type.as_deref().unwrap_or("paper");
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(

@@ -40,10 +40,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PositionResp
         .into_iter()
         .map(|row| {
             let t = row.trade;
-            let direction = serde_json::to_string(&t.direction)
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_string();
+            let direction = t.direction.as_str().to_string();
             // Strategies that exit dynamically (mean-revert, trailing
             // channel, etc.) may have no take_profit set.
             // Also filter out unreachable sentinel values (entry × 1000

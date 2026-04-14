@@ -106,6 +106,23 @@ pub enum ExitReason {
     StrategyTimeLimit,
 }
 
+impl ExitReason {
+    /// DB bind / display string — avoids `serde_json::to_string` + `trim_matches('"')` round-trip.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExitReason::TpHit => "tp_hit",
+            ExitReason::SlHit => "sl_hit",
+            ExitReason::Manual => "manual",
+            ExitReason::SignalReverse => "signal_reverse",
+            ExitReason::StrategyMeanReached => "strategy_mean_reached",
+            ExitReason::StrategyTrailingChannel => "strategy_trailing_channel",
+            ExitReason::StrategyTrailingMa => "strategy_trailing_ma",
+            ExitReason::StrategyIndicatorReversal => "strategy_indicator_reversal",
+            ExitReason::StrategyTimeLimit => "strategy_time_limit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
     pub strategy_name: String,
