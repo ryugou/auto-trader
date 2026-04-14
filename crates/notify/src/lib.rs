@@ -173,16 +173,24 @@ impl Notifier {
         };
         let text = format_for_slack(&event);
         let body = serde_json::json!({ "text": text });
-        let resp = self
-            .http
-            .post(url)
-            .json(&body)
-            .send()
-            .await
-            .inspect_err(
-                |e| tracing::warn!(event = variant, error = %e, "notify: slack http error"),
-            )
-            .map_err(NotifyError::Http)?;
+        // reqwest::Error の Display (%e) は失敗した URL を含むため、
+        // そのままログ出力 / 呼び出し側への return に使うと Slack
+        // Webhook URL (= secret) が漏れる。without_url() で URL を
+        // 落としてから記録・返却する。
+        let resp = match self.http.post(url).json(&body).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let redacted = e.without_url();
+                tracing::warn!(
+                    event = variant,
+                    is_timeout = redacted.is_timeout(),
+                    is_connect = redacted.is_connect(),
+                    error = %redacted,
+                    "notify: slack http error"
+                );
+                return Err(NotifyError::Http(redacted));
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             tracing::warn!(

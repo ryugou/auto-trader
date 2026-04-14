@@ -15,6 +15,21 @@ ALTER TABLE trades
     ADD CONSTRAINT trades_status_check
     CHECK (status IN ('pending', 'open', 'closed', 'inconsistent'));
 
+-- Enforce mode/status consistency at the database level. The Rust side has
+-- TradeStatus::assert_valid_for_mode() but it's debug_assert! only, so a
+-- release build could still silently persist paper/backtest rows with
+-- live-only statuses if a code path slipped past the guard. The CHECK
+-- below is the durable safety net:
+--   paper/backtest  → open | closed only
+--   live            → any of the 4 statuses
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_mode_status_consistency;
+ALTER TABLE trades
+    ADD CONSTRAINT trades_mode_status_consistency
+    CHECK (
+        mode = 'live'
+        OR (mode IN ('paper', 'backtest') AND status IN ('open', 'closed'))
+    );
+
 ALTER TABLE trades
     ADD COLUMN IF NOT EXISTS child_order_acceptance_id TEXT,
     ADD COLUMN IF NOT EXISTS child_order_id TEXT;

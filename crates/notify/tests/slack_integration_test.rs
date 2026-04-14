@@ -6,7 +6,7 @@ use auto_trader_notify::*;
 use rust_decimal_macros::dec;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 #[tokio::test]
 async fn notifier_posts_text_payload_to_slack_url() {
@@ -34,7 +34,22 @@ async fn notifier_posts_text_payload_to_slack_url() {
         .send(ev)
         .await
         .expect("send should succeed against 200");
-    // Mock::expect(1) が満たされなければドロップ時に panic する
+
+    // 受信したリクエスト body を検証し、Slack Incoming Webhook が要求する
+    // `{"text": "..."}` 形式を満たしているか、および format_for_slack が
+    // 期待される要素 (アカウント名 / ペア / 方向 / 数量 / 価格) を全て
+    // 含めているか確認する。
+    let received: Vec<Request> = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    let text = body["text"]
+        .as_str()
+        .expect("body must have a string `text` field");
+    assert!(text.contains("通常"), "text missing account_name: {text}");
+    assert!(text.contains("FX_BTC_JPY"), "text missing pair: {text}");
+    assert!(text.contains("long"), "text missing direction: {text}");
+    assert!(text.contains("0.005"), "text missing quantity: {text}");
+    assert!(text.contains("11500000"), "text missing price: {text}");
 }
 
 #[tokio::test]
