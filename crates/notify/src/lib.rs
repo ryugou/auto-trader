@@ -5,6 +5,7 @@
 //! 送信のみを実装し、発火ポイント (`LiveTrader` / `RiskGate` / reconciler
 //! など) は後続 PR で配線する。
 
+use auto_trader_core::types::{Direction, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -15,8 +16,8 @@ use uuid::Uuid;
 pub struct OrderFilledEvent {
     pub account_name: String,
     pub trade_id: Uuid,
-    pub pair: String,
-    pub direction: String,
+    pub pair: Pair,
+    pub direction: Direction,
     pub quantity: Decimal,
     pub price: Decimal,
     pub at: DateTime<Utc>,
@@ -26,7 +27,7 @@ pub struct OrderFilledEvent {
 pub struct OrderFailedEvent {
     pub account_name: String,
     pub strategy_name: String,
-    pub pair: String,
+    pub pair: Pair,
     pub reason: String,
 }
 
@@ -78,8 +79,8 @@ pub struct BalanceDriftEvent {
 pub struct DryRunOrderEvent {
     pub account_name: String,
     pub strategy_name: String,
-    pub pair: String,
-    pub direction: String,
+    pub pair: Pair,
+    pub direction: Direction,
     pub quantity: Decimal,
     pub intended_price: Decimal,
 }
@@ -149,14 +150,6 @@ impl Notifier {
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client builder should not fail with basic config"),
-        }
-    }
-
-    /// URL を差し替えたい（テスト用）場合のコンストラクタ。
-    pub fn with_client(slack_webhook_url: Option<String>, http: reqwest::Client) -> Self {
-        Self {
-            slack_webhook_url,
-            http,
         }
     }
 
@@ -252,8 +245,8 @@ mod tests {
         let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
             account_name: "通常".into(),
             trade_id: Uuid::nil(),
-            pair: "FX_BTC_JPY".into(),
-            direction: "long".into(),
+            pair: Pair::new("FX_BTC_JPY"),
+            direction: Direction::Long,
             quantity: dec!(0.01),
             price: dec!(11500000),
             at: Utc::now(),
@@ -283,7 +276,6 @@ mod tests {
         let n = Notifier::new(None);
         let ev =
             NotifyEvent::WebSocketDisconnected(WebSocketDisconnectedEvent { duration_secs: 30 });
-        // webhook が None なので即 Ok(())
         n.send(ev).await.unwrap();
     }
 }

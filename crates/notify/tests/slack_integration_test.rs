@@ -1,6 +1,7 @@
 //! Slack Webhook 送信の統合テスト。wiremock でダミーの Slack サーバーを
 //! 立ち上げ、Notifier が適切なペイロードを POST することを検証する。
 
+use auto_trader_core::types::{Direction, Pair};
 use auto_trader_notify::*;
 use rust_decimal_macros::dec;
 use uuid::Uuid;
@@ -22,8 +23,8 @@ async fn notifier_posts_text_payload_to_slack_url() {
     let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
         account_name: "通常".into(),
         trade_id: Uuid::nil(),
-        pair: "FX_BTC_JPY".into(),
-        direction: "long".into(),
+        pair: Pair::new("FX_BTC_JPY"),
+        direction: Direction::Long,
         quantity: dec!(0.005),
         price: dec!(11500000),
         at: chrono::Utc::now(),

@@ -47,6 +47,21 @@ pub enum Direction {
     Short,
 }
 
+impl Direction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Direction::Long => "long",
+            Direction::Short => "short",
+        }
+    }
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 注文種別。戦略が Signal 生成時に選択する。
 ///
 /// - `Market`: 成行注文。取引所がその瞬間の気配値で約定させる。
@@ -117,6 +132,23 @@ impl TradeStatus {
                 "paper/backtest trade must not have status {self:?}"
             );
         }
+    }
+
+    /// DB bind 時 / SQL 比較で使う静的文字列。`serde_json::to_string` の
+    /// round-trip (`"open"` → `open`) を踏まず 1 アロケーションで済む。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TradeStatus::Open => "open",
+            TradeStatus::Closed => "closed",
+            TradeStatus::Pending => "pending",
+            TradeStatus::Inconsistent => "inconsistent",
+        }
+    }
+}
+
+impl std::fmt::Display for TradeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

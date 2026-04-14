@@ -1,4 +1,4 @@
-use auto_trader_core::types::{Direction, ExitReason, Trade};
+use auto_trader_core::types::{ExitReason, Trade};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -19,13 +19,6 @@ pub struct Notification {
     pub exit_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub read_at: Option<DateTime<Utc>>,
-}
-
-fn direction_str(d: Direction) -> &'static str {
-    match d {
-        Direction::Long => "long",
-        Direction::Short => "short",
-    }
 }
 
 fn exit_reason_str(r: ExitReason) -> String {
@@ -55,7 +48,7 @@ where
     .bind(account_id)
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
-    .bind(direction_str(trade.direction))
+    .bind(trade.direction.as_str())
     .bind(trade.entry_price)
     .execute(executor)
     .await?;
@@ -90,7 +83,7 @@ where
     .bind(account_id)
     .bind(&trade.strategy_name)
     .bind(&trade.pair.0)
-    .bind(direction_str(trade.direction))
+    .bind(trade.direction.as_str())
     .bind(price)
     .bind(pnl)
     .bind(exit_reason_str(reason))
@@ -182,10 +175,7 @@ pub async fn list(
     let mut count_qb: sqlx::QueryBuilder<sqlx::Postgres> =
         sqlx::QueryBuilder::new("SELECT COUNT(*) FROM notifications WHERE 1=1");
     apply_filters(&mut count_qb, unread_only, kind_filter, from_ts, to_ts);
-    let total: i64 = count_qb
-        .build_query_scalar::<i64>()
-        .fetch_one(pool)
-        .await?;
+    let total: i64 = count_qb.build_query_scalar::<i64>().fetch_one(pool).await?;
 
     Ok((items, total))
 }
@@ -219,13 +209,6 @@ pub async fn purge_old_read(pool: &PgPool) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::Direction;
-
-    #[test]
-    fn direction_str_maps_long_short() {
-        assert_eq!(direction_str(Direction::Long), "long");
-        assert_eq!(direction_str(Direction::Short), "short");
-    }
 
     #[test]
     fn exit_reason_str_strips_quotes() {

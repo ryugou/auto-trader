@@ -15,8 +15,10 @@ rust_decimal = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+auto-trader-core = { path = "../core" }
 
 [dev-dependencies]
+auto-trader-core = { path = "../core" }
 wiremock = { workspace = true }
 rust_decimal_macros = "1"
 tokio = { workspace = true }

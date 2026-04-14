@@ -53,8 +53,8 @@ where
             .trim_matches('"')
             .to_string()
     }))
-    .bind(serde_json::to_string(&trade.mode).unwrap_or_default().trim_matches('"').to_string())
-    .bind(serde_json::to_string(&trade.status).unwrap_or_default().trim_matches('"').to_string())
+    .bind(trade.mode.as_str())
+    .bind(trade.status.as_str())
     .bind(trade.max_hold_until)
     .bind(&trade.child_order_acceptance_id)
     .bind(&trade.child_order_id)
@@ -77,7 +77,7 @@ pub async fn update_trade_closed(
     sqlx::query(
         r#"UPDATE trades
            SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
-               exit_reason = $6, fees = $7, status = 'closed'
+               exit_reason = $6, fees = $7, status = $8
            WHERE id = $1"#,
     )
     .bind(id)
@@ -91,11 +91,17 @@ pub async fn update_trade_closed(
             .trim_matches('"'),
     )
     .bind(fees)
+    .bind(TradeStatus::Closed.as_str())
     .execute(pool)
     .await?;
     Ok(())
 }
 
+// TODO(PR 3, live-trading): status フィルタを IN ('open', 'pending') に拡張する。
+// 現在は paper のみ返すので `open` のみでよいが、live trading が入ると pending
+// のトレードがポジションモニターから抜け落ちる (silent bug になる)。
+// partial unique index (trades_one_active_per_strategy_pair) は既に
+// status IN ('pending', 'open') を "active" として扱っているため、そこと整合させる。
 pub async fn get_open_trades(
     pool: &PgPool,
     strategy_name: &str,
