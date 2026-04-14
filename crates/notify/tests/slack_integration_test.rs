@@ -80,6 +80,39 @@ async fn notifier_noop_when_url_none() {
     notifier.send(ev).await.expect("noop should return Ok");
 }
 
+/// 回帰防止: `From<reqwest::Error> for NotifyError` の経路も必ず
+/// `without_url()` を通ることを検証する。将来 `send` 以外の関数が
+/// `self.http.<...>.send().await?` のパターンで `?` で
+/// `NotifyError::Http` に変換しても secret が漏れないことを担保。
+#[tokio::test]
+async fn notify_error_from_reqwest_error_strips_url() {
+    // 閉じたポートに向けて、明示的な redact を**通さず** `?` 相当の
+    // `NotifyError::from` で変換する。
+    let client = reqwest::Client::new();
+    let url = "http://127.0.0.1:1/services/SECRET_VIA_FROM_IMPL".to_string();
+    let reqwest_err = client
+        .post(&url)
+        .send()
+        .await
+        .expect_err("connection should fail");
+
+    let notify_err: NotifyError = reqwest_err.into();
+    let rendered = format!("{notify_err}");
+    let rendered_dbg = format!("{notify_err:?}");
+    assert!(
+        !rendered.contains("SECRET_VIA_FROM_IMPL"),
+        "URL leaked via From impl Display: {rendered}"
+    );
+    assert!(
+        !rendered_dbg.contains("SECRET_VIA_FROM_IMPL"),
+        "URL leaked via From impl Debug: {rendered_dbg}"
+    );
+    assert!(
+        !rendered.contains("127.0.0.1:1"),
+        "host:port leaked via From impl: {rendered}"
+    );
+}
+
 /// 回帰防止: `reqwest::Error` の Display は失敗した URL (= Slack
 /// Webhook secret) を含むため、`NotifyError::Http` に流し込む前に
 /// `without_url()` で落とす必要がある。接続先が存在しない URL

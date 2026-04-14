@@ -201,8 +201,20 @@ impl Notifier {
 }
 ```
 
-- Webhook 失敗時はリトライ 3 回、それでも失敗したらログのみ（通知失敗で本処理を止めない）
-- `SLACK_WEBHOOK_URL` 未設定時は no-op（ログのみ）
+- **リトライポリシー**: `Notifier::send` 自体はリトライしない。呼び出し側
+  の責務として以下のパターンで使い分ける:
+  - **High-frequency / low-priority** (`OrderFilled` / `DryRunOrder` / `PositionClosed`):
+    `tokio::spawn(async move { let _ = notifier.send(ev).await; })` で
+    fire-and-forget。signal hot path を Slack レイテンシで止めない。
+  - **Critical** (`KillSwitchTriggered` / `BalanceDrift` / `StartupReconciliationDiff`):
+    `.await` で結果を確認。失敗した場合は **DB `notifications` テーブル
+    (UI ベル) に backstop 書き込み**して UI 側で気付ける形にする。
+    Slack だけに頼らない二重化。
+- `SLACK_WEBHOOK_URL` 未設定時は `send()` が Ok(()) を返す no-op（ログのみ）
+- 送信失敗は `warn` ログ + `NotifyError` 返却。`reqwest::Error` は必ず
+  `without_url()` を通して Webhook URL (= secret) を落とすため、ログ
+  出力と `NotifyError::Http` の Display/Debug のどちらにも URL は
+  含まれない。`From<reqwest::Error> for NotifyError` も redact 強制。
 
 ### 5.6. `ExecutionPollingTask` (`crates/app/src/tasks/execution_poller.rs`)
 

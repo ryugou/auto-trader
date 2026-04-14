@@ -126,10 +126,24 @@ impl NotifyEvent {
 
 #[derive(Debug, Error)]
 pub enum NotifyError {
+    /// reqwest 由来の HTTP エラー。`From<reqwest::Error>` は `?` 経由で
+    /// 呼ばれても `without_url()` で URL (= Slack Webhook secret) を
+    /// 必ず落とすよう手書き実装している。`#[from]` を使わない理由は
+    /// まさにこの secret redaction 強制のため。
     #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error("slack returned non-2xx status: {0}")]
     Status(u16),
+}
+
+impl From<reqwest::Error> for NotifyError {
+    fn from(e: reqwest::Error) -> Self {
+        // `?` で自動変換された場合でも必ず URL を落とす。
+        // この 1 箇所でガードすることで、将来 send() 以外の関数が
+        // `self.http.<...>.send().await?` のパターンで reqwest::Error
+        // を投げても secret が漏れない。
+        NotifyError::Http(e.without_url())
+    }
 }
 
 /// Slack Webhook 送信クライアント。`slack_webhook_url` が None なら
