@@ -14,6 +14,9 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use thiserror::Error;
 
+// Batch D でエンドポイントメソッドが追加されるまでの過渡期。
+// dead_code は intentional: Batch D の各 endpoint が呼び出す。
+#[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
 /// `POST /v1/me/sendchildorder` リクエスト本体。
@@ -167,8 +170,10 @@ pub enum BitflyerApiError {
     InvalidApiKey,
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("rate limited")]
-    RateLimited,
+    #[error("rate limited (retry after {retry_after:?})")]
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+    },
     #[error("order not found: {0}")]
     OrderNotFound(String),
     #[error("bitflyer api error: status={status} message={message}")]
@@ -210,12 +215,30 @@ impl BitflyerApiError {
 /// コンストラクタは `new` (本番) と `new_for_test` (wiremock / 単体
 /// テスト) を分離し、テストが本番 URL を誤って叩かないよう型で
 /// ガードする。
+///
+/// `Debug` は手書き実装で `api_key` / `api_secret` を `"***redacted***"` に
+/// 置換する。将来 `#[derive(Debug)]` に差し替えると漏洩するため derive 禁止。
 #[derive(Clone)]
 pub struct BitflyerPrivateApi {
     base_url: String,
+    // Batch D のエンドポイントメソッドから使用予定。
+    // dead_code は intentional: Batch D 完成時に消す。
+    #[allow(dead_code)]
     api_key: String,
+    #[allow(dead_code)]
     api_secret: String,
+    #[allow(dead_code)]
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for BitflyerPrivateApi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitflyerPrivateApi")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"***redacted***")
+            .field("api_secret", &"***redacted***")
+            .finish_non_exhaustive()
+    }
 }
 
 impl BitflyerPrivateApi {
@@ -246,7 +269,9 @@ impl BitflyerPrivateApi {
     }
 
     /// 認証ヘッダ 3 本を生成する pure function (テスト可能)。
-    pub fn auth_headers(
+    // Batch D のエンドポイントメソッドから呼ばれる予定。
+    #[allow(dead_code)]
+    pub(crate) fn auth_headers(
         &self,
         timestamp: &str,
         method: &str,
@@ -263,6 +288,7 @@ impl BitflyerPrivateApi {
 
     /// 現在時刻の Unix 秒を 10 進文字列で返す。テストで時刻を固定
     /// したい場合は呼び出し側で auth_headers を直接叩く。
+    #[allow(dead_code)]
     fn current_timestamp() -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -279,7 +305,9 @@ impl BitflyerPrivateApi {
     /// 成功時は bitFlyer の raw レスポンスを (2xx, body_string) で返す。
     /// HTTP ステータスが 2xx でも JSON body に `status: <負数>` が
     /// 入っていれば `BitflyerApiError::from_body` で分類する。
-    pub async fn request(
+    // Batch D のエンドポイントメソッドから呼ばれる予定。
+    #[allow(dead_code)]
+    pub(crate) async fn request(
         &self,
         method: &str,
         path: &str,
@@ -309,24 +337,39 @@ impl BitflyerPrivateApi {
 
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| BitflyerApiError::Http(e.without_url()))?;
 
         if status.as_u16() == 429 {
-            return Err(BitflyerApiError::RateLimited);
+            let retry_after = parse_retry_after(&resp);
+            // body 読み取りは 429 確定後でよい (不要なら読まない)
+            let _ = resp.text().await;
+            return Err(BitflyerApiError::RateLimited { retry_after });
         }
+
+        let text = resp.text().await.map_err(|e| {
+            tracing::warn!(method, path, "failed to read response body");
+            BitflyerApiError::Http(e.without_url())
+        })?;
+
         if !status.is_success() {
             // 非 2xx レスポンスは body に BitflyerErrorBody が載っている
             // ことが多い。パース失敗したら InvalidResponse に fallback。
             return match serde_json::from_str::<BitflyerErrorBody>(&text) {
                 Ok(body) => Err(BitflyerApiError::from_body(body)),
-                Err(_) => Err(BitflyerApiError::InvalidResponse(format!(
-                    "non-2xx status {} body {}",
-                    status.as_u16(),
-                    text
-                ))),
+                Err(_) => {
+                    // body 全文をログに出さないよう先頭 512 文字にトリム
+                    let truncated: String = text.chars().take(512).collect();
+                    tracing::warn!(
+                        method,
+                        path,
+                        status = status.as_u16(),
+                        "non-2xx response with unrecognised body"
+                    );
+                    Err(BitflyerApiError::InvalidResponse(format!(
+                        "non-2xx status {} body (truncated to 512 chars): {}",
+                        status.as_u16(),
+                        truncated
+                    )))
+                }
             };
         }
 
@@ -340,6 +383,15 @@ impl BitflyerPrivateApi {
 
         Ok(text)
     }
+}
+
+/// HTTP レスポンスの `Retry-After` ヘッダから待機時間を解析する。
+///
+/// bitFlyer は秒数整数 (例: `"5"`) を返す。HTTP-date 形式は現在サポートしない。
+/// 解析失敗時は `None` を返す (= 安全側フォールバック)。
+fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    let hdr = resp.headers().get("retry-after")?.to_str().ok()?;
+    hdr.parse::<u64>().ok().map(std::time::Duration::from_secs)
 }
 
 /// bitFlyer Private API の `ACCESS-SIGN` ヘッダを計算する。
@@ -527,5 +579,107 @@ mod tests {
             "",
         );
         assert_eq!(headers.get("ACCESS-SIGN").unwrap(), &expected);
+    }
+
+    // --- Batch C regression tests ---
+
+    /// [CRITICAL] Debug impl が api_key / api_secret をリテラルで出力しないことを確認。
+    #[test]
+    fn debug_redacts_api_key_and_secret() {
+        let api = BitflyerPrivateApi::new_for_test(
+            "http://example.invalid".to_string(),
+            "my-super-key".to_string(),
+            "my-super-secret".to_string(),
+        );
+        let dbg = format!("{:?}", api);
+        assert!(
+            !dbg.contains("my-super-key"),
+            "api_key must not appear in Debug output, got: {dbg}"
+        );
+        assert!(
+            !dbg.contains("my-super-secret"),
+            "api_secret must not appear in Debug output, got: {dbg}"
+        );
+        assert!(
+            dbg.contains("***redacted***"),
+            "Debug output should contain '***redacted***', got: {dbg}"
+        );
+    }
+
+    /// [CRITICAL] request() が 503 + 2000 文字ボディを返したとき、
+    /// InvalidResponse メッセージが先頭 512 文字にトリムされること。
+    #[tokio::test]
+    async fn invalid_response_body_is_truncated() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let long_body: String = "x".repeat(2000);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getcollateral"))
+            .respond_with(ResponseTemplate::new(503).set_body_string(long_body.clone()))
+            .mount(&server)
+            .await;
+
+        let api =
+            BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
+        let err = api
+            .request("GET", "/v1/me/getcollateral", "")
+            .await
+            .unwrap_err();
+
+        let displayed = err.to_string();
+        // ボディが丸ごと入っていないこと (2000 文字は含まれないはず)
+        assert!(
+            displayed.len() < 700,
+            "error message must be truncated (< 700 chars), got len={}",
+            displayed.len()
+        );
+        // 先頭 512 文字の 'x' は含まれる
+        assert!(
+            displayed.contains(&"x".repeat(512)),
+            "first 512 chars of body must appear in message"
+        );
+        // 513 文字目以降の 'x' は含まれない (trunc で切れているはず)
+        assert!(
+            !displayed.contains(&"x".repeat(513)),
+            "body beyond 512 chars must not appear in message"
+        );
+    }
+
+    /// [IMPORTANT] RateLimited が Retry-After 秒数を保持できること。
+    #[tokio::test]
+    async fn rate_limited_captures_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getcollateral"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "5")
+                    .set_body_string("rate limited"),
+            )
+            .mount(&server)
+            .await;
+
+        let api =
+            BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
+        let err = api
+            .request("GET", "/v1/me/getcollateral", "")
+            .await
+            .unwrap_err();
+
+        match err {
+            BitflyerApiError::RateLimited { retry_after } => {
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_secs(5)),
+                    "should capture Retry-After: 5"
+                );
+            }
+            other => panic!("expected RateLimited, got {:?}", other),
+        }
     }
 }
