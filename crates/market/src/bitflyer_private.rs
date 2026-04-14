@@ -14,9 +14,6 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use thiserror::Error;
 
-// Batch D でエンドポイントメソッドが追加されるまでの過渡期。
-// dead_code は intentional: Batch D の各 endpoint が呼び出す。
-#[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
 /// `POST /v1/me/sendchildorder` リクエスト本体。
@@ -221,13 +218,8 @@ impl BitflyerApiError {
 #[derive(Clone)]
 pub struct BitflyerPrivateApi {
     base_url: String,
-    // Batch D のエンドポイントメソッドから使用予定。
-    // dead_code は intentional: Batch D 完成時に消す。
-    #[allow(dead_code)]
     api_key: String,
-    #[allow(dead_code)]
     api_secret: String,
-    #[allow(dead_code)]
     http: reqwest::Client,
 }
 
@@ -269,8 +261,6 @@ impl BitflyerPrivateApi {
     }
 
     /// 認証ヘッダ 3 本を生成する pure function (テスト可能)。
-    // Batch D のエンドポイントメソッドから呼ばれる予定。
-    #[allow(dead_code)]
     pub(crate) fn auth_headers(
         &self,
         timestamp: &str,
@@ -288,7 +278,6 @@ impl BitflyerPrivateApi {
 
     /// 現在時刻の Unix 秒を 10 進文字列で返す。テストで時刻を固定
     /// したい場合は呼び出し側で auth_headers を直接叩く。
-    #[allow(dead_code)]
     fn current_timestamp() -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -305,8 +294,6 @@ impl BitflyerPrivateApi {
     /// 成功時は bitFlyer の raw レスポンスを (2xx, body_string) で返す。
     /// HTTP ステータスが 2xx でも JSON body に `status: <負数>` が
     /// 入っていれば `BitflyerApiError::from_body` で分類する。
-    // Batch D のエンドポイントメソッドから呼ばれる予定。
-    #[allow(dead_code)]
     pub(crate) async fn request(
         &self,
         method: &str,
@@ -382,6 +369,18 @@ impl BitflyerPrivateApi {
         }
 
         Ok(text)
+    }
+
+    /// `POST /v1/me/sendchildorder` — 成行/指値注文を発行する。
+    pub async fn send_child_order(
+        &self,
+        req: SendChildOrderRequest,
+    ) -> Result<SendChildOrderResponse, BitflyerApiError> {
+        let body = serde_json::to_string(&req)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("serialize: {e}")))?;
+        let text = self.request("POST", "/v1/me/sendchildorder", &body).await?;
+        serde_json::from_str(&text)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
     }
 }
 
