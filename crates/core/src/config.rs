@@ -24,8 +24,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub gemini: Option<GeminiConfig>,
     #[serde(default)]
-    pub risk: Option<RiskConfig>,
-    #[serde(default)]
     pub live: Option<LiveConfig>,
 }
 
@@ -133,40 +131,6 @@ pub struct PositionSizingConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct RiskConfig {
-    /// 本日 (JST) のクローズ済み pnl 合計がこの比率 (×初期残高) を
-    /// 下回ったら Kill Switch 発動。
-    pub daily_loss_limit_pct: Decimal,
-    /// price tick の鮮度上限 (秒)。超過時は新規シグナル拒否。
-    pub price_freshness_secs: u64,
-    /// Kill Switch を自動解除する JST 時刻 (0 = 0:00)。
-    pub kill_switch_release_jst_hour: u32,
-}
-
-impl RiskConfig {
-    /// 起動時に fail-fast させる値域チェック。
-    /// 不正値を放置すると Kill Switch が永久停止/即発動になり得る。
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct > Decimal::ONE {
-            anyhow::bail!(
-                "[risk].daily_loss_limit_pct must be in (0, 1], got {}",
-                self.daily_loss_limit_pct
-            );
-        }
-        if self.price_freshness_secs == 0 {
-            anyhow::bail!("[risk].price_freshness_secs must be > 0");
-        }
-        if self.kill_switch_release_jst_hour > 23 {
-            anyhow::bail!(
-                "[risk].kill_switch_release_jst_hour must be in 0..=23, got {}",
-                self.kill_switch_release_jst_hour
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct LiveConfig {
     /// true の時のみ LiveTrader を起動する。account_type='live' の
     /// アカウントが存在すれば main.rs 起動時に true でなければ fatal。
@@ -206,9 +170,6 @@ impl AppConfig {
     /// AppConfig 全体の妥当性検証。各サブ config の `validate()` を呼ぶ。
     /// 不正値があれば anyhow::Error で起動中断させる。
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let Some(risk) = &self.risk {
-            risk.validate()?;
-        }
         if let Some(live) = &self.live {
             live.validate()?;
         }
@@ -258,15 +219,6 @@ mod debug_redaction_tests {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    use rust_decimal_macros::dec;
-
-    fn valid_risk() -> RiskConfig {
-        RiskConfig {
-            daily_loss_limit_pct: dec!(0.05),
-            price_freshness_secs: 60,
-            kill_switch_release_jst_hour: 0,
-        }
-    }
 
     fn valid_live() -> LiveConfig {
         LiveConfig {
@@ -276,53 +228,6 @@ mod validation_tests {
             reconciler_interval_secs: 300,
             balance_sync_interval_secs: 300,
         }
-    }
-
-    #[test]
-    fn risk_validate_accepts_valid_values() {
-        valid_risk().validate().unwrap();
-    }
-
-    #[test]
-    fn risk_validate_rejects_zero_loss_limit() {
-        let mut r = valid_risk();
-        r.daily_loss_limit_pct = Decimal::ZERO;
-        assert!(r.validate().is_err());
-    }
-
-    #[test]
-    fn risk_validate_rejects_negative_loss_limit() {
-        let mut r = valid_risk();
-        r.daily_loss_limit_pct = dec!(-0.05);
-        assert!(r.validate().is_err());
-    }
-
-    #[test]
-    fn risk_validate_rejects_loss_limit_over_one() {
-        let mut r = valid_risk();
-        r.daily_loss_limit_pct = dec!(1.5);
-        assert!(r.validate().is_err());
-    }
-
-    #[test]
-    fn risk_validate_rejects_zero_price_freshness() {
-        let mut r = valid_risk();
-        r.price_freshness_secs = 0;
-        assert!(r.validate().is_err());
-    }
-
-    #[test]
-    fn risk_validate_rejects_hour_out_of_range() {
-        let mut r = valid_risk();
-        r.kill_switch_release_jst_hour = 24;
-        assert!(r.validate().is_err());
-    }
-
-    #[test]
-    fn risk_validate_accepts_hour_23() {
-        let mut r = valid_risk();
-        r.kill_switch_release_jst_hour = 23;
-        r.validate().unwrap();
     }
 
     #[test]
@@ -456,7 +361,7 @@ pairs = ["FX_BTC_JPY"]
     }
 
     #[test]
-    fn parse_config_with_risk_and_live() {
+    fn parse_config_with_live() {
         let toml_str = r#"
 [vegapunk]
 endpoint = "http://localhost:3000"
@@ -471,11 +376,6 @@ interval_secs = 60
 [pairs]
 active = ["USD_JPY"]
 
-[risk]
-daily_loss_limit_pct = 0.05
-price_freshness_secs = 60
-kill_switch_release_jst_hour = 0
-
 [live]
 enabled = false
 dry_run = true
@@ -484,8 +384,6 @@ reconciler_interval_secs = 300
 balance_sync_interval_secs = 300
 "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
-        let risk = cfg.risk.expect("risk section should parse");
-        assert_eq!(risk.price_freshness_secs, 60);
         let live = cfg.live.expect("live section should parse");
         assert!(!live.enabled);
         assert!(live.dry_run);
