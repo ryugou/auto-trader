@@ -272,7 +272,12 @@ impl BitflyerPrivateApi {
 
     /// ベース URL を明示するコンストラクタ。wiremock テストが native speed で走るよう
     /// `rate_limiter: None`。
-    pub fn with_base_url(base_url: String, api_key: String, api_secret: String) -> Self {
+    ///
+    /// crate 内専用 (`pub(crate)`)。外部コードは `new()` を使うこと。
+    /// `new()` は常に rate limiter を張り本番 URL を指すため、
+    /// この関数を crate 外に公開すると「rate limiter なしで任意 URL」の
+    /// `BitflyerPrivateApi` を本番コードから作れてしまう。
+    pub(crate) fn with_base_url(base_url: String, api_key: String, api_secret: String) -> Self {
         Self {
             base_url,
             api_key,
@@ -426,8 +431,9 @@ impl BitflyerPrivateApi {
         let body = serde_json::to_string(&req)
             .map_err(|e| BitflyerApiError::InvalidResponse(format!("serialize: {e}")))?;
         let text = self.request("POST", "/v1/me/sendchildorder", &body).await?;
-        serde_json::from_str(&text)
-            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
     }
 
     /// `GET /v1/me/getchildorders` — `child_order_acceptance_id` で特定の
@@ -443,8 +449,9 @@ impl BitflyerPrivateApi {
             product_code, child_order_acceptance_id
         );
         let text = self.request("GET", &path, "").await?;
-        serde_json::from_str(&text)
-            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
     }
 
     /// `GET /v1/me/getexecutions` — 約定一覧を取得する。
@@ -458,8 +465,9 @@ impl BitflyerPrivateApi {
             product_code, child_order_acceptance_id
         );
         let text = self.request("GET", &path, "").await?;
-        serde_json::from_str(&text)
-            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
     }
 
     /// `GET /v1/me/getpositions` — 保有建玉一覧 (FX/CFD 専用)。
@@ -469,15 +477,17 @@ impl BitflyerPrivateApi {
     ) -> Result<Vec<ExchangePosition>, BitflyerApiError> {
         let path = format!("/v1/me/getpositions?product_code={}", product_code);
         let text = self.request("GET", &path, "").await?;
-        serde_json::from_str(&text)
-            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
     }
 
     /// `GET /v1/me/getcollateral` — 証拠金の現在状態。
     pub async fn get_collateral(&self) -> Result<Collateral, BitflyerApiError> {
         let text = self.request("GET", "/v1/me/getcollateral", "").await?;
-        serde_json::from_str(&text)
-            .map_err(|e| BitflyerApiError::InvalidResponse(format!("parse: {e}: {text}")))
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
     }
 
     /// `POST /v1/me/cancelchildorder` — 未約定注文をキャンセルする。
@@ -502,6 +512,14 @@ impl BitflyerPrivateApi {
             .await?;
         Ok(())
     }
+}
+
+/// parse/format エラー文字列に埋め込む body text を 512 文字で丸める。
+///
+/// `request()` の非 2xx ハンドリングと同じ上限を使うことで、
+/// ログ・エラー文字列のサイズポリシーを一箇所で管理する。
+fn truncate_body(text: &str) -> String {
+    text.chars().take(512).collect()
 }
 
 /// HTTP レスポンスの `Retry-After` ヘッダから待機時間を解析する。
@@ -800,5 +818,55 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {:?}", other),
         }
+    }
+
+    // --- Final review regression tests ---
+
+    /// truncate_body が 512 文字を超えないことを確認する。
+    #[test]
+    fn truncate_body_caps_at_512_chars() {
+        let long = "a".repeat(1000);
+        let truncated = truncate_body(&long);
+        assert_eq!(truncated.len(), 512, "should be exactly 512 chars");
+    }
+
+    /// truncate_body が短いテキストをそのまま返すことを確認する。
+    #[test]
+    fn truncate_body_passthrough_for_short_text() {
+        let short = "hello";
+        assert_eq!(truncate_body(short), "hello");
+    }
+
+    /// parse 失敗時の InvalidResponse メッセージが 512 文字以内に収まること。
+    /// (endpoint = get_collateral、600 文字の壊れた JSON で検証)
+    #[tokio::test]
+    async fn parse_failure_error_message_is_truncated_to_512() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // 壊れた JSON (600 文字以上) を返す stub
+        let garbage_body: String = "g".repeat(600);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getcollateral"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(garbage_body.clone()))
+            .mount(&server)
+            .await;
+
+        let api =
+            BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
+        let err = api.get_collateral().await.unwrap_err();
+
+        let msg = err.to_string();
+        // body の 512 文字目 'g' まではメッセージに含まれる
+        assert!(
+            msg.contains(&"g".repeat(512)),
+            "first 512 chars must appear in error message"
+        );
+        // 513 文字目以降は切れているはず
+        assert!(
+            !msg.contains(&"g".repeat(513)),
+            "body beyond 512 chars must not appear in error message"
+        );
     }
 }

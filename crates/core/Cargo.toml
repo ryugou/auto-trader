@@ -16,8 +16,5 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
-[features]
-testing = []
-
 [dev-dependencies]
 rust_decimal_macros = "1"

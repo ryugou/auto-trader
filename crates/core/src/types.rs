@@ -270,7 +270,10 @@ pub struct Trade {
 /// (PR 2 以降で Trade にフィールドを足しても、戦略 / backtest /
 /// paper のテスト固有 Trade リテラルを全書き換えしないで済むよう、
 /// ベースライン Trade を用意する。)
-#[cfg(any(test, feature = "testing"))]
+///
+/// `feature = "testing"` は廃止。production build に `Trade::default()`
+/// (entry_price=0 など無効値) が露出するのを防ぐため `#[cfg(test)]` のみ。
+#[cfg(test)]
 impl Default for Trade {
     fn default() -> Self {
         Self {
