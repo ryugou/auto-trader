@@ -148,6 +148,10 @@ pub struct Signal {
     /// "stale" trades (e.g. mean-reversion 24h, vol-breakout 48h).
     #[serde(default)]
     pub max_hold_until: Option<DateTime<Utc>>,
+    /// 注文種別 (Market / Limit)。Signal を出した戦略が選ぶ。
+    /// 既存の JSON を読み込むと Market に default される (後方互換)。
+    #[serde(default)]
+    pub order_type: OrderType,
 }
 
 fn default_allocation_pct() -> Decimal {
@@ -245,6 +249,7 @@ mod tests {
             timestamp: Utc::now(),
             allocation_pct: dec!(0.5),
             max_hold_until: None,
+            order_type: OrderType::Market,
         };
         let json = serde_json::to_string(&signal).unwrap();
         let back: Signal = serde_json::from_str(&json).unwrap();
@@ -282,6 +287,44 @@ mod tests {
             OrderType::Limit { price } => assert_eq!(price, dec!(150.25)),
             _ => panic!("expected Limit"),
         }
+    }
+
+    #[test]
+    fn signal_defaults_order_type_to_market_when_absent() {
+        // 既存コードが生成した Signal JSON (order_type フィールドなし)
+        // は OrderType::Market に既定化されることを検証する。
+        let legacy_json = r#"{
+            "strategy_name": "legacy",
+            "pair": "USD_JPY",
+            "direction": "long",
+            "entry_price": "150.00",
+            "stop_loss": "149.50",
+            "take_profit": "151.00",
+            "confidence": 0.8,
+            "timestamp": "2024-01-01T00:00:00Z",
+            "allocation_pct": "0.5"
+        }"#;
+        let signal: Signal = serde_json::from_str(legacy_json).unwrap();
+        assert!(matches!(signal.order_type, OrderType::Market));
+    }
+
+    #[test]
+    fn signal_serializes_with_explicit_order_type() {
+        let signal = Signal {
+            strategy_name: "s".to_string(),
+            pair: Pair::new("USD_JPY"),
+            direction: Direction::Long,
+            entry_price: dec!(150.0),
+            stop_loss: dec!(149.0),
+            take_profit: dec!(151.0),
+            confidence: 0.8,
+            timestamp: Utc::now(),
+            allocation_pct: dec!(0.5),
+            max_hold_until: None,
+            order_type: OrderType::Limit { price: dec!(150.5) },
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        assert!(json.contains(r#""order_type":{"type":"limit","price":"150.5"}"#));
     }
 
     #[test]
