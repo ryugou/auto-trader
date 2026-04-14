@@ -35,26 +35,58 @@ fn exit_reason_str(r: ExitReason) -> String {
 }
 
 /// Insert a `trade_opened` notification.
-///
-/// # Panics (temporary)
-///
-/// This is a stub. The real implementation will be added in PR-1 Task 6
-/// once the new `notifications` schema is in place.
-pub async fn insert_trade_opened<'e, E>(_executor: E, _trade: &Trade) -> anyhow::Result<()>
+pub async fn insert_trade_opened<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    unimplemented!("implemented in PR-1 Task 6 — notifications schema not yet migrated");
+    let direction = serde_json::to_string(&trade.direction)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    sqlx::query(
+        r#"INSERT INTO notifications
+               (kind, trade_id, account_id, strategy_name, pair, direction, price,
+                pnl_amount, exit_reason)
+           VALUES ('trade_opened', $1, $2, $3, $4, $5, $6, NULL, NULL)"#,
+    )
+    .bind(trade.id)
+    .bind(trade.account_id)
+    .bind(&trade.strategy_name)
+    .bind(&trade.pair.0)
+    .bind(&direction)
+    .bind(trade.entry_price)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Insert a `trade_closed` notification.
-///
-/// # Panics (temporary)
-pub async fn insert_trade_closed<'e, E>(_executor: E, _trade: &Trade) -> anyhow::Result<()>
+pub async fn insert_trade_closed<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    unimplemented!("implemented in PR-1 Task 6 — notifications schema not yet migrated");
+    let direction = serde_json::to_string(&trade.direction)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let exit_reason_str = trade.exit_reason.map(exit_reason_str);
+    sqlx::query(
+        r#"INSERT INTO notifications
+               (kind, trade_id, account_id, strategy_name, pair, direction, price,
+                pnl_amount, exit_reason)
+           VALUES ('trade_closed', $1, $2, $3, $4, $5, $6, $7, $8)"#,
+    )
+    .bind(trade.id)
+    .bind(trade.account_id)
+    .bind(&trade.strategy_name)
+    .bind(&trade.pair.0)
+    .bind(&direction)
+    .bind(trade.exit_price)
+    .bind(trade.pnl_amount)
+    .bind(exit_reason_str)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Paginated list with optional filters.

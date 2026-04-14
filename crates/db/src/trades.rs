@@ -9,108 +9,236 @@
 //! are preserved but may fail at runtime against the new schema.
 //! They will be updated in Task 6.
 
-use auto_trader_core::types::{
-    Direction, Exchange, ExitReason, Pair, Trade, TradeStatus,
-};
+use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// New API for Trader (Task 6 will provide real implementations)
+// New API for Trader
 // ---------------------------------------------------------------------------
 
 /// Insert a trade row inside the given transaction.
-///
-/// # Panics (temporary)
-///
-/// This is a stub. The real implementation (aligned with the new schema) is
-/// delivered in PR-1 Task 6.
-pub async fn insert_trade<'e, E>(_executor: E, _trade: &Trade) -> anyhow::Result<()>
+pub async fn insert_trade<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+    let direction = serde_json::to_string(&trade.direction)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let status = trade.status.as_str().to_string();
+    sqlx::query(
+        r#"INSERT INTO trades
+               (id, account_id, strategy_name, pair, exchange, direction,
+                entry_price, exit_price, stop_loss, take_profit,
+                quantity, leverage, fees, entry_at, exit_at,
+                pnl_amount, exit_reason, status, max_hold_until)
+           VALUES ($1, $2, $3, $4, $5, $6,
+                   $7, $8, $9, $10,
+                   $11, $12, $13, $14, $15,
+                   $16, $17, $18, $19)"#,
+    )
+    .bind(trade.id)
+    .bind(trade.account_id)
+    .bind(&trade.strategy_name)
+    .bind(&trade.pair.0)
+    .bind(trade.exchange.as_str())
+    .bind(&direction)
+    .bind(trade.entry_price)
+    .bind(trade.exit_price)
+    .bind(trade.stop_loss)
+    .bind(trade.take_profit)
+    .bind(trade.quantity)
+    .bind(trade.leverage)
+    .bind(trade.fees)
+    .bind(trade.entry_at)
+    .bind(trade.exit_at)
+    .bind(trade.pnl_amount)
+    .bind(trade.exit_reason.map(|r| {
+        serde_json::to_string(&r)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string()
+    }))
+    .bind(&status)
+    .bind(trade.max_hold_until)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Lock margin for an open trade.
 ///
 /// Deducts `margin_amount` from `trading_accounts.current_balance` and
 /// inserts an `account_events` row with `event_type='margin_lock'`.
-///
-/// # Panics (temporary)
-pub async fn lock_margin<'e, E>(
-    _executor: E,
-    _account_id: Uuid,
-    _trade_id: Uuid,
-    _margin_amount: Decimal,
-) -> anyhow::Result<()>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    unimplemented!("implemented in PR-1 Task 6 — account_events schema not yet migrated");
+pub async fn lock_margin(
+    tx: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    trade_id: Uuid,
+    margin_amount: Decimal,
+) -> anyhow::Result<()> {
+    // Update balance and capture new value in a single statement
+    let new_balance: Decimal = sqlx::query_scalar(
+        r#"UPDATE trading_accounts
+           SET current_balance = current_balance - $2
+           WHERE id = $1
+           RETURNING current_balance"#,
+    )
+    .bind(account_id)
+    .bind(margin_amount)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'margin_lock', $3, $4)"#,
+    )
+    .bind(account_id)
+    .bind(trade_id)
+    .bind(margin_amount)
+    .bind(new_balance)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }
 
 /// Fetch a trade for closing (SELECT … FOR UPDATE).
 ///
 /// Returns `None` when the trade is not found, already closed, or belongs
 /// to a different account.
-///
-/// # Panics (temporary)
 pub async fn get_trade_for_close(
-    _pool: &PgPool,
-    _trade_id: Uuid,
-    _account_id: Uuid,
+    pool: &PgPool,
+    trade_id: Uuid,
+    account_id: Uuid,
 ) -> anyhow::Result<Option<Trade>> {
-    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+    let row = sqlx::query_as::<_, TradeRow>(
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, account_id,
+                  entry_at, exit_at, pnl_amount,
+                  exit_reason, status, created_at, max_hold_until
+           FROM trades
+           WHERE id = $1 AND account_id = $2 AND status = 'open'
+           FOR UPDATE"#,
+    )
+    .bind(trade_id)
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| r.try_into()).transpose()
 }
 
 /// Update a trade to closed state inside the given transaction.
-///
-/// # Panics (temporary)
 pub async fn update_trade_closed<'e, E>(
-    _executor: E,
-    _trade_id: Uuid,
-    _exit_price: Decimal,
-    _exit_at: DateTime<Utc>,
-    _pnl_amount: Decimal,
-    _exit_reason: ExitReason,
-    _fees: Decimal,
+    executor: E,
+    trade_id: Uuid,
+    exit_price: Decimal,
+    exit_at: DateTime<Utc>,
+    pnl_amount: Decimal,
+    exit_reason: ExitReason,
+    fees: Decimal,
 ) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+    let reason_str = serde_json::to_string(&exit_reason)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let result = sqlx::query(
+        r#"UPDATE trades
+           SET exit_price = $2,
+               exit_at = $3,
+               pnl_amount = $4,
+               exit_reason = $5,
+               fees = $6,
+               status = 'closed'
+           WHERE id = $1 AND status = 'open'"#,
+    )
+    .bind(trade_id)
+    .bind(exit_price)
+    .bind(exit_at)
+    .bind(pnl_amount)
+    .bind(&reason_str)
+    .bind(fees)
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("trade {trade_id} not found or already closed");
+    }
+    Ok(())
 }
 
 /// Release margin back to the account and record pnl.
 ///
 /// Adds `margin_return + pnl_amount` to `trading_accounts.current_balance`
 /// and inserts `account_events` rows for `margin_release` and `trade_close`.
-///
-/// # Panics (temporary)
-pub async fn release_margin<'e, E>(
-    _executor: E,
-    _account_id: Uuid,
-    _trade_id: Uuid,
-    _margin_return: Decimal,
-    _pnl_amount: Decimal,
-) -> anyhow::Result<()>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    unimplemented!("implemented in PR-1 Task 6 — account_events schema not yet migrated");
+pub async fn release_margin(
+    tx: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    trade_id: Uuid,
+    margin_return: Decimal,
+    pnl_amount: Decimal,
+) -> anyhow::Result<()> {
+    // Return margin + pnl to balance, capture new value
+    let new_balance: Decimal = sqlx::query_scalar(
+        r#"UPDATE trading_accounts
+           SET current_balance = current_balance + $2 + $3
+           WHERE id = $1
+           RETURNING current_balance"#,
+    )
+    .bind(account_id)
+    .bind(margin_return)
+    .bind(pnl_amount)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // Record margin_release event
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'margin_release', $3, $4)"#,
+    )
+    .bind(account_id)
+    .bind(trade_id)
+    .bind(margin_return)
+    .bind(new_balance - pnl_amount) // balance after margin return, before pnl credit
+    .execute(&mut *tx)
+    .await?;
+
+    // Record trade_close event with pnl
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'trade_close', $3, $4)"#,
+    )
+    .bind(account_id)
+    .bind(trade_id)
+    .bind(pnl_amount)
+    .bind(new_balance)
+    .execute(&mut *tx)
+    .await?;
+
+    Ok(())
 }
 
 /// Fetch all open trades for a given account.
-///
-/// # Panics (temporary)
 pub async fn get_open_trades_by_account(
-    _pool: &PgPool,
-    _account_id: Uuid,
+    pool: &PgPool,
+    account_id: Uuid,
 ) -> anyhow::Result<Vec<Trade>> {
-    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+    let rows = sqlx::query_as::<_, TradeRow>(
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, account_id,
+                  entry_at, exit_at, pnl_amount,
+                  exit_reason, status, created_at, max_hold_until
+           FROM trades
+           WHERE account_id = $1 AND status = 'open'
+           ORDER BY entry_at DESC"#,
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(|r| r.try_into()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +415,7 @@ pub async fn get_trade_events(
 #[derive(Debug)]
 pub struct OpenTradeWithAccount {
     pub trade: Trade,
-    pub paper_account_name: Option<String>,
+    pub account_name: Option<String>,
 }
 
 /// Fetch open trades for a single (exchange, pair) joined with account name.
@@ -322,7 +450,7 @@ pub async fn list_open_with_account_name_for_pair(
             let trade: Trade = r.trade.try_into()?;
             Ok(OpenTradeWithAccount {
                 trade,
-                paper_account_name: r.account_name,
+                account_name: r.account_name,
             })
         })
         .collect()
@@ -356,7 +484,7 @@ pub async fn list_open_with_account_name(
             let trade: Trade = r.trade.try_into()?;
             Ok(OpenTradeWithAccount {
                 trade,
-                paper_account_name: r.account_name,
+                account_name: r.account_name,
             })
         })
         .collect()

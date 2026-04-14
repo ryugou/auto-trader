@@ -129,7 +129,25 @@ INSERT INTO strategy_params (strategy_name, params) VALUES
    '{"entry_channel":20,"exit_channel":10,"sl_pct":0.03,"allocation_pct":1.0,"atr_baseline_bars":50}'::jsonb)
 ON CONFLICT (strategy_name) DO NOTHING;
 
--- 10) trading_accounts seed (paper 4 アカウント)
+-- 10) daily_summary: paper_account_id → account_id (trading_accounts FK)
+--     The CASCADE on paper_accounts drop already removed the FK constraint,
+--     but the column is still named paper_account_id. Rename + re-add FK.
+ALTER TABLE daily_summary RENAME COLUMN paper_account_id TO account_id;
+-- Re-create unique constraints with account_id semantics.
+-- The old constraints were dropped by the paper_accounts CASCADE, but
+-- the unique index daily_summary_fx_unique may still exist.
+DROP INDEX IF EXISTS daily_summary_fx_unique;
+ALTER TABLE daily_summary DROP CONSTRAINT IF EXISTS daily_summary_unique_key;
+ALTER TABLE daily_summary ADD CONSTRAINT daily_summary_unique_key
+    UNIQUE (date, strategy_name, pair, mode, exchange, account_id);
+CREATE UNIQUE INDEX IF NOT EXISTS daily_summary_no_account_unique
+    ON daily_summary (date, strategy_name, pair, mode, exchange)
+    WHERE account_id IS NULL;
+ALTER TABLE daily_summary
+    ADD CONSTRAINT daily_summary_account_id_fk
+    FOREIGN KEY (account_id) REFERENCES trading_accounts(id);
+
+-- 11) trading_accounts seed (paper 4 アカウント)
 INSERT INTO trading_accounts (id, name, account_type, exchange, strategy, initial_balance, current_balance, leverage, currency) VALUES
   ('a0000000-0000-0000-0000-000000000010', '安全', 'paper', 'bitflyer_cfd', 'bb_mean_revert_v1', 30000, 30000, 2, 'JPY'),
   ('a0000000-0000-0000-0000-000000000011', '通常', 'paper', 'bitflyer_cfd', 'donchian_trend_v1', 30000, 30000, 2, 'JPY'),

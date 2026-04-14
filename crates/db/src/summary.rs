@@ -4,9 +4,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
-    // Get all closed trades for the UTC date, ordered by exit_at
-    let rows: Vec<(String, String, String, String, Option<Uuid>, Decimal)> = sqlx::query_as(
-        "SELECT strategy_name, pair, mode, exchange, paper_account_id, pnl_amount
+    // Get all closed trades for the UTC date, ordered by exit_at.
+    // New schema: account_id (not paper_account_id), no mode/pnl_pips columns.
+    let rows: Vec<(String, String, String, Option<Uuid>, Decimal)> = sqlx::query_as(
+        "SELECT strategy_name, pair, exchange, account_id, pnl_amount
          FROM trades
          WHERE status = 'closed'
            AND exit_at >= ($1::date AT TIME ZONE 'UTC')
@@ -17,18 +18,18 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
     .fetch_all(pool)
     .await?;
 
-    // Group by (strategy, pair, mode, exchange, paper_account_id) and calculate max drawdown per group
-    type GroupKey = (String, String, String, String, Option<Uuid>);
+    // Group by (strategy, pair, exchange, account_id) and calculate max drawdown per group.
+    type GroupKey = (String, String, String, Option<Uuid>);
     let mut groups: std::collections::HashMap<GroupKey, Vec<Decimal>> =
         std::collections::HashMap::new();
-    for (strategy, pair, mode, exchange, paper_account_id, pnl) in rows {
+    for (strategy, pair, exchange, account_id, pnl) in rows {
         groups
-            .entry((strategy, pair, mode, exchange, paper_account_id))
+            .entry((strategy, pair, exchange, account_id))
             .or_default()
             .push(pnl);
     }
 
-    for ((strategy, pair, mode, exchange, paper_account_id), pnls) in &groups {
+    for ((strategy, pair, exchange, account_id), pnls) in &groups {
         let mut peak = Decimal::ZERO;
         let mut equity = Decimal::ZERO;
         let mut max_dd = Decimal::ZERO;
@@ -43,24 +44,37 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
             }
         }
 
-        // Ensure daily_summary row exists before updating max_drawdown
+        // Determine mode from account_type (paper/live).
+        let mode_str: String = if let Some(aid) = account_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT account_type FROM trading_accounts WHERE id = $1",
+            )
+            .bind(aid)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or_else(|| "paper".to_string())
+        } else {
+            "paper".to_string()
+        };
+
+        // Try to update existing row first.
         let result = sqlx::query(
             "UPDATE daily_summary SET max_drawdown = $1
              WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND mode = $5
-               AND exchange = $6 AND paper_account_id IS NOT DISTINCT FROM $7",
+               AND exchange = $6 AND account_id IS NOT DISTINCT FROM $7",
         )
         .bind(max_dd)
         .bind(date)
         .bind(strategy.as_str())
         .bind(pair.as_str())
-        .bind(mode.as_str())
+        .bind(mode_str.as_str())
         .bind(exchange.as_str())
-        .bind(*paper_account_id)
+        .bind(*account_id)
         .execute(pool)
         .await?;
 
         if result.rows_affected() == 0 {
-            // Row doesn't exist yet — compute actual totals from trades
+            // Row doesn't exist yet — compute actual totals from trades.
             let (total_trades, total_wins, total_pnl): (i64, i64, Decimal) = pnls.iter().fold(
                 (0i64, 0i64, Decimal::ZERO),
                 |(count, wins, pnl_sum), pnl| {
@@ -68,9 +82,9 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                     (count + 1, wins + win, pnl_sum + *pnl)
                 },
             );
-            if let Some(account_id) = paper_account_id {
+            if let Some(aid) = account_id {
                 sqlx::query(
-                    r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, paper_account_id, trade_count, win_count, total_pnl, max_drawdown)
+                    r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                        ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
                        SET max_drawdown = $10"#,
@@ -78,9 +92,9 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                 .bind(date)
                 .bind(strategy.as_str())
                 .bind(pair.as_str())
-                .bind(mode.as_str())
+                .bind(mode_str.as_str())
                 .bind(exchange.as_str())
-                .bind(account_id)
+                .bind(aid)
                 .bind(total_trades as i32)
                 .bind(total_wins as i32)
                 .bind(total_pnl)
@@ -91,13 +105,13 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                 sqlx::query(
                     r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, trade_count, win_count, total_pnl, max_drawdown)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                       ON CONFLICT (date, strategy_name, pair, mode, exchange) WHERE paper_account_id IS NULL DO UPDATE
+                       ON CONFLICT ON CONSTRAINT daily_summary_no_account_unique DO UPDATE
                        SET max_drawdown = $9"#,
                 )
                 .bind(date)
                 .bind(strategy.as_str())
                 .bind(pair.as_str())
-                .bind(mode.as_str())
+                .bind(mode_str.as_str())
                 .bind(exchange.as_str())
                 .bind(total_trades as i32)
                 .bind(total_wins as i32)
@@ -120,16 +134,16 @@ pub async fn upsert_daily_summary(
     pair: &str,
     mode: &str,
     exchange: &str,
-    paper_account_id: Option<Uuid>,
+    account_id: Option<Uuid>,
     account_type: Option<&str>,
     trade_count_delta: i32,
     win_count_delta: i32,
     pnl_delta: Decimal,
 ) -> anyhow::Result<()> {
-    if let Some(account_id) = paper_account_id {
-        // Crypto path: paper_account_id is NOT NULL, use main UNIQUE constraint
+    if let Some(aid) = account_id {
+        // account_id is NOT NULL path — use main UNIQUE constraint.
         sqlx::query(
-            r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, paper_account_id, account_type, trade_count, win_count, total_pnl)
+            r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_id, account_type, trade_count, win_count, total_pnl)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
                SET trade_count = daily_summary.trade_count + $8,
@@ -142,7 +156,7 @@ pub async fn upsert_daily_summary(
         .bind(pair)
         .bind(mode)
         .bind(exchange)
-        .bind(account_id)
+        .bind(aid)
         .bind(account_type)
         .bind(trade_count_delta)
         .bind(win_count_delta)
@@ -150,11 +164,11 @@ pub async fn upsert_daily_summary(
         .execute(pool)
         .await?;
     } else {
-        // FX path: paper_account_id IS NULL, use partial unique index
+        // account_id IS NULL path — use partial unique index.
         sqlx::query(
             r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_type, trade_count, win_count, total_pnl)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT (date, strategy_name, pair, mode, exchange) WHERE paper_account_id IS NULL DO UPDATE
+               ON CONFLICT ON CONSTRAINT daily_summary_no_account_unique DO UPDATE
                SET trade_count = daily_summary.trade_count + $7,
                    win_count = daily_summary.win_count + $8,
                    total_pnl = daily_summary.total_pnl + $9,
