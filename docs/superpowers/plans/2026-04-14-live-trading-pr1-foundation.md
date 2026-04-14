@@ -865,19 +865,54 @@ Expected: `query data written to .sqlx`
 
 無ければスキップ。
 
-- [ ] **Step 7: ワークスペースビルドとテスト**
+- [ ] **Step 7: マイグレーション適用後、`#[sqlx(default)]` を外し SELECT に新列を追加する (Batch B レビュー I-2 対応)**
+
+Batch B で `crates/db/src/trades.rs` の `TradeRow` に `#[sqlx(default)]` を付けた理由は、マイグレーション未適用の DB でも SELECT が落ちないようにするため。本 Task で列が追加された今、`#[sqlx(default)]` は**外す**。理由は「将来うっかり `DROP COLUMN` すると silently `None` に fallback し、約定済み注文 ID が失われる事故」を防ぐため。
+
+1. `grep -n '#\[sqlx(default)\]' crates/db/src/trades.rs` で付与箇所を確認
+2. `child_order_acceptance_id` と `child_order_id` に付いている `#[sqlx(default)]` のみを削除 (他フィールドはそのまま)
+3. SELECT 文のうち列を明示列挙している箇所 (`SELECT id, strategy_name, ... FROM trades`) 全てに `child_order_acceptance_id` / `child_order_id` を追加
+4. `grep -n 'SELECT' crates/db/src/trades.rs` で対象クエリ列挙
+
+- [ ] **Step 8: ワークスペースビルドとテスト**
 
 ```bash
 cargo build --workspace 2>&1 | tail -5
 cargo test --workspace 2>&1 | tail -15
 ```
 
-Expected: 全パス
+Expected: 全パス。`#[sqlx(default)]` を外したことで DB 接続テストが必要になる場合は `DATABASE_URL=postgresql://auto-trader:auto-trader@localhost:15432/auto_trader` を付けて実行。
 
-- [ ] **Step 8: コミット**
+- [ ] **Step 9: Paper trade の INSERT が実 DB で通ることを verify**
+
+マイグレーション適用後、paper trade の insert→select が一気通貫で壊れていないことを手動検証:
 
 ```bash
-git add migrations/20260414000001_live_trading_support.sql .sqlx 2>/dev/null
+# テスト用の temporary trade を insert して select できることを確認
+docker compose exec -T db psql -U auto-trader -d auto_trader <<'SQL'
+BEGIN;
+INSERT INTO trades (
+    id, strategy_name, pair, exchange, direction,
+    entry_price, stop_loss, take_profit, quantity, leverage,
+    fees, paper_account_id, entry_at, mode, status,
+    max_hold_until, child_order_acceptance_id, child_order_id
+) VALUES (
+    gen_random_uuid(), 'test_smoke', 'FX_BTC_JPY', 'bitflyer_cfd', 'long',
+    11000000, 10700000, 11300000, 0.001, 2,
+    0, 'a0000000-0000-0000-0000-000000000011', NOW(), 'paper', 'open',
+    NULL, NULL, NULL
+);
+SELECT id, status, child_order_acceptance_id, child_order_id FROM trades WHERE strategy_name = 'test_smoke';
+ROLLBACK;
+SQL
+```
+
+Expected: INSERT 成功、SELECT で status=open / 注文 ID カラムが NULL で見える。
+
+- [ ] **Step 10: コミット (マイグレーション + sqlx default 撤去 + SELECT 列追加)**
+
+```bash
+git add migrations/20260414000001_live_trading_support.sql crates/db/src/trades.rs .sqlx 2>/dev/null
 git commit -m "$(cat <<'EOF'
 feat(db): schema for live trading (pending/inconsistent, order ids, risk_halts)
 
@@ -886,6 +921,14 @@ feat(db): schema for live trading (pending/inconsistent, order ids, risk_halts)
 - partial unique index prevents duplicate active positions per
   (paper_account_id, strategy_name, pair)
 - risk_halts persists Kill Switch activations across restarts
+
+Also removes the transitional #[sqlx(default)] on child_order_*
+columns now that the migration is in place: keeping the default
+would hide DROP COLUMN regressions and silently lose live order
+IDs. SELECT queries enumerate the new columns explicitly.
+
+NOTE: this migration and the preceding Trade-struct commit MUST
+ship in the same PR — they form an inseparable pair.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 EOF
