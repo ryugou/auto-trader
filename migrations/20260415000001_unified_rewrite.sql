@@ -142,6 +142,11 @@ ON CONFLICT (strategy_name) DO NOTHING;
 -- 10) daily_summary: paper_account_id → account_id (trading_accounts FK)
 --     The CASCADE on paper_accounts drop already removed the FK constraint,
 --     but the column is still named paper_account_id. Rename + re-add FK.
+--     Wipe existing rows first: any surviving row still references the old
+--     paper_account_ids that no longer exist, so the FK re-add would fail
+--     with a constraint-violation error. Past backtest data is intentionally
+--     discarded at this migration boundary.
+TRUNCATE daily_summary;
 ALTER TABLE daily_summary RENAME COLUMN paper_account_id TO account_id;
 -- Re-create unique constraints with account_id semantics.
 -- The old constraints were dropped by the paper_accounts CASCADE, but

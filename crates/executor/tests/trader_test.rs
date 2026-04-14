@@ -120,6 +120,32 @@ fn build_live_trader(
     )
 }
 
+/// Build a Trader in dry_run mode (no API calls; fill price comes from PriceStore).
+fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceStore>) -> Trader {
+    // In dry_run mode the BitflyerPrivateApi is never called, but Trader::new
+    // still requires an instance. Point it at a non-existent localhost address
+    // so any accidental call fails fast rather than hanging.
+    let api = Arc::new(BitflyerPrivateApi::new_for_test(
+        "http://127.0.0.1:1".to_string(),
+        "k".to_string(),
+        "s".to_string(),
+    ));
+    let notifier = Arc::new(Notifier::new(None));
+    let position_sizer =
+        auto_trader_executor::position_sizer::PositionSizer::new(btc_pair_configs());
+    Trader::new(
+        pool,
+        Exchange::BitflyerCfd,
+        account_id,
+        "test_dry".to_string(),
+        api,
+        price_store,
+        notifier,
+        position_sizer,
+        true, // dry_run = true
+    )
+}
+
 /// Seed one open Long trade directly into the DB and return the Trade value.
 async fn seed_open_trade(
     pool: &PgPool,
@@ -185,87 +211,171 @@ async fn seed_open_trade(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: dry_run Long uses ask price
+// Test 1: dry_run Long entry uses ask price (end-to-end via Trader)
 // ---------------------------------------------------------------------------
 
-/// Verify that fill_open for a Long position in dry_run mode uses the ask price.
+/// Verify that Trader::execute in dry_run mode routes Long entry to the ask price.
 ///
-/// We cannot call Trader::execute() end-to-end because insert_trade is
-/// unimplemented (Task 6). Instead we test fill_open behavior directly by
-/// inspecting what PriceStore returns for a Long entry.
-///
-/// This test verifies the routing logic: Long entry = ask.
-#[tokio::test]
-async fn dry_run_long_entry_selects_ask_price() {
+/// Constructs a real Trader (dry_run=true) with a seeded DB account and a
+/// PriceStore containing known bid/ask. Calls Trader::execute, then fetches
+/// the resulting Trade from the DB and asserts entry_price == ask.
+/// This catches Trader-level routing bugs that a plain PriceStore test cannot.
+#[sqlx::test(migrations = "../../migrations")]
+async fn dry_run_long_entry_selects_ask_price(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+
     let bid = dec!(11_500_000);
     let ask = dec!(11_500_500);
-    let store = seed_price_store(bid, ask).await;
+    let price_store = seed_price_store(bid, ask).await;
+    let account_id = seed_live_account(&pool).await;
+    let trader = build_dry_run_trader(pool.clone(), account_id, price_store);
 
-    let key = FeedKey::new(Exchange::BitflyerCfd, Pair::new("FX_BTC_JPY"));
-    let (_got_bid, got_ask) = store.latest_bid_ask(&key).await.expect("prices present");
+    let signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let trade = trader.execute(&signal).await.expect("execute must succeed");
 
-    // A Long entry should pick ask
-    let fill_price = got_ask;
-    assert_eq!(fill_price, ask, "Long entry must use ask");
+    assert_eq!(trade.entry_price, ask, "Long entry must use ask price");
+
+    // Confirm the DB row reflects the same price
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account");
+    assert_eq!(open_trades.len(), 1);
+    assert_eq!(open_trades[0].entry_price, ask);
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: dry_run Short uses bid price
+// Test 2: dry_run Short entry uses bid price (end-to-end via Trader)
 // ---------------------------------------------------------------------------
 
-/// Verify that fill_open for a Short position in dry_run mode uses the bid price.
-#[tokio::test]
-async fn dry_run_short_entry_selects_bid_price() {
+/// Verify that Trader::execute in dry_run mode routes Short entry to the bid price.
+#[sqlx::test(migrations = "../../migrations")]
+async fn dry_run_short_entry_selects_bid_price(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+
     let bid = dec!(11_500_000);
     let ask = dec!(11_500_500);
-    let store = seed_price_store(bid, ask).await;
+    let price_store = seed_price_store(bid, ask).await;
+    let account_id = seed_live_account(&pool).await;
+    let trader = build_dry_run_trader(pool.clone(), account_id, price_store);
 
-    let key = FeedKey::new(Exchange::BitflyerCfd, Pair::new("FX_BTC_JPY"));
-    let (got_bid, _got_ask) = store.latest_bid_ask(&key).await.expect("prices present");
+    let signal = make_signal("FX_BTC_JPY", Direction::Short);
+    let trade = trader.execute(&signal).await.expect("execute must succeed");
 
-    // A Short entry should pick bid
-    let fill_price = got_bid;
-    assert_eq!(fill_price, bid, "Short entry must use bid");
+    assert_eq!(trade.entry_price, bid, "Short entry must use bid price");
+
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account");
+    assert_eq!(open_trades.len(), 1);
+    assert_eq!(open_trades[0].entry_price, bid);
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: dry_run close Long uses bid price
+// Test 3: dry_run close Long uses bid price (end-to-end via Trader)
 // ---------------------------------------------------------------------------
 
-/// Verify that fill_close for a Long position in dry_run mode uses the bid price.
+/// Verify that Trader::close_position in dry_run mode routes Long close to the bid price.
 /// Long position close = sell = bid side.
-#[tokio::test]
-async fn dry_run_close_long_selects_bid_price() {
-    let bid = dec!(11_600_000);
-    let ask = dec!(11_600_500);
-    let store = seed_price_store(bid, ask).await;
+#[sqlx::test(migrations = "../../migrations")]
+async fn dry_run_close_long_selects_bid_price(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
 
+    let entry_bid = dec!(11_500_000);
+    let entry_ask = dec!(11_500_500);
+    let price_store = seed_price_store(entry_bid, entry_ask).await;
+    let account_id = seed_live_account(&pool).await;
+    let trader = build_dry_run_trader(pool.clone(), account_id, price_store.clone());
+
+    // Open a Long via execute so the DB and margin ledger are consistent
+    let open_signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let open_trade = trader
+        .execute(&open_signal)
+        .await
+        .expect("execute must succeed");
+
+    // Update PriceStore to new close-side prices (bid = exit price we expect)
+    let close_bid = dec!(11_600_000);
+    let close_ask = dec!(11_600_500);
     let key = FeedKey::new(Exchange::BitflyerCfd, Pair::new("FX_BTC_JPY"));
-    let (got_bid, _got_ask) = store.latest_bid_ask(&key).await.expect("prices present");
+    price_store
+        .update(
+            key,
+            auto_trader_market::price_store::LatestTick {
+                price: close_ask,
+                best_bid: Some(close_bid),
+                best_ask: Some(close_ask),
+                ts: chrono::Utc::now(),
+            },
+        )
+        .await;
 
-    // Long close = sell = bid
-    let fill_price = got_bid;
-    assert_eq!(fill_price, bid, "Long close must use bid");
+    let closed_trade = trader
+        .close_position(
+            &open_trade.id.to_string(),
+            auto_trader_core::types::ExitReason::Manual,
+        )
+        .await
+        .expect("close_position must succeed");
+
+    assert_eq!(
+        closed_trade.exit_price,
+        Some(close_bid),
+        "Long close must use bid price"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: dry_run close Short uses ask price
+// Test 4: dry_run close Short uses ask price (end-to-end via Trader)
 // ---------------------------------------------------------------------------
 
-/// Verify that fill_close for a Short position in dry_run mode uses the ask price.
+/// Verify that Trader::close_position in dry_run mode routes Short close to the ask price.
 /// Short position close = buy back = ask side.
-#[tokio::test]
-async fn dry_run_close_short_selects_ask_price() {
-    let bid = dec!(11_600_000);
-    let ask = dec!(11_600_500);
-    let store = seed_price_store(bid, ask).await;
+#[sqlx::test(migrations = "../../migrations")]
+async fn dry_run_close_short_selects_ask_price(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
 
+    let entry_bid = dec!(11_500_000);
+    let entry_ask = dec!(11_500_500);
+    let price_store = seed_price_store(entry_bid, entry_ask).await;
+    let account_id = seed_live_account(&pool).await;
+    let trader = build_dry_run_trader(pool.clone(), account_id, price_store.clone());
+
+    // Open a Short via execute so the DB and margin ledger are consistent
+    let open_signal = make_signal("FX_BTC_JPY", Direction::Short);
+    let open_trade = trader
+        .execute(&open_signal)
+        .await
+        .expect("execute must succeed");
+
+    // Update PriceStore to new close-side prices (ask = exit price we expect)
+    let close_bid = dec!(11_400_000);
+    let close_ask = dec!(11_400_500);
     let key = FeedKey::new(Exchange::BitflyerCfd, Pair::new("FX_BTC_JPY"));
-    let (_got_bid, got_ask) = store.latest_bid_ask(&key).await.expect("prices present");
+    price_store
+        .update(
+            key,
+            auto_trader_market::price_store::LatestTick {
+                price: close_ask,
+                best_bid: Some(close_bid),
+                best_ask: Some(close_ask),
+                ts: chrono::Utc::now(),
+            },
+        )
+        .await;
 
-    // Short close = buy back = ask
-    let fill_price = got_ask;
-    assert_eq!(fill_price, ask, "Short close must use ask");
+    let closed_trade = trader
+        .close_position(
+            &open_trade.id.to_string(),
+            auto_trader_core::types::ExitReason::Manual,
+        )
+        .await
+        .expect("close_position must succeed");
+
+    assert_eq!(
+        closed_trade.exit_price,
+        Some(close_ask),
+        "Short close must use ask price"
+    );
 }
 
 // ---------------------------------------------------------------------------

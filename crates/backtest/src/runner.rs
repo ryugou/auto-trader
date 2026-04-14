@@ -37,14 +37,13 @@ impl SimTrader {
         }
     }
 
-    fn open(&mut self, signal: &auto_trader_core::types::Signal, now: DateTime<Utc>) -> Trade {
-        // Compute SL/TP from signal percentages.
-        // For backtests we use a placeholder entry_price of 1 (the close will
-        // be set correctly from the candle in the runner loop).
-        // Since backtest signals don't have an entry price, we use a notional
-        // 1.0 so pct conversions produce reasonable SL/TP values.
-        // The actual PnL is computed from the real candle close prices.
-        let entry_price = Decimal::ONE;
+    fn open(
+        &mut self,
+        signal: &auto_trader_core::types::Signal,
+        entry_price: Decimal,
+        now: DateTime<Utc>,
+    ) -> Trade {
+        // Compute SL/TP from the actual candle close price passed by the caller.
         let stop_loss = match signal.direction {
             Direction::Long => entry_price * (Decimal::ONE - signal.stop_loss_pct),
             Direction::Short => entry_price * (Decimal::ONE + signal.stop_loss_pct),
@@ -210,7 +209,7 @@ impl BacktestRunner {
                     .iter()
                     .any(|t| t.strategy_name == signal.strategy_name && t.pair == signal.pair);
                 if !has_pos {
-                    let trade = trader.open(&signal, candle.timestamp);
+                    let trade = trader.open(&signal, candle.close, candle.timestamp);
                     trades.push(trade);
                 }
             }

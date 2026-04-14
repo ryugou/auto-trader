@@ -3,16 +3,29 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Row type for the drawdown query: (strategy, pair, exchange, account_id, account_type, pnl).
+type DrawdownRow = (
+    String,
+    String,
+    String,
+    Option<Uuid>,
+    Option<String>,
+    Decimal,
+);
+
 pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
     // Get all closed trades for the UTC date, ordered by exit_at.
-    // New schema: account_id (not paper_account_id), no mode/pnl_pips columns.
-    let rows: Vec<(String, String, String, Option<Uuid>, Decimal)> = sqlx::query_as(
-        "SELECT strategy_name, pair, exchange, account_id, pnl_amount
-         FROM trades
-         WHERE status = 'closed'
-           AND exit_at >= ($1::date AT TIME ZONE 'UTC')
-           AND exit_at < (($1::date + INTERVAL '1 day') AT TIME ZONE 'UTC')
-         ORDER BY exit_at ASC",
+    // JOIN trading_accounts to fetch account_type in a single query, avoiding
+    // an N+1 SELECT per group (Copilot WARN #6).
+    let rows: Vec<DrawdownRow> = sqlx::query_as(
+        "SELECT t.strategy_name, t.pair, t.exchange, t.account_id,
+                    ta.account_type, t.pnl_amount
+             FROM trades t
+             LEFT JOIN trading_accounts ta ON t.account_id = ta.id
+             WHERE t.status = 'closed'
+               AND t.exit_at >= ($1::date AT TIME ZONE 'UTC')
+               AND t.exit_at < (($1::date + INTERVAL '1 day') AT TIME ZONE 'UTC')
+             ORDER BY t.exit_at ASC",
     )
     .bind(date)
     .fetch_all(pool)
@@ -20,16 +33,16 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
 
     // Group by (strategy, pair, exchange, account_id) and calculate max drawdown per group.
     type GroupKey = (String, String, String, Option<Uuid>);
-    let mut groups: std::collections::HashMap<GroupKey, Vec<Decimal>> =
+    let mut groups: std::collections::HashMap<GroupKey, (Vec<Decimal>, Option<String>)> =
         std::collections::HashMap::new();
-    for (strategy, pair, exchange, account_id, pnl) in rows {
-        groups
+    for (strategy, pair, exchange, account_id, account_type, pnl) in rows {
+        let entry = groups
             .entry((strategy, pair, exchange, account_id))
-            .or_default()
-            .push(pnl);
+            .or_insert_with(|| (Vec::new(), account_type));
+        entry.0.push(pnl);
     }
 
-    for ((strategy, pair, exchange, account_id), pnls) in &groups {
+    for ((strategy, pair, exchange, account_id), (pnls, account_type)) in &groups {
         let mut peak = Decimal::ZERO;
         let mut equity = Decimal::ZERO;
         let mut max_dd = Decimal::ZERO;
@@ -44,18 +57,8 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
             }
         }
 
-        // Determine mode from account_type (paper/live).
-        let mode_str: String = if let Some(aid) = account_id {
-            sqlx::query_scalar::<_, String>(
-                "SELECT account_type FROM trading_accounts WHERE id = $1",
-            )
-            .bind(aid)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or_else(|| "paper".to_string())
-        } else {
-            "paper".to_string()
-        };
+        // account_type is already JOIN-fetched; fall back to "paper" when NULL.
+        let mode_str: &str = account_type.as_deref().unwrap_or("paper");
 
         // Try to update existing row first.
         let result = sqlx::query(
@@ -67,7 +70,7 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
         .bind(date)
         .bind(strategy.as_str())
         .bind(pair.as_str())
-        .bind(mode_str.as_str())
+        .bind(mode_str)
         .bind(exchange.as_str())
         .bind(*account_id)
         .execute(pool)
@@ -92,7 +95,7 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                 .bind(date)
                 .bind(strategy.as_str())
                 .bind(pair.as_str())
-                .bind(mode_str.as_str())
+                .bind(mode_str)
                 .bind(exchange.as_str())
                 .bind(aid)
                 .bind(total_trades as i32)
@@ -111,7 +114,7 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                 .bind(date)
                 .bind(strategy.as_str())
                 .bind(pair.as_str())
-                .bind(mode_str.as_str())
+                .bind(mode_str)
                 .bind(exchange.as_str())
                 .bind(total_trades as i32)
                 .bind(total_wins as i32)

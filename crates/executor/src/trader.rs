@@ -307,11 +307,50 @@ impl OrderExecutor for Trader {
         };
 
         // 6. DB 操作 (1 トランザクション)
-        let mut tx = self.pool.begin().await?;
-        auto_trader_db::trades::insert_trade(&mut *tx, &trade).await?;
-        auto_trader_db::trades::lock_margin(&mut tx, self.account_id, trade.id, margin).await?;
-        auto_trader_db::notifications::insert_trade_opened(&mut *tx, &trade).await?;
-        tx.commit().await?;
+        // CRITICAL: exchange fill is already done at this point. If the DB tx
+        // fails the exchange has an open position with no corresponding DB
+        // record (orphan). Emit a critical Slack notification + error log so
+        // the operator can reconcile manually (or the PR-2 reconciler picks it
+        // up via position diff).
+        let db_result = async {
+            let mut tx = self.pool.begin().await?;
+            auto_trader_db::trades::insert_trade(&mut *tx, &trade).await?;
+            auto_trader_db::trades::lock_margin(&mut tx, self.account_id, trade.id, margin).await?;
+            auto_trader_db::notifications::insert_trade_opened(&mut *tx, &trade).await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(ref e) = db_result {
+            tracing::error!(
+                trade_id = %trade.id,
+                account_id = %self.account_id,
+                pair = %trade.pair,
+                fill_price = %fill_price,
+                error = %e,
+                "inconsistent state: exchange filled but DB write failed — \
+                 orphan exchange position requires manual reconciliation"
+            );
+            let notifier = self.notifier.clone();
+            let account_name = self.account_name.clone();
+            let pair = trade.pair.clone();
+            let strategy_name = trade.strategy_name.clone();
+            let reason = format!("DB tx failed after exchange fill (orphan position): {e}");
+            tokio::spawn(async move {
+                let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                    auto_trader_notify::OrderFailedEvent {
+                        account_name,
+                        strategy_name,
+                        pair,
+                        reason,
+                    },
+                );
+                if let Err(notify_err) = notifier.send(ev).await {
+                    tracing::warn!("critical notify send failed: {notify_err}");
+                }
+            });
+            return Err(db_result.unwrap_err());
+        }
 
         // 7. Slack 通知 (fire-and-forget)
         let notifier = self.notifier.clone();
@@ -420,31 +459,72 @@ impl OrderExecutor for Trader {
             max_hold_until: trade.max_hold_until,
         };
 
-        let mut tx = self.pool.begin().await?;
-        // CAS: bails with "already closed" if rows_affected == 0
-        auto_trader_db::trades::update_trade_closed(
-            &mut *tx,
-            trade.id,
-            exit_price,
-            exit_at,
-            pnl_amount,
-            exit_reason,
-            trade.fees,
-        )
-        .await?;
-
+        // CRITICAL: Phase 2 (exchange fill) succeeded. If this Phase 3 DB tx
+        // fails, the exchange position is closed but the DB trade remains in
+        // status='closing'. The 5-min stale-closing self-healing in
+        // acquire_close_lock (or the PR-2 reconciler) will detect and handle
+        // this. Emit a critical notification + error log so the operator is
+        // aware immediately.
         let margin = truncate_yen(trade.entry_price * trade.quantity / trade.leverage);
-        auto_trader_db::trades::release_margin(
-            &mut tx,
-            self.account_id,
-            trade.id,
-            margin,
-            pnl_amount,
-        )
-        .await?;
+        let phase3_result = async {
+            let mut tx = self.pool.begin().await?;
+            // CAS: bails with "already closed" if rows_affected == 0
+            auto_trader_db::trades::update_trade_closed(
+                &mut *tx,
+                trade.id,
+                exit_price,
+                exit_at,
+                pnl_amount,
+                exit_reason,
+                trade.fees,
+            )
+            .await?;
 
-        auto_trader_db::notifications::insert_trade_closed(&mut *tx, &closed_trade).await?;
-        tx.commit().await?;
+            auto_trader_db::trades::release_margin(
+                &mut tx,
+                self.account_id,
+                trade.id,
+                margin,
+                pnl_amount,
+            )
+            .await?;
+
+            auto_trader_db::notifications::insert_trade_closed(&mut *tx, &closed_trade).await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(ref e) = phase3_result {
+            tracing::error!(
+                trade_id = %trade.id,
+                account_id = %self.account_id,
+                pair = %trade.pair,
+                exit_price = %exit_price,
+                error = %e,
+                "inconsistent state: exchange close filled but DB Phase 3 write failed — \
+                 trade remains in 'closing' status; stale-lock self-healing or PR-2 \
+                 reconciler will pick this up"
+            );
+            let notifier = self.notifier.clone();
+            let account_name = self.account_name.clone();
+            let trade_id = trade.id;
+            let reason =
+                format!("close DB tx failed after exchange fill (trade stuck in 'closing'): {e}");
+            tokio::spawn(async move {
+                let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                    auto_trader_notify::OrderFailedEvent {
+                        account_name,
+                        strategy_name: String::new(),
+                        pair: auto_trader_core::types::Pair::new(&format!("trade:{trade_id}")),
+                        reason,
+                    },
+                );
+                if let Err(notify_err) = notifier.send(ev).await {
+                    tracing::warn!("critical notify send failed: {notify_err}");
+                }
+            });
+            return Err(phase3_result.unwrap_err());
+        }
 
         // 6. Slack 通知 (fire-and-forget)
         let notifier = self.notifier.clone();

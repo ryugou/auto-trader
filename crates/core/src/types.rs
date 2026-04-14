@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn trade_status_roundtrip() {
-        for status in [TradeStatus::Open, TradeStatus::Closed] {
+        for status in [TradeStatus::Open, TradeStatus::Closing, TradeStatus::Closed] {
             let json = serde_json::to_string(&status).unwrap();
             let back: TradeStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, status);
@@ -325,6 +325,7 @@ mod tests {
     #[test]
     fn trade_status_as_str() {
         assert_eq!(TradeStatus::Open.as_str(), "open");
+        assert_eq!(TradeStatus::Closing.as_str(), "closing");
         assert_eq!(TradeStatus::Closed.as_str(), "closed");
     }
 }

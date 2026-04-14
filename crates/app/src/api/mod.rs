@@ -29,11 +29,11 @@ pub fn router(state: AppState) -> Router {
 
     let api_routes = Router::new()
         .route(
-            "/paper-accounts",
+            "/trading-accounts",
             get(accounts::list).post(accounts::create),
         )
         .route(
-            "/paper-accounts/:id",
+            "/trading-accounts/:id",
             get(accounts::get_one)
                 .put(accounts::update)
                 .delete(accounts::remove),
