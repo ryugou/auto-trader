@@ -47,6 +47,29 @@ pub enum Direction {
     Short,
 }
 
+/// 注文種別。戦略が Signal 生成時に選択する。
+///
+/// - `Market`: 成行注文。取引所がその瞬間の気配値で約定させる。
+///   スリッページが発生しうるが、約定確実性が高い。
+/// - `Limit { price }`: 指値注文。指定価格以下 (Long) / 以上 (Short)
+///   でのみ約定する。未約定リスクあり。
+///
+/// JSON 形式は internally-tagged (`{"type": "market"}` /
+/// `{"type": "limit", "price": "100.5"}`) — これは strategy ログや
+/// /api/signals への出力でも人間可読性を保つため。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OrderType {
+    Market,
+    Limit { price: Decimal },
+}
+
+impl Default for OrderType {
+    fn default() -> Self {
+        OrderType::Market
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeMode {
@@ -227,6 +250,38 @@ mod tests {
         let back: Signal = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pair, signal.pair);
         assert_eq!(back.direction, Direction::Long);
+    }
+
+    #[test]
+    fn order_type_serializes_market() {
+        let json = serde_json::to_string(&OrderType::Market).unwrap();
+        assert_eq!(json, r#"{"type":"market"}"#);
+    }
+
+    #[test]
+    fn order_type_serializes_limit_with_price() {
+        let ot = OrderType::Limit { price: dec!(100.5) };
+        let json = serde_json::to_string(&ot).unwrap();
+        assert_eq!(json, r#"{"type":"limit","price":"100.5"}"#);
+    }
+
+    #[test]
+    fn order_type_roundtrip_market() {
+        let ot = OrderType::Market;
+        let json = serde_json::to_string(&ot).unwrap();
+        let back: OrderType = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, OrderType::Market));
+    }
+
+    #[test]
+    fn order_type_roundtrip_limit() {
+        let ot = OrderType::Limit { price: dec!(150.25) };
+        let json = serde_json::to_string(&ot).unwrap();
+        let back: OrderType = serde_json::from_str(&json).unwrap();
+        match back {
+            OrderType::Limit { price } => assert_eq!(price, dec!(150.25)),
+            _ => panic!("expected Limit"),
+        }
     }
 
     #[test]
