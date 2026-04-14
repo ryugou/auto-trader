@@ -1,13 +1,9 @@
-//! Trade DB access.
+//! Trade DB access for the unified Trader.
 //!
-//! NOTE: This module is partially stubbed. Core functions (`insert_trade`,
-//! `lock_margin`, `release_margin`, `get_trade_for_close`,
-//! `update_trade_closed`) return `unimplemented!()` pending the full
-//! schema migration in PR-1 Task 6.
-//!
-//! Legacy query functions (`get_open_trades`, `get_trade_events`, etc.)
-//! are preserved but may fail at runtime against the new schema.
-//! They will be updated in Task 6.
+//! All functions operate against the `trades` schema defined in
+//! `migrations/20260415000001_unified_rewrite.sql` — `account_id` rather
+//! than the legacy `paper_account_id`, `quantity` is NOT NULL, and there
+//! is no `mode` / `child_order_*` / `pnl_pips` column.
 
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};
 use chrono::{DateTime, NaiveDate, Utc};
