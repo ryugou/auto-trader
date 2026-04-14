@@ -105,7 +105,8 @@ pub async fn get_open_trades(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until
+                  exit_reason, mode, status, created_at, max_hold_until,
+                  child_order_acceptance_id, child_order_id
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
     )
@@ -125,7 +126,8 @@ pub async fn get_open_trades_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until
+                  exit_reason, mode, status, created_at, max_hold_until,
+                  child_order_acceptance_id, child_order_id
            FROM trades
            WHERE paper_account_id = $1 AND status = 'open'
            ORDER BY entry_at ASC"#,
@@ -142,7 +144,8 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until
+                  exit_reason, mode, status, created_at, max_hold_until,
+                  child_order_acceptance_id, child_order_id
            FROM trades
            WHERE id = $1"#,
     )
@@ -367,6 +370,7 @@ pub async fn list_open_with_account_name_for_pair(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
                   t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
                   t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
+                  t.child_order_acceptance_id, t.child_order_id,
                   pa.name AS account_name
            FROM trades t
            LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
@@ -403,6 +407,7 @@ pub async fn list_open_with_account_name(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
                   t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
                   t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
+                  t.child_order_acceptance_id, t.child_order_id,
                   pa.name AS account_name
            FROM trades t
            LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
@@ -447,13 +452,7 @@ struct TradeRow {
     #[allow(dead_code)]
     created_at: DateTime<Utc>,
     max_hold_until: Option<DateTime<Utc>>,
-    /// NULL when the column does not yet exist in the DB (pre-migration).
-    /// Populated by Task 6 migration.
-    #[sqlx(default)]
     child_order_acceptance_id: Option<String>,
-    /// NULL when the column does not yet exist in the DB (pre-migration).
-    /// Populated by Task 6 migration.
-    #[sqlx(default)]
     child_order_id: Option<String>,
 }
 
