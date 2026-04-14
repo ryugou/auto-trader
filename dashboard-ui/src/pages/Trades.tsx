@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import TradeTable from '../components/TradeTable'
-import type { PaperAccount } from '../api/types'
+import type { TradingAccount } from '../api/types'
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 
@@ -43,22 +43,22 @@ function exchangeGroup(exchange: string): ExchangeGroupKey {
 interface AccountGroup {
   key: ExchangeGroupKey
   label: string
-  accounts: PaperAccount[]
+  accounts: TradingAccount[]
 }
 
 // Build the ordered group list. Crypto first, then FX, then anything
 // unclassified (so we notice during manual QA).
-function buildGroups(accounts: PaperAccount[]): AccountGroup[] {
-  const crypto: PaperAccount[] = []
-  const fx: PaperAccount[] = []
-  const other: PaperAccount[] = []
+function buildGroups(accounts: TradingAccount[]): AccountGroup[] {
+  const crypto: TradingAccount[] = []
+  const fx: TradingAccount[] = []
+  const other: TradingAccount[] = []
   for (const a of accounts) {
     const g = exchangeGroup(a.exchange)
     if (g === 'crypto') crypto.push(a)
     else if (g === 'fx') fx.push(a)
     else other.push(a)
   }
-  const byName = (a: PaperAccount, b: PaperAccount) =>
+  const byName = (a: TradingAccount, b: TradingAccount) =>
     a.name.localeCompare(b.name, 'ja')
   const groups: AccountGroup[] = []
   if (crypto.length) {

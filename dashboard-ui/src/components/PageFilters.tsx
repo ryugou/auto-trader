@@ -50,7 +50,7 @@ export default function PageFilters({ value, onChange }: PageFiltersProps) {
 
   const handleAccount = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value || undefined
-    onChange({ ...value, paper_account_id: v })
+    onChange({ ...value, account_id: v })
   }
 
   const handlePeriod = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -82,7 +82,7 @@ export default function PageFilters({ value, onChange }: PageFiltersProps) {
       <div className="flex items-center gap-2">
         <span className={labelClass}>口座</span>
         <select
-          value={value.paper_account_id ?? ''}
+          value={value.account_id ?? ''}
           onChange={handleAccount}
           className={selectClass}
         >

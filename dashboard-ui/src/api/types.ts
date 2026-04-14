@@ -1,4 +1,4 @@
-export interface PaperAccount {
+export interface TradingAccount {
   id: string
   name: string
   exchange: string
@@ -7,25 +7,25 @@ export interface PaperAccount {
   currency: string
   leverage: string
   strategy: string
-  account_type: string
+  account_type: 'paper' | 'live'
   created_at: string
   updated_at: string
-  // Enriched fields from GET /api/paper-accounts
+  // Enriched fields from GET /api/trading-accounts
   unrealized_pnl?: string
   evaluated_balance?: string
 }
 
-export interface CreatePaperAccount {
+export interface CreateTradingAccount {
   name: string
   exchange: string
   initial_balance: string
   leverage: string
   strategy: string
-  account_type: string
+  account_type: 'paper' | 'live'
   currency?: string
 }
 
-export interface UpdatePaperAccount {
+export interface UpdateTradingAccount {
   name?: string
   leverage?: string
   strategy?: string
@@ -99,7 +99,7 @@ export interface TradeRow {
   entry_at: string
   exit_at: string | null
   exit_reason: string | null
-  paper_account_id: string | null
+  account_id: string | null
   account_type: string | null
   status: string
 }
@@ -137,13 +137,13 @@ export interface PositionResponse {
   take_profit: string | null
   fees: string
   entry_at: string
-  paper_account_id: string | null
-  paper_account_name: string
+  account_id: string | null
+  account_name: string
 }
 
 export interface DashboardFilter {
   exchange?: string
-  paper_account_id?: string
+  account_id?: string
   account_type?: string
   strategy?: string
   pair?: string
@@ -170,7 +170,7 @@ export interface Notification {
   id: string
   kind: 'trade_opened' | 'trade_closed'
   trade_id: string
-  paper_account_id: string
+  account_id: string
   strategy_name: string
   pair: string
   direction: 'long' | 'short'

@@ -4,16 +4,16 @@ import { api } from '../api/client'
 import AccountForm from '../components/AccountForm'
 import { RiskBadge, useStrategyRiskLookup } from '../components/RiskBadge'
 import type {
-  PaperAccount,
-  CreatePaperAccount,
-  UpdatePaperAccount,
+  TradingAccount,
+  CreateTradingAccount,
+  UpdateTradingAccount,
 } from '../api/types'
 
 export default function Accounts() {
   const queryClient = useQueryClient()
   const [showForm, setShowForm] = useState(false)
-  const [editTarget, setEditTarget] = useState<PaperAccount | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
+  const [editTarget, setEditTarget] = useState<TradingAccount | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<TradingAccount | null>(null)
 
   const { data: accounts, isLoading } = useQuery({
     queryKey: ['accounts'],
@@ -22,7 +22,7 @@ export default function Accounts() {
   const lookupRisk = useStrategyRiskLookup()
 
   const createMut = useMutation({
-    mutationFn: (data: CreatePaperAccount) => api.accounts.create(data),
+    mutationFn: (data: CreateTradingAccount) => api.accounts.create(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] })
       setShowForm(false)
@@ -30,7 +30,7 @@ export default function Accounts() {
   })
 
   const updateMut = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: UpdatePaperAccount }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdateTradingAccount }) =>
       api.accounts.update(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] })
