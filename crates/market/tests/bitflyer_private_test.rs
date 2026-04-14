@@ -6,7 +6,7 @@
 //! ペイロードで確認する。
 
 use auto_trader_market::bitflyer_private::{
-    BitflyerApiError, BitflyerPrivateApi, ChildOrderType, SendChildOrderRequest, Side,
+    BitflyerApiError, BitflyerPrivateApi, ChildOrderType, RateLimiter, SendChildOrderRequest, Side,
 };
 use rust_decimal_macros::dec;
 use wiremock::matchers::{header_exists, method, path};
@@ -302,4 +302,49 @@ async fn cancel_child_order_unknown_id_maps_to_order_not_found() {
         .await
         .unwrap_err();
     assert!(matches!(err, BitflyerApiError::OrderNotFound(_)));
+}
+
+/// Rate limiter: バケットが空になったとき 3 件目のリクエストが待たされること。
+///
+/// 1 秒 2 件のバケットを with_rate_limiter() で注入し、3 件連続呼び出しで
+/// 3 件目が少なくとも 400ms 待たされることを計測する。
+#[tokio::test]
+async fn rate_limit_waits_when_bucket_empty() {
+    use std::num::NonZeroU32;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let server = MockServer::start().await;
+    // 3 回呼ばれる GET /v1/me/getcollateral を stub
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getcollateral"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"collateral":"100000","open_position_pnl":"0","require_collateral":"0","keep_rate":"0"}"#,
+        ))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    // 1 秒 2 件バケット (burst なし = burst 1) を注入
+    let limiter: Arc<RateLimiter> = Arc::new(governor::RateLimiter::direct(
+        governor::Quota::per_second(NonZeroU32::new(2).unwrap()),
+    ));
+    let api = BitflyerPrivateApi::new_for_test(
+        server.uri(),
+        "test-key".to_string(),
+        "test-secret".to_string(),
+    )
+    .with_rate_limiter(limiter);
+
+    let start = Instant::now();
+    api.get_collateral().await.unwrap(); // 1 件目
+    api.get_collateral().await.unwrap(); // 2 件目 (バケット満杯で即通過)
+    api.get_collateral().await.unwrap(); // 3 件目 (バケット空 → 待つ)
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "3 requests with 2 req/s limiter should take at least 400ms, got {:?}",
+        elapsed
+    );
 }

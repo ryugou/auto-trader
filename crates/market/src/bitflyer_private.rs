@@ -12,9 +12,21 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// トークンバケット型レートリミッタの型エイリアス。
+///
+/// `governor::RateLimiter<NotKeyed, InMemoryState, DefaultClock>` を短縮した
+/// もの。`Arc<RateLimiter>` で構造体に持ち、`with_rate_limiter()` で注入する。
+pub type RateLimiter = governor::RateLimiter<
+    governor::state::NotKeyed,
+    governor::state::InMemoryState,
+    governor::clock::DefaultClock,
+>;
 
 /// `POST /v1/me/sendchildorder` リクエスト本体。
 ///
@@ -221,6 +233,7 @@ pub struct BitflyerPrivateApi {
     api_key: String,
     api_secret: String,
     http: reqwest::Client,
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl std::fmt::Debug for BitflyerPrivateApi {
@@ -229,17 +242,36 @@ impl std::fmt::Debug for BitflyerPrivateApi {
             .field("base_url", &self.base_url)
             .field("api_key", &"***redacted***")
             .field("api_secret", &"***redacted***")
+            .field(
+                "rate_limiter",
+                if self.rate_limiter.is_some() {
+                    &"<enabled>"
+                } else {
+                    &"<none>"
+                },
+            )
             .finish_non_exhaustive()
     }
 }
 
 impl BitflyerPrivateApi {
     /// 本番用コンストラクタ。`base_url` は "https://api.bitflyer.com" 固定想定。
+    ///
+    /// bitFlyer の 200 req / 5 min 制限に対して安全側の 30 req/min + burst 10 の
+    /// トークンバケットを自動で張る。
     pub fn new(api_key: String, api_secret: String) -> Self {
-        Self::with_base_url("https://api.bitflyer.com".to_string(), api_key, api_secret)
+        let limiter = Arc::new(governor::RateLimiter::direct(
+            governor::Quota::per_minute(NonZeroU32::new(30).unwrap())
+                .allow_burst(NonZeroU32::new(10).unwrap()),
+        ));
+        let mut api =
+            Self::with_base_url("https://api.bitflyer.com".to_string(), api_key, api_secret);
+        api.rate_limiter = Some(limiter);
+        api
     }
 
-    /// ベース URL を明示するコンストラクタ。テスト・本番切り替え用。
+    /// ベース URL を明示するコンストラクタ。wiremock テストが native speed で走るよう
+    /// `rate_limiter: None`。
     pub fn with_base_url(base_url: String, api_key: String, api_secret: String) -> Self {
         Self {
             base_url,
@@ -249,15 +281,27 @@ impl BitflyerPrivateApi {
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .expect("reqwest client builder should not fail with basic config"),
+            rate_limiter: None,
         }
     }
 
     /// wiremock テスト専用のコンストラクタ。`#[cfg(test)]` ではなく
     /// `new_for_test` という名前で区別することで統合テスト (別 crate
     /// 境界をまたぐ `crates/market/tests/*.rs`) からも呼べるようにする。
+    ///
+    /// `rate_limiter: None` のため wiremock テストが native speed で走る。
     #[doc(hidden)]
     pub fn new_for_test(base_url: String, api_key: String, api_secret: String) -> Self {
         Self::with_base_url(base_url, api_key, api_secret)
+    }
+
+    /// テスト用レートリミッタを注入するビルダーメソッド。
+    ///
+    /// `new_for_test()` と組み合わせて、任意の Quota を持つバケットを
+    /// 差し込める。本番コードから呼ばないこと (`new()` が自動で張る)。
+    pub fn with_rate_limiter(mut self, limiter: Arc<RateLimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
     }
 
     /// 認証ヘッダ 3 本を生成する pure function (テスト可能)。
@@ -300,6 +344,9 @@ impl BitflyerPrivateApi {
         path: &str,
         body_json: &str,
     ) -> Result<String, BitflyerApiError> {
+        if let Some(limiter) = &self.rate_limiter {
+            limiter.until_ready().await;
+        }
         let url = format!("{}{}", self.base_url, path);
         let ts = Self::current_timestamp();
         let headers = self.auth_headers(&ts, method, path, body_json);
