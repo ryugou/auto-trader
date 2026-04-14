@@ -11,7 +11,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -158,21 +158,21 @@ impl Strategy for DonchianTrendEvolveV1 {
         let entry = event.candle.close;
         let sl_offset = entry * self.sl_pct;
 
+        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
+        let stop_loss_pct = sl_offset / entry;
+
         if entry > channel_high {
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Long,
-                entry_price: entry,
-                stop_loss: entry - sl_offset,
-                // Trailing exit handled in on_open_positions; fixed TP parked
-                // far away so the SL/TP monitor never fires it (Turtle design).
-                take_profit: entry * dec!(1000),
+                stop_loss_pct,
+                // Trailing exit handled in on_open_positions (Turtle has no fixed TP).
+                take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
                 allocation_pct: self.allocation_pct,
                 max_hold_until: None,
-                order_type: OrderType::Market,
             });
         }
         if entry < channel_low {
@@ -180,14 +180,12 @@ impl Strategy for DonchianTrendEvolveV1 {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Short,
-                entry_price: entry,
-                stop_loss: entry + sl_offset,
-                take_profit: entry / dec!(1000),
+                stop_loss_pct,
+                take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
                 allocation_pct: self.allocation_pct,
                 max_hold_until: None,
-                order_type: OrderType::Market,
             });
         }
         None
@@ -255,7 +253,7 @@ impl Strategy for DonchianTrendEvolveV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::{Candle, Pair, Trade, TradeMode, TradeStatus};
+    use auto_trader_core::types::{Candle, Pair, Trade, TradeStatus};
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -363,14 +361,10 @@ mod tests {
         assert!(signal.is_some(), "expected long breakout signal");
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        // SL should be 4% from entry (custom sl_pct)
-        let expected_sl = dec!(11000000) * (Decimal::ONE - dec!(0.04));
-        assert!(
-            (sig.stop_loss - expected_sl).abs() < dec!(1000),
-            "stop_loss={} expected near {}",
-            sig.stop_loss,
-            expected_sl
-        );
+        // SL pct must equal custom sl_pct (4%)
+        assert_eq!(sig.stop_loss_pct, dec!(0.04));
+        // Dynamic exit strategy → TP is None
+        assert!(sig.take_profit_pct.is_none());
         assert_eq!(sig.allocation_pct, dec!(0.8));
     }
 
@@ -394,6 +388,7 @@ mod tests {
         let pos = Position {
             trade: Trade {
                 id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
                 strategy_name: "dte".to_string(),
                 pair: Pair::new("FX_BTC_JPY"),
                 exchange: Exchange::BitflyerCfd,
@@ -401,21 +396,16 @@ mod tests {
                 entry_price: dec!(11000000),
                 exit_price: None,
                 stop_loss: dec!(0),
-                take_profit: dec!(0),
-                quantity: Some(dec!(0.001)),
+                take_profit: None,
+                quantity: dec!(0.001),
                 leverage: dec!(2),
                 fees: dec!(0),
-                paper_account_id: None,
                 entry_at: Utc::now(),
                 exit_at: None,
-                pnl_pips: None,
                 pnl_amount: None,
                 exit_reason: None,
-                mode: TradeMode::Paper,
                 status: TradeStatus::Open,
                 max_hold_until: None,
-                child_order_acceptance_id: None,
-                child_order_id: None,
             },
         };
         let drop_event = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));

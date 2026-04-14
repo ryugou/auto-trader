@@ -34,7 +34,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
 use rust_decimal::Decimal;
@@ -126,22 +126,22 @@ impl Strategy for BbMeanRevertV1 {
 
         let sl_offset = entry * SL_PCT;
 
+        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
+        let stop_loss_pct = sl_offset / entry;
+
         // Long setup: oversold extreme + capitulation candle
         if entry < lower && rsi < RSI_LONG_THRESHOLD && curr_candle.low < prev_candle.low {
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Long,
-                entry_price: entry,
-                stop_loss: entry - sl_offset,
-                // Take profit is dynamic (SMA20 mean-reach via on_open_positions);
-                // park the fixed TP far away so the SL/TP monitor never trips it.
-                take_profit: entry * dec!(1000),
+                stop_loss_pct,
+                // Take profit is dynamic (SMA20 mean-reach via on_open_positions).
+                take_profit_pct: None,
                 confidence: 0.65,
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
-                order_type: OrderType::Market,
             });
         }
 
@@ -151,14 +151,12 @@ impl Strategy for BbMeanRevertV1 {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Short,
-                entry_price: entry,
-                stop_loss: entry + sl_offset,
-                take_profit: entry / dec!(1000),
+                stop_loss_pct,
+                take_profit_pct: None,
                 confidence: 0.65,
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
-                order_type: OrderType::Market,
             });
         }
 
@@ -232,7 +230,7 @@ impl Strategy for BbMeanRevertV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::{Candle, Exchange, Pair, Trade, TradeMode, TradeStatus};
+    use auto_trader_core::types::{Candle, Exchange, Pair, Trade, TradeStatus};
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -262,6 +260,7 @@ mod tests {
         Position {
             trade: Trade {
                 id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
                 strategy_name: strategy.to_string(),
                 pair: Pair::new(pair),
                 exchange: Exchange::BitflyerCfd,
@@ -269,21 +268,16 @@ mod tests {
                 entry_price: entry,
                 exit_price: None,
                 stop_loss: dec!(0),
-                take_profit: dec!(0),
-                quantity: Some(dec!(0.001)),
+                take_profit: None,
+                quantity: dec!(0.001),
                 leverage: dec!(2),
                 fees: dec!(0),
-                paper_account_id: None,
                 entry_at: Utc::now(),
                 exit_at: None,
-                pnl_pips: None,
                 pnl_amount: None,
                 exit_reason: None,
-                mode: TradeMode::Paper,
                 status: TradeStatus::Open,
                 max_hold_until: None,
-                child_order_acceptance_id: None,
-                child_order_id: None,
             },
         }
     }
@@ -323,9 +317,10 @@ mod tests {
         );
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        // SL must be inside the 2% cap
-        let cap = sig.entry_price * dec!(0.02);
-        assert!(sig.entry_price - sig.stop_loss <= cap + dec!(0.001));
+        // SL pct must equal SL_PCT (2%)
+        assert_eq!(sig.stop_loss_pct, dec!(0.02));
+        // Dynamic exit strategy → TP is None
+        assert!(sig.take_profit_pct.is_none());
         // 24h fail-safe must be set
         assert!(sig.max_hold_until.is_some());
     }

@@ -32,7 +32,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
-use auto_trader_core::types::{Candle, Direction, Exchange, OrderType, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -171,22 +171,21 @@ impl Strategy for DonchianTrendV1 {
         let entry = event.candle.close;
         let sl_offset = entry * SL_PCT;
 
+        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
+        let stop_loss_pct = sl_offset / entry;
+
         if entry > channel_high {
             return Some(Signal {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Long,
-                entry_price: entry,
-                stop_loss: entry - sl_offset,
-                // Trailing exit handled in on_open_positions; the fixed
-                // TP is parked far away so the SL/TP monitor never fires
-                // it (Turtle System has no fixed TP by design).
-                take_profit: entry * dec!(1000),
+                stop_loss_pct,
+                // Trailing exit handled in on_open_positions (Turtle has no fixed TP).
+                take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: None,
-                order_type: OrderType::Market,
             });
         }
         if entry < channel_low {
@@ -194,14 +193,12 @@ impl Strategy for DonchianTrendV1 {
                 strategy_name: self.name.clone(),
                 pair: event.pair.clone(),
                 direction: Direction::Short,
-                entry_price: entry,
-                stop_loss: entry + sl_offset,
-                take_profit: entry / dec!(1000),
+                stop_loss_pct,
+                take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
                 allocation_pct: ALLOCATION_PCT,
                 max_hold_until: None,
-                order_type: OrderType::Market,
             });
         }
         None
@@ -272,7 +269,7 @@ impl Strategy for DonchianTrendV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::{Candle, Pair, Trade, TradeMode, TradeStatus};
+    use auto_trader_core::types::{Candle, Pair, Trade, TradeStatus};
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -302,6 +299,7 @@ mod tests {
         Position {
             trade: Trade {
                 id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
                 strategy_name: strategy.to_string(),
                 pair: Pair::new("FX_BTC_JPY"),
                 exchange: Exchange::BitflyerCfd,
@@ -309,21 +307,16 @@ mod tests {
                 entry_price: entry,
                 exit_price: None,
                 stop_loss: dec!(0),
-                take_profit: dec!(0),
-                quantity: Some(dec!(0.001)),
+                take_profit: None,
+                quantity: dec!(0.001),
                 leverage: dec!(2),
                 fees: dec!(0),
-                paper_account_id: None,
                 entry_at: Utc::now(),
                 exit_at: None,
-                pnl_pips: None,
                 pnl_amount: None,
                 exit_reason: None,
-                mode: TradeMode::Paper,
                 status: TradeStatus::Open,
                 max_hold_until: None,
-                child_order_acceptance_id: None,
-                child_order_id: None,
             },
         }
     }
@@ -362,10 +355,10 @@ mod tests {
         assert!(signal.is_some(), "expected long breakout signal");
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        let cap = sig.entry_price * dec!(0.03);
-        assert!(sig.entry_price - sig.stop_loss <= cap + dec!(0.001));
-        // Turtle has NO fixed TP — it's parked extremely far away
-        assert!(sig.take_profit > sig.entry_price * dec!(10));
+        // SL pct must equal SL_PCT (3%)
+        assert_eq!(sig.stop_loss_pct, dec!(0.03));
+        // Turtle has NO fixed TP — dynamic exit strategy uses None
+        assert!(sig.take_profit_pct.is_none());
     }
 
     #[tokio::test]
