@@ -11,9 +11,9 @@ use hmac::{Hmac, Mac};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use thiserror::Error;
 
-#[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
 /// `POST /v1/me/sendchildorder` リクエスト本体。
@@ -205,6 +205,143 @@ impl BitflyerApiError {
     }
 }
 
+/// bitFlyer Private REST API クライアント。
+///
+/// コンストラクタは `new` (本番) と `new_for_test` (wiremock / 単体
+/// テスト) を分離し、テストが本番 URL を誤って叩かないよう型で
+/// ガードする。
+#[derive(Clone)]
+pub struct BitflyerPrivateApi {
+    base_url: String,
+    api_key: String,
+    api_secret: String,
+    http: reqwest::Client,
+}
+
+impl BitflyerPrivateApi {
+    /// 本番用コンストラクタ。`base_url` は "https://api.bitflyer.com" 固定想定。
+    pub fn new(api_key: String, api_secret: String) -> Self {
+        Self::with_base_url("https://api.bitflyer.com".to_string(), api_key, api_secret)
+    }
+
+    /// ベース URL を明示するコンストラクタ。テスト・本番切り替え用。
+    pub fn with_base_url(base_url: String, api_key: String, api_secret: String) -> Self {
+        Self {
+            base_url,
+            api_key,
+            api_secret,
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("reqwest client builder should not fail with basic config"),
+        }
+    }
+
+    /// wiremock テスト専用のコンストラクタ。`#[cfg(test)]` ではなく
+    /// `new_for_test` という名前で区別することで統合テスト (別 crate
+    /// 境界をまたぐ `crates/market/tests/*.rs`) からも呼べるようにする。
+    #[doc(hidden)]
+    pub fn new_for_test(base_url: String, api_key: String, api_secret: String) -> Self {
+        Self::with_base_url(base_url, api_key, api_secret)
+    }
+
+    /// 認証ヘッダ 3 本を生成する pure function (テスト可能)。
+    pub fn auth_headers(
+        &self,
+        timestamp: &str,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> HashMap<&'static str, String> {
+        let sig = sign(&self.api_secret, timestamp, method, path, body);
+        let mut h = HashMap::new();
+        h.insert("ACCESS-KEY", self.api_key.clone());
+        h.insert("ACCESS-TIMESTAMP", timestamp.to_string());
+        h.insert("ACCESS-SIGN", sig);
+        h
+    }
+
+    /// 現在時刻の Unix 秒を 10 進文字列で返す。テストで時刻を固定
+    /// したい場合は呼び出し側で auth_headers を直接叩く。
+    fn current_timestamp() -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before 1970");
+        now.as_secs().to_string()
+    }
+
+    /// 共通 HTTP リクエストラッパー。
+    ///
+    /// - `method`: "GET" / "POST"
+    /// - `path`: 例 "/v1/me/getcollateral" (クエリ文字列を含むこと)
+    /// - `body_json`: POST 本体 JSON 文字列 (GET は "")
+    ///
+    /// 成功時は bitFlyer の raw レスポンスを (2xx, body_string) で返す。
+    /// HTTP ステータスが 2xx でも JSON body に `status: <負数>` が
+    /// 入っていれば `BitflyerApiError::from_body` で分類する。
+    pub async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body_json: &str,
+    ) -> Result<String, BitflyerApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let ts = Self::current_timestamp();
+        let headers = self.auth_headers(&ts, method, path, body_json);
+
+        let mut req = match method {
+            "GET" => self.http.get(&url),
+            "POST" => self.http.post(&url),
+            _ => {
+                return Err(BitflyerApiError::InvalidResponse(format!(
+                    "unsupported method: {method}"
+                )));
+            }
+        };
+        for (k, v) in &headers {
+            req = req.header(*k, v);
+        }
+        if method == "POST" {
+            req = req
+                .header("Content-Type", "application/json")
+                .body(body_json.to_string());
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| BitflyerApiError::Http(e.without_url()))?;
+
+        if status.as_u16() == 429 {
+            return Err(BitflyerApiError::RateLimited);
+        }
+        if !status.is_success() {
+            // 非 2xx レスポンスは body に BitflyerErrorBody が載っている
+            // ことが多い。パース失敗したら InvalidResponse に fallback。
+            return match serde_json::from_str::<BitflyerErrorBody>(&text) {
+                Ok(body) => Err(BitflyerApiError::from_body(body)),
+                Err(_) => Err(BitflyerApiError::InvalidResponse(format!(
+                    "non-2xx status {} body {}",
+                    status.as_u16(),
+                    text
+                ))),
+            };
+        }
+
+        // 2xx でも bitFlyer は `{"status":-200,...}` を返すことがある。
+        // status フィールドを覗いて負数なら error として扱う。
+        if let Ok(body) = serde_json::from_str::<BitflyerErrorBody>(&text)
+            && body.status < 0
+        {
+            return Err(BitflyerApiError::from_body(body));
+        }
+
+        Ok(text)
+    }
+}
+
 /// bitFlyer Private API の `ACCESS-SIGN` ヘッダを計算する。
 ///
 /// 仕様:
@@ -216,7 +353,6 @@ impl BitflyerApiError {
 /// - `body`: POST 本体 (GET の場合は空文字列 "")
 ///
 /// 返り値は 小文字 16 進数 64 文字。
-#[allow(dead_code)]
 pub(crate) fn sign(
     api_secret: &str,
     timestamp: &str,
@@ -370,5 +506,26 @@ mod tests {
         let e: BitflyerErrorBody = serde_json::from_str(json).unwrap();
         assert_eq!(e.status, -205);
         assert_eq!(e.error_message, "Insufficient fund");
+    }
+
+    #[test]
+    fn auth_headers_contain_key_timestamp_and_sign() {
+        let api = BitflyerPrivateApi::new_for_test(
+            "http://example.invalid".to_string(),
+            "test-key".to_string(),
+            "test-secret".to_string(),
+        );
+        let headers = api.auth_headers("1234567890", "GET", "/v1/me/getcollateral", "");
+        assert_eq!(headers.get("ACCESS-KEY").unwrap(), "test-key");
+        assert_eq!(headers.get("ACCESS-TIMESTAMP").unwrap(), "1234567890");
+        // signature は Task 3 の sign() と一致するはず
+        let expected = sign(
+            "test-secret",
+            "1234567890",
+            "GET",
+            "/v1/me/getcollateral",
+            "",
+        );
+        assert_eq!(headers.get("ACCESS-SIGN").unwrap(), &expected);
     }
 }
