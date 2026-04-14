@@ -134,7 +134,7 @@ export interface PositionResponse {
   entry_price: string
   quantity: string | null
   stop_loss: string
-  take_profit: string
+  take_profit: string | null
   fees: string
   entry_at: string
   paper_account_id: string | null
