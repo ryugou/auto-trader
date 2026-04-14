@@ -113,8 +113,11 @@ impl PaperTrader {
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
 
+        trade.status.assert_valid_for_mode(trade.mode);
         // Insert the trade row, deduct margin, and write the
         // balance-history event in a single transaction so a crash
         // can't leave us with a position whose margin we forgot to lock.
@@ -293,7 +296,10 @@ impl OrderExecutor for PaperTrader {
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
+        trade.status.assert_valid_for_mode(trade.mode);
         // Wrap the trade insert + notification insert in a single tx so
         // the two states never disagree. FX has no margin lock so this
         // is a two-statement transaction; crypto does the same dance
@@ -506,8 +512,11 @@ impl OrderExecutor for PaperTrader {
             // DB row's max_hold_until is preserved as-is and not relevant
             // after close, so we read from the locked snapshot.
             max_hold_until: locked.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
 
+        trade.status.assert_valid_for_mode(trade.mode);
         auto_trader_db::notifications::insert_trade_closed(&mut *tx, &trade).await?;
         tx.commit().await?;
 

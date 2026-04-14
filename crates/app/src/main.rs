@@ -6,7 +6,7 @@ mod weekly_batch;
 mod wilson;
 
 use auto_trader_core::config::AppConfig;
-use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent, TradeAction};
+use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_db::pool::create_pool;
@@ -19,7 +19,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 fn exchange_from_str(s: &str) -> Option<Exchange> {
     match s {
@@ -38,10 +38,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config_path = std::env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| "config/default.toml".to_string());
-    let config = AppConfig::load(&PathBuf::from(&config_path))?;
+    let config_path =
+        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
+    let mut config = AppConfig::load(&PathBuf::from(&config_path))?;
     tracing::info!("config loaded from {config_path}");
+    if let Some(bf) = config.bitflyer.as_mut() {
+        bf.api_key = std::env::var("BITFLYER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        bf.api_secret = std::env::var("BITFLYER_API_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+    }
 
     // Database
     let pool = create_pool(&config.database.url).await?;
@@ -100,14 +108,16 @@ async fn main() -> anyhow::Result<()> {
                 let account_id = std::env::var("OANDA_ACCOUNT_ID")
                     .unwrap_or_else(|_| oanda_config.account_id.clone());
                 let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
-                Some(MarketMonitor::new(
-                    oanda,
-                    fx_pairs,
-                    config.monitor.interval_secs,
-                    FX_TIMEFRAME,
-                    price_tx.clone(),
+                Some(
+                    MarketMonitor::new(
+                        oanda,
+                        fx_pairs,
+                        config.monitor.interval_secs,
+                        FX_TIMEFRAME,
+                        price_tx.clone(),
+                    )
+                    .with_db(pool.clone()),
                 )
-                .with_db(pool.clone()))
             }
             _ => {
                 tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
@@ -138,9 +148,12 @@ async fn main() -> anyhow::Result<()> {
     let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
     let vegapunk_base: Option<auto_trader_vegapunk::client::VegapunkClient> =
         match auto_trader_vegapunk::client::VegapunkClient::connect(
-            &config.vegapunk.endpoint, &config.vegapunk.schema,
+            &config.vegapunk.endpoint,
+            &config.vegapunk.schema,
             vegapunk_auth_token.as_deref(),
-        ).await {
+        )
+        .await
+        {
             Ok(client) => {
                 tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
                 Some(client)
@@ -159,14 +172,20 @@ async fn main() -> anyhow::Result<()> {
         }
         match sc.name.as_str() {
             name if name.starts_with("swing_llm") => {
-                let holding_days_max = sc.params.get("holding_days_max")
-                    .and_then(|v| v.as_integer()).unwrap_or(14) as u32;
+                let holding_days_max = sc
+                    .params
+                    .get("holding_days_max")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(14) as u32;
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
 
                 let gemini_api_key = match std::env::var("GEMINI_API_KEY") {
                     Ok(value) if !value.trim().is_empty() => value,
                     _ => {
-                        tracing::warn!("GEMINI_API_KEY not set or empty, skipping strategy: {}", sc.name);
+                        tracing::warn!(
+                            "GEMINI_API_KEY not set or empty, skipping strategy: {}",
+                            sc.name
+                        );
                         continue;
                     }
                 };
@@ -181,7 +200,8 @@ async fn main() -> anyhow::Result<()> {
                 // Clone from shared Vegapunk channel (no new TCP connection)
                 let vp_client = match &vegapunk_base {
                     Some(base) => auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
-                        base, &config.vegapunk.schema,
+                        base,
+                        &config.vegapunk.schema,
                     ),
                     None => {
                         tracing::warn!("vegapunk unavailable, skipping strategy: {}", sc.name);
@@ -221,24 +241,29 @@ async fn main() -> anyhow::Result<()> {
             }
             name if name.starts_with("donchian_trend_evolve") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                let params: serde_json::Value = sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
-                    "SELECT params FROM strategy_params WHERE strategy_name = $1"
-                )
-                .bind(&sc.name)
-                .fetch_optional(&pool)
-                .await
-                .unwrap_or(None)
-                .map(|j| j.0)
-                .unwrap_or_else(|| serde_json::json!({
-                    "entry_channel": 20, "exit_channel": 10,
-                    "sl_pct": 0.03, "allocation_pct": 1.0, "atr_baseline_bars": 50
-                }));
+                let params: serde_json::Value =
+                    sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
+                        "SELECT params FROM strategy_params WHERE strategy_name = $1",
+                    )
+                    .bind(&sc.name)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap_or(None)
+                    .map(|j| j.0)
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "entry_channel": 20, "exit_channel": 10,
+                            "sl_pct": 0.03, "allocation_pct": 1.0, "atr_baseline_bars": 50
+                        })
+                    });
                 engine.add_strategy(
-                    Box::new(auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(
-                        sc.name.clone(),
-                        pairs,
-                        params,
-                    )),
+                    Box::new(
+                        auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(
+                            sc.name.clone(),
+                            pairs,
+                            params,
+                        ),
+                    ),
                     sc.mode.clone(),
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
@@ -257,10 +282,12 @@ async fn main() -> anyhow::Result<()> {
             name if name.starts_with("squeeze_momentum") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
                 engine.add_strategy(
-                    Box::new(auto_trader_strategy::squeeze_momentum::SqueezeMomentumV1::new(
-                        sc.name.clone(),
-                        pairs,
-                    )),
+                    Box::new(
+                        auto_trader_strategy::squeeze_momentum::SqueezeMomentumV1::new(
+                            sc.name.clone(),
+                            pairs,
+                        ),
+                    ),
                     sc.mode.clone(),
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
@@ -336,9 +363,7 @@ async fn main() -> anyhow::Result<()> {
                 // chronological order.
                 Ok(candles) => candles.into_iter().rev().collect(),
                 Err(e) => {
-                    tracing::warn!(
-                        "warmup load failed for {exchange} {pair} {timeframe}: {e}"
-                    );
+                    tracing::warn!("warmup load failed for {exchange} {pair} {timeframe}: {e}");
                     Vec::new()
                 }
             }
@@ -450,13 +475,19 @@ async fn main() -> anyhow::Result<()> {
             for pac in &db_accounts {
                 tracing::info!(
                     "paper account: {} (id={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
-                    pac.name, pac.id, pac.exchange, pac.strategy,
-                    pac.current_balance, pac.initial_balance, pac.leverage
+                    pac.name,
+                    pac.id,
+                    pac.exchange,
+                    pac.strategy,
+                    pac.current_balance,
+                    pac.initial_balance,
+                    pac.leverage
                 );
                 if !registered_strategies.iter().any(|s| s == &pac.strategy) {
                     tracing::warn!(
                         "paper account '{}' references strategy '{}' which is not registered; signals for this strategy will be skipped",
-                        pac.name, pac.strategy
+                        pac.name,
+                        pac.strategy
                     );
                 }
             }
@@ -465,7 +496,6 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("failed to list paper accounts at startup: {e}");
         }
     }
-
 
     // PositionSizer for crypto. Pure capacity-based — the strategy
     // declares its own `allocation_pct` on each Signal, no global
@@ -487,7 +517,10 @@ async fn main() -> anyhow::Result<()> {
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
             Arc::new(Mutex::new(
-                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(base, &config.vegapunk.schema),
+                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
+                    base,
+                    &config.vegapunk.schema,
+                ),
             ))
         });
     let vegapunk_client_recorder = vegapunk_client_exec.clone();
@@ -572,7 +605,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
-    let (macro_tx, _) = tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
+    let (macro_tx, _) =
+        tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
     let macro_rx = macro_tx.subscribe();
     let macro_analyst_handle = if config.macro_analyst.as_ref().is_some_and(|m| m.enabled) {
         let mac = config.macro_analyst.as_ref().unwrap();
@@ -595,13 +629,16 @@ async fn main() -> anyhow::Result<()> {
                     &gemini_config.api_url,
                     &api_key,
                     &gemini_config.model,
-                ).with_db(pool.clone());
+                )
+                .with_db(pool.clone());
 
                 // Clone from shared Vegapunk channel for macro event ingestion
                 if let Some(base) = &vegapunk_base {
-                    let vp_for_macro = auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
-                        base, &config.vegapunk.schema,
-                    );
+                    let vp_for_macro =
+                        auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
+                            base,
+                            &config.vegapunk.schema,
+                        );
                     analyst = analyst.with_vegapunk(vp_for_macro);
                 }
 
@@ -622,9 +659,8 @@ async fn main() -> anyhow::Result<()> {
     // FX position monitor removed: FX paper trading is currently disabled.
     // Drain the forwarded FX price channel so senders do not block.
     let mut price_monitor_rx = price_monitor_rx;
-    let pos_monitor_handle = tokio::spawn(async move {
-        while price_monitor_rx.recv().await.is_some() {}
-    });
+    let pos_monitor_handle =
+        tokio::spawn(async move { while price_monitor_rx.recv().await.is_some() {} });
 
     // Task: Crypto position monitor — single task, DB-driven.
     //
@@ -637,15 +673,16 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
-            let open_trades = match auto_trader_db::trades::list_open_with_account_name(
-                &crypto_monitor_pool,
-            ).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("crypto monitor: failed to list open trades: {e}");
-                    continue;
-                }
-            };
+            let open_trades =
+                match auto_trader_db::trades::list_open_with_account_name(&crypto_monitor_pool)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("crypto monitor: failed to list open trades: {e}");
+                        continue;
+                    }
+                };
             for owned in open_trades {
                 let trade = owned.trade;
                 if trade.exchange != Exchange::BitflyerCfd || trade.pair != event.pair {
@@ -660,9 +697,7 @@ async fn main() -> anyhow::Result<()> {
                 // the dedicated StrategyTimeLimit ExitReason so analytics
                 // can attribute these closes correctly.
                 let now = chrono::Utc::now();
-                let time_limit_hit = trade
-                    .max_hold_until
-                    .is_some_and(|deadline| now >= deadline);
+                let time_limit_hit = trade.max_hold_until.is_some_and(|deadline| now >= deadline);
 
                 let mut exit_reason = match trade.direction {
                     Direction::Long => {
@@ -685,8 +720,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 if exit_reason.is_none() && time_limit_hit {
-                    exit_reason =
-                        Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
+                    exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
                     let exit_price = match reason {
@@ -751,8 +785,7 @@ async fn main() -> anyhow::Result<()> {
     // when the engine task exits (price channel closed) the sender drops
     // and the executor task's `recv()` returns None, allowing graceful
     // shutdown to complete inside the drain timeout.
-    let (exit_tx, mut exit_rx) =
-        mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
+    let (exit_tx, mut exit_rx) = mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
     let engine_pool = pool.clone();
     // Engine still updates PriceStore from the (M5-cadence) candle
     // PriceEvent path. For bitflyer this is redundant with the
@@ -881,7 +914,9 @@ async fn main() -> anyhow::Result<()> {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade so we know which account / pair to close
             // against and at what price.
-            let trade = match auto_trader_db::trades::get_trade_by_id(&exit_pool, exit.trade_id).await {
+            let trade = match auto_trader_db::trades::get_trade_by_id(&exit_pool, exit.trade_id)
+                .await
+            {
                 Ok(Some(t)) => t,
                 Ok(None) => {
                     tracing::warn!("exit signal references missing trade {}", exit.trade_id);
@@ -961,11 +996,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_pool = pool.clone();
     let executor_sizer = position_sizer.clone();
     let trade_tx_clone = trade_tx.clone();
-    let crypto_pairs_set: Vec<String> = config
-        .pairs
-        .crypto
-        .clone()
-        .unwrap_or_default();
+    let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
@@ -974,23 +1005,21 @@ async fn main() -> anyhow::Result<()> {
             if !is_crypto {
                 tracing::debug!(
                     "ignoring non-crypto signal: {} {} (FX paper trading disabled)",
-                    signal.strategy_name, signal.pair
+                    signal.strategy_name,
+                    signal.pair
                 );
                 continue;
             }
 
             // Re-read accounts from the DB for each signal.
-            let db_accounts = match auto_trader_db::paper_accounts::list_paper_accounts(
-                &executor_pool,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("executor: failed to list paper accounts: {e}");
-                    continue;
-                }
-            };
+            let db_accounts =
+                match auto_trader_db::paper_accounts::list_paper_accounts(&executor_pool).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("executor: failed to list paper accounts: {e}");
+                        continue;
+                    }
+                };
 
             // Crypto: dispatch signal only to paper_accounts bound to this strategy.
             let mut matched = false;
@@ -1004,7 +1033,9 @@ async fn main() -> anyhow::Result<()> {
                     None => {
                         tracing::warn!(
                             "skipping paper account {} ({}): unknown exchange '{}'",
-                            pac.name, pac.id, pac.exchange
+                            pac.name,
+                            pac.id,
+                            pac.exchange
                         );
                         continue;
                     }
@@ -1017,13 +1048,14 @@ async fn main() -> anyhow::Result<()> {
                 matched = true;
                 let positions = account.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
-                    p.trade.strategy_name == signal.strategy_name
-                        && p.trade.pair == signal.pair
+                    p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
                 });
                 if has_position {
                     tracing::debug!(
                         "skipping signal: {} already has open position for {} in account {}",
-                        signal.strategy_name, signal.pair, name
+                        signal.strategy_name,
+                        signal.pair,
+                        name
                     );
                     continue;
                 }
@@ -1041,7 +1073,9 @@ async fn main() -> anyhow::Result<()> {
                 let Some(qty) = quantity else {
                     tracing::info!(
                         "position sizing rejected signal for account {}: {} {}",
-                        name, signal.strategy_name, signal.pair
+                        name,
+                        signal.strategy_name,
+                        signal.pair
                     );
                     continue;
                 };
@@ -1062,7 +1096,9 @@ async fn main() -> anyhow::Result<()> {
                                 ind_map.insert(
                                     "regime".to_string(),
                                     serde_json::Value::String(
-                                        crate::regime::classify(&indicators_clone).as_str().to_string(),
+                                        crate::regime::classify(&indicators_clone)
+                                            .as_str()
+                                            .to_string(),
                                     ),
                                 );
                                 let ind_json = serde_json::Value::Object(ind_map);
@@ -1078,8 +1114,13 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 let mut vp = vp.lock().await;
-                                let text = crate::enriched_ingest::format_trade_open(&trade_clone, &indicators_clone, Some(alloc_pct));
-                                let channel = format!("{}-trades", trade_clone.pair.0.to_lowercase());
+                                let text = crate::enriched_ingest::format_trade_open(
+                                    &trade_clone,
+                                    &indicators_clone,
+                                    Some(alloc_pct),
+                                );
+                                let channel =
+                                    format!("{}-trades", trade_clone.pair.0.to_lowercase());
                                 let timestamp = chrono::Utc::now().to_rfc3339();
                                 if let Err(e) = vp
                                     .ingest_raw(&text, "trade_signal", &channel, &timestamp)
@@ -1089,10 +1130,13 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             });
                         }
-                        if let Err(e) = trade_tx_clone.send(TradeEvent {
-                            trade,
-                            action: TradeAction::Opened,
-                        }).await {
+                        if let Err(e) = trade_tx_clone
+                            .send(TradeEvent {
+                                trade,
+                                action: TradeAction::Opened,
+                            })
+                            .await
+                        {
                             tracing::error!("trade channel send failed: {e}");
                         }
                     }
@@ -1122,8 +1166,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TradeAction::Closed { .. } => {
                     let t = &trade_event.trade;
-                    if let (Some(_exit_price), Some(exit_at), Some(pnl_amount), Some(_exit_reason)) =
-                        (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
+                    if let (
+                        Some(_exit_price),
+                        Some(exit_at),
+                        Some(pnl_amount),
+                        Some(_exit_reason),
+                    ) = (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
                     {
                         // Upsert daily summary
                         let date = exit_at.date_naive();
@@ -1142,11 +1190,20 @@ async fn main() -> anyhow::Result<()> {
                             None => None,
                         };
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
-                            &recorder_pool, date, &t.strategy_name, &t.pair.0,
-                            mode_str, t.exchange.as_str(), t.paper_account_id,
+                            &recorder_pool,
+                            date,
+                            &t.strategy_name,
+                            &t.pair.0,
+                            mode_str,
+                            t.exchange.as_str(),
+                            t.paper_account_id,
                             account_type.as_deref(),
-                            1, win, pnl_amount,
-                        ).await {
+                            1,
+                            win,
+                            pnl_amount,
+                        )
+                        .await
+                        {
                             tracing::error!("upsert daily summary error: {e}");
                         }
                         // Fire-and-forget Vegapunk ingestion (don't block DB recording)
@@ -1210,7 +1267,8 @@ async fn main() -> anyhow::Result<()> {
                                 .flatten();
 
                                 if let Some(sid) = search_id {
-                                    let rating = crate::enriched_ingest::compute_feedback_rating(&t);
+                                    let rating =
+                                        crate::enriched_ingest::compute_feedback_rating(&t);
                                     let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;
                                     let regime = entry_ind
                                         .as_ref()
@@ -1236,13 +1294,24 @@ async fn main() -> anyhow::Result<()> {
     let vegapunk_client_daily: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
             Arc::new(Mutex::new(
-                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(base, &config.vegapunk.schema),
+                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
+                    base,
+                    &config.vegapunk.schema,
+                ),
             ))
         });
     let vegapunk_client_weekly = vegapunk_client_daily.clone();
-    let gemini_api_url = config.gemini.as_ref().map(|g| g.api_url.clone()).unwrap_or_default();
+    let gemini_api_url = config
+        .gemini
+        .as_ref()
+        .map(|g| g.api_url.clone())
+        .unwrap_or_default();
     let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-    let gemini_model = config.gemini.as_ref().map(|g| g.model.clone()).unwrap_or_default();
+    let gemini_model = config
+        .gemini
+        .as_ref()
+        .map(|g| g.model.clone())
+        .unwrap_or_default();
     let daily_pool = pool.clone();
     let daily_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -1254,9 +1323,8 @@ async fn main() -> anyhow::Result<()> {
         for i in (1..=backfill_days).rev() {
             let d = today - chrono::Duration::days(i);
             tracing::info!("daily batch startup backfill: {d}");
-            if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
-                &daily_pool, d,
-            ).await {
+            if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(&daily_pool, d).await
+            {
                 tracing::error!("daily batch backfill failed for {d}: {e}");
             }
         }
@@ -1275,9 +1343,9 @@ async fn main() -> anyhow::Result<()> {
             let now_date = chrono::Utc::now().date_naive();
             if now_date != last_date {
                 tracing::info!("running daily batch for {last_date}");
-                if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(
-                    &daily_pool, last_date,
-                ).await {
+                if let Err(e) =
+                    auto_trader_db::summary::update_daily_max_drawdown(&daily_pool, last_date).await
+                {
                     tracing::error!("daily batch failed: {e}");
                 }
                 match auto_trader_db::notifications::purge_old_read(&daily_pool).await {
@@ -1301,8 +1369,7 @@ async fn main() -> anyhow::Result<()> {
                 // Weekly (Sunday JST): run evolution batch
                 // `weekday()` requires the `Datelike` trait to be in scope.
                 use chrono::Datelike as _;
-                let jst_weekday = (chrono::Utc::now() + chrono::Duration::hours(9))
-                    .weekday();
+                let jst_weekday = (chrono::Utc::now() + chrono::Duration::hours(9)).weekday();
                 if jst_weekday == chrono::Weekday::Sun
                     && let Err(e) = crate::weekly_batch::run(
                         &daily_pool,
@@ -1353,7 +1420,9 @@ async fn main() -> anyhow::Result<()> {
                         None => {
                             tracing::warn!(
                                 "overnight fee: skipping paper account {} ({}): unknown exchange '{}'",
-                                pac.name, pac.id, pac.exchange
+                                pac.name,
+                                pac.id,
+                                pac.exchange
                             );
                             continue;
                         }
@@ -1364,10 +1433,7 @@ async fn main() -> anyhow::Result<()> {
                     let trader = PaperTrader::new(overnight_pool.clone(), exchange, pac.id);
                     match trader.apply_overnight_fees(fee_rate).await {
                         Ok(fees) if fees > Decimal::ZERO => {
-                            tracing::info!(
-                                "overnight fee applied: {} = {} JPY",
-                                pac.name, fees
-                            );
+                            tracing::info!("overnight fee applied: {} = {} JPY", pac.name, fees);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -1390,7 +1456,8 @@ async fn main() -> anyhow::Result<()> {
         // Always bind to 0.0.0.0. Host-level access control is handled by
         // docker-compose port mapping (127.0.0.1:3001:3001) or firewall.
         let bind_addr = "0.0.0.0:3001";
-        let listener = tokio::net::TcpListener::bind(bind_addr).await
+        let listener = tokio::net::TcpListener::bind(bind_addr)
+            .await
             .expect("failed to bind API server");
         tracing::info!("API server listening on {bind_addr}");
         if let Err(e) = axum::serve(listener, app).await {
@@ -1428,7 +1495,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = exit_executor_handle.await;
         let _ = executor_handle.await;
         let _ = recorder_handle.await;
-    }).await;
+    })
+    .await;
 
     tracing::info!("shutdown complete");
     Ok(())

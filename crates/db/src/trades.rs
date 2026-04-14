@@ -16,20 +16,19 @@ pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
 /// keep the trade INSERT atomic with the balance update + event row,
 /// without duplicating the column / serialization logic in the
 /// executor crate.
-pub async fn insert_trade_with_executor<'e, E>(
-    executor: E,
-    trade: &Trade,
-) -> anyhow::Result<()>
+pub async fn insert_trade_with_executor<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    trade.status.assert_valid_for_mode(trade.mode);
     sqlx::query(
         r#"INSERT INTO trades
            (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
             stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
             entry_at, exit_at, pnl_pips, pnl_amount,
-            exit_reason, mode, status, max_hold_until)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
+            exit_reason, mode, status, max_hold_until,
+            child_order_acceptance_id, child_order_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)"#,
     )
     .bind(trade.id)
     .bind(&trade.strategy_name)
@@ -54,9 +53,11 @@ where
             .trim_matches('"')
             .to_string()
     }))
-    .bind(serde_json::to_string(&trade.mode).unwrap_or_default().trim_matches('"').to_string())
-    .bind(serde_json::to_string(&trade.status).unwrap_or_default().trim_matches('"').to_string())
+    .bind(trade.mode.as_str())
+    .bind(trade.status.as_str())
     .bind(trade.max_hold_until)
+    .bind(&trade.child_order_acceptance_id)
+    .bind(&trade.child_order_id)
     .execute(executor)
     .await?;
     Ok(())
@@ -76,7 +77,7 @@ pub async fn update_trade_closed(
     sqlx::query(
         r#"UPDATE trades
            SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
-               exit_reason = $6, fees = $7, status = 'closed'
+               exit_reason = $6, fees = $7, status = $8
            WHERE id = $1"#,
     )
     .bind(id)
@@ -84,13 +85,23 @@ pub async fn update_trade_closed(
     .bind(exit_at)
     .bind(pnl_pips)
     .bind(pnl_amount)
-    .bind(serde_json::to_string(&exit_reason).unwrap_or_default().trim_matches('"'))
+    .bind(
+        serde_json::to_string(&exit_reason)
+            .unwrap_or_default()
+            .trim_matches('"'),
+    )
     .bind(fees)
+    .bind(TradeStatus::Closed.as_str())
     .execute(pool)
     .await?;
     Ok(())
 }
 
+// TODO(PR 3, live-trading): status フィルタを IN ('open', 'pending') に拡張する。
+// 現在は paper のみ返すので `open` のみでよいが、live trading が入ると pending
+// のトレードがポジションモニターから抜け落ちる (silent bug になる)。
+// partial unique index (trades_one_active_per_strategy_pair) は既に
+// status IN ('pending', 'open') を "active" として扱っているため、そこと整合させる。
 pub async fn get_open_trades(
     pool: &PgPool,
     strategy_name: &str,
@@ -100,7 +111,8 @@ pub async fn get_open_trades(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until
+                  exit_reason, mode, status, created_at, max_hold_until,
+                  child_order_acceptance_id, child_order_id
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
     )
@@ -120,7 +132,8 @@ pub async fn get_open_trades_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until
+                  exit_reason, mode, status, created_at, max_hold_until,
+                  child_order_acceptance_id, child_order_id
            FROM trades
            WHERE paper_account_id = $1 AND status = 'open'
            ORDER BY entry_at ASC"#,
@@ -137,7 +150,8 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
                   entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until
+                  exit_reason, mode, status, created_at, max_hold_until,
+                  child_order_acceptance_id, child_order_id
            FROM trades
            WHERE id = $1"#,
     )
@@ -362,6 +376,7 @@ pub async fn list_open_with_account_name_for_pair(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
                   t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
                   t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
+                  t.child_order_acceptance_id, t.child_order_id,
                   pa.name AS account_name
            FROM trades t
            LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
@@ -398,6 +413,7 @@ pub async fn list_open_with_account_name(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
                   t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
                   t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
+                  t.child_order_acceptance_id, t.child_order_id,
                   pa.name AS account_name
            FROM trades t
            LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
@@ -442,6 +458,8 @@ struct TradeRow {
     #[allow(dead_code)]
     created_at: DateTime<Utc>,
     max_hold_until: Option<DateTime<Utc>>,
+    child_order_acceptance_id: Option<String>,
+    child_order_id: Option<String>,
 }
 
 impl TryFrom<TradeRow> for Trade {
@@ -467,6 +485,8 @@ impl TryFrom<TradeRow> for Trade {
         let status = match r.status.as_str() {
             "open" => TradeStatus::Open,
             "closed" => TradeStatus::Closed,
+            "pending" => TradeStatus::Pending,
+            "inconsistent" => TradeStatus::Inconsistent,
             other => anyhow::bail!("unknown status: {other}"),
         };
         let exit_reason = r
@@ -507,6 +527,8 @@ impl TryFrom<TradeRow> for Trade {
             mode,
             status,
             max_hold_until: r.max_hold_until,
+            child_order_acceptance_id: r.child_order_acceptance_id,
+            child_order_id: r.child_order_id,
         })
     }
 }
