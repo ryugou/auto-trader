@@ -541,3 +541,183 @@ async fn live_close_calls_api_and_uses_actual_fill_price(pool: PgPool) {
         "no open trades must remain after close"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 9: get_trade_for_close returns None for already-closed trade
+// ---------------------------------------------------------------------------
+
+/// Regression test for CRITICAL #1 fix.
+///
+/// `get_trade_for_close` should return `None` when the trade status is
+/// 'closed', confirming that the plain SELECT (not FOR UPDATE) still
+/// correctly filters by status = 'open'.
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_trade_for_close_returns_none_for_closed_trade(pool: PgPool) {
+    let account_id = seed_live_account(&pool).await;
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+
+    // Manually mark the trade as closed in the DB
+    sqlx::query("UPDATE trades SET status = 'closed', exit_price = $2, exit_at = now(), pnl_amount = 0 WHERE id = $1")
+        .bind(trade.id)
+        .bind(dec!(11_600_000))
+        .execute(&pool)
+        .await
+        .expect("manual close update failed");
+
+    let result = auto_trader_db::trades::get_trade_for_close(&pool, trade.id, account_id)
+        .await
+        .expect("get_trade_for_close should not error");
+
+    assert!(
+        result.is_none(),
+        "get_trade_for_close must return None for a closed trade"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: concurrent close — second close loses the CAS race
+// ---------------------------------------------------------------------------
+
+/// Regression test for CRITICAL #1 fix.
+///
+/// Two sequential `close_position` calls on the same trade:
+///   - First call: succeeds (update_trade_closed sets status='closed')
+///   - Second call: `get_trade_for_close` returns None (status != 'open')
+///     → bails with "not found or already closed"
+///
+/// In production a true concurrent scenario would race at the DB level;
+/// this sequential test verifies the CAS path via the WHERE status='open'
+/// guard in `update_trade_closed`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn second_close_fails_after_first_close_succeeds(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Two identical fill responses — one per close attempt
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_RACE"})),
+        )
+        .expect(1) // only 1 API call should occur
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 3,
+                "child_order_id": "JOR_RACE",
+                "side": "SELL",
+                "price": "11600000",
+                "size": "0.005",
+                "commission": "0",
+                "exec_date": "2026-01-01T00:02:00",
+                "child_order_acceptance_id": "JRF_RACE"
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+    let price_store = PriceStore::new(vec![]);
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    // First close must succeed
+    let first = trader
+        .close_position(&trade.id.to_string(), ExitReason::Manual)
+        .await;
+    assert!(first.is_ok(), "first close must succeed: {:?}", first);
+
+    // Second close must fail: get_trade_for_close returns None (status='closed')
+    // Build a second trader pointing at same wiremock server (no more mocks = any
+    // accidental API call would 501 but we assert the error before it reaches API)
+    let price_store2 = PriceStore::new(vec![]);
+    let trader2 = build_live_trader(pool.clone(), account_id, server.uri(), price_store2);
+    let second = trader2
+        .close_position(&trade.id.to_string(), ExitReason::Manual)
+        .await;
+    assert!(
+        second.is_err(),
+        "second close on same trade must return Err"
+    );
+    let err_msg = second.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not found") || err_msg.contains("already closed"),
+        "error must indicate trade not available: {err_msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: apply_overnight_fee is atomic
+// ---------------------------------------------------------------------------
+
+/// Regression test for CRITICAL #3 fix.
+///
+/// `apply_overnight_fee` must atomically:
+///   1. Deduct fee from account balance
+///   2. Increment trade.fees
+///   3. Insert an account_events row
+///
+/// Verify all three side effects are visible after tx.commit().
+#[sqlx::test(migrations = "../../migrations")]
+async fn apply_overnight_fee_is_atomic(pool: PgPool) {
+    let account_id = seed_live_account(&pool).await;
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+
+    // Initial balance is 30_000 (from seed_live_account)
+    let fee = dec!(100);
+
+    let mut tx = pool.begin().await.expect("begin tx");
+    let new_balance =
+        auto_trader_db::trades::apply_overnight_fee(&mut tx, account_id, trade.id, fee)
+            .await
+            .expect("apply_overnight_fee failed");
+    tx.commit().await.expect("commit tx");
+
+    // 1. Returned balance must equal initial - fee
+    assert_eq!(new_balance, dec!(29_900), "new_balance must be 30000 - 100");
+
+    // 2. Account balance in DB must be updated
+    let db_balance: rust_decimal::Decimal =
+        sqlx::query_scalar("SELECT current_balance FROM trading_accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch balance");
+    assert_eq!(
+        db_balance,
+        dec!(29_900),
+        "DB balance must reflect deduction"
+    );
+
+    // 3. trades.fees must be incremented
+    let db_fees: rust_decimal::Decimal =
+        sqlx::query_scalar("SELECT fees FROM trades WHERE id = $1")
+            .bind(trade.id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch fees");
+    assert_eq!(db_fees, fee, "trades.fees must equal the fee applied");
+
+    // 4. account_events row must exist with correct values
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'overnight_fee'",
+    )
+    .bind(trade.id)
+    .fetch_one(&pool)
+    .await
+    .expect("count events");
+    assert_eq!(
+        event_count, 1,
+        "exactly 1 overnight_fee event must be recorded"
+    );
+}

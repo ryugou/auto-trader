@@ -344,7 +344,8 @@ impl OrderExecutor for Trader {
     async fn close_position(&self, id: &str, exit_reason: ExitReason) -> anyhow::Result<Trade> {
         let uuid = Uuid::parse_str(id)?;
 
-        // 1. trade_id から既存 trade 取得 (FOR UPDATE でロック)
+        // Phase 1: Read the open trade (non-locking SELECT).
+        // Race protection is achieved in Phase 3 via CAS (WHERE status = 'open').
         let trade = auto_trader_db::trades::get_trade_for_close(&self.pool, uuid, self.account_id)
             .await?
             .ok_or_else(|| {
@@ -353,24 +354,20 @@ impl OrderExecutor for Trader {
                 )
             })?;
 
-        // 2. status='open' であること確認
-        if trade.status != TradeStatus::Open {
-            anyhow::bail!("trade {id} is not open (status={:?})", trade.status);
-        }
-
-        // 3. fill_close() で exit 価格取得
+        // Phase 2: Execute live fill outside the DB transaction to avoid
+        // holding a long lock while waiting for the exchange API.
         let exit_price = self.fill_close(&trade).await?;
 
-        // 4. pnl 計算
+        // Phase 3: CAS update + ledger in a single transaction.
+        // update_trade_closed uses WHERE status = 'open' — rows_affected == 0
+        // means another concurrent close already won this race; we bail.
         let price_diff = match trade.direction {
             Direction::Long => exit_price - trade.entry_price,
             Direction::Short => trade.entry_price - exit_price,
         };
         let pnl_amount = truncate_yen(price_diff * trade.quantity);
-
         let exit_at = Utc::now();
 
-        // 5. DB 操作 (1 トランザクション)
         let closed_trade = Trade {
             id: trade.id,
             account_id: trade.account_id,
@@ -394,6 +391,7 @@ impl OrderExecutor for Trader {
         };
 
         let mut tx = self.pool.begin().await?;
+        // CAS: bails with "already closed" if rows_affected == 0
         auto_trader_db::trades::update_trade_closed(
             &mut *tx,
             trade.id,

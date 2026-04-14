@@ -721,7 +721,10 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let account_id = trade.account_id;
-                // Determine account type (paper=dry_run, live=real orders)
+                // Determine account type (paper=dry_run, live=real orders).
+                // DB errors are NOT silently treated as dry_run=true because a
+                // live account that silently degrades to paper mode would skip
+                // real orders while still holding live positions.
                 let dry_run = match auto_trader_db::trading_accounts::get_account(
                     &crypto_monitor_pool,
                     account_id,
@@ -729,7 +732,22 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 {
                     Ok(Some(acc)) => acc.account_type == "paper",
-                    _ => true, // default to dry_run on error
+                    Ok(None) => {
+                        tracing::warn!(
+                            "skipping close for trade {}: account {} not found",
+                            trade.id,
+                            account_id
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "skipping close for trade {}: DB error fetching account {}: {e}",
+                            trade.id,
+                            account_id
+                        );
+                        continue;
+                    }
                 };
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
@@ -977,12 +995,32 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
             let account_id = trade.account_id;
-            // Determine account type for dry_run flag
-            let dry_run =
-                match auto_trader_db::trading_accounts::get_account(&exit_pool, account_id).await {
-                    Ok(Some(acc)) => acc.account_type == "paper",
-                    _ => true,
-                };
+            // Determine account type for dry_run flag.
+            // DB errors are NOT silently treated as dry_run=true (see position
+            // monitor for detailed rationale).
+            let dry_run = match auto_trader_db::trading_accounts::get_account(
+                &exit_pool, account_id,
+            )
+            .await
+            {
+                Ok(Some(acc)) => acc.account_type == "paper",
+                Ok(None) => {
+                    tracing::warn!(
+                        "skipping strategy exit for trade {}: account {} not found",
+                        trade.id,
+                        account_id
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping strategy exit for trade {}: DB error fetching account {}: {e}",
+                        trade.id,
+                        account_id
+                    );
+                    continue;
+                }
+            };
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
@@ -1496,43 +1534,26 @@ async fn main() -> anyhow::Result<()> {
                         if fee.is_zero() {
                             continue;
                         }
-                        if let Err(e) =
-                            auto_trader_db::trades::add_fees(&overnight_pool, trade.id, fee).await
-                        {
+                        // Apply overnight fee atomically: balance deduction +
+                        // trades.fees increment + account_events insert in one tx.
+                        // This prevents race conditions with concurrent close_position calls.
+                        let result = async {
+                            let mut tx = overnight_pool.begin().await?;
+                            auto_trader_db::trades::apply_overnight_fee(
+                                &mut tx, pac.id, trade.id, fee,
+                            )
+                            .await?;
+                            tx.commit().await?;
+                            anyhow::Ok(())
+                        }
+                        .await;
+                        if let Err(e) = result {
                             tracing::error!(
-                                "overnight fee: add_fees failed for trade {}: {e}",
+                                "overnight fee: apply_overnight_fee failed for trade {}: {e}",
                                 trade.id
                             );
                             continue;
                         }
-                        // Deduct fee from account balance and capture new value
-                        let new_balance_result: Result<Decimal, _> = sqlx::query_scalar(
-                            "UPDATE trading_accounts SET current_balance = current_balance - $2 WHERE id = $1 RETURNING current_balance",
-                        )
-                        .bind(pac.id)
-                        .bind(fee)
-                        .fetch_one(&overnight_pool)
-                        .await;
-                        let new_balance = match new_balance_result {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::error!(
-                                    "overnight fee: balance update failed for {}: {e}",
-                                    pac.name
-                                );
-                                continue;
-                            }
-                        };
-                        // Record in account_events
-                        let _ = sqlx::query(
-                            "INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after) VALUES ($1, $2, 'overnight_fee', $3, $4)",
-                        )
-                        .bind(pac.id)
-                        .bind(trade.id)
-                        .bind(-fee)
-                        .bind(new_balance)
-                        .execute(&overnight_pool)
-                        .await;
                         total_fee += fee;
                     }
                     if total_fee > Decimal::ZERO {

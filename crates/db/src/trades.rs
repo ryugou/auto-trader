@@ -100,29 +100,85 @@ pub async fn lock_margin(
     Ok(())
 }
 
-/// Fetch a trade for closing (SELECT … FOR UPDATE).
+/// Fetch an open trade for closing.
+///
+/// Must be called inside a transaction when used for concurrent-safe close
+/// operations (the caller is responsible for `WHERE status = 'open'` CAS via
+/// `update_trade_closed`).  Accepts any sqlx executor so callers can pass
+/// either a `&PgPool` (for simple reads) or `&mut Transaction` (for locked
+/// reads).
 ///
 /// Returns `None` when the trade is not found, already closed, or belongs
 /// to a different account.
-pub async fn get_trade_for_close(
-    pool: &PgPool,
+pub async fn get_trade_for_close<'e, E>(
+    executor: E,
     trade_id: Uuid,
     account_id: Uuid,
-) -> anyhow::Result<Option<Trade>> {
+) -> anyhow::Result<Option<Trade>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let row = sqlx::query_as::<_, TradeRow>(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
                   exit_reason, status, created_at, max_hold_until
            FROM trades
-           WHERE id = $1 AND account_id = $2 AND status = 'open'
-           FOR UPDATE"#,
+           WHERE id = $1 AND account_id = $2 AND status = 'open'"#,
     )
     .bind(trade_id)
     .bind(account_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     row.map(|r| r.try_into()).transpose()
+}
+
+/// Apply an overnight fee for a single trade inside a transaction.
+///
+/// Atomically:
+///   1. Deducts `fee_amount` from `trading_accounts.current_balance`
+///   2. Increments `trades.fees` for the given trade
+///   3. Inserts an `account_events` row with `event_type = 'overnight_fee'`
+///
+/// Returns the account's new balance after the deduction.
+pub async fn apply_overnight_fee(
+    tx: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    trade_id: Uuid,
+    fee_amount: Decimal,
+) -> anyhow::Result<Decimal> {
+    // 1. Deduct from balance (SELECT … FOR UPDATE implicitly via UPDATE)
+    let new_balance: Decimal = sqlx::query_scalar(
+        r#"UPDATE trading_accounts
+           SET current_balance = current_balance - $2
+           WHERE id = $1
+           RETURNING current_balance"#,
+    )
+    .bind(account_id)
+    .bind(fee_amount)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // 2. Accumulate fee on the trade row
+    sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
+        .bind(trade_id)
+        .bind(fee_amount)
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Record in account_events (amount is negative to indicate outflow)
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'overnight_fee', $3, $4)"#,
+    )
+    .bind(account_id)
+    .bind(trade_id)
+    .bind(-fee_amount)
+    .bind(new_balance)
+    .execute(&mut *tx)
+    .await?;
+
+    Ok(new_balance)
 }
 
 /// Update a trade to closed state inside the given transaction.
