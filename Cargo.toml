@@ -10,6 +10,7 @@ members = [
     "crates/app",
     "crates/vegapunk-client",
     "crates/backtest",
+    "crates/notify",
 ]
 
 [workspace.package]
@@ -51,3 +52,7 @@ auto-trader-executor = { path = "crates/executor" }
 auto-trader-vegapunk = { path = "crates/vegapunk-client" }
 auto-trader-macro-analyst = { path = "crates/macro-analyst" }
 auto-trader-backtest = { path = "crates/backtest" }
+auto-trader-notify = { path = "crates/notify" }
+
+# test helpers (reserved for PR 2+)
+wiremock = "0.6"
