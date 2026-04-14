@@ -412,6 +412,8 @@ mod tests {
                 mode: TradeMode::Paper,
                 status: TradeStatus::Open,
                 max_hold_until: None,
+                child_order_acceptance_id: None,
+                child_order_id: None,
             },
         };
         let drop_event = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));

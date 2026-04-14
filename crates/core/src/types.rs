@@ -186,6 +186,14 @@ pub struct Trade {
     /// Optional time-based fail-safe — see `Signal::max_hold_until`.
     #[serde(default)]
     pub max_hold_until: Option<DateTime<Utc>>,
+    /// bitFlyer 注文受付 ID (sendchildorder のレスポンス)。
+    /// Paper トレードでは None。
+    #[serde(default)]
+    pub child_order_acceptance_id: Option<String>,
+    /// bitFlyer 注文 ID (約定確定後に getchildorders から取得)。
+    /// Paper トレードでは None。pending 中も None。
+    #[serde(default)]
+    pub child_order_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

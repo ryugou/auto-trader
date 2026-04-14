@@ -113,6 +113,8 @@ impl PaperTrader {
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
 
         // Insert the trade row, deduct margin, and write the
@@ -293,6 +295,8 @@ impl OrderExecutor for PaperTrader {
             mode: TradeMode::Paper,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
         // Wrap the trade insert + notification insert in a single tx so
         // the two states never disagree. FX has no margin lock so this
@@ -506,6 +510,8 @@ impl OrderExecutor for PaperTrader {
             // DB row's max_hold_until is preserved as-is and not relevant
             // after close, so we read from the locked snapshot.
             max_hold_until: locked.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
 
         auto_trader_db::notifications::insert_trade_closed(&mut *tx, &trade).await?;

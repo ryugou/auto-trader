@@ -35,11 +35,7 @@ impl SimTrader {
         }
     }
 
-    fn open(
-        &mut self,
-        signal: &auto_trader_core::types::Signal,
-        now: DateTime<Utc>,
-    ) -> Trade {
+    fn open(&mut self, signal: &auto_trader_core::types::Signal, now: DateTime<Utc>) -> Trade {
         let trade = Trade {
             id: Uuid::new_v4(),
             strategy_name: signal.strategy_name.clone(),
@@ -62,6 +58,8 @@ impl SimTrader {
             mode: TradeMode::Backtest,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            child_order_acceptance_id: None,
+            child_order_id: None,
         };
         self.positions.insert(trade.id, trade.clone());
         trade
@@ -130,9 +128,9 @@ impl BacktestRunner {
         leverage: Decimal,
     ) -> anyhow::Result<BacktestReport> {
         // Load candles from DB — get_candles returns DESC order, reverse for chronological
-        let mut candles = auto_trader_db::candles::get_candles(
-            &self.pool, "oanda", &pair.0, timeframe, 10000
-        ).await?;
+        let mut candles =
+            auto_trader_db::candles::get_candles(&self.pool, "oanda", &pair.0, timeframe, 10000)
+                .await?;
         candles.reverse(); // chronological order
 
         if candles.is_empty() {
@@ -202,9 +200,9 @@ impl BacktestRunner {
             if let Some(signal) = strategy.on_price(&event).await {
                 // Check 1-pair-1-position per strategy
                 let open = trader.open_positions();
-                let has_pos = open.iter().any(|t| {
-                    t.strategy_name == signal.strategy_name && t.pair == signal.pair
-                });
+                let has_pos = open
+                    .iter()
+                    .any(|t| t.strategy_name == signal.strategy_name && t.pair == signal.pair);
                 if !has_pos {
                     let trade = trader.open(&signal, candle.timestamp);
                     trades.push(trade);

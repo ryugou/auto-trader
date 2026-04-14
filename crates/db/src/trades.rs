@@ -25,8 +25,9 @@ where
            (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
             stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
             entry_at, exit_at, pnl_pips, pnl_amount,
-            exit_reason, mode, status, max_hold_until)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
+            exit_reason, mode, status, max_hold_until,
+            child_order_acceptance_id, child_order_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)"#,
     )
     .bind(trade.id)
     .bind(&trade.strategy_name)
@@ -54,6 +55,8 @@ where
     .bind(serde_json::to_string(&trade.mode).unwrap_or_default().trim_matches('"').to_string())
     .bind(serde_json::to_string(&trade.status).unwrap_or_default().trim_matches('"').to_string())
     .bind(trade.max_hold_until)
+    .bind(&trade.child_order_acceptance_id)
+    .bind(&trade.child_order_id)
     .execute(executor)
     .await?;
     Ok(())
@@ -443,6 +446,14 @@ struct TradeRow {
     #[allow(dead_code)]
     created_at: DateTime<Utc>,
     max_hold_until: Option<DateTime<Utc>>,
+    /// NULL when the column does not yet exist in the DB (pre-migration).
+    /// Populated by Task 6 migration.
+    #[sqlx(default)]
+    child_order_acceptance_id: Option<String>,
+    /// NULL when the column does not yet exist in the DB (pre-migration).
+    /// Populated by Task 6 migration.
+    #[sqlx(default)]
+    child_order_id: Option<String>,
 }
 
 impl TryFrom<TradeRow> for Trade {
@@ -510,6 +521,8 @@ impl TryFrom<TradeRow> for Trade {
             mode,
             status,
             max_hold_until: r.max_hold_until,
+            child_order_acceptance_id: r.child_order_acceptance_id,
+            child_order_id: r.child_order_id,
         })
     }
 }

@@ -324,6 +324,8 @@ mod tests {
                 mode: TradeMode::Paper,
                 status: TradeStatus::Open,
                 max_hold_until: None,
+                child_order_acceptance_id: None,
+                child_order_id: None,
             },
         }
     }
