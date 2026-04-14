@@ -1,3 +1,8 @@
+//! Notification DB access.
+//!
+//! NOTE: `insert_trade_opened` / `insert_trade_closed` are stubs pending PR-1 Task 6.
+//! The `notifications` table schema changed (paper_account_id → account_id).
+
 use auto_trader_core::types::{ExitReason, Trade};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -9,18 +14,19 @@ use uuid::Uuid;
 pub struct Notification {
     pub id: Uuid,
     pub kind: String,
-    pub trade_id: Uuid,
-    pub paper_account_id: Uuid,
-    pub strategy_name: String,
-    pub pair: String,
-    pub direction: String,
-    pub price: Decimal,
+    pub trade_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
+    pub strategy_name: Option<String>,
+    pub pair: Option<String>,
+    pub direction: Option<String>,
+    pub price: Option<Decimal>,
     pub pnl_amount: Option<Decimal>,
     pub exit_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub read_at: Option<DateTime<Utc>>,
 }
 
+#[allow(dead_code)]
 fn exit_reason_str(r: ExitReason) -> String {
     serde_json::to_string(&r)
         .unwrap_or_default()
@@ -28,73 +34,30 @@ fn exit_reason_str(r: ExitReason) -> String {
         .to_string()
 }
 
-/// Insert a `trade_opened` notification. Must be called with the same
-/// executor (usually a `&mut tx`) that wrote the `trades` row so that
-/// the two live or die together.
-pub async fn insert_trade_opened<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
+/// Insert a `trade_opened` notification.
+///
+/// # Panics (temporary)
+///
+/// This is a stub. The real implementation will be added in PR-1 Task 6
+/// once the new `notifications` schema is in place.
+pub async fn insert_trade_opened<'e, E>(_executor: E, _trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let account_id = trade
-        .paper_account_id
-        .ok_or_else(|| anyhow::anyhow!("trade {} has no paper_account_id", trade.id))?;
-    sqlx::query(
-        r#"INSERT INTO notifications
-               (kind, trade_id, paper_account_id, strategy_name, pair,
-                direction, price)
-           VALUES ('trade_opened', $1, $2, $3, $4, $5, $6)"#,
-    )
-    .bind(trade.id)
-    .bind(account_id)
-    .bind(&trade.strategy_name)
-    .bind(&trade.pair.0)
-    .bind(trade.direction.as_str())
-    .bind(trade.entry_price)
-    .execute(executor)
-    .await?;
-    Ok(())
+    unimplemented!("implemented in PR-1 Task 6 — notifications schema not yet migrated");
 }
 
-/// Insert a `trade_closed` notification. `trade` must have `exit_price`,
-/// `pnl_amount`, and `exit_reason` populated.
-pub async fn insert_trade_closed<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
+/// Insert a `trade_closed` notification.
+///
+/// # Panics (temporary)
+pub async fn insert_trade_closed<'e, E>(_executor: E, _trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let account_id = trade
-        .paper_account_id
-        .ok_or_else(|| anyhow::anyhow!("trade {} has no paper_account_id", trade.id))?;
-    let price = trade
-        .exit_price
-        .ok_or_else(|| anyhow::anyhow!("closed trade {} has no exit_price", trade.id))?;
-    let pnl = trade
-        .pnl_amount
-        .ok_or_else(|| anyhow::anyhow!("closed trade {} has no pnl_amount", trade.id))?;
-    let reason = trade
-        .exit_reason
-        .ok_or_else(|| anyhow::anyhow!("closed trade {} has no exit_reason", trade.id))?;
-    sqlx::query(
-        r#"INSERT INTO notifications
-               (kind, trade_id, paper_account_id, strategy_name, pair,
-                direction, price, pnl_amount, exit_reason)
-           VALUES ('trade_closed', $1, $2, $3, $4, $5, $6, $7, $8)"#,
-    )
-    .bind(trade.id)
-    .bind(account_id)
-    .bind(&trade.strategy_name)
-    .bind(&trade.pair.0)
-    .bind(trade.direction.as_str())
-    .bind(price)
-    .bind(pnl)
-    .bind(exit_reason_str(reason))
-    .execute(executor)
-    .await?;
-    Ok(())
+    unimplemented!("implemented in PR-1 Task 6 — notifications schema not yet migrated");
 }
 
-/// Paginated list with optional filters. Dates are interpreted as JST
-/// (UTC+9) day boundaries to match the rest of the dashboard — a
-/// `from = 2026-04-08` means "trades created from 2026-04-08 00:00 JST".
+/// Paginated list with optional filters.
 pub async fn list(
     pool: &PgPool,
     limit: i64,
@@ -106,31 +69,24 @@ pub async fn list(
 ) -> anyhow::Result<(Vec<Notification>, i64)> {
     let jst_offset =
         chrono::FixedOffset::east_opt(9 * 3600).expect("9-hour offset is always valid");
-    // Convert JST day boundaries to half-open [from, to+1day) UTC
-    // timestamps so the existing `created_at` index can be used and
-    // the bounds check is unambiguous about including `to`.
     let from_ts = from.map(|d| {
         d.and_hms_opt(0, 0, 0)
-            .expect("midnight is always a valid time")
+            .unwrap()
             .and_local_timezone(jst_offset)
             .single()
-            .expect("midnight in a fixed-offset zone has no DST ambiguity")
+            .unwrap()
             .with_timezone(&Utc)
     });
     let to_ts = to.map(|d| {
         (d + chrono::Duration::days(1))
             .and_hms_opt(0, 0, 0)
-            .expect("midnight is always a valid time")
+            .unwrap()
             .and_local_timezone(jst_offset)
             .single()
-            .expect("midnight in a fixed-offset zone has no DST ambiguity")
+            .unwrap()
             .with_timezone(&Utc)
     });
 
-    // Single helper that appends WHERE clauses to either the SELECT or
-    // the COUNT(*) builder so they cannot drift apart. The builder
-    // handles placeholder numbering for us — no manual `$N` math, and
-    // adding a future filter is mechanical.
     fn apply_filters<'a>(
         qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
         unread_only: bool,
@@ -153,15 +109,11 @@ pub async fn list(
     }
 
     let mut select_qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        "SELECT id, kind, trade_id, paper_account_id, strategy_name, pair, \
+        "SELECT id, kind, trade_id, account_id, strategy_name, pair, \
          direction, price, pnl_amount, exit_reason, created_at, read_at \
          FROM notifications WHERE 1=1",
     );
     apply_filters(&mut select_qb, unread_only, kind_filter, from_ts, to_ts);
-    // ORDER BY has a stable tie-breaker on `id` so pagination doesn't
-    // drop or duplicate rows when multiple notifications share the
-    // same `created_at` timestamp (rare in practice, but two
-    // simultaneous open/close events can land in the same tick).
     select_qb
         .push(" ORDER BY created_at DESC, id DESC LIMIT ")
         .push_bind(limit)
@@ -194,7 +146,6 @@ pub async fn mark_all_read(pool: &PgPool) -> anyhow::Result<u64> {
     Ok(result.rows_affected())
 }
 
-/// Delete read notifications older than 30 days. Returns rows deleted.
 pub async fn purge_old_read(pool: &PgPool) -> anyhow::Result<u64> {
     let result = sqlx::query(
         "DELETE FROM notifications

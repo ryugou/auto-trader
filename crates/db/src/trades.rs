@@ -1,107 +1,127 @@
+//! Trade DB access.
+//!
+//! NOTE: This module is partially stubbed. Core functions (`insert_trade`,
+//! `lock_margin`, `release_margin`, `get_trade_for_close`,
+//! `update_trade_closed`) return `unimplemented!()` pending the full
+//! schema migration in PR-1 Task 6.
+//!
+//! Legacy query functions (`get_open_trades`, `get_trade_events`, etc.)
+//! are preserved but may fail at runtime against the new schema.
+//! They will be updated in Task 6.
+
 use auto_trader_core::types::{
-    Direction, Exchange, ExitReason, Pair, Trade, TradeMode, TradeStatus,
+    Direction, Exchange, ExitReason, Pair, Trade, TradeStatus,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn insert_trade(pool: &PgPool, trade: &Trade) -> anyhow::Result<()> {
-    let mut conn = pool.acquire().await?;
-    insert_trade_with_executor(&mut *conn, trade).await
-}
+// ---------------------------------------------------------------------------
+// New API for Trader (Task 6 will provide real implementations)
+// ---------------------------------------------------------------------------
 
-/// Insert a trade row using a caller-provided executor (a transaction
-/// or a connection). Used by `PaperTrader::execute_with_quantity` to
-/// keep the trade INSERT atomic with the balance update + event row,
-/// without duplicating the column / serialization logic in the
-/// executor crate.
-pub async fn insert_trade_with_executor<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
+/// Insert a trade row inside the given transaction.
+///
+/// # Panics (temporary)
+///
+/// This is a stub. The real implementation (aligned with the new schema) is
+/// delivered in PR-1 Task 6.
+pub async fn insert_trade<'e, E>(_executor: E, _trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    trade.status.assert_valid_for_mode(trade.mode);
-    sqlx::query(
-        r#"INSERT INTO trades
-           (id, strategy_name, pair, exchange, direction, entry_price, exit_price,
-            stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
-            entry_at, exit_at, pnl_pips, pnl_amount,
-            exit_reason, mode, status, max_hold_until,
-            child_order_acceptance_id, child_order_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)"#,
-    )
-    .bind(trade.id)
-    .bind(&trade.strategy_name)
-    .bind(&trade.pair.0)
-    .bind(trade.exchange.as_str())
-    .bind(serde_json::to_string(&trade.direction)?.trim_matches('"').to_string())
-    .bind(trade.entry_price)
-    .bind(trade.exit_price)
-    .bind(trade.stop_loss)
-    .bind(trade.take_profit)
-    .bind(trade.quantity)
-    .bind(trade.leverage)
-    .bind(trade.fees)
-    .bind(trade.paper_account_id)
-    .bind(trade.entry_at)
-    .bind(trade.exit_at)
-    .bind(trade.pnl_pips)
-    .bind(trade.pnl_amount)
-    .bind(trade.exit_reason.map(|r| {
-        serde_json::to_string(&r)
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_string()
-    }))
-    .bind(trade.mode.as_str())
-    .bind(trade.status.as_str())
-    .bind(trade.max_hold_until)
-    .bind(&trade.child_order_acceptance_id)
-    .bind(&trade.child_order_id)
-    .execute(executor)
-    .await?;
-    Ok(())
+    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn update_trade_closed(
-    pool: &PgPool,
-    id: Uuid,
-    exit_price: Decimal,
-    exit_at: DateTime<Utc>,
-    pnl_pips: Option<Decimal>,
-    pnl_amount: Decimal,
-    exit_reason: ExitReason,
-    fees: Decimal,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"UPDATE trades
-           SET exit_price = $2, exit_at = $3, pnl_pips = $4, pnl_amount = $5,
-               exit_reason = $6, fees = $7, status = $8
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .bind(exit_price)
-    .bind(exit_at)
-    .bind(pnl_pips)
-    .bind(pnl_amount)
-    .bind(
-        serde_json::to_string(&exit_reason)
-            .unwrap_or_default()
-            .trim_matches('"'),
-    )
-    .bind(fees)
-    .bind(TradeStatus::Closed.as_str())
-    .execute(pool)
-    .await?;
-    Ok(())
+/// Lock margin for an open trade.
+///
+/// Deducts `margin_amount` from `trading_accounts.current_balance` and
+/// inserts an `account_events` row with `event_type='margin_lock'`.
+///
+/// # Panics (temporary)
+pub async fn lock_margin<'e, E>(
+    _executor: E,
+    _account_id: Uuid,
+    _trade_id: Uuid,
+    _margin_amount: Decimal,
+) -> anyhow::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    unimplemented!("implemented in PR-1 Task 6 — account_events schema not yet migrated");
 }
 
-// TODO(PR 3, live-trading): status フィルタを IN ('open', 'pending') に拡張する。
-// 現在は paper のみ返すので `open` のみでよいが、live trading が入ると pending
-// のトレードがポジションモニターから抜け落ちる (silent bug になる)。
-// partial unique index (trades_one_active_per_strategy_pair) は既に
-// status IN ('pending', 'open') を "active" として扱っているため、そこと整合させる。
+/// Fetch a trade for closing (SELECT … FOR UPDATE).
+///
+/// Returns `None` when the trade is not found, already closed, or belongs
+/// to a different account.
+///
+/// # Panics (temporary)
+pub async fn get_trade_for_close(
+    _pool: &PgPool,
+    _trade_id: Uuid,
+    _account_id: Uuid,
+) -> anyhow::Result<Option<Trade>> {
+    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+}
+
+/// Update a trade to closed state inside the given transaction.
+///
+/// # Panics (temporary)
+pub async fn update_trade_closed<'e, E>(
+    _executor: E,
+    _trade_id: Uuid,
+    _exit_price: Decimal,
+    _exit_at: DateTime<Utc>,
+    _pnl_amount: Decimal,
+    _exit_reason: ExitReason,
+    _fees: Decimal,
+) -> anyhow::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+}
+
+/// Release margin back to the account and record pnl.
+///
+/// Adds `margin_return + pnl_amount` to `trading_accounts.current_balance`
+/// and inserts `account_events` rows for `margin_release` and `trade_close`.
+///
+/// # Panics (temporary)
+pub async fn release_margin<'e, E>(
+    _executor: E,
+    _account_id: Uuid,
+    _trade_id: Uuid,
+    _margin_return: Decimal,
+    _pnl_amount: Decimal,
+) -> anyhow::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    unimplemented!("implemented in PR-1 Task 6 — account_events schema not yet migrated");
+}
+
+/// Fetch all open trades for a given account.
+///
+/// # Panics (temporary)
+pub async fn get_open_trades_by_account(
+    _pool: &PgPool,
+    _account_id: Uuid,
+) -> anyhow::Result<Vec<Trade>> {
+    unimplemented!("implemented in PR-1 Task 6 — new trades schema not yet migrated");
+}
+
+// ---------------------------------------------------------------------------
+// Legacy query helpers — preserved for other callers, updated in Task 6
+// ---------------------------------------------------------------------------
+
+// TODO(PR-1 Task 6): Remove or rewrite all functions below. They reference
+// the old schema (paper_account_id, pnl_pips, mode, child_order_*) and will
+// fail against the new `trades` table.
+
+/// Fetch open trades for a (strategy, pair) pair. Used by the strategy engine.
 pub async fn get_open_trades(
     pool: &PgPool,
     strategy_name: &str,
@@ -109,10 +129,9 @@ pub async fn get_open_trades(
 ) -> anyhow::Result<Vec<Trade>> {
     let rows = sqlx::query_as::<_, TradeRow>(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
-                  stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
-                  entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until,
-                  child_order_acceptance_id, child_order_id
+                  stop_loss, take_profit, quantity, leverage, fees, account_id,
+                  entry_at, exit_at, pnl_amount,
+                  exit_reason, status, created_at, max_hold_until
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
     )
@@ -123,35 +142,13 @@ pub async fn get_open_trades(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-/// Fetch all open trades for a given paper account.
-pub async fn get_open_trades_by_account(
-    pool: &PgPool,
-    paper_account_id: Uuid,
-) -> anyhow::Result<Vec<Trade>> {
-    let rows = sqlx::query_as::<_, TradeRow>(
-        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
-                  stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
-                  entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until,
-                  child_order_acceptance_id, child_order_id
-           FROM trades
-           WHERE paper_account_id = $1 AND status = 'open'
-           ORDER BY entry_at ASC"#,
-    )
-    .bind(paper_account_id)
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter().map(|r| r.try_into()).collect()
-}
-
 /// Fetch a single trade by id.
 pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Trade>> {
     let row = sqlx::query_as::<_, TradeRow>(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
-                  stop_loss, take_profit, quantity, leverage, fees, paper_account_id,
-                  entry_at, exit_at, pnl_pips, pnl_amount,
-                  exit_reason, mode, status, created_at, max_hold_until,
-                  child_order_acceptance_id, child_order_id
+                  stop_loss, take_profit, quantity, leverage, fees, account_id,
+                  entry_at, exit_at, pnl_amount,
+                  exit_reason, status, created_at, max_hold_until
            FROM trades
            WHERE id = $1"#,
     )
@@ -174,10 +171,7 @@ pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Re
     Ok(())
 }
 
-/// Discriminator for `TradeEvent` rows. Modeled as a typed enum (rather
-/// than a free string) so that adding a new event kind is a compile-time
-/// change in both Rust and any TS client generated from this schema, and
-/// so typos cannot reach the wire.
+/// Discriminator for `TradeEvent` rows.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeEventKind {
@@ -186,45 +180,19 @@ pub enum TradeEventKind {
     Close,
 }
 
-/// One entry in a single trade's chronological event timeline (used by
-/// the dashboard "trade detail" expandable row). Synthesized from the
-/// `trades` row + any matching `paper_account_events` so that the
-/// timeline is consistent regardless of when the trade was opened —
-/// pre-margin-lock-contract trades and FX trades simply have no
-/// `margin_lock` / `margin_release` rows in `paper_account_events`,
-/// but the OPEN/CLOSE entries below are still synthesized from the
-/// `trades` row, so the UI always has a complete picture.
+/// One entry in a single trade's chronological event timeline.
 #[derive(Debug, serde::Serialize)]
 pub struct TradeEvent {
     pub kind: TradeEventKind,
     pub occurred_at: DateTime<Utc>,
-    /// Mark price at the moment of the event (entry/exit). NULL for
-    /// non-price events such as `overnight_fee`.
     pub price: Option<Decimal>,
-    /// Position size in base units. Only set for OPEN/CLOSE.
     pub quantity: Option<Decimal>,
-    /// Direction (`long` / `short`). Only set for OPEN/CLOSE so the UI
-    /// can label which way the position was facing.
     pub direction: Option<String>,
-    /// Cash delta to the paper account from this event. OPEN is
-    /// `-margin` (locked), `overnight_fee` is `-fee`, and CLOSE is
-    /// `+margin` (released) + `pnl_amount` (realized PnL).
-    ///
-    /// For trades that predate the margin-lock contract (no
-    /// `margin_lock` event row in `paper_account_events`), the OPEN
-    /// `cash_delta` is `None` to indicate "unknown" rather than 0,
-    /// because we can't tell from the trade row alone whether margin
-    /// was deducted or not. CLOSE for those trades just shows
-    /// `pnl_amount` (no margin refund leg) for the same reason.
     pub cash_delta: Option<Decimal>,
-    /// PnL realized at this event. Only set for CLOSE.
     pub pnl_amount: Option<Decimal>,
 }
 
-/// Build the event timeline for a single trade. Returns events ordered
-/// chronologically (OPEN → overnight fees → CLOSE). For an open trade
-/// the CLOSE entry is omitted; the most recent overnight fee is the
-/// last row.
+/// Build the event timeline for a single trade.
 pub async fn get_trade_events(
     pool: &PgPool,
     trade_id: Uuid,
@@ -233,11 +201,6 @@ pub async fn get_trade_events(
         return Ok(None);
     };
 
-    // Look up any margin_lock / margin_release / overnight_fee events
-    // that reference this trade. These are only present for paper
-    // crypto trades opened after the margin-lock contract shipped; we
-    // tolerate their absence and synthesize OPEN/CLOSE from the trade
-    // row anyway so the timeline is never empty.
     #[derive(sqlx::FromRow)]
     struct EventRow {
         event_type: String,
@@ -246,8 +209,8 @@ pub async fn get_trade_events(
     }
     let event_rows: Vec<EventRow> = sqlx::query_as(
         r#"SELECT event_type, amount, occurred_at
-           FROM paper_account_events
-           WHERE reference_id = $1
+           FROM account_events
+           WHERE trade_id = $1
            ORDER BY occurred_at ASC, id ASC"#,
     )
     .bind(trade_id)
@@ -267,47 +230,24 @@ pub async fn get_trade_events(
         .iter()
         .find(|r| r.event_type == "margin_release")
         .map(|r| r.amount);
-    // Source of truth for the realized PnL leg: prefer the
-    // `trade_close` ledger row when present (that's what
-    // PaperTrader::close_position writes and what
-    // get_balance_history reconstructs from), and fall back to
-    // `trades.pnl_amount` only when the ledger row is missing
-    // (e.g. trades imported before the events table existed).
-    // If the two diverge for the same trade we trust the ledger
-    // and emit a warning so the discrepancy is at least visible.
     let trade_close_amount = event_rows
         .iter()
         .find(|r| r.event_type == "trade_close")
         .map(|r| r.amount);
-    if let (Some(ledger), Some(field)) = (trade_close_amount, trade.pnl_amount)
-        && ledger != field
-    {
-        tracing::warn!(
-            "trade {}: trade_close ledger amount {} != trades.pnl_amount {}; using ledger",
-            trade_id,
-            ledger,
-            field
-        );
-    }
     let realized_pnl = trade_close_amount.or(trade.pnl_amount);
 
     let mut events = Vec::with_capacity(event_rows.len() + 2);
 
-    // OPEN event (synthesized from trade row).
     events.push(TradeEvent {
         kind: TradeEventKind::Open,
         occurred_at: trade.entry_at,
         price: Some(trade.entry_price),
-        quantity: trade.quantity,
+        quantity: Some(trade.quantity),
         direction: Some(direction.to_string()),
-        // margin_lock amount is stored as negative (deduction); pass
-        // it through verbatim so the UI's sign convention matches
-        // every other event row.
         cash_delta: margin_lock_amount,
         pnl_amount: None,
     });
 
-    // Overnight fee accruals — one row per night the position was held.
     for row in &event_rows {
         if row.event_type == "overnight_fee" {
             events.push(TradeEvent {
@@ -322,11 +262,6 @@ pub async fn get_trade_events(
         }
     }
 
-    // CLOSE event (only for closed trades). cash_delta combines the
-    // margin refund (positive) and the realized PnL so the timeline
-    // sums to the same value the ledger sees. We pull the realized
-    // PnL from the trade_close event row whenever it's available so
-    // the UI matches the ledger byte-for-byte.
     if let (Some(exit_at), Some(exit_price)) = (trade.exit_at, trade.exit_price) {
         let cash_delta = match (margin_release_amount, realized_pnl) {
             (Some(refund), Some(pnl)) => Some(refund + pnl),
@@ -338,7 +273,7 @@ pub async fn get_trade_events(
             kind: TradeEventKind::Close,
             occurred_at: exit_at,
             price: Some(exit_price),
-            quantity: trade.quantity,
+            quantity: Some(trade.quantity),
             direction: Some(direction.to_string()),
             cash_delta,
             pnl_amount: realized_pnl,
@@ -348,18 +283,14 @@ pub async fn get_trade_events(
     Ok(Some(events))
 }
 
-/// Response row for positions API — joins with paper_accounts to include account name.
+/// Response row for positions API.
 #[derive(Debug)]
 pub struct OpenTradeWithAccount {
     pub trade: Trade,
     pub paper_account_name: Option<String>,
 }
 
-/// Fetch open trades for a single (exchange, pair) joined with the paper
-/// account name. Used by the strategy engine on every price tick — we
-/// scope to the event's exchange/pair in SQL so the query stays cheap as
-/// the open-trade table grows, instead of pulling every open trade and
-/// filtering in Rust.
+/// Fetch open trades for a single (exchange, pair) joined with account name.
 pub async fn list_open_with_account_name_for_pair(
     pool: &PgPool,
     exchange: &str,
@@ -373,13 +304,12 @@ pub async fn list_open_with_account_name_for_pair(
     }
     let rows = sqlx::query_as::<_, Row>(
         r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
-                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
-                  t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
-                  t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
-                  t.child_order_acceptance_id, t.child_order_id,
-                  pa.name AS account_name
+                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
+                  t.entry_at, t.exit_at, t.pnl_amount,
+                  t.exit_reason, t.status, t.created_at, t.max_hold_until,
+                  ta.name AS account_name
            FROM trades t
-           LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
+           LEFT JOIN trading_accounts ta ON t.account_id = ta.id
            WHERE t.status = 'open' AND t.exchange = $1 AND t.pair = $2
            ORDER BY t.entry_at DESC"#,
     )
@@ -398,7 +328,7 @@ pub async fn list_open_with_account_name_for_pair(
         .collect()
 }
 
-/// Fetch all currently open trades joined with the paper account name.
+/// Fetch all currently open trades joined with account name.
 pub async fn list_open_with_account_name(
     pool: &PgPool,
 ) -> anyhow::Result<Vec<OpenTradeWithAccount>> {
@@ -410,13 +340,12 @@ pub async fn list_open_with_account_name(
     }
     let rows = sqlx::query_as::<_, Row>(
         r#"SELECT t.id, t.strategy_name, t.pair, t.exchange, t.direction, t.entry_price, t.exit_price,
-                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.paper_account_id,
-                  t.entry_at, t.exit_at, t.pnl_pips, t.pnl_amount,
-                  t.exit_reason, t.mode, t.status, t.created_at, t.max_hold_until,
-                  t.child_order_acceptance_id, t.child_order_id,
-                  pa.name AS account_name
+                  t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
+                  t.entry_at, t.exit_at, t.pnl_amount,
+                  t.exit_reason, t.status, t.created_at, t.max_hold_until,
+                  ta.name AS account_name
            FROM trades t
-           LEFT JOIN paper_accounts pa ON t.paper_account_id = pa.id
+           LEFT JOIN trading_accounts ta ON t.account_id = ta.id
            WHERE t.status = 'open'
            ORDER BY t.entry_at DESC"#,
     )
@@ -433,6 +362,10 @@ pub async fn list_open_with_account_name(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Internal row mapper
+// ---------------------------------------------------------------------------
+
 #[derive(sqlx::FromRow)]
 struct TradeRow {
     id: Uuid,
@@ -443,23 +376,19 @@ struct TradeRow {
     entry_price: Decimal,
     exit_price: Option<Decimal>,
     stop_loss: Decimal,
-    take_profit: Decimal,
-    quantity: Option<Decimal>,
+    take_profit: Option<Decimal>,
+    quantity: Decimal,
     leverage: Decimal,
     fees: Decimal,
-    paper_account_id: Option<Uuid>,
+    account_id: Uuid,
     entry_at: DateTime<Utc>,
     exit_at: Option<DateTime<Utc>>,
-    pnl_pips: Option<Decimal>,
     pnl_amount: Option<Decimal>,
     exit_reason: Option<String>,
-    mode: String,
     status: String,
     #[allow(dead_code)]
     created_at: DateTime<Utc>,
     max_hold_until: Option<DateTime<Utc>>,
-    child_order_acceptance_id: Option<String>,
-    child_order_id: Option<String>,
 }
 
 impl TryFrom<TradeRow> for Trade {
@@ -476,17 +405,9 @@ impl TryFrom<TradeRow> for Trade {
             "short" => Direction::Short,
             other => anyhow::bail!("unknown direction: {other}"),
         };
-        let mode = match r.mode.as_str() {
-            "live" => TradeMode::Live,
-            "paper" => TradeMode::Paper,
-            "backtest" => TradeMode::Backtest,
-            other => anyhow::bail!("unknown mode: {other}"),
-        };
         let status = match r.status.as_str() {
             "open" => TradeStatus::Open,
             "closed" => TradeStatus::Closed,
-            "pending" => TradeStatus::Pending,
-            "inconsistent" => TradeStatus::Inconsistent,
             other => anyhow::bail!("unknown status: {other}"),
         };
         let exit_reason = r
@@ -507,6 +428,7 @@ impl TryFrom<TradeRow> for Trade {
             .transpose()?;
         Ok(Trade {
             id: r.id,
+            account_id: r.account_id,
             strategy_name: r.strategy_name,
             pair: Pair::new(&r.pair),
             exchange,
@@ -518,17 +440,80 @@ impl TryFrom<TradeRow> for Trade {
             quantity: r.quantity,
             leverage: r.leverage,
             fees: r.fees,
-            paper_account_id: r.paper_account_id,
             entry_at: r.entry_at,
             exit_at: r.exit_at,
-            pnl_pips: r.pnl_pips,
             pnl_amount: r.pnl_amount,
             exit_reason,
-            mode,
             status,
             max_hold_until: r.max_hold_until,
-            child_order_acceptance_id: r.child_order_acceptance_id,
-            child_order_id: r.child_order_id,
         })
     }
+}
+
+/// Paginated trade list (for API use).
+pub async fn list_trades(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+) -> anyhow::Result<(Vec<Trade>, i64)> {
+    let jst_offset =
+        chrono::FixedOffset::east_opt(9 * 3600).expect("9-hour offset is always valid");
+    let from_ts = from.map(|d| {
+        d.and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(jst_offset)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc)
+    });
+    let to_ts = to.map(|d| {
+        (d + chrono::Duration::days(1))
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(jst_offset)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc)
+    });
+
+    fn apply_filters<'a>(
+        qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
+        from_ts: Option<DateTime<Utc>>,
+        to_ts: Option<DateTime<Utc>>,
+    ) {
+        if let Some(f) = from_ts {
+            qb.push(" AND entry_at >= ").push_bind(f);
+        }
+        if let Some(t) = to_ts {
+            qb.push(" AND entry_at < ").push_bind(t);
+        }
+    }
+
+    let mut select_qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+        "SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price, \
+         stop_loss, take_profit, quantity, leverage, fees, account_id, \
+         entry_at, exit_at, pnl_amount, exit_reason, status, created_at, max_hold_until \
+         FROM trades WHERE 1=1",
+    );
+    apply_filters(&mut select_qb, from_ts, to_ts);
+    select_qb
+        .push(" ORDER BY entry_at DESC, id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows: Vec<TradeRow> = select_qb
+        .build_query_as::<TradeRow>()
+        .fetch_all(pool)
+        .await?;
+    let trades: anyhow::Result<Vec<Trade>> = rows.into_iter().map(|r| r.try_into()).collect();
+    let trades = trades?;
+
+    let mut count_qb: sqlx::QueryBuilder<sqlx::Postgres> =
+        sqlx::QueryBuilder::new("SELECT COUNT(*) FROM trades WHERE 1=1");
+    apply_filters(&mut count_qb, from_ts, to_ts);
+    let total: i64 = count_qb.build_query_scalar::<i64>().fetch_one(pool).await?;
+
+    Ok((trades, total))
 }

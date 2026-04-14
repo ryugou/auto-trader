@@ -7,3 +7,4 @@ pub mod pool;
 pub mod strategies;
 pub mod summary;
 pub mod trades;
+pub mod trading_accounts;
