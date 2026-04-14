@@ -64,8 +64,8 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <div className="min-h-screen bg-gray-950 text-gray-100">
-          <header className="border-b border-gray-800 px-4 py-3">
-            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center gap-3">
+          <header className="border-b border-gray-800 px-[15px] py-3">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
               <h1 className="text-lg font-bold whitespace-nowrap">Auto Trader</h1>
               <NavBar />
               {/* Bell lives flush-right; `ml-auto` inside the component

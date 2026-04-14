@@ -147,7 +147,6 @@ export default function Positions() {
                 <th className="px-4 py-2 text-right text-gray-400 font-medium">含み損益</th>
                 <th className="px-4 py-2 text-right text-gray-400 font-medium">純損益</th>
                 <th className="px-4 py-2 text-right text-gray-400 font-medium">損切りライン</th>
-                <th className="px-4 py-2 text-right text-gray-400 font-medium">利確ライン</th>
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">エントリー日時</th>
                 <th className="px-4 py-2 text-left text-gray-400 font-medium">口座</th>
               </tr>
@@ -155,13 +154,13 @@ export default function Positions() {
             <tbody>
               {isLoading ? (
                 <tr>
-                  <td colSpan={12} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
                     読み込み中...
                   </td>
                 </tr>
               ) : !filtered.length ? (
                 <tr>
-                  <td colSpan={12} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
                     保有ポジションはありません
                   </td>
                 </tr>
@@ -207,9 +206,6 @@ export default function Positions() {
                       </td>
                       <td className="px-4 py-2 text-right font-mono">
                         {formatInt(p.stop_loss)}
-                      </td>
-                      <td className="px-4 py-2 text-right font-mono">
-                        {formatInt(p.take_profit)}
                       </td>
                       <td className="px-4 py-2 text-gray-300">
                         {new Date(p.entry_at).toLocaleString('ja-JP', {
