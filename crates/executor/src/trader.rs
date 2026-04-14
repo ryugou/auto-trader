@@ -47,6 +47,7 @@ pub struct Trader {
 }
 
 impl Trader {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         exchange: Exchange,
@@ -303,7 +304,7 @@ impl OrderExecutor for Trader {
         // 6. DB 操作 (1 トランザクション)
         let mut tx = self.pool.begin().await?;
         auto_trader_db::trades::insert_trade(&mut *tx, &trade).await?;
-        auto_trader_db::trades::lock_margin(&mut *tx, self.account_id, trade.id, margin).await?;
+        auto_trader_db::trades::lock_margin(&mut tx, self.account_id, trade.id, margin).await?;
         auto_trader_db::notifications::insert_trade_opened(&mut *tx, &trade).await?;
         tx.commit().await?;
 
@@ -406,7 +407,7 @@ impl OrderExecutor for Trader {
 
         let margin = truncate_yen(trade.entry_price * trade.quantity / trade.leverage);
         auto_trader_db::trades::release_margin(
-            &mut *tx,
+            &mut tx,
             self.account_id,
             trade.id,
             margin,
