@@ -304,6 +304,68 @@ async fn cancel_child_order_unknown_id_maps_to_order_not_found() {
     assert!(matches!(err, BitflyerApiError::OrderNotFound(_)));
 }
 
+/// [SECURITY] get_child_orders は予約文字を含む product_code / acceptance_id を
+/// percent-encode して送ること。
+///
+/// signed path と実送信 URL は同一文字列なので、encode 後の値が
+/// wiremock の query_param matcher に一致することで「HMAC 署名対象と
+/// 実際の URL が一致している」ことを間接的に確認する。
+#[tokio::test]
+async fn get_child_orders_url_encodes_reserved_chars() {
+    let server = MockServer::start().await;
+    // wiremock は percent-decode した値で query_param を照合するため、
+    // クライアントが "FX%26evil" として送ったものを "FX&evil" で受ける。
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getchildorders"))
+        .and(query_param("product_code", "FX&evil"))
+        .and(query_param("child_order_acceptance_id", "id=1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let orders = api.get_child_orders("FX&evil", "id=1").await.unwrap();
+    assert!(orders.is_empty());
+}
+
+/// [SECURITY] get_executions は予約文字を含む product_code / acceptance_id を
+/// percent-encode して送ること。
+#[tokio::test]
+async fn get_executions_url_encodes_reserved_chars() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getexecutions"))
+        .and(query_param("product_code", "FX&evil"))
+        .and(query_param("child_order_acceptance_id", "id=1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let execs = api.get_executions("FX&evil", "id=1").await.unwrap();
+    assert!(execs.is_empty());
+}
+
+/// [SECURITY] get_positions は予約文字を含む product_code を
+/// percent-encode して送ること。
+#[tokio::test]
+async fn get_positions_url_encodes_reserved_chars() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getpositions"))
+        .and(query_param("product_code", "FX&evil"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let positions = api.get_positions("FX&evil").await.unwrap();
+    assert!(positions.is_empty());
+}
+
 /// Rate limiter: バケットが空になったとき 3 件目のリクエストが待たされること。
 ///
 /// 1 秒 2 件のバケットを with_rate_limiter() で注入し、3 件連続呼び出しで

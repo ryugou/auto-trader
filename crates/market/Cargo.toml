@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 governor = { workspace = true }
 thiserror = { workspace = true }
+urlencoding = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = "1"

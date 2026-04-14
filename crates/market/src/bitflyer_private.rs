@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use thiserror::Error;
+use urlencoding::encode as url_encode;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -290,9 +291,14 @@ impl BitflyerPrivateApi {
         }
     }
 
-    /// wiremock テスト専用のコンストラクタ。`#[cfg(test)]` ではなく
-    /// `new_for_test` という名前で区別することで統合テスト (別 crate
-    /// 境界をまたぐ `crates/market/tests/*.rs`) からも呼べるようにする。
+    /// wiremock 等の crate 外 integration test 専用コンストラクタ。
+    ///
+    /// **本番コードから絶対に呼ばないこと。**
+    /// Rust の integration test は本 crate を外部 crate として読むため
+    /// `#[cfg(test)]` では gate できないが、命名 (`new_for_test`) と
+    /// `#[doc(hidden)]` でテスト以外の呼び出しを防衛する。
+    /// production build で呼ばれていないことは workspace 全体の grep で
+    /// レビュー時に保証する。
     ///
     /// `rate_limiter: None` のため wiremock テストが native speed で走る。
     #[doc(hidden)]
@@ -302,8 +308,13 @@ impl BitflyerPrivateApi {
 
     /// テスト用レートリミッタを注入するビルダーメソッド。
     ///
+    /// **本番コードから絶対に呼ばないこと。**
     /// `new_for_test()` と組み合わせて、任意の Quota を持つバケットを
-    /// 差し込める。本番コードから呼ばないこと (`new()` が自動で張る)。
+    /// 差し込める。本番コードでは `new()` が自動でレートリミッタを設定する。
+    /// `new_for_test` と同様、Rust の integration test 仕様上
+    /// `#[cfg(test)]` で gate できないため、`#[doc(hidden)]` と命名で
+    /// 防衛する。
+    #[doc(hidden)]
     pub fn with_rate_limiter(mut self, limiter: Arc<RateLimiter>) -> Self {
         self.rate_limiter = Some(limiter);
         self
@@ -340,7 +351,7 @@ impl BitflyerPrivateApi {
     /// - `path`: 例 "/v1/me/getcollateral" (クエリ文字列を含むこと)
     /// - `body_json`: POST 本体 JSON 文字列 (GET は "")
     ///
-    /// 成功時は bitFlyer の raw レスポンスを (2xx, body_string) で返す。
+    /// 成功時は bitFlyer の raw レスポンス本文文字列を返す。
     /// HTTP ステータスが 2xx でも JSON body に `status: <負数>` が
     /// 入っていれば `BitflyerApiError::from_body` で分類する。
     pub(crate) async fn request(
@@ -396,7 +407,7 @@ impl BitflyerPrivateApi {
                 Ok(body) => Err(BitflyerApiError::from_body(body)),
                 Err(_) => {
                     // body 全文をログに出さないよう先頭 512 文字にトリム
-                    let truncated: String = text.chars().take(512).collect();
+                    let truncated = truncate_body(&text);
                     tracing::warn!(
                         method,
                         path,
@@ -446,7 +457,8 @@ impl BitflyerPrivateApi {
     ) -> Result<Vec<ChildOrder>, BitflyerApiError> {
         let path = format!(
             "/v1/me/getchildorders?product_code={}&child_order_acceptance_id={}",
-            product_code, child_order_acceptance_id
+            url_encode(product_code),
+            url_encode(child_order_acceptance_id),
         );
         let text = self.request("GET", &path, "").await?;
         serde_json::from_str(&text).map_err(|e| {
@@ -462,7 +474,8 @@ impl BitflyerPrivateApi {
     ) -> Result<Vec<Execution>, BitflyerApiError> {
         let path = format!(
             "/v1/me/getexecutions?product_code={}&child_order_acceptance_id={}",
-            product_code, child_order_acceptance_id
+            url_encode(product_code),
+            url_encode(child_order_acceptance_id),
         );
         let text = self.request("GET", &path, "").await?;
         serde_json::from_str(&text).map_err(|e| {
@@ -475,7 +488,10 @@ impl BitflyerPrivateApi {
         &self,
         product_code: &str,
     ) -> Result<Vec<ExchangePosition>, BitflyerApiError> {
-        let path = format!("/v1/me/getpositions?product_code={}", product_code);
+        let path = format!(
+            "/v1/me/getpositions?product_code={}",
+            url_encode(product_code)
+        );
         let text = self.request("GET", &path, "").await?;
         serde_json::from_str(&text).map_err(|e| {
             BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
