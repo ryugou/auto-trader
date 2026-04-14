@@ -102,6 +102,24 @@ pub enum TradeStatus {
     Inconsistent,
 }
 
+impl TradeStatus {
+    /// Paper / backtest は Open / Closed のみ許容。Live 専用の Pending /
+    /// Inconsistent を paper/backtest で誤って書き込んだら debug_assert で
+    /// 即死させる。
+    ///
+    /// 本番 (`--release`) では debug_assert は no-op になるため、PR 2 以降で
+    /// 状態遷移関数 (`fn transition(from, to) -> Result<TradeStatus>`) を
+    /// 導入して遷移不可能状態を締める予定。このガードはそれまでの暫定措置。
+    pub fn assert_valid_for_mode(self, mode: TradeMode) {
+        if matches!(mode, TradeMode::Paper | TradeMode::Backtest) {
+            debug_assert!(
+                matches!(self, TradeStatus::Open | TradeStatus::Closed),
+                "paper/backtest trade must not have status {self:?}"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitReason {
@@ -362,6 +380,45 @@ mod tests {
             let back: TradeStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, status);
         }
+    }
+
+    #[test]
+    fn assert_valid_for_mode_accepts_paper_open() {
+        TradeStatus::Open.assert_valid_for_mode(TradeMode::Paper);
+        TradeStatus::Closed.assert_valid_for_mode(TradeMode::Paper);
+    }
+
+    #[test]
+    fn assert_valid_for_mode_accepts_backtest_open() {
+        TradeStatus::Open.assert_valid_for_mode(TradeMode::Backtest);
+        TradeStatus::Closed.assert_valid_for_mode(TradeMode::Backtest);
+    }
+
+    #[test]
+    fn assert_valid_for_mode_accepts_live_all_statuses() {
+        // Live は 4 バリアント全て許容
+        TradeStatus::Pending.assert_valid_for_mode(TradeMode::Live);
+        TradeStatus::Open.assert_valid_for_mode(TradeMode::Live);
+        TradeStatus::Closed.assert_valid_for_mode(TradeMode::Live);
+        TradeStatus::Inconsistent.assert_valid_for_mode(TradeMode::Live);
+    }
+
+    #[test]
+    #[should_panic(expected = "paper/backtest trade must not have status")]
+    fn assert_valid_for_mode_panics_on_paper_pending() {
+        TradeStatus::Pending.assert_valid_for_mode(TradeMode::Paper);
+    }
+
+    #[test]
+    #[should_panic(expected = "paper/backtest trade must not have status")]
+    fn assert_valid_for_mode_panics_on_paper_inconsistent() {
+        TradeStatus::Inconsistent.assert_valid_for_mode(TradeMode::Paper);
+    }
+
+    #[test]
+    #[should_panic(expected = "paper/backtest trade must not have status")]
+    fn assert_valid_for_mode_panics_on_backtest_pending() {
+        TradeStatus::Pending.assert_valid_for_mode(TradeMode::Backtest);
     }
 
     #[test]

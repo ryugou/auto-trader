@@ -20,6 +20,7 @@ pub async fn insert_trade_with_executor<'e, E>(executor: E, trade: &Trade) -> an
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    trade.status.assert_valid_for_mode(trade.mode);
     sqlx::query(
         r#"INSERT INTO trades
            (id, strategy_name, pair, exchange, direction, entry_price, exit_price,

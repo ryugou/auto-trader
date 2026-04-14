@@ -61,6 +61,7 @@ impl SimTrader {
             child_order_acceptance_id: None,
             child_order_id: None,
         };
+        trade.status.assert_valid_for_mode(trade.mode);
         self.positions.insert(trade.id, trade.clone());
         trade
     }
@@ -100,6 +101,7 @@ impl SimTrader {
         trade.pnl_amount = Some(pnl_amount);
         trade.exit_reason = Some(reason);
         trade.status = TradeStatus::Closed;
+        trade.status.assert_valid_for_mode(trade.mode);
 
         self.balance += pnl_amount;
         Ok(trade)
