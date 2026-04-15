@@ -15,14 +15,13 @@ pub struct Strategy {
     /// next to the strategy name. Persisted via the
     /// `strategies_risk_level_check` CHECK constraint.
     pub risk_level: String,
-    pub description: String,
-    pub algorithm: String,
-    pub default_params: serde_json::Value,
+    pub description: Option<String>,
+    pub algorithm: Option<String>,
+    pub default_params: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
-const STRATEGY_COLUMNS: &str = "name, display_name, category, risk_level, description, algorithm, default_params, created_at, updated_at";
+const STRATEGY_COLUMNS: &str = "name, display_name, category, risk_level, description, algorithm, default_params, created_at";
 
 /// List all strategies in the catalog. Optionally filter by category
 /// (`fx` / `crypto`) so the account-creation UI can scope the dropdown to
