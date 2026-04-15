@@ -1334,6 +1334,22 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         });
+
+        let bs_pool = pool.clone();
+        let bs_api = bitflyer_api.clone();
+        let bs_notifier = notifier.clone();
+        let bs_interval = live_cfg.balance_sync_interval_secs;
+        let drift_threshold = rust_decimal::Decimal::new(1, 2); // 0.01 = 1%
+        let _bs_handle = tokio::spawn(async move {
+            auto_trader::tasks::balance_sync::run_balance_sync_loop(
+                bs_pool,
+                bs_api,
+                bs_notifier,
+                bs_interval,
+                drift_threshold,
+            )
+            .await;
+        });
     }
 
     // Task: Trade recorder — handles side effects after PaperTrader has already
