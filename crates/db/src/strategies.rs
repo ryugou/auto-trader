@@ -11,18 +11,18 @@ pub struct Strategy {
     pub name: String,
     pub display_name: String,
     pub category: String,
-    /// 'low' | 'medium' | 'high' — used by the UI to render a risk badge
-    /// next to the strategy name. Persisted via the
-    /// `strategies_risk_level_check` CHECK constraint.
+    /// 'low' | 'medium' | 'high' — used by the UI to render a risk badge.
+    /// Note: the unified_rewrite migration (PR-1) does NOT add a DB-level
+    /// CHECK constraint for these values; the TS union type + seed-data
+    /// discipline is currently the only enforcement.
     pub risk_level: String,
-    pub description: String,
-    pub algorithm: String,
-    pub default_params: serde_json::Value,
+    pub description: Option<String>,
+    pub algorithm: Option<String>,
+    pub default_params: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
-const STRATEGY_COLUMNS: &str = "name, display_name, category, risk_level, description, algorithm, default_params, created_at, updated_at";
+const STRATEGY_COLUMNS: &str = "name, display_name, category, risk_level, description, algorithm, default_params, created_at";
 
 /// List all strategies in the catalog. Optionally filter by category
 /// (`fx` / `crypto`) so the account-creation UI can scope the dropdown to
@@ -71,4 +71,37 @@ pub async fn list_strategy_names(pool: &PgPool) -> anyhow::Result<Vec<String>> {
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().map(|(name,)| name).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::PgPool;
+
+    /// Regression: strategies rows with NULL description / algorithm /
+    /// default_params must deserialize cleanly into the Rust struct.
+    /// Before this fix, the struct required non-null values and
+    /// `/api/strategies` returned 500 on any row with NULLs.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_strategies_deserializes_null_fields(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO strategies (name, display_name, category, risk_level,
+                                      description, algorithm, default_params)
+             VALUES ('test_null', 'Test Null', 'crypto', 'low', NULL, NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = list_strategies(&pool, None).await.unwrap();
+        let row = rows.iter().find(|r| r.name == "test_null").unwrap();
+        assert!(row.description.is_none());
+        assert!(row.algorithm.is_none());
+        assert!(row.default_params.is_none());
+
+        let one = get_strategy(&pool, "test_null").await.unwrap().unwrap();
+        assert!(one.description.is_none());
+        assert!(one.algorithm.is_none());
+        assert!(one.default_params.is_none());
+    }
 }
