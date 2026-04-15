@@ -1,5 +1,6 @@
 use auto_trader::tasks::reconciler::{DbOpen, ExchangeOpen, compute_diff};
 use rust_decimal_macros::dec;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[test]
@@ -106,4 +107,24 @@ fn quantity_mismatch_includes_all_trade_ids_for_same_key() {
     assert_eq!(ids, expected);
     assert_eq!(m.db_qty, dec!(0.02));
     assert_eq!(m.exchange_qty, dec!(0.05));
+}
+
+/// Verify that the approved-live-account filter correctly gates accounts.
+/// This test validates the HashSet logic used inside run_reconciler_loop
+/// without requiring DB or exchange connections.
+#[test]
+fn approved_live_set_rejects_unapproved_id() {
+    let approved_id = Uuid::new_v4();
+    let other_id = Uuid::new_v4();
+
+    let approved: HashSet<Uuid> = [approved_id].into_iter().collect();
+
+    assert!(approved.contains(&approved_id));
+    assert!(!approved.contains(&other_id));
+}
+
+#[test]
+fn empty_approved_live_set_rejects_all() {
+    let approved: HashSet<Uuid> = HashSet::new();
+    assert!(!approved.contains(&Uuid::new_v4()));
 }

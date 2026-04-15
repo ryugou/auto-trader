@@ -484,79 +484,71 @@ async fn main() -> anyhow::Result<()> {
     // executor gate is relaxed.
     //
     // Log the accounts currently present at startup for visibility only.
-    match auto_trader_db::trading_accounts::list_all(&pool).await {
-        Ok(db_accounts) => {
-            if db_accounts.is_empty() {
-                tracing::info!("no trading accounts found in DB at startup");
-            }
-            for pac in &db_accounts {
-                tracing::info!(
-                    "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
-                    pac.name,
-                    pac.id,
-                    pac.account_type,
-                    pac.exchange,
-                    pac.strategy,
-                    pac.current_balance,
-                    pac.initial_balance,
-                    pac.leverage
-                );
-                if !registered_strategies.iter().any(|s| s == &pac.strategy) {
-                    tracing::warn!(
-                        "trading account '{}' references strategy '{}' which is not registered; signals for this strategy will be skipped",
-                        pac.name,
-                        pac.strategy
-                    );
-                }
-            }
-
-            // Compute effective_dry_run for the validator: LIVE_DRY_RUN env
-            // wins over [live].dry_run config. This must match the logic in
-            // the live_forces_dry_run block below so the validator sees the
-            // same value that the executor loops will use.
-            let startup_effective_dry_run: bool = match std::env::var("LIVE_DRY_RUN") {
-                Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => true,
-                    "0" | "false" | "no" | "off" => false,
-                    _ => config.live.as_ref().is_some_and(|l| l.dry_run),
-                },
-                Err(_) => config.live.as_ref().is_some_and(|l| l.dry_run),
-            };
-            // Fail-fast safety gate: validate config × env × DB accounts.
-            auto_trader::startup::validate_startup(
-                &db_accounts,
-                config.live.as_ref(),
-                startup_effective_dry_run,
-                std::env::var("SLACK_WEBHOOK_URL").ok().as_deref(),
-                std::env::var("BITFLYER_API_KEY").ok().as_deref(),
-                std::env::var("BITFLYER_API_SECRET").ok().as_deref(),
-            )?;
-        }
+    // Fatal if the DB query fails — we cannot validate live-safety preconditions
+    // without this snapshot, so refusing to start is the correct behaviour.
+    let db_accounts = match auto_trader_db::trading_accounts::list_all(&pool).await {
+        Ok(v) => v,
         Err(e) => {
-            tracing::error!("failed to list trading accounts at startup: {e}");
+            anyhow::bail!(
+                "failed to list trading accounts at startup: {e} — cannot validate live-trading preconditions, refusing to start"
+            );
+        }
+    };
+    if db_accounts.is_empty() {
+        tracing::info!("no trading accounts found in DB at startup");
+    }
+    for pac in &db_accounts {
+        tracing::info!(
+            "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
+            pac.name,
+            pac.id,
+            pac.account_type,
+            pac.exchange,
+            pac.strategy,
+            pac.current_balance,
+            pac.initial_balance,
+            pac.leverage
+        );
+        if !registered_strategies.iter().any(|s| s == &pac.strategy) {
+            tracing::warn!(
+                "trading account '{}' references strategy '{}' which is not registered; signals for this strategy will be skipped",
+                pac.name,
+                pac.strategy
+            );
         }
     }
 
-    // Global dry-run override: if [live].dry_run=true (or the LIVE_DRY_RUN
-    // env var is truthy), ALL accounts (paper *and* live) run in dry-run
-    // mode. Paper is always dry-run by account_type; live is only dry-run
-    // when this flag is set. `LIVE_DRY_RUN` env wins over config per the
-    // doc comment on `LiveConfig::dry_run`. Captured by copy into the
-    // dispatch loops (bool is Copy).
-    let live_forces_dry_run: bool = match std::env::var("LIVE_DRY_RUN") {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            other => {
-                tracing::warn!(
-                    "ignoring invalid LIVE_DRY_RUN='{}' (expected true/false); falling back to [live].dry_run from config",
-                    other
-                );
-                config.live.as_ref().is_some_and(|l| l.dry_run)
-            }
-        },
-        Err(_) => config.live.as_ref().is_some_and(|l| l.dry_run),
-    };
+    // Resolve effective dry-run once; shared by validate_startup and all
+    // executor loops. `LIVE_DRY_RUN` env wins over `[live].dry_run` config.
+    let live_cfg_dry_run = config.live.as_ref().is_some_and(|l| l.dry_run);
+    let live_dry_run_env = std::env::var("LIVE_DRY_RUN").ok();
+    let live_forces_dry_run: bool = auto_trader::startup::resolve_effective_dry_run(
+        live_cfg_dry_run,
+        live_dry_run_env.as_deref(),
+    );
+
+    // Fail-fast safety gate: validate config × env × DB accounts.
+    auto_trader::startup::validate_startup(
+        &db_accounts,
+        config.live.as_ref(),
+        live_forces_dry_run,
+        std::env::var("SLACK_WEBHOOK_URL").ok().as_deref(),
+        std::env::var("BITFLYER_API_KEY").ok().as_deref(),
+        std::env::var("BITFLYER_API_SECRET").ok().as_deref(),
+    )?;
+
+    // Freeze the set of live account UUIDs approved at startup. Any live
+    // account inserted via the REST API after this point will be refused by
+    // the executor, reconciler, and balance_sync loops. Paper accounts are
+    // always allowed dynamically because they have no real exchange interaction.
+    let approved_live_account_ids: std::sync::Arc<std::collections::HashSet<uuid::Uuid>> =
+        std::sync::Arc::new(
+            db_accounts
+                .iter()
+                .filter(|a| a.account_type == "live")
+                .map(|a| a.id)
+                .collect(),
+        );
 
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(
@@ -1135,6 +1127,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_risk_gate = risk_gate.clone();
     let executor_risk_config = risk_config.clone();
+    let executor_approved_live = approved_live_account_ids.clone();
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1180,6 +1173,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 if exchange != Exchange::BitflyerCfd {
+                    continue;
+                }
+                // Safety gate: refuse signals for live accounts that were not
+                // present at startup. Such accounts bypass validate_startup's
+                // single-live / enabled / Slack / API-key checks.
+                if pac.account_type == "live" && !executor_approved_live.contains(&pac.id) {
+                    tracing::warn!(
+                        "refusing signal for dynamically-added live account {} (id={}); live accounts must be present at startup for safety validation. Restart to pick up new live accounts.",
+                        pac.name,
+                        pac.id
+                    );
                     continue;
                 }
                 let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
@@ -1331,6 +1335,7 @@ async fn main() -> anyhow::Result<()> {
         let recon_api = bitflyer_api.clone();
         let recon_notifier = notifier.clone();
         let recon_interval = live_cfg.reconciler_interval_secs;
+        let recon_approved = approved_live_account_ids.clone();
         let _recon_handle = tokio::spawn(async move {
             auto_trader::tasks::reconciler::run_reconciler_loop(
                 recon_pool,
@@ -1338,6 +1343,7 @@ async fn main() -> anyhow::Result<()> {
                 recon_notifier,
                 "FX_BTC_JPY".to_string(),
                 recon_interval,
+                recon_approved,
             )
             .await;
         });
@@ -1347,6 +1353,7 @@ async fn main() -> anyhow::Result<()> {
         let bs_notifier = notifier.clone();
         let bs_interval = live_cfg.balance_sync_interval_secs;
         let drift_threshold = rust_decimal::Decimal::new(1, 2); // 0.01 = 1%
+        let bs_approved = approved_live_account_ids.clone();
         let _bs_handle = tokio::spawn(async move {
             auto_trader::tasks::balance_sync::run_balance_sync_loop(
                 bs_pool,
@@ -1354,6 +1361,7 @@ async fn main() -> anyhow::Result<()> {
                 bs_notifier,
                 bs_interval,
                 drift_threshold,
+                bs_approved,
             )
             .await;
         });

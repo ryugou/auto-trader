@@ -3,6 +3,28 @@
 use auto_trader_core::config::LiveConfig;
 use auto_trader_db::trading_accounts::TradingAccount;
 
+/// Parse `LIVE_DRY_RUN` env var against `[live].dry_run` config. Returns the
+/// effective dry-run flag. Invalid env value logs a warning and falls back
+/// to the config value. Both call sites (startup validation + executor
+/// runtime dispatch) must see the same result.
+pub fn resolve_effective_dry_run(live_cfg_dry_run: bool, env: Option<&str>) -> bool {
+    match env {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                tracing::warn!(
+                    "ignoring invalid LIVE_DRY_RUN='{}' (expected true/false); falling back to [live].dry_run={}",
+                    other,
+                    live_cfg_dry_run
+                );
+                live_cfg_dry_run
+            }
+        },
+        None => live_cfg_dry_run,
+    }
+}
+
 /// Returns Err if any precondition for a safe start is violated.
 ///
 /// `effective_dry_run` must be computed by the caller from the `LIVE_DRY_RUN`
@@ -55,4 +77,39 @@ pub fn validate_startup(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_effective_dry_run;
+
+    #[test]
+    fn env_true_overrides_config_false() {
+        assert!(resolve_effective_dry_run(false, Some("true")));
+        assert!(resolve_effective_dry_run(false, Some("1")));
+        assert!(resolve_effective_dry_run(false, Some("yes")));
+        assert!(resolve_effective_dry_run(false, Some("on")));
+    }
+
+    #[test]
+    fn env_false_overrides_config_true() {
+        assert!(!resolve_effective_dry_run(true, Some("false")));
+        assert!(!resolve_effective_dry_run(true, Some("0")));
+        assert!(!resolve_effective_dry_run(true, Some("no")));
+        assert!(!resolve_effective_dry_run(true, Some("off")));
+    }
+
+    #[test]
+    fn invalid_env_falls_back_to_config() {
+        // Invalid value should fall back to config value (true).
+        assert!(resolve_effective_dry_run(true, Some("garbage")));
+        // Invalid value should fall back to config value (false).
+        assert!(!resolve_effective_dry_run(false, Some("garbage")));
+    }
+
+    #[test]
+    fn no_env_uses_config() {
+        assert!(resolve_effective_dry_run(true, None));
+        assert!(!resolve_effective_dry_run(false, None));
+    }
 }

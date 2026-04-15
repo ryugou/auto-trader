@@ -5,8 +5,10 @@ use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_notify::{BalanceDriftEvent, Notifier, NotifyEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Returns true if |exchange - db| / db > threshold. Zero db balance → false
 /// (avoids div by zero; caller can still see the raw values if needed).
@@ -62,6 +64,7 @@ pub async fn run_balance_sync_loop(
     notifier: Arc<Notifier>,
     interval_secs: u64,
     drift_threshold: Decimal,
+    approved_live_account_ids: Arc<HashSet<Uuid>>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
@@ -75,6 +78,11 @@ pub async fn run_balance_sync_loop(
         };
         for acc in &accounts {
             if acc.account_type != "live" {
+                continue;
+            }
+            // Only sync accounts that were approved at startup; refuse any live
+            // account inserted via REST after startup validation ran.
+            if !approved_live_account_ids.contains(&acc.id) {
                 continue;
             }
             if let Err(e) = sync_account(&pool, &api, &notifier, acc, drift_threshold).await {

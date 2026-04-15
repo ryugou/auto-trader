@@ -5,6 +5,7 @@ use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_notify::{Notifier, NotifyEvent, StartupReconciliationDiffEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -155,6 +156,7 @@ pub async fn run_reconciler_loop(
     notifier: Arc<Notifier>,
     product_code: String,
     interval_secs: u64,
+    approved_live_account_ids: Arc<HashSet<Uuid>>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
@@ -168,6 +170,11 @@ pub async fn run_reconciler_loop(
         };
         for acc in &accounts {
             if acc.account_type != "live" {
+                continue;
+            }
+            // Only reconcile accounts that were approved at startup; refuse
+            // any live account inserted via REST after startup validation ran.
+            if !approved_live_account_ids.contains(&acc.id) {
                 continue;
             }
             if let Err(e) = reconcile_account(&pool, &api, &notifier, acc, &product_code).await {
