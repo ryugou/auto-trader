@@ -1317,6 +1317,25 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: live reconciler — detect drift between DB open trades and exchange
+    // positions. Only runs when [live].enabled is true (live config exists).
+    if let Some(live_cfg) = config.live.as_ref().filter(|l| l.enabled) {
+        let recon_pool = pool.clone();
+        let recon_api = bitflyer_api.clone();
+        let recon_notifier = notifier.clone();
+        let recon_interval = live_cfg.reconciler_interval_secs;
+        let _recon_handle = tokio::spawn(async move {
+            auto_trader::tasks::reconciler::run_reconciler_loop(
+                recon_pool,
+                recon_api,
+                recon_notifier,
+                "FX_BTC_JPY".to_string(),
+                recon_interval,
+            )
+            .await;
+        });
+    }
+
     // Task: Trade recorder — handles side effects after PaperTrader has already
     // persisted the trade to the DB. Responsibilities:
     //   - Upsert daily_summary on close

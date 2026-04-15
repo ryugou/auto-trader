@@ -59,8 +59,10 @@ pub struct WebSocketDisconnectedEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StartupReconciliationDiffEvent {
-    pub orphan_db_trade_ids: Vec<Uuid>,
-    pub orphan_exchange_positions: Vec<String>,
+    pub account_name: String,
+    pub db_orphan: Vec<Uuid>,
+    pub exchange_orphan_count: usize,
+    pub quantity_mismatch_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,9 +244,11 @@ fn format_for_slack(event: &NotifyEvent) -> String {
             format!("⚠️ *WebSocket 切断* {} 秒", e.duration_secs)
         }
         NotifyEvent::StartupReconciliationDiff(e) => format!(
-            "⚠️ *起動時リコン差分* DB のみ={} 件, 取引所のみ={} 件",
-            e.orphan_db_trade_ids.len(),
-            e.orphan_exchange_positions.len()
+            "⚠️ *リコン差分* `{}` DB のみ={} 件, 取引所のみ={} 件, 数量不一致={} 件",
+            e.account_name,
+            e.db_orphan.len(),
+            e.exchange_orphan_count,
+            e.quantity_mismatch_count,
         ),
         NotifyEvent::BalanceDrift(e) => format!(
             "⚠️ *残高ズレ* `{}` DB={} / 取引所={} ({}%)",
