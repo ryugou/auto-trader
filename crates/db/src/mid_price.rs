@@ -10,7 +10,8 @@ use rust_decimal::Decimal;
 
 /// Provides mid-price and tick-age for a given trading pair.
 ///
-/// Implementors: `Arc<auto_trader_market::price_store::PriceStore>`.
+/// Implemented on `auto_trader_market::price_store::PriceStore` (not `Arc<...>`).
+/// If you hold `Arc<PriceStore>`, pass `&*arc` or `arc.as_ref()` at the call site.
 #[async_trait]
 pub trait MidPriceSource: Send + Sync {
     async fn mid(&self, pair: &Pair) -> Option<Decimal>;

@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS risk_halts (
 );
 
 CREATE INDEX IF NOT EXISTS risk_halts_account_active
-    ON risk_halts (account_id, halted_until DESC)
+    ON risk_halts (account_id, triggered_at DESC)
     WHERE released_at IS NULL;
 
 -- 二重発注防止: 同一 account × strategy × pair で open/closing は1件まで。

@@ -58,7 +58,7 @@ pub struct WebSocketDisconnectedEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StartupReconciliationDiffEvent {
+pub struct ReconciliationDiffEvent {
     pub account_name: String,
     pub db_orphan: Vec<Uuid>,
     pub exchange_orphan_count: usize,
@@ -90,7 +90,7 @@ pub struct DryRunOrderEvent {
 /// 通知イベント。Slack には各イベントごとに整形された文面で送る。
 ///
 /// **Slack 4000 文字上限ポリシー**: format_for_slack はリスト系イベント
-/// (`StartupReconciliationDiff`) で ID 一覧を埋め込まず `.len()` のみ
+/// (`ReconciliationDiff`) で ID 一覧を埋め込まず `.len()` のみ
 /// 表示する方針。巨大な ID 一覧を本文に含めて truncate で末尾欠落する
 /// より、件数を出して詳細は DB 照会へ誘導する方が安全。新バリアントを
 /// 追加する際もこのポリシーに従うこと。
@@ -103,7 +103,7 @@ pub enum NotifyEvent {
     KillSwitchTriggered(KillSwitchTriggeredEvent),
     KillSwitchReleased(KillSwitchReleasedEvent),
     WebSocketDisconnected(WebSocketDisconnectedEvent),
-    StartupReconciliationDiff(StartupReconciliationDiffEvent),
+    ReconciliationDiff(ReconciliationDiffEvent),
     BalanceDrift(BalanceDriftEvent),
     DryRunOrder(DryRunOrderEvent),
 }
@@ -119,7 +119,7 @@ impl NotifyEvent {
             NotifyEvent::KillSwitchTriggered(_) => "kill_switch_triggered",
             NotifyEvent::KillSwitchReleased(_) => "kill_switch_released",
             NotifyEvent::WebSocketDisconnected(_) => "websocket_disconnected",
-            NotifyEvent::StartupReconciliationDiff(_) => "startup_reconciliation_diff",
+            NotifyEvent::ReconciliationDiff(_) => "reconciliation_diff",
             NotifyEvent::BalanceDrift(_) => "balance_drift",
             NotifyEvent::DryRunOrder(_) => "dry_run_order",
         }
@@ -179,7 +179,7 @@ impl Notifier {
     /// **呼び出し側規約 (PR 2 以降で厳守)**:
     /// - `OrderFilled` / `DryRunOrder` など高頻度・低重要度: `tokio::spawn`
     ///   で fire-and-forget (`let _ = notifier.send(ev).await;`)
-    /// - `KillSwitchTriggered` / `BalanceDrift` / `StartupReconciliationDiff`
+    /// - `KillSwitchTriggered` / `BalanceDrift` / `ReconciliationDiff`
     ///   など critical: `.await` で結果を確認し、失敗時は DB
     ///   `notifications` テーブル (UI ベル) に backstop 書き込み
     /// - リトライは本メソッド内で行わない。配線側の責務。
@@ -248,8 +248,8 @@ fn format_for_slack(event: &NotifyEvent) -> String {
         NotifyEvent::WebSocketDisconnected(e) => {
             format!("⚠️ *WebSocket 切断* {} 秒", e.duration_secs)
         }
-        NotifyEvent::StartupReconciliationDiff(e) => format!(
-            "⚠️ *リコン差分* `{}` DB のみ={} 件, 取引所のみ={} 件, 数量不一致={} 件",
+        NotifyEvent::ReconciliationDiff(e) => format!(
+            "⚠️ *建玉整合性の差分検出* `{}` DB のみ={} 件, 取引所のみ={} 件, 数量不一致={} 件",
             e.account_name,
             e.db_orphan.len(),
             e.exchange_orphan_count,

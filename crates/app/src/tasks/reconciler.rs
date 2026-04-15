@@ -2,7 +2,7 @@
 
 use auto_trader_db::trading_accounts::{self, TradingAccount};
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
-use auto_trader_notify::{Notifier, NotifyEvent, StartupReconciliationDiffEvent};
+use auto_trader_notify::{Notifier, NotifyEvent, ReconciliationDiffEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashSet;
@@ -139,7 +139,7 @@ pub async fn reconcile_account(
         diff.exchange_orphan.len(),
         diff.quantity_mismatch.len(),
     );
-    let ev = NotifyEvent::StartupReconciliationDiff(StartupReconciliationDiffEvent {
+    let ev = NotifyEvent::ReconciliationDiff(ReconciliationDiffEvent {
         account_name: account.name.clone(),
         db_orphan: diff.db_orphan,
         exchange_orphan_count: diff.exchange_orphan.len(),
