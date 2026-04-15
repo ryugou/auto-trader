@@ -114,6 +114,38 @@ impl PriceStore {
         }
     }
 
+    /// Return the age (in seconds) of the newest tick for the given pair across
+    /// all exchanges. Returns `None` when no tick has ever been observed for
+    /// that pair.
+    pub async fn last_tick_age(&self, pair: &Pair) -> Option<u64> {
+        let guard = self.latest.read().await;
+        let newest_ts = guard
+            .iter()
+            .filter(|(k, _)| &k.pair == pair)
+            .map(|(_, v)| v.ts)
+            .max()?;
+        let age = (chrono::Utc::now() - newest_ts).num_seconds().max(0) as u64;
+        Some(age)
+    }
+
+    /// Return the mid price for the given pair from the most recent tick that
+    /// carries both bid and ask. Falls back to `price` (LTP) when bid/ask are
+    /// absent. Returns `None` when no tick has been observed for the pair.
+    pub async fn mid(&self, pair: &Pair) -> Option<Decimal> {
+        let guard = self.latest.read().await;
+        // Pick the newest tick across all exchanges for this pair.
+        let tick = guard
+            .iter()
+            .filter(|(k, _)| &k.pair == pair)
+            .max_by_key(|(_, v)| v.ts)
+            .map(|(_, v)| v)?;
+        let mid = match (tick.best_bid, tick.best_ask) {
+            (Some(bid), Some(ask)) => (bid + ask) / Decimal::from(2),
+            _ => tick.price,
+        };
+        Some(mid)
+    }
+
     pub async fn snapshot(&self) -> Vec<(FeedKey, LatestTick)> {
         let guard = self.latest.read().await;
         guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -153,6 +185,21 @@ impl PriceStore {
                 }
             })
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MidPriceSource impl — decouples auto-trader-db from auto-trader-market
+// ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+impl auto_trader_db::mid_price::MidPriceSource for PriceStore {
+    async fn mid(&self, pair: &Pair) -> Option<rust_decimal::Decimal> {
+        PriceStore::mid(self, pair).await
+    }
+
+    async fn last_tick_age(&self, pair: &Pair) -> Option<u64> {
+        PriceStore::last_tick_age(self, pair).await
     }
 }
 
@@ -283,6 +330,27 @@ mod tests {
         let report = store.health_at(now).await;
         assert_eq!(report[0].status, FeedStatus::Healthy);
         assert_eq!(report[0].last_tick_age_secs, Some(0));
+    }
+
+    #[tokio::test]
+    async fn last_tick_age_returns_small_for_just_inserted_tick() {
+        let store = PriceStore::new(vec![]);
+        let k = key(Exchange::BitflyerCfd, "FX_BTC_JPY");
+        let now = chrono::Utc::now();
+        store.update(k.clone(), tick(11_500_000, now)).await;
+        let age = store
+            .last_tick_age(&k.pair)
+            .await
+            .expect("tick was just inserted");
+        assert!(age <= 1, "age should be 0 or 1 second, got {age}");
+    }
+
+    #[tokio::test]
+    async fn last_tick_age_returns_none_for_unknown_pair() {
+        let store = PriceStore::new(vec![]);
+        let pair = Pair::new("UNKNOWN_PAIR");
+        let age = store.last_tick_age(&pair).await;
+        assert!(age.is_none(), "expected None for unknown pair");
     }
 
     #[tokio::test]

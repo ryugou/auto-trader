@@ -58,9 +58,11 @@ pub struct WebSocketDisconnectedEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StartupReconciliationDiffEvent {
-    pub orphan_db_trade_ids: Vec<Uuid>,
-    pub orphan_exchange_positions: Vec<String>,
+pub struct ReconciliationDiffEvent {
+    pub account_name: String,
+    pub db_orphan: Vec<Uuid>,
+    pub exchange_orphan_count: usize,
+    pub quantity_mismatch_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,8 +71,9 @@ pub struct BalanceDriftEvent {
     pub db_balance: Decimal,
     pub exchange_balance: Decimal,
     /// 残高の乖離率 **パーセンテージ値** (例: `5` = 5%、`0.5` = 0.5%)。
-    /// `db_balance / exchange_balance - 1` の **×100 済み** の値を渡すこと。
-    /// format_for_slack は `{}%` として表示するので、呼び出し側で小数
+    /// `|exchange_balance - db_balance| / db_balance * 100` の値を渡すこと。
+    /// `balance_sync::is_drift_over_threshold` の閾値判定と同じ式。
+    /// 常に非負。format_for_slack は `{}%` として表示するので、呼び出し側で小数
     /// (0.05 = 5%) を渡すと Slack には `0.05%` と出て 100 倍のズレになる。
     pub diff_pct: Decimal,
 }
@@ -88,7 +91,7 @@ pub struct DryRunOrderEvent {
 /// 通知イベント。Slack には各イベントごとに整形された文面で送る。
 ///
 /// **Slack 4000 文字上限ポリシー**: format_for_slack はリスト系イベント
-/// (`StartupReconciliationDiff`) で ID 一覧を埋め込まず `.len()` のみ
+/// (`ReconciliationDiff`) で ID 一覧を埋め込まず `.len()` のみ
 /// 表示する方針。巨大な ID 一覧を本文に含めて truncate で末尾欠落する
 /// より、件数を出して詳細は DB 照会へ誘導する方が安全。新バリアントを
 /// 追加する際もこのポリシーに従うこと。
@@ -101,7 +104,7 @@ pub enum NotifyEvent {
     KillSwitchTriggered(KillSwitchTriggeredEvent),
     KillSwitchReleased(KillSwitchReleasedEvent),
     WebSocketDisconnected(WebSocketDisconnectedEvent),
-    StartupReconciliationDiff(StartupReconciliationDiffEvent),
+    ReconciliationDiff(ReconciliationDiffEvent),
     BalanceDrift(BalanceDriftEvent),
     DryRunOrder(DryRunOrderEvent),
 }
@@ -117,7 +120,7 @@ impl NotifyEvent {
             NotifyEvent::KillSwitchTriggered(_) => "kill_switch_triggered",
             NotifyEvent::KillSwitchReleased(_) => "kill_switch_released",
             NotifyEvent::WebSocketDisconnected(_) => "websocket_disconnected",
-            NotifyEvent::StartupReconciliationDiff(_) => "startup_reconciliation_diff",
+            NotifyEvent::ReconciliationDiff(_) => "reconciliation_diff",
             NotifyEvent::BalanceDrift(_) => "balance_drift",
             NotifyEvent::DryRunOrder(_) => "dry_run_order",
         }
@@ -157,6 +160,11 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    /// No-op notifier for tests: behaves like `new(None)` (Slack skipped).
+    pub fn new_disabled() -> Self {
+        Self::new(None)
+    }
+
     pub fn new(slack_webhook_url: Option<String>) -> Self {
         Self {
             slack_webhook_url,
@@ -172,7 +180,7 @@ impl Notifier {
     /// **呼び出し側規約 (PR 2 以降で厳守)**:
     /// - `OrderFilled` / `DryRunOrder` など高頻度・低重要度: `tokio::spawn`
     ///   で fire-and-forget (`let _ = notifier.send(ev).await;`)
-    /// - `KillSwitchTriggered` / `BalanceDrift` / `StartupReconciliationDiff`
+    /// - `KillSwitchTriggered` / `BalanceDrift` / `ReconciliationDiff`
     ///   など critical: `.await` で結果を確認し、失敗時は DB
     ///   `notifications` テーブル (UI ベル) に backstop 書き込み
     /// - リトライは本メソッド内で行わない。配線側の責務。
@@ -241,10 +249,12 @@ fn format_for_slack(event: &NotifyEvent) -> String {
         NotifyEvent::WebSocketDisconnected(e) => {
             format!("⚠️ *WebSocket 切断* {} 秒", e.duration_secs)
         }
-        NotifyEvent::StartupReconciliationDiff(e) => format!(
-            "⚠️ *起動時リコン差分* DB のみ={} 件, 取引所のみ={} 件",
-            e.orphan_db_trade_ids.len(),
-            e.orphan_exchange_positions.len()
+        NotifyEvent::ReconciliationDiff(e) => format!(
+            "⚠️ *建玉整合性の差分検出* `{}` DB のみ={} 件, 取引所のみ={} 件, 数量不一致={} 件",
+            e.account_name,
+            e.db_orphan.len(),
+            e.exchange_orphan_count,
+            e.quantity_mismatch_count,
         ),
         NotifyEvent::BalanceDrift(e) => format!(
             "⚠️ *残高ズレ* `{}` DB={} / 取引所={} ({}%)",

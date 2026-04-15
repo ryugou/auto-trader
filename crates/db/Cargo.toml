@@ -12,5 +12,6 @@ rust_decimal = { workspace = true }
 rust_decimal_macros = "1"
 tracing = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

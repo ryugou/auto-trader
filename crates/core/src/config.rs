@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub gemini: Option<GeminiConfig>,
     #[serde(default)]
     pub live: Option<LiveConfig>,
+    #[serde(default)]
+    pub risk: Option<RiskConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -131,6 +133,28 @@ pub struct PositionSizingConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct RiskConfig {
+    pub daily_loss_limit_pct: Decimal,
+    pub price_freshness_secs: u64,
+    pub kill_switch_release_jst_hour: u32,
+}
+
+impl RiskConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct > Decimal::ONE {
+            anyhow::bail!("[risk].daily_loss_limit_pct must be in (0, 1]");
+        }
+        if self.price_freshness_secs == 0 {
+            anyhow::bail!("[risk].price_freshness_secs must be > 0");
+        }
+        if self.kill_switch_release_jst_hour > 23 {
+            anyhow::bail!("[risk].kill_switch_release_jst_hour must be 0..=23");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct LiveConfig {
     /// true の時のみ LiveTrader を起動する。account_type='live' の
     /// アカウントが存在すれば main.rs 起動時に true でなければ fatal。
@@ -172,6 +196,9 @@ impl AppConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if let Some(live) = &self.live {
             live.validate()?;
+        }
+        if let Some(risk) = &self.risk {
+            risk.validate()?;
         }
         Ok(())
     }
@@ -387,6 +414,56 @@ balance_sync_interval_secs = 300
         let live = cfg.live.expect("live section should parse");
         assert!(!live.enabled);
         assert!(live.dry_run);
+    }
+
+    #[test]
+    fn parse_config_with_risk() {
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://u:p@localhost/auto_trader"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+active = ["USD_JPY"]
+
+[risk]
+daily_loss_limit_pct = 0.05
+price_freshness_secs = 60
+kill_switch_release_jst_hour = 0
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let risk = cfg.risk.expect("risk section should parse");
+        assert_eq!(risk.price_freshness_secs, 60);
+        assert_eq!(risk.kill_switch_release_jst_hour, 0);
+        risk.validate().unwrap();
+    }
+
+    #[test]
+    fn risk_validate_rejects_zero_freshness() {
+        use rust_decimal_macros::dec;
+        let r = crate::config::RiskConfig {
+            daily_loss_limit_pct: dec!(0.05),
+            price_freshness_secs: 0,
+            kill_switch_release_jst_hour: 0,
+        };
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn risk_validate_rejects_invalid_loss_limit() {
+        use rust_decimal_macros::dec;
+        let r = crate::config::RiskConfig {
+            daily_loss_limit_pct: dec!(0),
+            price_freshness_secs: 60,
+            kill_switch_release_jst_hour: 0,
+        };
+        assert!(r.validate().is_err());
     }
 
     #[test]

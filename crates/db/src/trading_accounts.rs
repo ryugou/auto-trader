@@ -79,6 +79,11 @@ impl From<AccountRow> for TradingAccount {
 const ACCOUNT_COLUMNS: &str = "id, name, account_type, exchange, strategy, \
                                 initial_balance, current_balance, leverage, currency, created_at";
 
+/// Fetch a single account by id (alias for `get_account`).
+pub async fn get(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<TradingAccount>> {
+    get_account(pool, id).await
+}
+
 /// Fetch a single account by id.
 pub async fn get_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<TradingAccount>> {
     let row = sqlx::query_as::<_, AccountRow>(&format!(
