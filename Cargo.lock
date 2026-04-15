@@ -133,7 +133,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "wiremock",
 ]
 
 [[package]]
@@ -176,7 +175,6 @@ name = "auto-trader-db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "auto-trader-core",
  "chrono",
  "rust_decimal",

@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
+use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
+
 fn exchange_from_str(s: &str) -> Option<Exchange> {
     match s {
         "oanda" => Some(Exchange::Oanda),
@@ -518,37 +520,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Resolve effective dry-run once; shared by validate_startup and all
-    // executor loops. `LIVE_DRY_RUN` env wins over `[live].dry_run` config.
+    // `LIVE_DRY_RUN` env overrides `[live].dry_run` config. "1/true/yes/on" → true.
     let live_cfg_dry_run = config.live.as_ref().is_some_and(|l| l.dry_run);
-    let live_dry_run_env = std::env::var("LIVE_DRY_RUN").ok();
-    let live_forces_dry_run: bool = auto_trader::startup::resolve_effective_dry_run(
-        live_cfg_dry_run,
-        live_dry_run_env.as_deref(),
-    );
+    let live_forces_dry_run: bool = match std::env::var("LIVE_DRY_RUN").ok().as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        _ => live_cfg_dry_run,
+    };
 
-    // Fail-fast safety gate: validate config × env × DB accounts.
-    auto_trader::startup::validate_startup(
-        &db_accounts,
-        config.live.as_ref(),
-        live_forces_dry_run,
-        std::env::var("SLACK_WEBHOOK_URL").ok().as_deref(),
-        std::env::var("BITFLYER_API_KEY").ok().as_deref(),
-        std::env::var("BITFLYER_API_SECRET").ok().as_deref(),
-    )?;
-
-    // Freeze the set of live account UUIDs approved at startup. Any live
-    // account inserted via the REST API after this point will be refused by
-    // the executor, reconciler, and balance_sync loops. Paper accounts are
-    // always allowed dynamically because they have no real exchange interaction.
-    let approved_live_account_ids: std::sync::Arc<std::collections::HashSet<uuid::Uuid>> =
-        std::sync::Arc::new(
-            db_accounts
-                .iter()
-                .filter(|a| a.account_type == "live")
-                .map(|a| a.id)
-                .collect(),
-        );
+    // PR-1 startup gate: refuse to start if a live account exists but
+    // [live].enabled is false (or missing). Nothing more.
+    auto_trader::startup::check_live_gate(&db_accounts, config.live.as_ref())?;
 
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(
@@ -575,23 +557,13 @@ async fn main() -> anyhow::Result<()> {
         ))
     };
 
-    let risk_config = config
+    // Freshness threshold for entry signals. Only the price_freshness_secs
+    // field from RiskConfig is used post-revert.
+    let price_freshness_secs: u64 = config
         .risk
-        .clone()
-        .unwrap_or_else(|| auto_trader_core::config::RiskConfig {
-            daily_loss_limit_pct: rust_decimal::Decimal::new(5, 2),
-            price_freshness_secs: 60,
-            kill_switch_release_jst_hour: 0,
-        });
-    let risk_gate = Arc::new(auto_trader_executor::risk_gate::RiskGate::new(
-        pool.clone(),
-        notifier.clone(),
-        auto_trader_executor::risk_gate::RiskGateConfig {
-            daily_loss_limit_pct: risk_config.daily_loss_limit_pct,
-            price_freshness_secs: risk_config.price_freshness_secs,
-        },
-        risk_config.kill_switch_release_jst_hour,
-    ));
+        .as_ref()
+        .map(|r| r.price_freshness_secs)
+        .unwrap_or(60);
 
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
@@ -759,7 +731,6 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
-    let crypto_monitor_approved_live = approved_live_account_ids.clone();
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -795,18 +766,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-                if !auto_trader::startup::is_account_approved_for_execution(
-                    &account_type,
-                    account_id,
-                    &crypto_monitor_approved_live,
-                ) {
-                    tracing::warn!(
-                        "refusing close for unapproved account {} (trade {}); manual intervention required",
-                        account_id,
-                        trade.id
-                    );
-                    continue;
-                }
                 let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
@@ -1034,7 +993,6 @@ async fn main() -> anyhow::Result<()> {
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
     let exit_live_forces_dry_run = live_forces_dry_run;
-    let exit_approved_live = approved_live_account_ids.clone();
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade joined with account info in one query so we
@@ -1073,18 +1031,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-            if !auto_trader::startup::is_account_approved_for_execution(
-                &account_type,
-                account_id,
-                &exit_approved_live,
-            ) {
-                tracing::warn!(
-                    "refusing strategy exit for unapproved account {} (trade {})",
-                    account_id,
-                    trade.id
-                );
-                continue;
-            }
             let dry_run = account_type == "paper" || exit_live_forces_dry_run;
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
@@ -1151,9 +1097,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_notifier = notifier.clone();
     let executor_position_sizer = shared_position_sizer.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
-    let executor_risk_gate = risk_gate.clone();
-    let executor_risk_config = risk_config.clone();
-    let executor_approved_live = approved_live_account_ids.clone();
+    let executor_price_freshness_secs = price_freshness_secs;
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1201,59 +1145,20 @@ async fn main() -> anyhow::Result<()> {
                 if exchange != Exchange::BitflyerCfd {
                     continue;
                 }
-                // Safety gate: refuse signals for live accounts that were not
-                // present at startup. Such accounts bypass validate_startup's
-                // single-live / enabled / Slack / API-key checks.
-                if !auto_trader::startup::is_account_approved_for_execution(
-                    &pac.account_type,
-                    pac.id,
-                    &executor_approved_live,
-                ) {
-                    tracing::warn!(
-                        "refusing signal for unapproved account {} (id={}, type={}); must be approved at startup",
-                        pac.name,
-                        pac.id,
-                        pac.account_type
-                    );
-                    continue;
-                }
                 let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
 
-                // RiskGate pre-check (paper + live both).
+                // Freshness gate: reject stale-tick signals at entry.
                 let last_tick_age = executor_price_store
                     .last_tick_age(&signal.pair)
                     .await
                     .unwrap_or(u64::MAX);
-                let unrealized = match auto_trader_db::trades::sum_unrealized_pnl_for_account(
-                    &executor_pool,
-                    pac.id,
-                    executor_price_store.as_ref(),
-                    executor_risk_config.price_freshness_secs,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            "risk_gate: unrealized pnl calc failed for {}: {e}; skipping signal (fail-closed)",
-                            pac.name
-                        );
-                        continue;
-                    }
-                };
-                let decision = executor_risk_gate
-                    .check(signal, pac, last_tick_age, unrealized)
-                    .await;
-                match decision {
-                    Ok(auto_trader_executor::risk_gate::GateDecision::Pass) => {}
-                    Ok(auto_trader_executor::risk_gate::GateDecision::Reject(reason)) => {
-                        tracing::warn!("risk_gate rejected signal for {}: {:?}", pac.name, reason);
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "risk_gate check errored for {}: {e}; failing closed (skip)",
-                            pac.name
+                match eval_price_freshness(executor_price_freshness_secs, last_tick_age) {
+                    GateDecision::Pass => {}
+                    GateDecision::Reject(reason) => {
+                        tracing::warn!(
+                            "freshness gate rejected signal for {}: {:?}",
+                            pac.name,
+                            reason
                         );
                         continue;
                     }
@@ -1358,45 +1263,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-
-    // Task: live reconciler — detect drift between DB open trades and exchange
-    // positions. Only runs when [live].enabled is true (live config exists).
-    if let Some(live_cfg) = config.live.as_ref().filter(|l| l.enabled) {
-        let recon_pool = pool.clone();
-        let recon_api = bitflyer_api.clone();
-        let recon_notifier = notifier.clone();
-        let recon_interval = live_cfg.reconciler_interval_secs;
-        let recon_approved = approved_live_account_ids.clone();
-        let _recon_handle = tokio::spawn(async move {
-            auto_trader::tasks::reconciler::run_reconciler_loop(
-                recon_pool,
-                recon_api,
-                recon_notifier,
-                "FX_BTC_JPY".to_string(),
-                recon_interval,
-                recon_approved,
-            )
-            .await;
-        });
-
-        let bs_pool = pool.clone();
-        let bs_api = bitflyer_api.clone();
-        let bs_notifier = notifier.clone();
-        let bs_interval = live_cfg.balance_sync_interval_secs;
-        let drift_threshold = rust_decimal::Decimal::new(1, 2); // 0.01 = 1%
-        let bs_approved = approved_live_account_ids.clone();
-        let _bs_handle = tokio::spawn(async move {
-            auto_trader::tasks::balance_sync::run_balance_sync_loop(
-                bs_pool,
-                bs_api,
-                bs_notifier,
-                bs_interval,
-                drift_threshold,
-                bs_approved,
-            )
-            .await;
-        });
-    }
 
     // Task: Trade recorder — handles side effects after PaperTrader has already
     // persisted the trade to the DB. Responsibilities:

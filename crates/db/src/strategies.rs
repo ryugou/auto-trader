@@ -22,7 +22,8 @@ pub struct Strategy {
     pub created_at: DateTime<Utc>,
 }
 
-const STRATEGY_COLUMNS: &str = "name, display_name, category, risk_level, description, algorithm, default_params, created_at";
+const STRATEGY_COLUMNS: &str =
+    "name, display_name, category, risk_level, description, algorithm, default_params, created_at";
 
 /// List all strategies in the catalog. Optionally filter by category
 /// (`fx` / `crypto`) so the account-creation UI can scope the dropdown to

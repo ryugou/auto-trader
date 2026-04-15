@@ -134,21 +134,13 @@ pub struct PositionSizingConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RiskConfig {
-    pub daily_loss_limit_pct: Decimal,
     pub price_freshness_secs: u64,
-    pub kill_switch_release_jst_hour: u32,
 }
 
 impl RiskConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct > Decimal::ONE {
-            anyhow::bail!("[risk].daily_loss_limit_pct must be in (0, 1]");
-        }
         if self.price_freshness_secs == 0 {
             anyhow::bail!("[risk].price_freshness_secs must be > 0");
-        }
-        if self.kill_switch_release_jst_hour > 23 {
-            anyhow::bail!("[risk].kill_switch_release_jst_hour must be 0..=23");
         }
         Ok(())
     }
@@ -162,23 +154,10 @@ pub struct LiveConfig {
     /// true 中は発注直前で no-op し通知のみ出す (DryRunTrader)。
     /// LIVE_DRY_RUN env が設定されていれば env 優先。
     pub dry_run: bool,
-    pub execution_poll_interval_secs: u64,
-    pub reconciler_interval_secs: u64,
-    pub balance_sync_interval_secs: u64,
 }
 
 impl LiveConfig {
-    /// 起動時の値域チェック。0 秒 interval は busy loop になるため禁止。
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.execution_poll_interval_secs == 0 {
-            anyhow::bail!("[live].execution_poll_interval_secs must be > 0");
-        }
-        if self.reconciler_interval_secs == 0 {
-            anyhow::bail!("[live].reconciler_interval_secs must be > 0");
-        }
-        if self.balance_sync_interval_secs == 0 {
-            anyhow::bail!("[live].balance_sync_interval_secs must be > 0");
-        }
         Ok(())
     }
 }
@@ -251,29 +230,12 @@ mod validation_tests {
         LiveConfig {
             enabled: false,
             dry_run: true,
-            execution_poll_interval_secs: 3,
-            reconciler_interval_secs: 300,
-            balance_sync_interval_secs: 300,
         }
     }
 
     #[test]
     fn live_validate_accepts_valid_values() {
         valid_live().validate().unwrap();
-    }
-
-    #[test]
-    fn live_validate_rejects_zero_intervals() {
-        for field in ["execution", "reconciler", "balance"] {
-            let mut l = valid_live();
-            match field {
-                "execution" => l.execution_poll_interval_secs = 0,
-                "reconciler" => l.reconciler_interval_secs = 0,
-                "balance" => l.balance_sync_interval_secs = 0,
-                _ => unreachable!(),
-            }
-            assert!(l.validate().is_err(), "expected error for {field}=0");
-        }
     }
 }
 
@@ -406,9 +368,6 @@ active = ["USD_JPY"]
 [live]
 enabled = false
 dry_run = true
-execution_poll_interval_secs = 3
-reconciler_interval_secs = 300
-balance_sync_interval_secs = 300
 "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
         let live = cfg.live.expect("live section should parse");
@@ -433,35 +392,18 @@ interval_secs = 60
 active = ["USD_JPY"]
 
 [risk]
-daily_loss_limit_pct = 0.05
 price_freshness_secs = 60
-kill_switch_release_jst_hour = 0
 "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
         let risk = cfg.risk.expect("risk section should parse");
         assert_eq!(risk.price_freshness_secs, 60);
-        assert_eq!(risk.kill_switch_release_jst_hour, 0);
         risk.validate().unwrap();
     }
 
     #[test]
     fn risk_validate_rejects_zero_freshness() {
-        use rust_decimal_macros::dec;
         let r = crate::config::RiskConfig {
-            daily_loss_limit_pct: dec!(0.05),
             price_freshness_secs: 0,
-            kill_switch_release_jst_hour: 0,
-        };
-        assert!(r.validate().is_err());
-    }
-
-    #[test]
-    fn risk_validate_rejects_invalid_loss_limit() {
-        use rust_decimal_macros::dec;
-        let r = crate::config::RiskConfig {
-            daily_loss_limit_pct: dec!(0),
-            price_freshness_secs: 60,
-            kill_switch_release_jst_hour: 0,
         };
         assert!(r.validate().is_err());
     }
