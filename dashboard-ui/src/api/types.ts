@@ -35,9 +35,9 @@ export interface Strategy {
   display_name: string
   category: 'fx' | 'crypto'
   risk_level: 'low' | 'medium' | 'high'
-  description: string
-  algorithm: string
-  default_params: Record<string, unknown>
+  description: string | null
+  algorithm: string | null
+  default_params: Record<string, unknown> | null
   created_at: string
 }
 
