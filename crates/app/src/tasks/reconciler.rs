@@ -26,7 +26,7 @@ pub struct ExchangeOpen {
 
 #[derive(Debug, Clone)]
 pub struct QuantityMismatch {
-    pub trade_id: Uuid,
+    pub trade_ids: Vec<Uuid>,
     pub pair: String,
     pub db_qty: Decimal,
     pub exchange_qty: Decimal,
@@ -61,7 +61,7 @@ pub fn compute_diff(db: &[DbOpen], exch: &[ExchangeOpen]) -> ReconcileDiff {
             Some(ex_qty) => {
                 if db_qty != ex_qty {
                     diff.quantity_mismatch.push(QuantityMismatch {
-                        trade_id: trade_ids[0],
+                        trade_ids: trade_ids.clone(),
                         pair: key.0.clone(),
                         db_qty: *db_qty,
                         exchange_qty: *ex_qty,

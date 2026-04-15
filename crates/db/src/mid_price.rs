@@ -8,10 +8,14 @@ use async_trait::async_trait;
 use auto_trader_core::types::Pair;
 use rust_decimal::Decimal;
 
-/// Provides mid-price for a given trading pair.
+/// Provides mid-price and tick-age for a given trading pair.
 ///
 /// Implementors: `Arc<auto_trader_market::price_store::PriceStore>`.
 #[async_trait]
 pub trait MidPriceSource: Send + Sync {
     async fn mid(&self, pair: &Pair) -> Option<Decimal>;
+
+    /// Return the age (in seconds) of the most-recent tick for this pair
+    /// across all exchanges. Returns `None` when no tick has been observed.
+    async fn last_tick_age(&self, pair: &Pair) -> Option<u64>;
 }

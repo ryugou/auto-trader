@@ -769,13 +769,14 @@ impl TryFrom<TradeRow> for Trade {
 
 /// Compute the total unrealized PnL for all open/closing trades on an account.
 ///
-/// Mid price is obtained from `price_source`. Pairs without a current price
-/// tick are treated as zero (conservative — do not block the gate on missing
-/// price data; that is handled separately by the freshness check).
+/// Mid price is obtained from `price_source`. Returns `Err` when any open pair
+/// has no tick or the tick is stale (age > `max_age_secs`), so that the caller
+/// can fail-closed rather than silently skipping a potentially large loss.
 pub async fn sum_unrealized_pnl_for_account(
     pool: &PgPool,
     account_id: Uuid,
     price_source: &dyn crate::mid_price::MidPriceSource,
+    max_age_secs: u64,
 ) -> anyhow::Result<Decimal> {
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -795,8 +796,24 @@ pub async fn sum_unrealized_pnl_for_account(
     let mut total = Decimal::ZERO;
     for row in rows {
         let pair_obj = auto_trader_core::types::Pair::new(&row.pair);
+        let Some(age) = price_source.last_tick_age(&pair_obj).await else {
+            anyhow::bail!(
+                "no tick for open pair {} (account {})",
+                row.pair,
+                account_id
+            );
+        };
+        if age > max_age_secs {
+            anyhow::bail!(
+                "stale tick for open pair {} (age={}s > {}s, account {})",
+                row.pair,
+                age,
+                max_age_secs,
+                account_id
+            );
+        }
         let Some(current) = price_source.mid(&pair_obj).await else {
-            continue;
+            anyhow::bail!("no mid for open pair {} (account {})", row.pair, account_id);
         };
         let pnl = match row.direction.as_str() {
             "long" => (current - row.entry_price) * row.quantity,
@@ -895,4 +912,135 @@ pub async fn list_trades(
     let total: i64 = count_qb.build_query_scalar::<i64>().fetch_one(pool).await?;
 
     Ok((trades, total))
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for sum_unrealized_pnl_for_account freshness checks
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mid_price::MidPriceSource;
+    use async_trait::async_trait;
+    use auto_trader_core::types::Pair;
+    use rust_decimal_macros::dec;
+
+    /// Test double: always returns a fixed mid price and a configurable age.
+    struct MockPriceSource {
+        mid: Option<Decimal>,
+        age: Option<u64>,
+    }
+
+    #[async_trait]
+    impl MidPriceSource for MockPriceSource {
+        async fn mid(&self, _pair: &Pair) -> Option<Decimal> {
+            self.mid
+        }
+        async fn last_tick_age(&self, _pair: &Pair) -> Option<u64> {
+            self.age
+        }
+    }
+
+    /// Insert a minimal strategy + trading_account row so the trades FK is satisfied.
+    async fn insert_account(pool: &PgPool, id: Uuid) {
+        sqlx::query(
+            "INSERT INTO strategies (name, display_name, category, risk_level)
+             VALUES ('test_strat', 'Test Strategy', 'test', 'low')
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("insert strategy");
+
+        sqlx::query(
+            "INSERT INTO trading_accounts
+             (id, name, account_type, exchange, strategy,
+              initial_balance, current_balance, leverage, currency)
+             VALUES ($1, 'test', 'paper', 'bitflyer_cfd', 'test_strat',
+                     10000, 10000, 1, 'JPY')",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert account");
+    }
+
+    /// Insert a minimal open trade row.
+    async fn insert_open_trade(pool: &PgPool, account_id: Uuid, pair: &str) {
+        let trade_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO trades
+             (id, account_id, strategy_name, pair, exchange, direction,
+              entry_price, stop_loss, quantity, leverage, fees,
+              entry_at, status)
+             VALUES ($1, $2, 'test_strat', $3, 'bitflyer_cfd', 'long',
+                     5000000, 4900000, 0.01, 1, 0,
+                     NOW(), 'open')",
+        )
+        .bind(trade_id)
+        .bind(account_id)
+        .bind(pair)
+        .execute(pool)
+        .await
+        .expect("insert trade");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn returns_zero_when_no_open_trades(pool: PgPool) {
+        let account_id = Uuid::new_v4();
+        insert_account(&pool, account_id).await;
+        let src = MockPriceSource {
+            mid: Some(dec!(5_100_000)),
+            age: Some(10),
+        };
+        let result = sum_unrealized_pnl_for_account(&pool, account_id, &src, 60).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Decimal::ZERO);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn errors_when_tick_missing_for_open_pair(pool: PgPool) {
+        let account_id = Uuid::new_v4();
+        insert_account(&pool, account_id).await;
+        insert_open_trade(&pool, account_id, "FX_BTC_JPY").await;
+        let src = MockPriceSource {
+            mid: None,
+            age: None, // no tick at all
+        };
+        let result = sum_unrealized_pnl_for_account(&pool, account_id, &src, 60).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no tick for open pair"), "unexpected: {msg}");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn errors_when_tick_is_stale(pool: PgPool) {
+        let account_id = Uuid::new_v4();
+        insert_account(&pool, account_id).await;
+        insert_open_trade(&pool, account_id, "FX_BTC_JPY").await;
+        let src = MockPriceSource {
+            mid: Some(dec!(5_100_000)),
+            age: Some(120), // 120s > 60s threshold
+        };
+        let result = sum_unrealized_pnl_for_account(&pool, account_id, &src, 60).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("stale tick"), "unexpected: {msg}");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn computes_pnl_when_tick_is_fresh(pool: PgPool) {
+        let account_id = Uuid::new_v4();
+        insert_account(&pool, account_id).await;
+        insert_open_trade(&pool, account_id, "FX_BTC_JPY").await;
+        // entry_price=5_000_000, long, qty=0.01 → pnl=(5_100_000 - 5_000_000)*0.01 = 1000
+        let src = MockPriceSource {
+            mid: Some(dec!(5_100_000)),
+            age: Some(5),
+        };
+        let result = sum_unrealized_pnl_for_account(&pool, account_id, &src, 60).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), dec!(1000));
+    }
 }

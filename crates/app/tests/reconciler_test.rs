@@ -67,7 +67,43 @@ fn detects_quantity_mismatch_same_direction() {
     let diff = compute_diff(&db, &exch);
     assert_eq!(diff.quantity_mismatch.len(), 1);
     let m = &diff.quantity_mismatch[0];
-    assert_eq!(m.trade_id, trade_id);
+    assert_eq!(m.trade_ids, vec![trade_id]);
     assert_eq!(m.db_qty, dec!(0.01));
     assert_eq!(m.exchange_qty, dec!(0.02));
+}
+
+#[test]
+fn quantity_mismatch_includes_all_trade_ids_for_same_key() {
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+    let db = vec![
+        DbOpen {
+            trade_id: id1,
+            pair: "FX_BTC_JPY".into(),
+            direction: "long".into(),
+            quantity: dec!(0.01),
+        },
+        DbOpen {
+            trade_id: id2,
+            pair: "FX_BTC_JPY".into(),
+            direction: "long".into(),
+            quantity: dec!(0.01),
+        },
+    ];
+    let exch = vec![ExchangeOpen {
+        pair: "FX_BTC_JPY".into(),
+        direction: "long".into(),
+        quantity: dec!(0.05),
+    }];
+    let diff = compute_diff(&db, &exch);
+    assert_eq!(diff.quantity_mismatch.len(), 1);
+    let m = &diff.quantity_mismatch[0];
+    // Both trade IDs must be present (order is non-deterministic via HashMap).
+    let mut ids = m.trade_ids.clone();
+    ids.sort();
+    let mut expected = vec![id1, id2];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert_eq!(m.db_qty, dec!(0.02));
+    assert_eq!(m.exchange_qty, dec!(0.05));
 }

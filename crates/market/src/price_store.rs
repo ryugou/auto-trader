@@ -197,6 +197,10 @@ impl auto_trader_db::mid_price::MidPriceSource for PriceStore {
     async fn mid(&self, pair: &Pair) -> Option<rust_decimal::Decimal> {
         PriceStore::mid(self, pair).await
     }
+
+    async fn last_tick_age(&self, pair: &Pair) -> Option<u64> {
+        PriceStore::last_tick_age(self, pair).await
+    }
 }
 
 #[cfg(test)]

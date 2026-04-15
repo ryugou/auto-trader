@@ -510,10 +510,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // Compute effective_dry_run for the validator: LIVE_DRY_RUN env
+            // wins over [live].dry_run config. This must match the logic in
+            // the live_forces_dry_run block below so the validator sees the
+            // same value that the executor loops will use.
+            let startup_effective_dry_run: bool = match std::env::var("LIVE_DRY_RUN") {
+                Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => true,
+                    "0" | "false" | "no" | "off" => false,
+                    _ => config.live.as_ref().is_some_and(|l| l.dry_run),
+                },
+                Err(_) => config.live.as_ref().is_some_and(|l| l.dry_run),
+            };
             // Fail-fast safety gate: validate config × env × DB accounts.
             auto_trader::startup::validate_startup(
                 &db_accounts,
                 config.live.as_ref(),
+                startup_effective_dry_run,
                 std::env::var("SLACK_WEBHOOK_URL").ok().as_deref(),
                 std::env::var("BITFLYER_API_KEY").ok().as_deref(),
                 std::env::var("BITFLYER_API_SECRET").ok().as_deref(),
@@ -1121,6 +1134,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_position_sizer = shared_position_sizer.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_risk_gate = risk_gate.clone();
+    let executor_risk_config = risk_config.clone();
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1179,16 +1193,17 @@ async fn main() -> anyhow::Result<()> {
                     &executor_pool,
                     pac.id,
                     executor_price_store.as_ref(),
+                    executor_risk_config.price_freshness_secs,
                 )
                 .await
                 {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::error!(
-                            "risk_gate: unrealized pnl calc failed for {}: {e}",
+                            "risk_gate: unrealized pnl calc failed for {}: {e}; skipping signal (fail-closed)",
                             pac.name
                         );
-                        rust_decimal::Decimal::ZERO
+                        continue;
                     }
                 };
                 let decision = executor_risk_gate
