@@ -1,0 +1,22 @@
+-- Kill Switch 発動記録。PR-1 の unified_rewrite で drop したテーブルを
+-- RiskGate 実装に合わせて再作成。trading_accounts FK に合わせる。
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS risk_halts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES trading_accounts(id) ON DELETE RESTRICT,
+    reason TEXT NOT NULL,
+    daily_loss NUMERIC NOT NULL,
+    loss_limit NUMERIC NOT NULL,
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    halted_until TIMESTAMPTZ NOT NULL,
+    released_at TIMESTAMPTZ,
+    CONSTRAINT risk_halts_halt_after_trigger
+        CHECK (halted_until > triggered_at)
+);
+
+CREATE INDEX IF NOT EXISTS risk_halts_account_active
+    ON risk_halts (account_id, halted_until DESC)
+    WHERE released_at IS NULL;
+
+COMMIT;
