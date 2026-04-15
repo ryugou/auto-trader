@@ -575,6 +575,23 @@ async fn main() -> anyhow::Result<()> {
         ))
     };
 
+    let risk_config = config.risk.clone().unwrap_or_else(|| {
+        auto_trader_core::config::RiskConfig {
+            daily_loss_limit_pct: rust_decimal::Decimal::new(5, 2),
+            price_freshness_secs: 60,
+            kill_switch_release_jst_hour: 0,
+        }
+    });
+    let risk_gate = Arc::new(auto_trader_executor::risk_gate::RiskGate::new(
+        pool.clone(),
+        notifier.clone(),
+        auto_trader_executor::risk_gate::RiskGateConfig {
+            daily_loss_limit_pct: risk_config.daily_loss_limit_pct,
+            price_freshness_secs: risk_config.price_freshness_secs,
+        },
+        risk_config.kill_switch_release_jst_hour,
+    ));
+
     let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
         vegapunk_base.as_ref().map(|base| {
             Arc::new(Mutex::new(
@@ -1107,6 +1124,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_notifier = notifier.clone();
     let executor_position_sizer = shared_position_sizer.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
+    let executor_risk_gate = risk_gate.clone();
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1155,6 +1173,50 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
+
+                // RiskGate pre-check (paper + live both).
+                let last_tick_age = executor_price_store
+                    .last_tick_age(&signal.pair)
+                    .await
+                    .unwrap_or(u64::MAX);
+                let unrealized = match auto_trader_db::trades::sum_unrealized_pnl_for_account(
+                    &executor_pool,
+                    pac.id,
+                    executor_price_store.as_ref(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "risk_gate: unrealized pnl calc failed for {}: {e}",
+                            pac.name
+                        );
+                        rust_decimal::Decimal::ZERO
+                    }
+                };
+                let decision = executor_risk_gate
+                    .check(signal, pac, last_tick_age, unrealized)
+                    .await;
+                match decision {
+                    Ok(auto_trader_executor::risk_gate::GateDecision::Pass) => {}
+                    Ok(auto_trader_executor::risk_gate::GateDecision::Reject(reason)) => {
+                        tracing::warn!(
+                            "risk_gate rejected signal for {}: {:?}",
+                            pac.name,
+                            reason
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "risk_gate check errored for {}: {e}; failing closed (skip)",
+                            pac.name
+                        );
+                        continue;
+                    }
+                }
+
                 let trader = UnifiedTrader::new(
                     executor_pool.clone(),
                     exchange,

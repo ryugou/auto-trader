@@ -767,6 +767,47 @@ impl TryFrom<TradeRow> for Trade {
     }
 }
 
+/// Compute the total unrealized PnL for all open/closing trades on an account.
+///
+/// Mid price is obtained from `price_source`. Pairs without a current price
+/// tick are treated as zero (conservative — do not block the gate on missing
+/// price data; that is handled separately by the freshness check).
+pub async fn sum_unrealized_pnl_for_account(
+    pool: &PgPool,
+    account_id: Uuid,
+    price_source: &dyn crate::mid_price::MidPriceSource,
+) -> anyhow::Result<Decimal> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        pair: String,
+        direction: String,
+        entry_price: Decimal,
+        quantity: Decimal,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT pair, direction, entry_price, quantity FROM trades
+         WHERE account_id = $1 AND status IN ('open', 'closing')",
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut total = Decimal::ZERO;
+    for row in rows {
+        let pair_obj = auto_trader_core::types::Pair::new(&row.pair);
+        let Some(current) = price_source.mid(&pair_obj).await else {
+            continue;
+        };
+        let pnl = match row.direction.as_str() {
+            "long" => (current - row.entry_price) * row.quantity,
+            "short" => (row.entry_price - current) * row.quantity,
+            _ => continue,
+        };
+        total += pnl;
+    }
+    Ok(total)
+}
+
 /// RiskGate 用: 指定 account × strategy × pair で open/closing な trade を1件。
 pub async fn find_open_for_strategy_pair(
     pool: &PgPool,
