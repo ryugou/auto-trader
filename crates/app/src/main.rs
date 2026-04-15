@@ -759,6 +759,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
+    let crypto_monitor_approved_live = approved_live_account_ids.clone();
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -794,6 +795,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+                if !auto_trader::startup::is_account_approved_for_execution(
+                    &account_type,
+                    account_id,
+                    &crypto_monitor_approved_live,
+                ) {
+                    tracing::warn!(
+                        "refusing close for unapproved account {} (trade {}); manual intervention required",
+                        account_id,
+                        trade.id
+                    );
+                    continue;
+                }
                 let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
@@ -1021,6 +1034,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
     let exit_live_forces_dry_run = live_forces_dry_run;
+    let exit_approved_live = approved_live_account_ids.clone();
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade joined with account info in one query so we
@@ -1059,6 +1073,18 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+            if !auto_trader::startup::is_account_approved_for_execution(
+                &account_type,
+                account_id,
+                &exit_approved_live,
+            ) {
+                tracing::warn!(
+                    "refusing strategy exit for unapproved account {} (trade {})",
+                    account_id,
+                    trade.id
+                );
+                continue;
+            }
             let dry_run = account_type == "paper" || exit_live_forces_dry_run;
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
@@ -1178,11 +1204,16 @@ async fn main() -> anyhow::Result<()> {
                 // Safety gate: refuse signals for live accounts that were not
                 // present at startup. Such accounts bypass validate_startup's
                 // single-live / enabled / Slack / API-key checks.
-                if pac.account_type == "live" && !executor_approved_live.contains(&pac.id) {
+                if !auto_trader::startup::is_account_approved_for_execution(
+                    &pac.account_type,
+                    pac.id,
+                    &executor_approved_live,
+                ) {
                     tracing::warn!(
-                        "refusing signal for dynamically-added live account {} (id={}); live accounts must be present at startup for safety validation. Restart to pick up new live accounts.",
+                        "refusing signal for unapproved account {} (id={}, type={}); must be approved at startup",
                         pac.name,
-                        pac.id
+                        pac.id,
+                        pac.account_type
                     );
                     continue;
                 }

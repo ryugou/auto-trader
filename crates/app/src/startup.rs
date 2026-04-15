@@ -2,6 +2,26 @@
 
 use auto_trader_core::config::LiveConfig;
 use auto_trader_db::trading_accounts::TradingAccount;
+use std::collections::HashSet;
+use uuid::Uuid;
+
+/// Returns true if this account is allowed to execute against the live
+/// exchange right now. Paper accounts are always allowed (no external
+/// side-effect). Live accounts are allowed ONLY if their UUID was in the
+/// startup-approved set. This is the single source of truth — every site
+/// that would call `send_child_order` (or equivalent real-money side effect)
+/// must consult this helper.
+pub fn is_account_approved_for_execution(
+    account_type: &str,
+    account_id: Uuid,
+    approved_live: &HashSet<Uuid>,
+) -> bool {
+    match account_type {
+        "paper" => true,
+        "live" => approved_live.contains(&account_id),
+        _ => false, // future-proof: unknown account_type → refuse
+    }
+}
 
 /// Parse `LIVE_DRY_RUN` env var against `[live].dry_run` config. Returns the
 /// effective dry-run flag. Invalid env value logs a warning and falls back
@@ -81,7 +101,38 @@ pub fn validate_startup(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_effective_dry_run;
+    use super::{is_account_approved_for_execution, resolve_effective_dry_run};
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    #[test]
+    fn paper_account_is_always_approved() {
+        let approved: HashSet<Uuid> = HashSet::new();
+        let id = Uuid::new_v4();
+        assert!(is_account_approved_for_execution("paper", id, &approved));
+    }
+
+    #[test]
+    fn live_account_in_set_is_approved() {
+        let id = Uuid::new_v4();
+        let approved: HashSet<Uuid> = [id].iter().cloned().collect();
+        assert!(is_account_approved_for_execution("live", id, &approved));
+    }
+
+    #[test]
+    fn live_account_not_in_set_is_refused() {
+        let approved: HashSet<Uuid> = HashSet::new();
+        let id = Uuid::new_v4();
+        assert!(!is_account_approved_for_execution("live", id, &approved));
+    }
+
+    #[test]
+    fn unknown_account_type_is_refused() {
+        let id = Uuid::new_v4();
+        let approved: HashSet<Uuid> = [id].iter().cloned().collect();
+        assert!(!is_account_approved_for_execution("demo", id, &approved));
+        assert!(!is_account_approved_for_execution("", id, &approved));
+    }
 
     #[test]
     fn env_true_overrides_config_false() {

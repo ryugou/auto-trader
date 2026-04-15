@@ -77,12 +77,18 @@ pub async fn run_balance_sync_loop(
             }
         };
         for acc in &accounts {
-            if acc.account_type != "live" {
+            // Only process accounts approved for execution at startup; paper
+            // accounts are always allowed, unknown types are refused.
+            if !crate::startup::is_account_approved_for_execution(
+                &acc.account_type,
+                acc.id,
+                &approved_live_account_ids,
+            ) {
                 continue;
             }
-            // Only sync accounts that were approved at startup; refuse any live
-            // account inserted via REST after startup validation ran.
-            if !approved_live_account_ids.contains(&acc.id) {
+            // Balance sync is a live-only concern; skip paper accounts even
+            // though they are "approved" — they have no exchange balance.
+            if acc.account_type != "live" {
                 continue;
             }
             if let Err(e) = sync_account(&pool, &api, &notifier, acc, drift_threshold).await {

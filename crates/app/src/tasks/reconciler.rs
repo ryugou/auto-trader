@@ -169,12 +169,18 @@ pub async fn run_reconciler_loop(
             }
         };
         for acc in &accounts {
-            if acc.account_type != "live" {
+            // Only process accounts approved for execution at startup; paper
+            // accounts are always allowed, unknown types are refused.
+            if !crate::startup::is_account_approved_for_execution(
+                &acc.account_type,
+                acc.id,
+                &approved_live_account_ids,
+            ) {
                 continue;
             }
-            // Only reconcile accounts that were approved at startup; refuse
-            // any live account inserted via REST after startup validation ran.
-            if !approved_live_account_ids.contains(&acc.id) {
+            // Reconciliation is a live-only concern; skip paper accounts even
+            // though they are "approved" — they have no exchange positions.
+            if acc.account_type != "live" {
                 continue;
             }
             if let Err(e) = reconcile_account(&pool, &api, &notifier, acc, &product_code).await {
