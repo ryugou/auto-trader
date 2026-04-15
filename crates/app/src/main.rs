@@ -510,19 +510,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // Fail-fast safety gate: if any `account_type='live'` row exists,
-            // [live].enabled MUST be true. Otherwise a misconfigured deploy
-            // would place real orders the instant BITFLYER_API_KEY/SECRET
-            // are set, with no config-level guard. We refuse to start.
-            let has_live = db_accounts.iter().any(|p| p.account_type == "live");
-            if has_live {
-                let live_enabled = config.live.as_ref().is_some_and(|l| l.enabled);
-                if !live_enabled {
-                    anyhow::bail!(
-                        "refusing to start: account_type='live' row(s) present in DB but [live].enabled is false (or [live] section missing). Set [live].enabled=true (and optionally [live].dry_run=true to force-simulate) before restarting."
-                    );
-                }
-            }
+            // Fail-fast safety gate: validate config × env × DB accounts.
+            auto_trader::startup::validate_startup(
+                &db_accounts,
+                config.live.as_ref(),
+                std::env::var("SLACK_WEBHOOK_URL").ok().as_deref(),
+                std::env::var("BITFLYER_API_KEY").ok().as_deref(),
+                std::env::var("BITFLYER_API_SECRET").ok().as_deref(),
+            )?;
         }
         Err(e) => {
             tracing::error!("failed to list trading accounts at startup: {e}");
