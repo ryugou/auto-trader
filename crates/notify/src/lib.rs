@@ -71,8 +71,9 @@ pub struct BalanceDriftEvent {
     pub db_balance: Decimal,
     pub exchange_balance: Decimal,
     /// 残高の乖離率 **パーセンテージ値** (例: `5` = 5%、`0.5` = 0.5%)。
-    /// `db_balance / exchange_balance - 1` の **×100 済み** の値を渡すこと。
-    /// format_for_slack は `{}%` として表示するので、呼び出し側で小数
+    /// `|exchange_balance - db_balance| / db_balance * 100` の値を渡すこと。
+    /// `balance_sync::is_drift_over_threshold` の閾値判定と同じ式。
+    /// 常に非負。format_for_slack は `{}%` として表示するので、呼び出し側で小数
     /// (0.05 = 5%) を渡すと Slack には `0.05%` と出て 100 倍のズレになる。
     pub diff_pct: Decimal,
 }

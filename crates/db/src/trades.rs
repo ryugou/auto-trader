@@ -818,7 +818,18 @@ pub async fn sum_unrealized_pnl_for_account(
         let pnl = match row.direction.as_str() {
             "long" => (current - row.entry_price) * row.quantity,
             "short" => (row.entry_price - current) * row.quantity,
-            _ => continue,
+            other => {
+                // Defense in depth: trades.direction has a CHECK constraint ('long'|'short'),
+                // so this arm is unreachable via normal inserts. Still fail-closed rather than
+                // silent skip — undercounting unrealized PnL could cause the kill switch to
+                // miss a real breach.
+                anyhow::bail!(
+                    "sum_unrealized_pnl_for_account: unexpected direction '{}' for account {} (trade in pair {}) — refusing to evaluate fail-open",
+                    other,
+                    account_id,
+                    row.pair
+                );
+            }
         };
         total += pnl;
     }

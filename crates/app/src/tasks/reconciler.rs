@@ -109,21 +109,26 @@ pub async fn reconcile_account(
         .collect();
 
     let positions = api.get_positions(product_code).await?;
-    let exch_opens: Vec<ExchangeOpen> = positions
-        .iter()
-        .map(|p| {
-            let direction = if p.side.eq_ignore_ascii_case("BUY") {
-                "long".to_string()
-            } else {
-                "short".to_string()
-            };
-            ExchangeOpen {
-                pair: p.product_code.clone(),
-                direction,
-                quantity: p.size,
+    let mut exch_opens: Vec<ExchangeOpen> = Vec::new();
+    for p in &positions {
+        let direction = match p.side.trim().to_ascii_uppercase().as_str() {
+            "BUY" => "long",
+            "SELL" => "short",
+            other => {
+                tracing::error!(
+                    "reconciler: unexpected side '{}' from exchange for account {} (skipping)",
+                    other,
+                    account.name
+                );
+                continue;
             }
-        })
-        .collect();
+        };
+        exch_opens.push(ExchangeOpen {
+            pair: p.product_code.clone(),
+            direction: direction.to_string(),
+            quantity: p.size,
+        });
+    }
 
     let diff = compute_diff(&db_opens, &exch_opens);
     if diff.db_orphan.is_empty()
