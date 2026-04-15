@@ -767,6 +767,27 @@ impl TryFrom<TradeRow> for Trade {
     }
 }
 
+/// RiskGate 用: 指定 account × strategy × pair で open/closing な trade を1件。
+pub async fn find_open_for_strategy_pair(
+    pool: &PgPool,
+    account_id: Uuid,
+    strategy_name: &str,
+    pair: &str,
+) -> anyhow::Result<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM trades
+         WHERE account_id = $1 AND strategy_name = $2 AND pair = $3
+           AND status IN ('open', 'closing')
+         LIMIT 1",
+    )
+    .bind(account_id)
+    .bind(strategy_name)
+    .bind(pair)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
+}
+
 /// Paginated trade list (for API use).
 pub async fn list_trades(
     pool: &PgPool,
