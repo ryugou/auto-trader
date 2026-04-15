@@ -73,6 +73,26 @@ pub async fn release_halt(pool: &PgPool, halt_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 未解除の最新 halt を1件返す (halted_until が未来でも過去でも)。
+/// RiskGate が期限切れ halt の自動解除と KillSwitchReleased 通知に使う。
+pub async fn latest_unreleased_halt(
+    pool: &PgPool,
+    account_id: Uuid,
+) -> anyhow::Result<Option<RiskHalt>> {
+    let halt = sqlx::query_as::<_, RiskHalt>(
+        "SELECT id, account_id, reason, daily_loss, loss_limit,
+                triggered_at, halted_until, released_at
+         FROM risk_halts
+         WHERE account_id = $1 AND released_at IS NULL
+         ORDER BY triggered_at DESC
+         LIMIT 1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(halt)
+}
+
 /// JST 本日のクローズ済み trade の pnl_amount 合計。
 pub async fn daily_realized_pnl_jst(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
     let pnl: Option<Decimal> = sqlx::query_scalar(
@@ -166,5 +186,52 @@ mod tests {
         .unwrap();
         let active = active_halt_for_account(&pool, account_id).await.unwrap();
         assert!(active.is_none(), "expired halt must not count as active");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn latest_unreleased_returns_expired_halt(pool: PgPool) {
+        let account_id = seed_account(&pool).await;
+        let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+        sqlx::query(
+            "INSERT INTO risk_halts
+                 (account_id, reason, daily_loss, loss_limit, triggered_at, halted_until)
+             VALUES ($1, 'test', 0, -1500, $2, $3)",
+        )
+        .bind(account_id)
+        .bind(past - chrono::Duration::hours(1))
+        .bind(past)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let halt = latest_unreleased_halt(&pool, account_id).await.unwrap();
+        assert!(
+            halt.is_some(),
+            "expired but unreleased halt must still be fetched"
+        );
+        assert!(
+            halt.unwrap().halted_until <= chrono::Utc::now(),
+            "halted_until must be in the past"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn latest_unreleased_skips_released_halt(pool: PgPool) {
+        let account_id = seed_account(&pool).await;
+        let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let halt_id = sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO risk_halts
+                 (account_id, reason, daily_loss, loss_limit, triggered_at, halted_until)
+             VALUES ($1, 'test', 0, -1500, $2, $3)
+             RETURNING id",
+        )
+        .bind(account_id)
+        .bind(past - chrono::Duration::hours(1))
+        .bind(past)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        release_halt(&pool, halt_id).await.unwrap();
+        let halt = latest_unreleased_halt(&pool, account_id).await.unwrap();
+        assert!(halt.is_none(), "released halt must not be returned");
     }
 }

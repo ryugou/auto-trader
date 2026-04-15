@@ -92,9 +92,10 @@ pub async fn reconcile_account(
 ) -> anyhow::Result<()> {
     let db_rows: Vec<(Uuid, String, String, Decimal)> = sqlx::query_as(
         "SELECT id, pair, direction, quantity FROM trades
-         WHERE account_id = $1 AND status IN ('open', 'closing')",
+         WHERE account_id = $1 AND pair = $2 AND status IN ('open', 'closing')",
     )
     .bind(account.id)
+    .bind(product_code)
     .fetch_all(pool)
     .await?;
     let db_opens: Vec<DbOpen> = db_rows

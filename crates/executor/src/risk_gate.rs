@@ -3,7 +3,9 @@
 use auto_trader_core::types::Signal;
 use auto_trader_db::risk_halts;
 use auto_trader_db::trading_accounts::TradingAccount;
-use auto_trader_notify::{KillSwitchTriggeredEvent, Notifier, NotifyEvent};
+use auto_trader_notify::{
+    KillSwitchReleasedEvent, KillSwitchTriggeredEvent, Notifier, NotifyEvent,
+};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -76,11 +78,27 @@ impl RiskGate {
         {
             return Ok(GateDecision::Reject(r));
         }
-        // 2) active halt
-        if let Some(halt) = risk_halts::active_halt_for_account(&self.pool, account.id).await? {
-            return Ok(GateDecision::Reject(RejectReason::KillSwitchActive {
-                until: halt.halted_until,
-            }));
+        // 2) kill switch: fetch latest unreleased halt regardless of expiry
+        if let Some(halt) = risk_halts::latest_unreleased_halt(&self.pool, account.id).await? {
+            let now = Utc::now();
+            if halt.halted_until > now {
+                return Ok(GateDecision::Reject(RejectReason::KillSwitchActive {
+                    until: halt.halted_until,
+                }));
+            }
+            // Halt expired — release it so the partial index stays bounded
+            // and we have a clean audit trail. Fire KillSwitchReleased notify.
+            risk_halts::release_halt(&self.pool, halt.id).await?;
+            let ev = NotifyEvent::KillSwitchReleased(KillSwitchReleasedEvent {
+                account_name: account.name.clone(),
+            });
+            if let Err(e) = self.notifier.send(ev).await {
+                tracing::error!(
+                    "risk_gate: KillSwitchReleased notify failed for {}: {e}",
+                    account.name
+                );
+            }
+            // Fall through to other gates.
         }
         // 3) duplicate position
         let existing = auto_trader_db::trades::find_open_for_strategy_pair(
