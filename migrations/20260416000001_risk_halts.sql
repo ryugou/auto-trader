@@ -15,10 +15,6 @@ CREATE TABLE IF NOT EXISTS risk_halts (
         CHECK (halted_until > triggered_at)
 );
 
-CREATE INDEX IF NOT EXISTS risk_halts_account_active
-    ON risk_halts (account_id, triggered_at DESC)
-    WHERE released_at IS NULL;
-
 -- 同一 account の未解除 halt は 1 件のみ許可（並行 KillSwitch 二重発火防止）。
 CREATE UNIQUE INDEX IF NOT EXISTS risk_halts_one_active_per_account
     ON risk_halts (account_id)

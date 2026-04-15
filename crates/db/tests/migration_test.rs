@@ -13,20 +13,6 @@ async fn risk_halts_table_exists(pool: sqlx::PgPool) -> sqlx::Result<()> {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn risk_halts_active_partial_index_exists(pool: sqlx::PgPool) -> sqlx::Result<()> {
-    let row: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (
-            SELECT 1 FROM pg_indexes
-            WHERE indexname = 'risk_halts_account_active'
-        )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(row.0);
-    Ok(())
-}
-
-#[sqlx::test(migrations = "../../migrations")]
 async fn risk_halts_one_active_per_account_unique_exists(pool: sqlx::PgPool) {
     let row: (bool,) = sqlx::query_as(
         "SELECT EXISTS (
