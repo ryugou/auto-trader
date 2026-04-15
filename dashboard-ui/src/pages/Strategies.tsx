@@ -75,24 +75,29 @@ function StrategyCard({ strategy }: { strategy: Strategy }) {
       {strategy.description && (
         <p className="text-sm text-gray-300">{strategy.description}</p>
       )}
-      <details className="group">
-        <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-200 select-none">
-          アルゴリズム詳細を表示
-        </summary>
-        {strategy.algorithm && (
-          <pre className="mt-2 whitespace-pre-wrap text-xs text-gray-300 bg-gray-950 border border-gray-800 rounded p-3 leading-relaxed">
-            {strategy.algorithm.trim()}
-          </pre>
-        )}
-        {strategy.default_params && Object.keys(strategy.default_params).length > 0 && (
-          <div className="mt-2">
-            <div className="text-xs text-gray-500 mb-1">既定パラメータ:</div>
-            <pre className="text-xs text-gray-300 bg-gray-950 border border-gray-800 rounded p-3">
-              {JSON.stringify(strategy.default_params, null, 2)}
+      {(strategy.algorithm ||
+        (strategy.default_params &&
+          Object.keys(strategy.default_params).length > 0)) && (
+        <details className="group">
+          <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-200 select-none">
+            アルゴリズム詳細を表示
+          </summary>
+          {strategy.algorithm && (
+            <pre className="mt-2 whitespace-pre-wrap text-xs text-gray-300 bg-gray-950 border border-gray-800 rounded p-3 leading-relaxed">
+              {strategy.algorithm.trim()}
             </pre>
-          </div>
-        )}
-      </details>
+          )}
+          {strategy.default_params &&
+            Object.keys(strategy.default_params).length > 0 && (
+              <div className="mt-2">
+                <div className="text-xs text-gray-500 mb-1">既定パラメータ:</div>
+                <pre className="text-xs text-gray-300 bg-gray-950 border border-gray-800 rounded p-3">
+                  {JSON.stringify(strategy.default_params, null, 2)}
+                </pre>
+              </div>
+            )}
+        </details>
+      )}
     </div>
   )
 }
