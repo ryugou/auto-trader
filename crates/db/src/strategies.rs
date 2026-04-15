@@ -11,9 +11,10 @@ pub struct Strategy {
     pub name: String,
     pub display_name: String,
     pub category: String,
-    /// 'low' | 'medium' | 'high' — used by the UI to render a risk badge
-    /// next to the strategy name. Persisted via the
-    /// `strategies_risk_level_check` CHECK constraint.
+    /// 'low' | 'medium' | 'high' — used by the UI to render a risk badge.
+    /// Note: the unified_rewrite migration (PR-1) does NOT add a DB-level
+    /// CHECK constraint for these values; the TS union type + seed-data
+    /// discipline is currently the only enforcement.
     pub risk_level: String,
     pub description: Option<String>,
     pub algorithm: Option<String>,
