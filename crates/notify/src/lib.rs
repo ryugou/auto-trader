@@ -159,6 +159,11 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    /// No-op notifier for tests: behaves like `new(None)` (Slack skipped).
+    pub fn new_disabled() -> Self {
+        Self::new(None)
+    }
+
     pub fn new(slack_webhook_url: Option<String>) -> Self {
         Self {
             slack_webhook_url,

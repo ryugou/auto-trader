@@ -306,6 +306,14 @@ impl BitflyerPrivateApi {
         Self::with_base_url(base_url, api_key, api_secret)
     }
 
+    /// `new_for_test` の別名。wiremock integration test から呼びやすい名前で提供する。
+    ///
+    /// **本番コードから絶対に呼ばないこと。**
+    #[doc(hidden)]
+    pub fn new_with_base(base_url: String, api_key: String, api_secret: String) -> Self {
+        Self::with_base_url(base_url, api_key, api_secret)
+    }
+
     /// テスト用レートリミッタを注入するビルダーメソッド。
     ///
     /// **本番コードから絶対に呼ばないこと。**
