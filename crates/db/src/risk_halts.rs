@@ -74,10 +74,7 @@ pub async fn release_halt(pool: &PgPool, halt_id: Uuid) -> anyhow::Result<()> {
 }
 
 /// JST 本日のクローズ済み trade の pnl_amount 合計。
-pub async fn daily_realized_pnl_jst(
-    pool: &PgPool,
-    account_id: Uuid,
-) -> anyhow::Result<Decimal> {
+pub async fn daily_realized_pnl_jst(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
     let pnl: Option<Decimal> = sqlx::query_scalar(
         "SELECT SUM(pnl_amount) FROM trades
          WHERE account_id = $1
@@ -115,8 +112,16 @@ mod tests {
     async fn insert_and_fetch_active_halt(pool: PgPool) {
         let account_id = seed_account(&pool).await;
         let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
-        insert_halt(&pool, account_id, "daily_loss_limit_exceeded",
-                    dec!(-1600), dec!(-1500), halted_until).await.unwrap();
+        insert_halt(
+            &pool,
+            account_id,
+            "daily_loss_limit_exceeded",
+            dec!(-1600),
+            dec!(-1500),
+            halted_until,
+        )
+        .await
+        .unwrap();
         let active = active_halt_for_account(&pool, account_id).await.unwrap();
         assert!(active.is_some());
         let halt = active.unwrap();
@@ -129,8 +134,16 @@ mod tests {
     async fn released_halt_not_returned_as_active(pool: PgPool) {
         let account_id = seed_account(&pool).await;
         let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
-        let halt_id = insert_halt(&pool, account_id, "daily_loss_limit_exceeded",
-                                   dec!(-1600), dec!(-1500), halted_until).await.unwrap();
+        let halt_id = insert_halt(
+            &pool,
+            account_id,
+            "daily_loss_limit_exceeded",
+            dec!(-1600),
+            dec!(-1500),
+            halted_until,
+        )
+        .await
+        .unwrap();
         release_halt(&pool, halt_id).await.unwrap();
         let active = active_halt_for_account(&pool, account_id).await.unwrap();
         assert!(active.is_none());

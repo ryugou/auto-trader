@@ -21,7 +21,10 @@ fn rejects_when_price_tick_is_stale() {
 #[test]
 fn passes_when_price_tick_is_fresh() {
     let cfg = sample_config();
-    assert!(matches!(RiskGate::eval_price_freshness(&cfg, 10), GateDecision::Pass));
+    assert!(matches!(
+        RiskGate::eval_price_freshness(&cfg, 10),
+        GateDecision::Pass
+    ));
 }
 
 #[test]

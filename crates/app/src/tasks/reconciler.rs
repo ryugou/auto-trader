@@ -2,7 +2,7 @@
 
 use auto_trader_db::trading_accounts::{self, TradingAccount};
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
-use auto_trader_notify::{NotifyEvent, Notifier, StartupReconciliationDiffEvent};
+use auto_trader_notify::{Notifier, NotifyEvent, StartupReconciliationDiffEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::sync::Arc;

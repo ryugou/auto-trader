@@ -2,7 +2,7 @@
 
 use auto_trader_db::trading_accounts::{self, TradingAccount};
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
-use auto_trader_notify::{BalanceDriftEvent, NotifyEvent, Notifier};
+use auto_trader_notify::{BalanceDriftEvent, Notifier, NotifyEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -37,7 +37,8 @@ pub async fn sync_account(
         let diff_pct = if account.current_balance.is_zero() {
             Decimal::ZERO
         } else {
-            let ratio = (exchange_balance - account.current_balance).abs() / account.current_balance;
+            let ratio =
+                (exchange_balance - account.current_balance).abs() / account.current_balance;
             ratio * Decimal::ONE_HUNDRED
         };
         let ev = NotifyEvent::BalanceDrift(BalanceDriftEvent {

@@ -141,9 +141,7 @@ pub struct RiskConfig {
 
 impl RiskConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.daily_loss_limit_pct <= Decimal::ZERO
-            || self.daily_loss_limit_pct > Decimal::ONE
-        {
+        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct > Decimal::ONE {
             anyhow::bail!("[risk].daily_loss_limit_pct must be in (0, 1]");
         }
         if self.price_freshness_secs == 0 {

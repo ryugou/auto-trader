@@ -3,8 +3,8 @@
 use auto_trader_core::types::Signal;
 use auto_trader_db::risk_halts;
 use auto_trader_db::trading_accounts::TradingAccount;
-use auto_trader_notify::{KillSwitchTriggeredEvent, NotifyEvent, Notifier};
-use chrono::{Datelike, DateTime, Duration, FixedOffset, TimeZone, Utc};
+use auto_trader_notify::{KillSwitchTriggeredEvent, Notifier, NotifyEvent};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -71,7 +71,9 @@ impl RiskGate {
         current_unrealized: Decimal,
     ) -> anyhow::Result<GateDecision> {
         // 1) freshness
-        if let GateDecision::Reject(r) = Self::eval_price_freshness(&self.config, last_tick_age_secs) {
+        if let GateDecision::Reject(r) =
+            Self::eval_price_freshness(&self.config, last_tick_age_secs)
+        {
             return Ok(GateDecision::Reject(r));
         }
         // 2) active halt
@@ -96,7 +98,12 @@ impl RiskGate {
         // 4) kill switch evaluation + insert + notify
         let realized = risk_halts::daily_realized_pnl_jst(&self.pool, account.id).await?;
         if let GateDecision::Reject(RejectReason::DailyLossLimitExceeded { loss, limit }) =
-            Self::eval_kill_switch(&self.config, account.initial_balance, realized, current_unrealized)
+            Self::eval_kill_switch(
+                &self.config,
+                account.initial_balance,
+                realized,
+                current_unrealized,
+            )
         {
             let halted_until = self.compute_halted_until(Utc::now());
             risk_halts::insert_halt(
@@ -117,7 +124,10 @@ impl RiskGate {
             if let Err(e) = self.notifier.send(ev).await {
                 tracing::error!("risk_gate: KillSwitchTriggered notify failed: {e}");
             }
-            return Ok(GateDecision::Reject(RejectReason::DailyLossLimitExceeded { loss, limit }));
+            return Ok(GateDecision::Reject(RejectReason::DailyLossLimitExceeded {
+                loss,
+                limit,
+            }));
         }
         Ok(GateDecision::Pass)
     }

@@ -570,13 +570,14 @@ async fn main() -> anyhow::Result<()> {
         ))
     };
 
-    let risk_config = config.risk.clone().unwrap_or_else(|| {
-        auto_trader_core::config::RiskConfig {
+    let risk_config = config
+        .risk
+        .clone()
+        .unwrap_or_else(|| auto_trader_core::config::RiskConfig {
             daily_loss_limit_pct: rust_decimal::Decimal::new(5, 2),
             price_freshness_secs: 60,
             kill_switch_release_jst_hour: 0,
-        }
-    });
+        });
     let risk_gate = Arc::new(auto_trader_executor::risk_gate::RiskGate::new(
         pool.clone(),
         notifier.clone(),
@@ -1196,11 +1197,7 @@ async fn main() -> anyhow::Result<()> {
                 match decision {
                     Ok(auto_trader_executor::risk_gate::GateDecision::Pass) => {}
                     Ok(auto_trader_executor::risk_gate::GateDecision::Reject(reason)) => {
-                        tracing::warn!(
-                            "risk_gate rejected signal for {}: {:?}",
-                            pac.name,
-                            reason
-                        );
+                        tracing::warn!("risk_gate rejected signal for {}: {:?}", pac.name, reason);
                         continue;
                     }
                     Err(e) => {

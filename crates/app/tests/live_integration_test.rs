@@ -103,15 +103,9 @@ async fn balance_sync_updates_current_balance_from_exchange(pool: PgPool) {
         .unwrap()
         .unwrap();
 
-    auto_trader::tasks::balance_sync::sync_account(
-        &pool,
-        &api,
-        &notifier,
-        &account,
-        dec!(0.01),
-    )
-    .await
-    .unwrap();
+    auto_trader::tasks::balance_sync::sync_account(&pool, &api, &notifier, &account, dec!(0.01))
+        .await
+        .unwrap();
 
     let updated = auto_trader_db::trading_accounts::get(&pool, account_id)
         .await

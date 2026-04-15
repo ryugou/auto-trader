@@ -1,4 +1,4 @@
-use auto_trader::tasks::reconciler::{compute_diff, DbOpen, ExchangeOpen};
+use auto_trader::tasks::reconciler::{DbOpen, ExchangeOpen, compute_diff};
 use rust_decimal_macros::dec;
 use uuid::Uuid;
 

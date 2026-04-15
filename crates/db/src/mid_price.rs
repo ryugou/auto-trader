@@ -4,8 +4,8 @@
 //! depending on `auto-trader-market`, which would create a circular dependency
 //! (`auto-trader-market` already depends on `auto-trader-db`).
 
-use auto_trader_core::types::Pair;
 use async_trait::async_trait;
+use auto_trader_core::types::Pair;
 use rust_decimal::Decimal;
 
 /// Provides mid-price for a given trading pair.
