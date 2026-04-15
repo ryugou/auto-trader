@@ -19,4 +19,10 @@ CREATE INDEX IF NOT EXISTS risk_halts_account_active
     ON risk_halts (account_id, halted_until DESC)
     WHERE released_at IS NULL;
 
+-- 二重発注防止: 同一 account × strategy × pair で open/closing は1件まで。
+-- RiskGate の pre-check と二重化。レースで潜り抜けた場合は DB が拒否する。
+CREATE UNIQUE INDEX IF NOT EXISTS trades_one_active_per_strategy_pair
+    ON trades (account_id, strategy_name, pair)
+    WHERE status IN ('open', 'closing');
+
 COMMIT;

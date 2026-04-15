@@ -25,3 +25,17 @@ async fn risk_halts_active_partial_index_exists(pool: sqlx::PgPool) -> sqlx::Res
     assert!(row.0);
     Ok(())
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn trades_one_active_per_strategy_pair_unique_exists(pool: sqlx::PgPool) {
+    let row: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE indexname = 'trades_one_active_per_strategy_pair'
+        )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(row.0, "partial unique index must exist");
+}
