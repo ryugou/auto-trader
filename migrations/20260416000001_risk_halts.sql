@@ -19,6 +19,11 @@ CREATE INDEX IF NOT EXISTS risk_halts_account_active
     ON risk_halts (account_id, triggered_at DESC)
     WHERE released_at IS NULL;
 
+-- 同一 account の未解除 halt は 1 件のみ許可（並行 KillSwitch 二重発火防止）。
+CREATE UNIQUE INDEX IF NOT EXISTS risk_halts_one_active_per_account
+    ON risk_halts (account_id)
+    WHERE released_at IS NULL;
+
 -- 二重発注防止: 同一 account × strategy × pair で open/closing は1件まで。
 -- RiskGate の pre-check と二重化。レースで潜り抜けた場合は DB が拒否する。
 CREATE UNIQUE INDEX IF NOT EXISTS trades_one_active_per_strategy_pair

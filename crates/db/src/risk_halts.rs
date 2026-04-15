@@ -18,7 +18,9 @@ pub struct RiskHalt {
     pub released_at: Option<DateTime<Utc>>,
 }
 
-/// Kill Switch 発動レコードを作成し、id を返す。
+/// Kill Switch 発動レコードを作成し id を返す。
+/// 同一 account の未解除 halt が既に存在する場合は ON CONFLICT DO NOTHING で
+/// 何もせず None を返す（並行 KillSwitch 二重発火の安全対応）。
 pub async fn insert_halt(
     pool: &PgPool,
     account_id: Uuid,
@@ -26,11 +28,12 @@ pub async fn insert_halt(
     daily_loss: Decimal,
     loss_limit: Decimal,
     halted_until: DateTime<Utc>,
-) -> anyhow::Result<Uuid> {
-    let id: Uuid = sqlx::query_scalar(
+) -> anyhow::Result<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
         "INSERT INTO risk_halts
              (account_id, reason, daily_loss, loss_limit, halted_until)
          VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (account_id) WHERE released_at IS NULL DO NOTHING
          RETURNING id",
     )
     .bind(account_id)
@@ -38,9 +41,9 @@ pub async fn insert_halt(
     .bind(daily_loss)
     .bind(loss_limit)
     .bind(halted_until)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(id)
+    Ok(row.map(|(id,)| id))
 }
 
 /// アクティブ (未解除 かつ halted_until > NOW) な halt を1件返す。
@@ -64,13 +67,16 @@ pub async fn active_halt_for_account(
     Ok(halt)
 }
 
-/// halt を手動解除。
-pub async fn release_halt(pool: &PgPool, halt_id: Uuid) -> anyhow::Result<()> {
-    sqlx::query("UPDATE risk_halts SET released_at = NOW() WHERE id = $1 AND released_at IS NULL")
-        .bind(halt_id)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// halt を解除する。実際に更新が発生した場合 true を返す。
+/// 既に解除済みか存在しない halt_id の場合は false（冪等呼び出し可）。
+pub async fn release_halt(pool: &PgPool, halt_id: Uuid) -> anyhow::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE risk_halts SET released_at = NOW() WHERE id = $1 AND released_at IS NULL",
+    )
+    .bind(halt_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// 未解除の最新 halt を1件返す (halted_until が未来でも過去でも)。
@@ -128,12 +134,13 @@ mod tests {
         id
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn insert_and_fetch_active_halt(pool: PgPool) {
-        let account_id = seed_account(&pool).await;
-        let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
-        insert_halt(
-            &pool,
+    async fn insert_halt(
+        pool: &PgPool,
+        account_id: Uuid,
+        halted_until: chrono::DateTime<Utc>,
+    ) -> Uuid {
+        super::insert_halt(
+            pool,
             account_id,
             "daily_loss_limit_exceeded",
             dec!(-1600),
@@ -141,7 +148,15 @@ mod tests {
             halted_until,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("first insert should succeed")
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn insert_and_fetch_active_halt(pool: PgPool) {
+        let account_id = seed_account(&pool).await;
+        let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
+        insert_halt(&pool, account_id, halted_until).await;
         let active = active_halt_for_account(&pool, account_id).await.unwrap();
         assert!(active.is_some());
         let halt = active.unwrap();
@@ -154,19 +169,66 @@ mod tests {
     async fn released_halt_not_returned_as_active(pool: PgPool) {
         let account_id = seed_account(&pool).await;
         let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
-        let halt_id = insert_halt(
+        let halt_id = insert_halt(&pool, account_id, halted_until).await;
+        release_halt(&pool, halt_id).await.unwrap();
+        let active = active_halt_for_account(&pool, account_id).await.unwrap();
+        assert!(active.is_none());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn insert_halt_returns_none_when_active_already_exists(pool: PgPool) {
+        let account_id = seed_account(&pool).await;
+        let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
+        let first = super::insert_halt(
             &pool,
             account_id,
-            "daily_loss_limit_exceeded",
-            dec!(-1600),
+            "test",
+            dec!(-1000),
             dec!(-1500),
             halted_until,
         )
         .await
         .unwrap();
-        release_halt(&pool, halt_id).await.unwrap();
-        let active = active_halt_for_account(&pool, account_id).await.unwrap();
-        assert!(active.is_none());
+        assert!(first.is_some(), "first insert should succeed");
+        let second = super::insert_halt(
+            &pool,
+            account_id,
+            "test",
+            dec!(-1200),
+            dec!(-1500),
+            halted_until,
+        )
+        .await
+        .unwrap();
+        assert!(
+            second.is_none(),
+            "second insert should be no-op due to unique partial index"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn release_halt_returns_true_on_first_false_on_second(pool: PgPool) {
+        let account_id = seed_account(&pool).await;
+        let halted_until = chrono::Utc::now() + chrono::Duration::hours(24);
+        let halt_id = super::insert_halt(
+            &pool,
+            account_id,
+            "test",
+            dec!(-1000),
+            dec!(-1500),
+            halted_until,
+        )
+        .await
+        .unwrap()
+        .expect("insert should succeed");
+        assert!(
+            release_halt(&pool, halt_id).await.unwrap(),
+            "first release should affect 1 row"
+        );
+        assert!(
+            !release_halt(&pool, halt_id).await.unwrap(),
+            "second release is a no-op"
+        );
     }
 
     #[sqlx::test(migrations = "../../migrations")]

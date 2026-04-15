@@ -27,6 +27,20 @@ async fn risk_halts_active_partial_index_exists(pool: sqlx::PgPool) -> sqlx::Res
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn risk_halts_one_active_per_account_unique_exists(pool: sqlx::PgPool) {
+    let row: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE indexname = 'risk_halts_one_active_per_account'
+        )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(row.0);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn trades_one_active_per_strategy_pair_unique_exists(pool: sqlx::PgPool) {
     let row: (bool,) = sqlx::query_as(
         "SELECT EXISTS (

@@ -87,16 +87,20 @@ impl RiskGate {
                 }));
             }
             // Halt expired — release it so the partial index stays bounded
-            // and we have a clean audit trail. Fire KillSwitchReleased notify.
-            risk_halts::release_halt(&self.pool, halt.id).await?;
-            let ev = NotifyEvent::KillSwitchReleased(KillSwitchReleasedEvent {
-                account_name: account.name.clone(),
-            });
-            if let Err(e) = self.notifier.send(ev).await {
-                tracing::error!(
-                    "risk_gate: KillSwitchReleased notify failed for {}: {e}",
-                    account.name
-                );
+            // and we have a clean audit trail. Fire KillSwitchReleased notify
+            // only when this caller actually transitioned the row (not a
+            // concurrent duplicate release).
+            let released = risk_halts::release_halt(&self.pool, halt.id).await?;
+            if released {
+                let ev = NotifyEvent::KillSwitchReleased(KillSwitchReleasedEvent {
+                    account_name: account.name.clone(),
+                });
+                if let Err(e) = self.notifier.send(ev).await {
+                    tracing::error!(
+                        "risk_gate: KillSwitchReleased notify failed for {}: {e}",
+                        account.name
+                    );
+                }
             }
             // Fall through to other gates.
         }
@@ -124,7 +128,7 @@ impl RiskGate {
             )
         {
             let halted_until = self.compute_halted_until(Utc::now());
-            risk_halts::insert_halt(
+            let inserted = risk_halts::insert_halt(
                 &self.pool,
                 account.id,
                 "daily_loss_limit_exceeded",
@@ -133,14 +137,18 @@ impl RiskGate {
                 halted_until,
             )
             .await?;
-            let ev = NotifyEvent::KillSwitchTriggered(KillSwitchTriggeredEvent {
-                account_name: account.name.clone(),
-                daily_loss: loss,
-                limit,
-                halted_until,
-            });
-            if let Err(e) = self.notifier.send(ev).await {
-                tracing::error!("risk_gate: KillSwitchTriggered notify failed: {e}");
+            // Only notify when we actually created a fresh halt.
+            // Concurrent second path gets None (ON CONFLICT DO NOTHING) — silent.
+            if inserted.is_some() {
+                let ev = NotifyEvent::KillSwitchTriggered(KillSwitchTriggeredEvent {
+                    account_name: account.name.clone(),
+                    daily_loss: loss,
+                    limit,
+                    halted_until,
+                });
+                if let Err(e) = self.notifier.send(ev).await {
+                    tracing::error!("risk_gate: KillSwitchTriggered notify failed: {e}");
+                }
             }
             return Ok(GateDecision::Reject(RejectReason::DailyLossLimitExceeded {
                 loss,
