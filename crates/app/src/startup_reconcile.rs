@@ -128,9 +128,19 @@ async fn reconcile_one_account(
             .get(&trade.pair.0)
             .cloned()
             .unwrap_or_default();
-        let exchange_has_matching = pair_positions
-            .iter()
-            .any(|p| matches_direction(&p.side, &trade.direction) && p.size > Decimal::ZERO);
+        let exchange_has_matching = pair_positions.iter().any(|p| {
+            match matches_direction(&p.side, &trade.direction) {
+                Some(true) => p.size > Decimal::ZERO,
+                Some(false) => false,
+                None => {
+                    tracing::warn!(
+                        "startup reconcile: unknown side '{}' in exchange position for {}; assuming position exists (conservative)",
+                        p.side, p.product_code
+                    );
+                    true // conservative: don't force-close
+                }
+            }
+        });
 
         match (trade.status.as_str(), exchange_has_matching) {
             ("open", true) => {
@@ -219,11 +229,11 @@ fn resolve_exchange_enum(s: &str) -> anyhow::Result<auto_trader_core::types::Exc
     }
 }
 
-fn matches_direction(side: &str, direction: &Direction) -> bool {
-    let s = side.to_ascii_uppercase();
-    match direction {
-        Direction::Long => s == "BUY",
-        Direction::Short => s == "SELL",
+fn matches_direction(side: &str, direction: &Direction) -> Option<bool> {
+    match side.trim().to_ascii_uppercase().as_str() {
+        "BUY" => Some(*direction == Direction::Long),
+        "SELL" => Some(*direction == Direction::Short),
+        _ => None,
     }
 }
 
@@ -234,16 +244,22 @@ mod tests {
 
     #[test]
     fn matches_direction_long() {
-        assert!(matches_direction("BUY", &Direction::Long));
-        assert!(matches_direction("buy", &Direction::Long));
-        assert!(!matches_direction("SELL", &Direction::Long));
+        assert_eq!(matches_direction("BUY", &Direction::Long), Some(true));
+        assert_eq!(matches_direction("buy", &Direction::Long), Some(true));
+        assert_eq!(matches_direction("SELL", &Direction::Long), Some(false));
     }
 
     #[test]
     fn matches_direction_short() {
-        assert!(matches_direction("SELL", &Direction::Short));
-        assert!(matches_direction("sell", &Direction::Short));
-        assert!(!matches_direction("BUY", &Direction::Short));
+        assert_eq!(matches_direction("SELL", &Direction::Short), Some(true));
+        assert_eq!(matches_direction("sell", &Direction::Short), Some(true));
+        assert_eq!(matches_direction("BUY", &Direction::Short), Some(false));
+    }
+
+    #[test]
+    fn matches_direction_unknown_side() {
+        assert_eq!(matches_direction("UNKNOWN", &Direction::Long), None);
+        assert_eq!(matches_direction("", &Direction::Short), None);
     }
 
     #[test]

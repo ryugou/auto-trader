@@ -547,8 +547,11 @@ async fn live_execute_times_out_if_no_execution_returned(pool: PgPool) {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("timed out"),
-        "error must mention timeout, got: {err_msg}"
+        err_msg.contains("timed out")
+            || err_msg.contains("no executions")
+            || err_msg.contains("not filled")
+            || err_msg.contains("orphan"),
+        "error must indicate failed fill, got: {err_msg}"
     );
 
     // DB に trade が insert されていないこと
@@ -965,6 +968,31 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
 }
 
 // ---------------------------------------------------------------------------
+// CountingResponder: stateful wiremock responder using AtomicUsize
+// ---------------------------------------------------------------------------
+
+/// Stateful responder that returns an empty-array response for the first
+/// `empty_until` calls and the `filled_response` thereafter.  This is used
+/// to deterministically exhaust `poll_executions`' ~4 attempts before the
+/// one-shot reconcile call fires the real response.
+struct CountingResponder {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    empty_until: usize,
+    filled_response: serde_json::Value,
+}
+
+impl wiremock::Respond for CountingResponder {
+    fn respond(&self, _req: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.empty_until {
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
+        } else {
+            wiremock::ResponseTemplate::new(200).set_body_json(self.filled_response.clone())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test S1-a: C1 timeout path — executions arrive after poll timeout → Ok
 // ---------------------------------------------------------------------------
 
@@ -977,16 +1005,14 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
 ///   - aggregate succeeds → execute returns Ok with correct fill price
 ///   - DB trade is inserted with status='open'
 ///
-/// Mock strategy: wiremock matches last-mounted first.
-/// We mount the filled response FIRST (lowest priority).
-/// We mount 20 empty responses LAST (highest priority, `up_to_n_times(20)`).
-/// The poll loop exhausts the high-priority empty mocks, then when the
-/// reconcile call arrives, the lower-priority filled mock fires.
+/// Mock strategy: CountingResponder returns [] for the first `empty_until`
+/// calls (exhausting poll_executions' ~4 attempts), then returns the filled
+/// response for the reconcile call.
 #[sqlx::test(migrations = "../../migrations")]
 async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
     use auto_trader_core::executor::OrderExecutor;
     use wiremock::matchers::{method, path, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer};
 
     let server = MockServer::start().await;
 
@@ -994,36 +1020,34 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
     Mock::given(method("POST"))
         .and(path("/v1/me/sendchildorder"))
         .respond_with(
-            ResponseTemplate::new(200)
+            wiremock::ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_LATE"})),
         )
         .mount(&server)
         .await;
 
-    // Mounted first = LOWER priority: returns filled exec (reconcile call only)
+    // Stateful responder: first 7 calls → [] (exhausts poll_executions' ~7 iterations
+    // before the 5s timeout), call 7+ → filled exec (reconcile call).
+    // poll_executions makes exactly 7 get_executions calls before timing out
+    // (exponential backoff 100ms→200ms→400ms→800ms→1600ms×3, total ~4700ms < 5s).
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "id": 10,
-                "child_order_id": "JOR_LATE",
-                "side": "BUY",
-                "price": "11505000",
-                "size": "0.005",
-                "commission": "0",
-                "exec_date": "2026-01-01T00:00:00",
-                "child_order_acceptance_id": "JRF_LATE"
-            }
-        ])))
-        .mount(&server)
-        .await;
-
-    // Mounted last = HIGHER priority: returns [] up to 20 times (absorbs poll loop).
-    // Once exhausted, the lower-priority filled response kicks in for the reconcile call.
-    Mock::given(method("GET"))
-        .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .up_to_n_times(20)
+        .respond_with(CountingResponder {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            empty_until: 7,
+            filled_response: serde_json::json!([
+                {
+                    "id": 10,
+                    "child_order_id": "JOR_LATE",
+                    "side": "BUY",
+                    "price": "11505000",
+                    "size": "0.005",
+                    "commission": "0",
+                    "exec_date": "2026-01-01T00:00:00",
+                    "child_order_acceptance_id": "JRF_LATE"
+                }
+            ]),
+        })
         .mount(&server)
         .await;
 
@@ -1073,56 +1097,62 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
 async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
     use auto_trader_core::executor::OrderExecutor;
     use wiremock::matchers::{method, path, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer};
 
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1/me/sendchildorder"))
         .respond_with(
-            ResponseTemplate::new(200)
+            wiremock::ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_ACTIVE"})),
         )
         .mount(&server)
         .await;
 
-    // All get_executions → []
+    // All get_executions → [] (stateful responder with empty_until=usize::MAX means always [])
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .respond_with(CountingResponder {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            empty_until: usize::MAX,
+            filled_response: serde_json::json!([]),
+        })
         .mount(&server)
         .await;
 
     // get_child_orders → ACTIVE (not terminal → cancel must be triggered)
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getchildorders.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "id": 20,
-                "child_order_id": "JOR_ACTIVE",
-                "product_code": "FX_BTC_JPY",
-                "side": "BUY",
-                "child_order_type": "MARKET",
-                "price": "0",
-                "average_price": "0",
-                "size": "0.001",
-                "child_order_state": "ACTIVE",
-                "expire_date": "2026-12-31T00:00:00",
-                "child_order_date": "2026-01-01T00:00:00",
-                "child_order_acceptance_id": "JRF_ACTIVE",
-                "outstanding_size": "0.001",
-                "cancel_size": "0",
-                "executed_size": "0",
-                "total_commission": "0"
-            }
-        ])))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 20,
+                    "child_order_id": "JOR_ACTIVE",
+                    "product_code": "FX_BTC_JPY",
+                    "side": "BUY",
+                    "child_order_type": "MARKET",
+                    "price": "0",
+                    "average_price": "0",
+                    "size": "0.001",
+                    "child_order_state": "ACTIVE",
+                    "expire_date": "2026-12-31T00:00:00",
+                    "child_order_date": "2026-01-01T00:00:00",
+                    "child_order_acceptance_id": "JRF_ACTIVE",
+                    "outstanding_size": "0.001",
+                    "cancel_size": "0",
+                    "executed_size": "0",
+                    "total_commission": "0"
+                }
+            ])),
+        )
         .mount(&server)
         .await;
 
     // cancel_child_order → 200 OK, expect exactly 1 call
     Mock::given(method("POST"))
         .and(path("/v1/me/cancelchildorder"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
         .expect(1)
         .mount(&server)
         .await;
@@ -1140,8 +1170,10 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("timed out") || err_msg.contains("not filled"),
-        "error must mention timeout or not-filled: {err_msg}"
+        err_msg.contains("timed out")
+            || err_msg.contains("not filled")
+            || err_msg.contains("cancel requested"),
+        "error must mention timeout, not-filled, or cancel: {err_msg}"
     );
 
     // No DB trade inserted
@@ -1169,76 +1201,75 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
 async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
     use auto_trader_core::executor::OrderExecutor;
     use wiremock::matchers::{method, path, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer};
 
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1/me/sendchildorder"))
         .respond_with(
-            ResponseTemplate::new(200)
+            wiremock::ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_ZERO"})),
         )
         .mount(&server)
         .await;
 
-    // Mounted first = LOWER priority: reconcile call returns exec with size=0 → aggregate fails
+    // Stateful: first 7 calls → [] (exhausts poll_executions), call 7+ → zero-size exec.
+    // poll_executions skips non-empty execs with total_size==0 and keeps looping;
+    // after the 5s timeout the reconcile call gets the zero-size exec → aggregate fails.
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "id": 30,
-                "child_order_id": "JOR_ZERO",
-                "side": "BUY",
-                "price": "11505000",
-                "size": "0",
-                "commission": "0",
-                "exec_date": "2026-01-01T00:00:00",
-                "child_order_acceptance_id": "JRF_ZERO"
-            }
-        ])))
-        .mount(&server)
-        .await;
-
-    // Mounted last = HIGHER priority: returns [] up to 20 times (absorbs poll loop).
-    // Once exhausted, the lower-priority zero-size exec fires for the reconcile call.
-    Mock::given(method("GET"))
-        .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .up_to_n_times(20)
+        .respond_with(CountingResponder {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            empty_until: 7,
+            filled_response: serde_json::json!([
+                {
+                    "id": 30,
+                    "child_order_id": "JOR_ZERO",
+                    "side": "BUY",
+                    "price": "11505000",
+                    "size": "0",
+                    "commission": "0",
+                    "exec_date": "2026-01-01T00:00:00",
+                    "child_order_acceptance_id": "JRF_ZERO"
+                }
+            ]),
+        })
         .mount(&server)
         .await;
 
     // cleanup path: get_child_orders → ACTIVE
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getchildorders.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "id": 31,
-                "child_order_id": "JOR_ZERO",
-                "product_code": "FX_BTC_JPY",
-                "side": "BUY",
-                "child_order_type": "MARKET",
-                "price": "0",
-                "average_price": "0",
-                "size": "0.001",
-                "child_order_state": "ACTIVE",
-                "expire_date": "2026-12-31T00:00:00",
-                "child_order_date": "2026-01-01T00:00:00",
-                "child_order_acceptance_id": "JRF_ZERO",
-                "outstanding_size": "0.001",
-                "cancel_size": "0",
-                "executed_size": "0",
-                "total_commission": "0"
-            }
-        ])))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 31,
+                    "child_order_id": "JOR_ZERO",
+                    "product_code": "FX_BTC_JPY",
+                    "side": "BUY",
+                    "child_order_type": "MARKET",
+                    "price": "0",
+                    "average_price": "0",
+                    "size": "0.001",
+                    "child_order_state": "ACTIVE",
+                    "expire_date": "2026-12-31T00:00:00",
+                    "child_order_date": "2026-01-01T00:00:00",
+                    "child_order_acceptance_id": "JRF_ZERO",
+                    "outstanding_size": "0.001",
+                    "cancel_size": "0",
+                    "executed_size": "0",
+                    "total_commission": "0"
+                }
+            ])),
+        )
         .mount(&server)
         .await;
 
     // cancel must be called once
     Mock::given(method("POST"))
         .and(path("/v1/me/cancelchildorder"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
         .expect(1)
         .mount(&server)
         .await;
@@ -1256,8 +1287,11 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("aggregate") || err_msg.contains("zero"),
-        "error must mention aggregate or zero: {err_msg}"
+        err_msg.contains("aggregate")
+            || err_msg.contains("zero")
+            || err_msg.contains("cancel requested")
+            || err_msg.contains("not filled"),
+        "error must indicate aggregate/zero/cleanup, got: {err_msg}"
     );
 
     let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)

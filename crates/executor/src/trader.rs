@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
-    ChildOrderState, ChildOrderType, Execution, SendChildOrderRequest, Side,
+    ChildOrderType, Execution, SendChildOrderRequest, Side,
 };
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::price_store::{FeedKey, PriceStore};
@@ -81,25 +81,38 @@ impl Trader {
         order_id: &str,
         context: &str,
     ) -> anyhow::Error {
-        match self.api.get_child_orders(pair, order_id).await {
-            Ok(orders) => {
-                let state = orders.first().map(|o| o.child_order_state);
-                let is_terminal = matches!(
-                    state,
-                    Some(
-                        ChildOrderState::Completed
-                            | ChildOrderState::Canceled
-                            | ChildOrderState::Expired
-                            | ChildOrderState::Rejected
-                    ) | None
+        let state_label = match self.api.get_child_orders(pair, order_id).await {
+            Ok(orders) => orders
+                .first()
+                .map(|o| format!("{:?}", o.child_order_state))
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
+            Err(e) => {
+                return anyhow::anyhow!(
+                    "{context}: get_child_orders failed for order {order_id}: {e}; may be orphan"
                 );
-                if !is_terminal {
-                    let _ = self.api.cancel_child_order(pair, order_id).await;
-                }
-                anyhow::anyhow!("{context}: order {order_id} state={:?} (not filled)", state)
             }
-            Err(e) => anyhow::anyhow!(
-                "{context}: get_child_orders failed: {e}; order {order_id} may be orphan at exchange"
+        };
+
+        let is_terminal = matches!(
+            state_label.as_str(),
+            "Completed" | "Canceled" | "Expired" | "Rejected"
+        );
+
+        if is_terminal {
+            return anyhow::anyhow!(
+                "{context}: order {order_id} state={} (not filled, no cleanup needed)",
+                state_label
+            );
+        }
+
+        match self.api.cancel_child_order(pair, order_id).await {
+            Ok(_) => anyhow::anyhow!(
+                "{context}: order {order_id} state={} (cancel requested)",
+                state_label
+            ),
+            Err(cancel_err) => anyhow::anyhow!(
+                "{context}: order {order_id} state={} — CANCEL ATTEMPT FAILED: {cancel_err}; MANUAL INTERVENTION MAY BE REQUIRED",
+                state_label
             ),
         }
     }
@@ -160,11 +173,11 @@ impl Trader {
             {
                 Ok((price, qty)) => Ok((price, qty)),
                 Err(poll_err) => {
-                    // Timeout — the order may or may not have filled at the exchange.
+                    // poll_executions failed — the order may or may not have filled at the exchange.
                     // Consult the exchange before giving up to avoid creating an
                     // orphan position that never gets recorded in the DB.
                     tracing::warn!(
-                        "open fill poll timeout for order {}: {poll_err}; reconciling via exchange",
+                        "open fill poll_executions failed for order {}: {poll_err}; reconciling via exchange",
                         order_id
                     );
                     // One additional attempt after a short pause.
@@ -194,7 +207,9 @@ impl Trader {
                                         .cleanup_unfilled_order(
                                             &signal.pair.0,
                                             &order_id,
-                                            "open fill aggregate error",
+                                            &format!(
+                                                "open fill failed (aggregate error: {agg_err})"
+                                            ),
                                         )
                                         .await;
                                     Err(anyhow::anyhow!(
@@ -209,7 +224,7 @@ impl Trader {
                                 .cleanup_unfilled_order(
                                     &signal.pair.0,
                                     &order_id,
-                                    "open fill timed out and",
+                                    "open fill failed (no executions reported)",
                                 )
                                 .await)
                         }
@@ -347,9 +362,23 @@ impl Trader {
         trade: &Trade,
     ) -> anyhow::Result<(Decimal, bool)> {
         let positions = self.api.get_positions(&trade.pair.0).await?;
-        let still_open = positions.iter().any(|p| {
-            exchange_side_to_direction(&p.side) == trade.direction && p.size > Decimal::ZERO
-        });
+        let still_open = positions
+            .iter()
+            .any(|p| match exchange_side_to_direction(&p.side) {
+                Some(exchange_direction) => {
+                    p.product_code == trade.pair.0
+                        && exchange_direction == trade.direction
+                        && p.size > Decimal::ZERO
+                }
+                None => {
+                    tracing::warn!(
+                        "stale recovery: unknown exchange side '{}' for position on {}, ignoring",
+                        p.side,
+                        p.product_code
+                    );
+                    false
+                }
+            });
         if still_open {
             // Exchange still has the position → Phase 2 really failed, re-run it.
             tracing::info!(
@@ -405,12 +434,13 @@ impl Trader {
 
 /// Map an exchange-side string to a `Direction`.
 ///
-/// Used when comparing exchange position sides against DB trade directions.
-fn exchange_side_to_direction(side: &str) -> Direction {
-    if side.eq_ignore_ascii_case("BUY") {
-        Direction::Long
-    } else {
-        Direction::Short
+/// Returns `None` for unrecognised side strings so callers can treat them
+/// conservatively instead of silently misclassifying.
+fn exchange_side_to_direction(side: &str) -> Option<Direction> {
+    match side.trim().to_ascii_uppercase().as_str() {
+        "BUY" => Some(Direction::Long),
+        "SELL" => Some(Direction::Short),
+        _ => None,
     }
 }
 
