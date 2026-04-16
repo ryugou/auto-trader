@@ -204,3 +204,137 @@ async fn cancel_child_order_sends_put() {
     let api = api(&server.uri());
     api.cancel_child_order("USD_JPY", "6372").await.unwrap();
 }
+
+#[tokio::test]
+async fn send_child_order_rejects_fractional_size() {
+    let server = MockServer::start().await;
+    let api = api(&server.uri());
+    let err = api
+        .send_child_order(SendChildOrderRequest {
+            product_code: "USD_JPY".to_string(),
+            child_order_type: ChildOrderType::Market,
+            side: Side::Buy,
+            size: dec!(1000.5),
+            price: None,
+            minute_to_expire: None,
+            time_in_force: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("integer"), "err={err}");
+}
+
+#[tokio::test]
+async fn send_child_order_rejects_negative_size() {
+    let server = MockServer::start().await;
+    let api = api(&server.uri());
+    let err = api
+        .send_child_order(SendChildOrderRequest {
+            product_code: "USD_JPY".to_string(),
+            child_order_type: ChildOrderType::Market,
+            side: Side::Buy,
+            size: dec!(-100),
+            price: None,
+            minute_to_expire: None,
+            time_in_force: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("size"), "err={err}");
+}
+
+#[tokio::test]
+async fn get_executions_handles_sell_side() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/orders/6400"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "order": {
+                "id": "6400",
+                "state": "FILLED",
+                "fillingTransactionIDs": ["6401"],
+                "instrument": "USD_JPY",
+                "units": "-1000",
+                "createTime": "2026-04-16T05:00:00Z",
+                "filledTime": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/transactions/6401"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transaction": {
+                "id": "6401",
+                "type": "ORDER_FILL",
+                "units": "-1000",
+                "price": "148.500",
+                "commission": "0.0",
+                "time": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    let execs = api.get_executions("USD_JPY", "6400").await.unwrap();
+    assert_eq!(execs.len(), 1);
+    assert_eq!(execs[0].side, "SELL");
+    assert_eq!(execs[0].size, dec!(1000));
+}
+
+#[tokio::test]
+async fn get_executions_handles_multiple_fills() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/orders/6500"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "order": {
+                "id": "6500",
+                "state": "FILLED",
+                "fillingTransactionIDs": ["6501", "6502"],
+                "instrument": "USD_JPY",
+                "units": "2000",
+                "createTime": "2026-04-16T05:00:00Z",
+                "filledTime": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/transactions/6501"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transaction": {
+                "id": "6501",
+                "type": "ORDER_FILL",
+                "units": "1500",
+                "price": "148.500",
+                "commission": "0.0",
+                "time": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/transactions/6502"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transaction": {
+                "id": "6502",
+                "type": "ORDER_FILL",
+                "units": "500",
+                "price": "148.510",
+                "commission": "0.0",
+                "time": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    let execs = api.get_executions("USD_JPY", "6500").await.unwrap();
+    assert_eq!(execs.len(), 2);
+    assert_eq!(execs[0].size, dec!(1500));
+    assert_eq!(execs[0].price, dec!(148.500));
+    assert_eq!(execs[1].size, dec!(500));
+    assert_eq!(execs[1].price, dec!(148.510));
+}

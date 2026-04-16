@@ -6,6 +6,11 @@
 //!
 //! ## Known limitations (tracked)
 //!
+//! - `send_child_order` sets `positionFill: "DEFAULT"`. The actual effect
+//!   depends on the OANDA account's positionFill configuration
+//!   (OPEN_ONLY / REDUCE_FIRST / REDUCE_ONLY / DEFAULT). For close/reduce
+//!   semantics, configure the OANDA account accordingly or add explicit
+//!   positionFill handling here when a differentiating strategy arrives.
 //! - `get_child_orders` returns a single-element Vec with incomplete fields
 //!   (child_order_type hardcoded to Market, price=0). Only used for
 //!   reconciliation today; Trader doesn't call it. Refine when a real
