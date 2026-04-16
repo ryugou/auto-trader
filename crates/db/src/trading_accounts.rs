@@ -162,6 +162,17 @@ pub async fn create_account(
     }
     // exchange を正規化して大文字/小文字・余白の差異で unique 制約を回避できないようにする。
     let exchange = req.exchange.trim().to_ascii_lowercase();
+    // Validate exchange matches the DB CHECK constraint pattern before INSERT.
+    if exchange.is_empty()
+        || !exchange
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        anyhow::bail!(
+            "invalid exchange '{}': must be non-empty and contain only [a-z0-9_]",
+            req.exchange
+        );
+    }
     // live 口座は同一 exchange に 1 件のみ許可 (bitFlyer API client が
     // singleton のため、複数行があると margin / collateral 共有で会計破綻する)。
     // 通常フローの早期失敗として SELECT で確認する。並行 INSERT が競合した場合は
@@ -216,10 +227,22 @@ pub async fn create_account(
             // Concurrent inserts can race past the app-layer pre-check above.
             // The DB partial unique index is the real guard; translate its
             // unique_violation (23505) into a friendly error.
-            if let sqlx::Error::Database(ref db_err) = e
-                && db_err.constraint() == Some("trading_accounts_one_live_per_exchange")
-            {
-                return anyhow::anyhow!("live account for exchange '{}' already exists", exchange);
+            if let sqlx::Error::Database(ref db_err) = e {
+                match db_err.constraint() {
+                    Some("trading_accounts_one_live_per_exchange") => {
+                        return anyhow::anyhow!(
+                            "live account for exchange '{}' already exists",
+                            exchange
+                        );
+                    }
+                    Some("trading_accounts_exchange_normalized") => {
+                        return anyhow::anyhow!(
+                            "invalid exchange '{}': must match ^[a-z0-9_]+$",
+                            exchange
+                        );
+                    }
+                    _ => {}
+                }
             }
             e.into()
         })?;

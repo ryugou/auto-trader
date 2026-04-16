@@ -1,10 +1,8 @@
 //! Entry-path price-tick freshness gate.
 //!
-//! Only one check survives the PR-2 revert: reject signals when the most
-//! recent price tick for the signal's pair is older than `price_freshness_secs`.
-//! Everything else (Kill Switch, duplicate-position ban, daily-loss limit) has
-//! been removed — they were speculative scope creep that never worked as intended
-//! for paper operation.
+//! Rejects signals when the most recent price tick for the signal's pair is
+//! older than `price_freshness_secs`. Ensures entry decisions are based on
+//! sufficiently recent market data.
 
 /// Outcome of the freshness check.
 #[derive(Debug)]

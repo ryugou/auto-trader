@@ -5,8 +5,8 @@ BEGIN;
 
 -- 既存行を正規化。
 UPDATE trading_accounts
-SET exchange = lower(trim(exchange))
-WHERE exchange <> lower(trim(exchange));
+SET exchange = lower(btrim(exchange, E' \t\n\r'))
+WHERE exchange <> lower(btrim(exchange, E' \t\n\r'));
 
 -- DB CHECK: exchange は lowercase alphanumeric + underscore のみ許可。
 -- trim/lower 正規化の結果に加え、tab/newline 等の非可視文字も一括拒否。
