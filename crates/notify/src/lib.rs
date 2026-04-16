@@ -1,9 +1,7 @@
 //! 外部通知チャネル (Slack Webhook など)。
 //!
 //! `db::notifications` はアプリ内通知（UI ベル表示）専用で、オペレータが
-//! 外部で気付く通知はこの crate が担う。本 PR では Slack Webhook の
-//! 送信のみを実装し、発火ポイント (`LiveTrader` / `RiskGate` / reconciler
-//! など) は後続 PR で配線する。
+//! 外部で気付く通知はこの crate が担う。
 
 use auto_trader_core::types::{Direction, Pair};
 use chrono::{DateTime, Utc};
@@ -39,74 +37,13 @@ pub struct PositionClosedEvent {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct KillSwitchTriggeredEvent {
-    pub account_name: String,
-    pub daily_loss: Decimal,
-    pub limit: Decimal,
-    pub halted_until: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct KillSwitchReleasedEvent {
-    pub account_name: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WebSocketDisconnectedEvent {
-    pub duration_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ReconciliationDiffEvent {
-    pub account_name: String,
-    pub db_orphan: Vec<Uuid>,
-    pub exchange_orphan_count: usize,
-    pub quantity_mismatch_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BalanceDriftEvent {
-    pub account_name: String,
-    pub db_balance: Decimal,
-    pub exchange_balance: Decimal,
-    /// 残高の乖離率 **パーセンテージ値** (例: `5` = 5%、`0.5` = 0.5%)。
-    /// `|exchange_balance - db_balance| / db_balance * 100` の値を渡すこと。
-    /// `balance_sync::is_drift_over_threshold` の閾値判定と同じ式。
-    /// 常に非負。format_for_slack は `{}%` として表示するので、呼び出し側で小数
-    /// (0.05 = 5%) を渡すと Slack には `0.05%` と出て 100 倍のズレになる。
-    pub diff_pct: Decimal,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DryRunOrderEvent {
-    pub account_name: String,
-    pub strategy_name: String,
-    pub pair: Pair,
-    pub direction: Direction,
-    pub quantity: Decimal,
-    pub intended_price: Decimal,
-}
-
 /// 通知イベント。Slack には各イベントごとに整形された文面で送る。
-///
-/// **Slack 4000 文字上限ポリシー**: format_for_slack はリスト系イベント
-/// (`ReconciliationDiff`) で ID 一覧を埋め込まず `.len()` のみ
-/// 表示する方針。巨大な ID 一覧を本文に含めて truncate で末尾欠落する
-/// より、件数を出して詳細は DB 照会へ誘導する方が安全。新バリアントを
-/// 追加する際もこのポリシーに従うこと。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NotifyEvent {
     OrderFilled(OrderFilledEvent),
     OrderFailed(OrderFailedEvent),
     PositionClosed(PositionClosedEvent),
-    KillSwitchTriggered(KillSwitchTriggeredEvent),
-    KillSwitchReleased(KillSwitchReleasedEvent),
-    WebSocketDisconnected(WebSocketDisconnectedEvent),
-    ReconciliationDiff(ReconciliationDiffEvent),
-    BalanceDrift(BalanceDriftEvent),
-    DryRunOrder(DryRunOrderEvent),
 }
 
 impl NotifyEvent {
@@ -117,12 +54,6 @@ impl NotifyEvent {
             NotifyEvent::OrderFilled(_) => "order_filled",
             NotifyEvent::OrderFailed(_) => "order_failed",
             NotifyEvent::PositionClosed(_) => "position_closed",
-            NotifyEvent::KillSwitchTriggered(_) => "kill_switch_triggered",
-            NotifyEvent::KillSwitchReleased(_) => "kill_switch_released",
-            NotifyEvent::WebSocketDisconnected(_) => "websocket_disconnected",
-            NotifyEvent::ReconciliationDiff(_) => "reconciliation_diff",
-            NotifyEvent::BalanceDrift(_) => "balance_drift",
-            NotifyEvent::DryRunOrder(_) => "dry_run_order",
         }
     }
 }
@@ -177,12 +108,9 @@ impl Notifier {
 
     /// Slack Webhook にイベントを送信する。
     ///
-    /// **呼び出し側規約 (PR 2 以降で厳守)**:
-    /// - `OrderFilled` / `DryRunOrder` など高頻度・低重要度: `tokio::spawn`
+    /// **呼び出し側規約**:
+    /// - `OrderFilled` など高頻度・低重要度: `tokio::spawn`
     ///   で fire-and-forget (`let _ = notifier.send(ev).await;`)
-    /// - `KillSwitchTriggered` / `BalanceDrift` / `ReconciliationDiff`
-    ///   など critical: `.await` で結果を確認し、失敗時は DB
-    ///   `notifications` テーブル (UI ベル) に backstop 書き込み
     /// - リトライは本メソッド内で行わない。配線側の責務。
     pub async fn send(&self, event: NotifyEvent) -> Result<(), NotifyError> {
         let variant = event.variant_name();
@@ -241,29 +169,6 @@ fn format_for_slack(event: &NotifyEvent) -> String {
             "🔒 *クローズ* `{}` pnl={} reason={} (trade {})",
             e.account_name, e.pnl_amount, e.reason, e.trade_id
         ),
-        NotifyEvent::KillSwitchTriggered(e) => format!(
-            "🛑 *Kill Switch 発動* `{}` 日次損失 {} / 上限 {} — 再開予定 {}",
-            e.account_name, e.daily_loss, e.limit, e.halted_until
-        ),
-        NotifyEvent::KillSwitchReleased(e) => format!("🟢 *Kill Switch 解除* `{}`", e.account_name),
-        NotifyEvent::WebSocketDisconnected(e) => {
-            format!("⚠️ *WebSocket 切断* {} 秒", e.duration_secs)
-        }
-        NotifyEvent::ReconciliationDiff(e) => format!(
-            "⚠️ *建玉整合性の差分検出* `{}` DB のみ={} 件, 取引所のみ={} 件, 数量不一致={} 件",
-            e.account_name,
-            e.db_orphan.len(),
-            e.exchange_orphan_count,
-            e.quantity_mismatch_count,
-        ),
-        NotifyEvent::BalanceDrift(e) => format!(
-            "⚠️ *残高ズレ* `{}` DB={} / 取引所={} ({}%)",
-            e.account_name, e.db_balance, e.exchange_balance, e.diff_pct
-        ),
-        NotifyEvent::DryRunOrder(e) => format!(
-            "🧪 *DRY RUN* `{}` {} {} {} {} @ {} (発注せず)",
-            e.account_name, e.strategy_name, e.pair, e.direction, e.quantity, e.intended_price
-        ),
     }
 }
 
@@ -290,24 +195,15 @@ mod tests {
         assert!(s.contains("11500000"));
     }
 
-    #[test]
-    fn format_kill_switch_triggered() {
-        let ev = NotifyEvent::KillSwitchTriggered(KillSwitchTriggeredEvent {
-            account_name: "通常".into(),
-            daily_loss: dec!(-1500),
-            limit: dec!(-1500),
-            halted_until: Utc::now(),
-        });
-        let s = format_for_slack(&ev);
-        assert!(s.contains("Kill Switch"));
-        assert!(s.contains("通常"));
-    }
-
     #[tokio::test]
     async fn send_without_webhook_is_noop() {
         let n = Notifier::new(None);
-        let ev =
-            NotifyEvent::WebSocketDisconnected(WebSocketDisconnectedEvent { duration_secs: 30 });
+        let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
+            account_name: "通常".into(),
+            strategy_name: "test".into(),
+            pair: Pair::new("FX_BTC_JPY"),
+            reason: "test".into(),
+        });
         n.send(ev).await.unwrap();
     }
 }

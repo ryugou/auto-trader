@@ -1,10 +1,8 @@
 pub mod candles;
 pub mod dashboard;
 pub mod macro_events;
-pub mod mid_price;
 pub mod notifications;
 pub mod pool;
-pub mod risk_halts;
 pub mod strategies;
 pub mod summary;
 pub mod trades;

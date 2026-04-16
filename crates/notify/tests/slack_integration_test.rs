@@ -63,7 +63,12 @@ async fn notifier_returns_error_on_5xx() {
         .await;
 
     let notifier = Notifier::new(Some(server.uri()));
-    let ev = NotifyEvent::WebSocketDisconnected(WebSocketDisconnectedEvent { duration_secs: 42 });
+    let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
+        account_name: "通常".into(),
+        strategy_name: "test_strategy".into(),
+        pair: Pair::new("FX_BTC_JPY"),
+        reason: "price stale".into(),
+    });
     let err = notifier.send(ev).await.unwrap_err();
     match err {
         NotifyError::Status(code) => assert_eq!(code, 500),
@@ -74,8 +79,11 @@ async fn notifier_returns_error_on_5xx() {
 #[tokio::test]
 async fn notifier_noop_when_url_none() {
     let notifier = Notifier::new(None);
-    let ev = NotifyEvent::KillSwitchReleased(KillSwitchReleasedEvent {
+    let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
+        trade_id: Uuid::nil(),
+        pnl_amount: dec!(500),
+        reason: "take_profit".into(),
     });
     notifier.send(ev).await.expect("noop should return Ok");
 }
@@ -127,8 +135,11 @@ async fn notifier_http_error_does_not_leak_webhook_url() {
     let url_with_secret_marker = "http://127.0.0.1:1/services/SECRET_TOKEN_NEVER_LEAK".to_string();
     let notifier = Notifier::new(Some(url_with_secret_marker));
 
-    let ev = NotifyEvent::KillSwitchReleased(KillSwitchReleasedEvent {
+    let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
+        trade_id: Uuid::nil(),
+        pnl_amount: dec!(-100),
+        reason: "stop_loss".into(),
     });
     let err = notifier
         .send(ev)

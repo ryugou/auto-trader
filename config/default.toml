@@ -111,21 +111,14 @@ params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 2
 #   PUT    /api/paper-accounts/{id}
 #   DELETE /api/paper-accounts/{id}
 
-# === Risk / Kill Switch ===
-# 全アカウント共通のガードレール。paper/live を問わず RiskGate
-# （PR 4 で実装）が前段でシグナルをブロックする。
+# === Risk ===
+# 全アカウント共通のガードレール。
 [risk]
-daily_loss_limit_pct = 0.05      # 初期残高比 -5% で当日停止
-price_freshness_secs = 60        # price tick がこの秒数より古ければ新規発注禁止
-kill_switch_release_jst_hour = 0 # 翌 0:00 JST に自動解除
+price_freshness_secs = 60  # price tick がこの秒数より古ければ新規発注禁止
 
 # === Live execution ===
-# enabled = true でない限り LiveTrader は起動しない。
 # dry_run が true の間は発注手前で no-op 通知のみ。
 # LIVE_DRY_RUN env が設定されていればそちらが優先される。
 [live]
-enabled = false
+enabled = false  # true にしないと live 口座での取引が起動時・runtime 両方で拒否される
 dry_run = true
-execution_poll_interval_secs = 3
-reconciler_interval_secs = 300
-balance_sync_interval_secs = 300
