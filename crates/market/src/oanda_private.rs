@@ -85,10 +85,14 @@ impl OandaPrivateApi {
         let status = resp.status();
         let text = resp.text().await.map_err(OandaApiError::Http)?;
         if !status.is_success() {
-            return Err(anyhow::Error::from(OandaApiError::Api {
-                status,
-                body: text,
-            }));
+            const MAX_ERR_BODY: usize = 512;
+            let body = if text.len() > MAX_ERR_BODY {
+                let truncated: String = text.chars().take(MAX_ERR_BODY).collect();
+                format!("{}... (truncated from {} chars)", truncated, text.len())
+            } else {
+                text
+            };
+            return Err(anyhow::Error::from(OandaApiError::Api { status, body }));
         }
         serde_json::from_str(&text)
             .map_err(|e| anyhow::Error::from(OandaApiError::Parse(e.to_string())))
@@ -278,16 +282,24 @@ impl ExchangeApi for OandaPrivateApi {
 
             // OANDA fill transaction shape (ORDER_FILL type):
             //   { type: "ORDER_FILL", price, units, time, commission?, ... }
-            let price = tx
+            let price_str = tx
                 .get("price")
                 .and_then(|v| v.as_str())
-                .and_then(|s| Decimal::from_str(s).ok())
                 .ok_or_else(|| OandaApiError::Parse(format!("missing price in fill: {tx}")))?;
-            let units_signed: i64 = tx
+            let price = Decimal::from_str(price_str).map_err(|e| {
+                OandaApiError::Parse(format!(
+                    "failed to parse price '{price_str}': {e} in fill: {tx}"
+                ))
+            })?;
+            let units_str = tx
                 .get("units")
                 .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok())
                 .ok_or_else(|| OandaApiError::Parse(format!("missing units in fill: {tx}")))?;
+            let units_signed: i64 = units_str.parse().map_err(|e: std::num::ParseIntError| {
+                OandaApiError::Parse(format!(
+                    "failed to parse units '{units_str}': {e} in fill: {tx}"
+                ))
+            })?;
             let side_str = if units_signed > 0 { "BUY" } else { "SELL" };
             let size = Decimal::from(units_signed.unsigned_abs());
             let commission = tx
@@ -379,18 +391,26 @@ impl ExchangeApi for OandaPrivateApi {
             .get("account")
             .ok_or_else(|| OandaApiError::Parse(format!("missing 'account' field: {body}")))?;
 
-        let parse_decimal = |key: &str| -> Decimal {
-            account
-                .get(key)
-                .and_then(|v| v.as_str())
-                .and_then(|s| Decimal::from_str(s).ok())
-                .unwrap_or(Decimal::ZERO)
+        let parse_decimal = |key: &str| -> anyhow::Result<Decimal> {
+            let value = account.get(key).ok_or_else(|| {
+                OandaApiError::Parse(format!(
+                    "missing required account field '{key}' in summary response"
+                ))
+            })?;
+            let s = value.as_str().ok_or_else(|| {
+                OandaApiError::Parse(format!("account field '{key}' is not a string: {value}"))
+            })?;
+            Decimal::from_str(s).map_err(|e| {
+                anyhow::Error::from(OandaApiError::Parse(format!(
+                    "invalid decimal in account field '{key}': '{s}': {e}"
+                )))
+            })
         };
 
         Ok(Collateral {
-            collateral: parse_decimal("balance"),
-            open_position_pnl: parse_decimal("unrealizedPL"),
-            require_collateral: parse_decimal("marginUsed"),
+            collateral: parse_decimal("balance")?,
+            open_position_pnl: parse_decimal("unrealizedPL")?,
+            require_collateral: parse_decimal("marginUsed")?,
             // OANDA uses marginRate differently; keep_rate has no direct equivalent.
             keep_rate: Decimal::ZERO,
         })
