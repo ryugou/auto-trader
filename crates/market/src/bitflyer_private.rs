@@ -530,6 +530,64 @@ impl BitflyerPrivateApi {
     }
 }
 
+/// `ExchangeApi` trait implementation — thin delegation layer.
+///
+/// The inherent methods return `Result<T, BitflyerApiError>`; the trait
+/// requires `anyhow::Result<T>`. Each arm simply calls the inherent method
+/// and converts the error via `anyhow::Error::from` (which works because
+/// `BitflyerApiError: std::error::Error`).
+#[async_trait::async_trait]
+impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
+    async fn send_child_order(
+        &self,
+        req: SendChildOrderRequest,
+    ) -> anyhow::Result<SendChildOrderResponse> {
+        self.send_child_order(req)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn get_child_orders(
+        &self,
+        product_code: &str,
+        child_order_acceptance_id: &str,
+    ) -> anyhow::Result<Vec<ChildOrder>> {
+        self.get_child_orders(product_code, child_order_acceptance_id)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn get_executions(
+        &self,
+        product_code: &str,
+        child_order_acceptance_id: &str,
+    ) -> anyhow::Result<Vec<Execution>> {
+        self.get_executions(product_code, child_order_acceptance_id)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn get_positions(&self, product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {
+        self.get_positions(product_code)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn get_collateral(&self) -> anyhow::Result<Collateral> {
+        self.get_collateral().await.map_err(anyhow::Error::from)
+    }
+
+    async fn cancel_child_order(
+        &self,
+        product_code: &str,
+        child_order_acceptance_id: &str,
+    ) -> anyhow::Result<()> {
+        self.cancel_child_order(product_code, child_order_acceptance_id)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+}
+
 /// parse/format エラー文字列に埋め込む body text を 512 文字で丸める。
 ///
 /// `request()` の非 2xx ハンドリングと同じ上限を使うことで、
