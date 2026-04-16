@@ -14,9 +14,8 @@ use std::time::{Duration, Instant};
 
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
-use auto_trader_market::bitflyer_private::{
-    BitflyerPrivateApi, ChildOrderType, SendChildOrderRequest, Side,
-};
+use auto_trader_market::bitflyer_private::{ChildOrderType, SendChildOrderRequest, Side};
+use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::price_store::{FeedKey, PriceStore};
 use auto_trader_notify::{Notifier, NotifyEvent, OrderFilledEvent, PositionClosedEvent};
 use chrono::Utc;
@@ -40,7 +39,7 @@ pub struct Trader {
     /// Cached at construction time so every Slack notification shows the
     /// human-readable account name rather than the raw UUID.
     account_name: String,
-    api: Arc<BitflyerPrivateApi>,
+    api: Arc<dyn ExchangeApi>,
     price_store: Arc<PriceStore>,
     notifier: Arc<Notifier>,
     /// Shared PositionSizer — pre-built at startup, every per-tick task
@@ -57,7 +56,7 @@ impl Trader {
         exchange: Exchange,
         account_id: Uuid,
         account_name: String,
-        api: Arc<BitflyerPrivateApi>,
+        api: Arc<dyn ExchangeApi>,
         price_store: Arc<PriceStore>,
         notifier: Arc<Notifier>,
         position_sizer: Arc<PositionSizer>,

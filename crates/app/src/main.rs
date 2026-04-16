@@ -12,6 +12,7 @@ use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_db::pool::create_pool;
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
+use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
 use auto_trader_notify::Notifier;
@@ -69,6 +70,15 @@ async fn main() -> anyhow::Result<()> {
         } else {
             BitflyerPrivateApi::new(String::new(), String::new())
         });
+
+    // Exchange API registry — maps Exchange variant to its private-API client.
+    // Adding a new exchange = impl ExchangeApi for NewClient + insert here.
+    let mut _exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
+    _exchange_apis.insert(
+        Exchange::BitflyerCfd,
+        bitflyer_api.clone() as Arc<dyn ExchangeApi>,
+    );
+    let exchange_apis = Arc::new(_exchange_apis);
 
     // Notifier — Slack Webhook for operator alerts.
     let slack_webhook_url = std::env::var("SLACK_WEBHOOK_URL").ok();
@@ -737,7 +747,7 @@ async fn main() -> anyhow::Result<()> {
     let (crypto_price_tx, mut crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
     let crypto_monitor_pool = pool.clone();
     let crypto_monitor_trade_tx = trade_tx.clone();
-    let crypto_monitor_bitflyer_api = bitflyer_api.clone();
+    let crypto_monitor_exchange_apis = exchange_apis.clone();
     let crypto_monitor_price_store = price_store.clone();
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
@@ -822,12 +832,20 @@ async fn main() -> anyhow::Result<()> {
                     exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
+                    let Some(api) = crypto_monitor_exchange_apis.get(&trade.exchange) else {
+                        tracing::warn!(
+                            "no ExchangeApi registered for exchange {:?}; skipping close for trade {}",
+                            trade.exchange,
+                            trade.id
+                        );
+                        continue;
+                    };
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
-                        Exchange::BitflyerCfd,
+                        trade.exchange,
                         account_id,
                         account_name,
-                        crypto_monitor_bitflyer_api.clone(),
+                        api.clone(),
                         crypto_monitor_price_store.clone(),
                         crypto_monitor_notifier.clone(),
                         crypto_monitor_position_sizer.clone(),
@@ -1011,7 +1029,7 @@ async fn main() -> anyhow::Result<()> {
     // the daily summary and the analytics dashboard.
     let exit_pool = pool.clone();
     let exit_trade_tx = trade_tx.clone();
-    let exit_bitflyer_api = bitflyer_api.clone();
+    let exit_exchange_apis = exchange_apis.clone();
     let exit_price_store = price_store.clone();
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
@@ -1065,12 +1083,20 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
             let dry_run = account_type == "paper" || exit_live_forces_dry_run;
+            let Some(api) = exit_exchange_apis.get(&trade.exchange) else {
+                tracing::warn!(
+                    "no ExchangeApi registered for exchange {:?}; skipping exit for trade {}",
+                    trade.exchange,
+                    exit.trade_id
+                );
+                continue;
+            };
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
                 account_id,
                 account_name,
-                exit_bitflyer_api.clone(),
+                api.clone(),
                 exit_price_store.clone(),
                 exit_notifier.clone(),
                 exit_position_sizer.clone(),
@@ -1125,7 +1151,7 @@ async fn main() -> anyhow::Result<()> {
     // (add/update/delete trading_accounts) are picked up without restart.
     let executor_pool = pool.clone();
     let trade_tx_clone = trade_tx.clone();
-    let executor_bitflyer_api = bitflyer_api.clone();
+    let executor_exchange_apis = exchange_apis.clone();
     let executor_price_store = price_store.clone();
     let executor_notifier = notifier.clone();
     let executor_position_sizer = shared_position_sizer.clone();
@@ -1176,9 +1202,17 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                if exchange != Exchange::BitflyerCfd {
+                // Registry lookup — unregistered exchanges are skipped (warn + continue),
+                // giving equivalent behavior to the old BitflyerCfd-only gate.
+                let Some(api) = executor_exchange_apis.get(&exchange) else {
+                    tracing::warn!(
+                        "no ExchangeApi registered for exchange {:?}; skipping account {} ({})",
+                        exchange,
+                        pac.name,
+                        pac.id
+                    );
                     continue;
-                }
+                };
                 // [live].enabled=false なら live 口座の signal を拒否し、発注経路に入れない。
                 // 起動時 gate と belt-and-suspenders。runtime に REST で live 行が
                 // 追加された場合も発注を防ぐ。
@@ -1214,7 +1248,7 @@ async fn main() -> anyhow::Result<()> {
                     exchange,
                     pac.id,
                     pac.name.clone(),
-                    executor_bitflyer_api.clone(),
+                    api.clone(),
                     executor_price_store.clone(),
                     executor_notifier.clone(),
                     executor_position_sizer.clone(),
