@@ -21,7 +21,38 @@ async fn send_child_order_returns_order_id() {
     Mock::given(method("POST"))
         .and(path("/v3/accounts/101-001-12345-001/orders"))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-            "orderCreateTransaction": { "id": "6372" }
+            "orderCreateTransaction": {
+                "orderID": "6372",    // preferred canonical order id
+                "id": "TX-6372"       // transaction id (fallback only)
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    let resp = api
+        .send_child_order(SendChildOrderRequest {
+            product_code: "USD_JPY".to_string(),
+            child_order_type: ChildOrderType::Market,
+            side: Side::Buy,
+            size: dec!(1000),
+            price: None,
+            minute_to_expire: None,
+            time_in_force: None,
+        })
+        .await
+        .unwrap();
+    // API prefers orderID over id
+    assert_eq!(resp.child_order_acceptance_id, "6372");
+}
+
+#[tokio::test]
+async fn send_child_order_falls_back_to_id_when_order_id_missing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v3/accounts/101-001-12345-001/orders"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "orderCreateTransaction": { "id": "6372" }  // current OANDA shape
         })))
         .mount(&server)
         .await;
