@@ -74,7 +74,7 @@ impl OandaPrivateApi {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .expect("reqwest Client::new"),
+                .expect("reqwest Client::builder().build()"),
             base_url,
             account_id,
             api_key,
@@ -89,6 +89,27 @@ impl OandaPrivateApi {
             .header("Content-Type", "application/json")
     }
 
+    /// Produce a log/error-safe snippet of a response body: redacts the
+    /// account_id and truncates to MAX_ERR_BODY chars.
+    fn sanitize_body_snippet(&self, body: &str) -> String {
+        const MAX_ERR_BODY: usize = 512;
+        let redacted = if body.contains(&self.account_id) {
+            body.replace(&self.account_id, "<REDACTED_ACCOUNT_ID>")
+        } else {
+            body.to_string()
+        };
+        let truncated: String = redacted.chars().take(MAX_ERR_BODY).collect();
+        if redacted.chars().count() > MAX_ERR_BODY {
+            format!(
+                "{}... (truncated from {} chars)",
+                truncated,
+                redacted.chars().count()
+            )
+        } else {
+            truncated
+        }
+    }
+
     async fn send_json(
         &self,
         builder: reqwest::RequestBuilder,
@@ -97,24 +118,7 @@ impl OandaPrivateApi {
         let status = resp.status();
         let text = resp.text().await.map_err(OandaApiError::from)?;
         if !status.is_success() {
-            const MAX_ERR_BODY: usize = 512;
-            // Redact account_id from the FULL body first so occurrences beyond
-            // the truncation boundary are still scrubbed.
-            let redacted_full = if text.contains(&self.account_id) {
-                text.replace(&self.account_id, "<REDACTED_ACCOUNT_ID>")
-            } else {
-                text
-            };
-            let truncated: String = redacted_full.chars().take(MAX_ERR_BODY).collect();
-            let final_body = if redacted_full.chars().count() > MAX_ERR_BODY {
-                format!(
-                    "{}... (truncated from {} chars)",
-                    truncated,
-                    redacted_full.chars().count()
-                )
-            } else {
-                truncated
-            };
+            let final_body = self.sanitize_body_snippet(&text);
             return Err(anyhow::Error::from(OandaApiError::Api {
                 status,
                 body: final_body,
@@ -188,18 +192,16 @@ impl ExchangeApi for OandaPrivateApi {
         // response shapes — falls through to `.id` (the canonical field in
         // current practice) otherwise.
         let tx = body.get("orderCreateTransaction").ok_or_else(|| {
-            OandaApiError::Parse(format!(
-                "missing orderCreateTransaction in response: {body}"
-            ))
+            OandaApiError::Parse("missing orderCreateTransaction in response".to_string())
         })?;
         let order_id = tx
             .get("orderID")
             .and_then(|v| v.as_str())
             .or_else(|| tx.get("id").and_then(|v| v.as_str()))
             .ok_or_else(|| {
-                OandaApiError::Parse(format!(
-                    "orderCreateTransaction missing both 'orderID' and 'id': {body}"
-                ))
+                OandaApiError::Parse(
+                    "orderCreateTransaction missing both 'orderID' and 'id'".to_string(),
+                )
             })?
             .to_string();
 
@@ -222,9 +224,12 @@ impl ExchangeApi for OandaPrivateApi {
         );
         let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
 
-        let order = body
-            .get("order")
-            .ok_or_else(|| OandaApiError::Parse(format!("missing 'order' field: {body}")))?;
+        let order = body.get("order").ok_or_else(|| {
+            OandaApiError::Parse(format!(
+                "missing 'order' field in response: {}",
+                self.sanitize_body_snippet(&body.to_string())
+            ))
+        })?;
         Ok(vec![order_json_to_child(order)?])
     }
 
@@ -244,9 +249,12 @@ impl ExchangeApi for OandaPrivateApi {
         let order_body: serde_json::Value = self
             .send_json(self.authed(Method::GET, &order_path))
             .await?;
-        let order = order_body
-            .get("order")
-            .ok_or_else(|| OandaApiError::Parse(format!("missing 'order' field: {order_body}")))?;
+        let order = order_body.get("order").ok_or_else(|| {
+            OandaApiError::Parse(format!(
+                "missing 'order' field in response: {}",
+                self.sanitize_body_snippet(&order_body.to_string())
+            ))
+        })?;
 
         let state = order.get("state").and_then(|v| v.as_str()).unwrap_or("");
         if state == "FILLED" {
@@ -322,27 +330,36 @@ impl ExchangeApi for OandaPrivateApi {
             let tx_body: serde_json::Value =
                 self.send_json(self.authed(Method::GET, &tx_path)).await?;
             let tx = tx_body.get("transaction").ok_or_else(|| {
-                OandaApiError::Parse(format!("missing 'transaction' field: {tx_body}"))
+                OandaApiError::Parse(format!(
+                    "missing 'transaction' field in response: {}",
+                    self.sanitize_body_snippet(&tx_body.to_string())
+                ))
             })?;
 
             // OANDA fill transaction shape (ORDER_FILL type):
             //   { type: "ORDER_FILL", price, units, time, commission?, ... }
-            let price_str = tx
-                .get("price")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| OandaApiError::Parse(format!("missing price in fill: {tx}")))?;
-            let price = Decimal::from_str(price_str).map_err(|e| {
+            let price_str = tx.get("price").and_then(|v| v.as_str()).ok_or_else(|| {
                 OandaApiError::Parse(format!(
-                    "failed to parse price '{price_str}': {e} in fill: {tx}"
+                    "missing price in fill: {}",
+                    self.sanitize_body_snippet(&tx.to_string())
                 ))
             })?;
-            let units_str = tx
-                .get("units")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| OandaApiError::Parse(format!("missing units in fill: {tx}")))?;
+            let price = Decimal::from_str(price_str).map_err(|e| {
+                OandaApiError::Parse(format!(
+                    "failed to parse price '{price_str}': {e} in fill: {}",
+                    self.sanitize_body_snippet(&tx.to_string())
+                ))
+            })?;
+            let units_str = tx.get("units").and_then(|v| v.as_str()).ok_or_else(|| {
+                OandaApiError::Parse(format!(
+                    "missing units in fill: {}",
+                    self.sanitize_body_snippet(&tx.to_string())
+                ))
+            })?;
             let units_signed: i64 = units_str.parse().map_err(|e: std::num::ParseIntError| {
                 OandaApiError::Parse(format!(
-                    "failed to parse units '{units_str}': {e} in fill: {tx}"
+                    "failed to parse units '{units_str}': {e} in fill: {}",
+                    self.sanitize_body_snippet(&tx.to_string())
                 ))
             })?;
             let side_str = if units_signed > 0 { "BUY" } else { "SELL" };
@@ -387,9 +404,12 @@ impl ExchangeApi for OandaPrivateApi {
             encode_path(product_code)
         );
         let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
-        let pos = body
-            .get("position")
-            .ok_or_else(|| OandaApiError::Parse(format!("missing 'position' field: {body}")))?;
+        let pos = body.get("position").ok_or_else(|| {
+            OandaApiError::Parse(format!(
+                "missing 'position' field in response: {}",
+                self.sanitize_body_snippet(&body.to_string())
+            ))
+        })?;
 
         let mut out = Vec::new();
         for (side_str, key) in [("BUY", "long"), ("SELL", "short")] {
@@ -433,9 +453,12 @@ impl ExchangeApi for OandaPrivateApi {
         //   -> { account: { balance, marginAvailable, marginUsed, unrealizedPL, ... } }
         let path = format!("/v3/accounts/{}/summary", encode_path(&self.account_id));
         let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
-        let account = body
-            .get("account")
-            .ok_or_else(|| OandaApiError::Parse(format!("missing 'account' field: {body}")))?;
+        let account = body.get("account").ok_or_else(|| {
+            OandaApiError::Parse(format!(
+                "missing 'account' field in response: {}",
+                self.sanitize_body_snippet(&body.to_string())
+            ))
+        })?;
 
         let parse_decimal = |key: &str| -> anyhow::Result<Decimal> {
             let value = account.get(key).ok_or_else(|| {
@@ -661,6 +684,31 @@ mod tests {
         assert!(
             !msg.contains("101-001-12345-001"),
             "account_id leaked past truncation: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_error_redacts_account_id_in_body() {
+        let server = MockServer::start().await;
+        // Return a 200 but with a malformed body containing the account_id
+        Mock::given(method("GET"))
+            .and(path("/v3/accounts/101-001-12345-001/positions/USD%2FJPY"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "wrong_field": "whatever 101-001-12345-001"
+                // missing "position" field → parse error
+            })))
+            .mount(&server)
+            .await;
+
+        let api = OandaPrivateApi::new(
+            server.uri(),
+            "101-001-12345-001".to_string(),
+            "fake-token".to_string(),
+        );
+        let err = api.get_positions("USD/JPY").await.unwrap_err();
+        assert!(
+            !err.to_string().contains("101-001-12345-001"),
+            "leaked: {err}"
         );
     }
 }
