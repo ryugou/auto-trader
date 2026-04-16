@@ -963,3 +963,306 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
         .expect("fetch final status");
     assert_eq!(final_status, "closed", "trade must be closed at the end");
 }
+
+// ---------------------------------------------------------------------------
+// Test S1-a: C1 timeout path — executions arrive after poll timeout → Ok
+// ---------------------------------------------------------------------------
+
+/// Regression test for W1 fix (S1 case 1).
+///
+/// Scenario:
+///   - send_child_order → JRF_LATE
+///   - get_executions returns [] during poll window → poll_executions times out
+///   - 500ms pause, then the one-shot reconcile get_executions returns 1 valid exec
+///   - aggregate succeeds → execute returns Ok with correct fill price
+///   - DB trade is inserted with status='open'
+///
+/// Mock strategy: wiremock matches last-mounted first.
+/// We mount the filled response FIRST (lowest priority).
+/// We mount 20 empty responses LAST (highest priority, `up_to_n_times(20)`).
+/// The poll loop exhausts the high-priority empty mocks, then when the
+/// reconcile call arrives, the lower-priority filled mock fires.
+#[sqlx::test(migrations = "../../migrations")]
+async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // send_child_order → acceptance_id
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_LATE"})),
+        )
+        .mount(&server)
+        .await;
+
+    // Mounted first = LOWER priority: returns filled exec (reconcile call only)
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 10,
+                "child_order_id": "JOR_LATE",
+                "side": "BUY",
+                "price": "11505000",
+                "size": "0.005",
+                "commission": "0",
+                "exec_date": "2026-01-01T00:00:00",
+                "child_order_acceptance_id": "JRF_LATE"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    // Mounted last = HIGHER priority: returns [] up to 20 times (absorbs poll loop).
+    // Once exhausted, the lower-priority filled response kicks in for the reconcile call.
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .up_to_n_times(20)
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+    let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    let signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let result = trader.execute(&signal).await;
+
+    assert!(
+        result.is_ok(),
+        "execute must return Ok when reconcile finds executions: {:?}",
+        result
+    );
+    let trade = result.unwrap();
+    assert_eq!(
+        trade.entry_price,
+        dec!(11505000),
+        "entry_price must be the reconcile-path fill price"
+    );
+    assert_eq!(
+        trade.quantity,
+        dec!(0.005),
+        "quantity must match reconcile-path fill size"
+    );
+
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account failed");
+    assert_eq!(open_trades.len(), 1, "trade must be inserted into DB");
+}
+
+// ---------------------------------------------------------------------------
+// Test S1-b: C1 timeout + empty executions + active order → cancel called
+// ---------------------------------------------------------------------------
+
+/// Regression test for W1 fix (S1 case 2).
+///
+/// Scenario:
+///   - send_child_order → JRF_ACTIVE
+///   - get_executions always returns [] (poll timeout + reconcile call)
+///   - get_child_orders → state=ACTIVE (not terminal)
+///   - cancel_child_order must be called exactly once
+///   - execute returns Err
+#[sqlx::test(migrations = "../../migrations")]
+async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_ACTIVE"})),
+        )
+        .mount(&server)
+        .await;
+
+    // All get_executions → []
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    // get_child_orders → ACTIVE (not terminal → cancel must be triggered)
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getchildorders.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 20,
+                "child_order_id": "JOR_ACTIVE",
+                "product_code": "FX_BTC_JPY",
+                "side": "BUY",
+                "child_order_type": "MARKET",
+                "price": "0",
+                "average_price": "0",
+                "size": "0.001",
+                "child_order_state": "ACTIVE",
+                "expire_date": "2026-12-31T00:00:00",
+                "child_order_date": "2026-01-01T00:00:00",
+                "child_order_acceptance_id": "JRF_ACTIVE",
+                "outstanding_size": "0.001",
+                "cancel_size": "0",
+                "executed_size": "0",
+                "total_commission": "0"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    // cancel_child_order → 200 OK, expect exactly 1 call
+    Mock::given(method("POST"))
+        .and(path("/v1/me/cancelchildorder"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+    let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    let signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let result = trader.execute(&signal).await;
+
+    assert!(
+        result.is_err(),
+        "execute must return Err when order is active but no fill"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("timed out") || err_msg.contains("not filled"),
+        "error must mention timeout or not-filled: {err_msg}"
+    );
+
+    // No DB trade inserted
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account failed");
+    assert_eq!(open_trades.len(), 0, "no trade must be inserted");
+    // wiremock's expect(1) on cancel enforces exactly 1 cancel call on drop.
+}
+
+// ---------------------------------------------------------------------------
+// Test S1-c: C1 timeout + execs with all zero size → aggregate error → cleanup
+// ---------------------------------------------------------------------------
+
+/// Regression test for W1 fix (S1 case 3).
+///
+/// Scenario:
+///   - send_child_order → JRF_ZERO
+///   - poll_executions returns [] → times out
+///   - reconcile get_executions returns 1 exec with size=0 (malformed)
+///   - aggregate_executions returns Err (total_size == 0)
+///   - cleanup path: get_child_orders → ACTIVE → cancel_child_order called
+///   - execute returns Err with aggregate error message
+#[sqlx::test(migrations = "../../migrations")]
+async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
+    use auto_trader_core::executor::OrderExecutor;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendchildorder"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"child_order_acceptance_id": "JRF_ZERO"})),
+        )
+        .mount(&server)
+        .await;
+
+    // Mounted first = LOWER priority: reconcile call returns exec with size=0 → aggregate fails
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 30,
+                "child_order_id": "JOR_ZERO",
+                "side": "BUY",
+                "price": "11505000",
+                "size": "0",
+                "commission": "0",
+                "exec_date": "2026-01-01T00:00:00",
+                "child_order_acceptance_id": "JRF_ZERO"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    // Mounted last = HIGHER priority: returns [] up to 20 times (absorbs poll loop).
+    // Once exhausted, the lower-priority zero-size exec fires for the reconcile call.
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getexecutions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .up_to_n_times(20)
+        .mount(&server)
+        .await;
+
+    // cleanup path: get_child_orders → ACTIVE
+    Mock::given(method("GET"))
+        .and(path_regex(r"/v1/me/getchildorders.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 31,
+                "child_order_id": "JOR_ZERO",
+                "product_code": "FX_BTC_JPY",
+                "side": "BUY",
+                "child_order_type": "MARKET",
+                "price": "0",
+                "average_price": "0",
+                "size": "0.001",
+                "child_order_state": "ACTIVE",
+                "expire_date": "2026-12-31T00:00:00",
+                "child_order_date": "2026-01-01T00:00:00",
+                "child_order_acceptance_id": "JRF_ZERO",
+                "outstanding_size": "0.001",
+                "cancel_size": "0",
+                "executed_size": "0",
+                "total_commission": "0"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    // cancel must be called once
+    Mock::given(method("POST"))
+        .and(path("/v1/me/cancelchildorder"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let account_id = seed_live_account(&pool).await;
+    let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    let signal = make_signal("FX_BTC_JPY", Direction::Long);
+    let result = trader.execute(&signal).await;
+
+    assert!(
+        result.is_err(),
+        "execute must return Err on aggregate failure"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("aggregate") || err_msg.contains("zero"),
+        "error must mention aggregate or zero: {err_msg}"
+    );
+
+    let open_trades = auto_trader_db::trades::get_open_trades_by_account(&pool, account_id)
+        .await
+        .expect("get_open_trades_by_account failed");
+    assert_eq!(open_trades.len(), 0, "no trade must be inserted");
+    // wiremock expect(1) on cancel enforces the cancel was called.
+}

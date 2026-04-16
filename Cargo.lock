@@ -112,6 +112,7 @@ name = "auto-trader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "auto-trader-core",
  "auto-trader-db",
  "auto-trader-executor",

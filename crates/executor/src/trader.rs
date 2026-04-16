@@ -69,6 +69,41 @@ pub struct Trader {
 }
 
 impl Trader {
+    /// Attempt to cancel an order that did not fill, then return the
+    /// diagnostic error. Always returns `Err`.
+    ///
+    /// Checks the current order state first so we only call cancel on orders
+    /// that are still active. Called from both the empty-execs path and the
+    /// aggregate-error path in `fill_open`.
+    async fn cleanup_unfilled_order(
+        &self,
+        pair: &str,
+        order_id: &str,
+        context: &str,
+    ) -> anyhow::Error {
+        match self.api.get_child_orders(pair, order_id).await {
+            Ok(orders) => {
+                let state = orders.first().map(|o| o.child_order_state);
+                let is_terminal = matches!(
+                    state,
+                    Some(
+                        ChildOrderState::Completed
+                            | ChildOrderState::Canceled
+                            | ChildOrderState::Expired
+                            | ChildOrderState::Rejected
+                    ) | None
+                );
+                if !is_terminal {
+                    let _ = self.api.cancel_child_order(pair, order_id).await;
+                }
+                anyhow::anyhow!("{context}: order {order_id} state={:?} (not filled)", state)
+            }
+            Err(e) => anyhow::anyhow!(
+                "{context}: get_child_orders failed: {e}; order {order_id} may be orphan at exchange"
+            ),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
@@ -137,48 +172,46 @@ impl Trader {
                     match self.api.get_executions(&signal.pair.0, &order_id).await {
                         Ok(execs) if !execs.is_empty() => {
                             // Fill did happen — aggregate to get avg price + total size.
-                            let (avg_price, total_size) = aggregate_executions(&execs)?;
-                            tracing::info!(
-                                "open fill reconciled after timeout: order {} filled {} @ {}",
-                                order_id,
-                                total_size,
-                                avg_price
-                            );
-                            Ok((avg_price, total_size))
-                        }
-                        Ok(_) => {
-                            // No executions. Check order state to decide how to clean up.
-                            match self.api.get_child_orders(&signal.pair.0, &order_id).await {
-                                Ok(orders) => {
-                                    let state = orders.first().map(|o| o.child_order_state);
-                                    let is_terminal = matches!(
-                                        state,
-                                        Some(
-                                            ChildOrderState::Completed
-                                                | ChildOrderState::Canceled
-                                                | ChildOrderState::Expired
-                                                | ChildOrderState::Rejected
-                                        ) | None
-                                    );
-                                    // Attempt cancel if still active (best-effort).
-                                    if !is_terminal {
-                                        let _ = self
-                                            .api
-                                            .cancel_child_order(&signal.pair.0, &order_id)
-                                            .await;
-                                    }
-                                    Err(anyhow::anyhow!(
-                                        "open fill timed out and order {} state={:?} (not filled)",
+                            match aggregate_executions(&execs) {
+                                Ok((avg_price, total_size)) => {
+                                    tracing::info!(
+                                        "open fill reconciled after timeout: order {} filled {} @ {}",
                                         order_id,
-                                        state
+                                        total_size,
+                                        avg_price
+                                    );
+                                    Ok((avg_price, total_size))
+                                }
+                                Err(agg_err) => {
+                                    // aggregate failed (e.g. all size=0) — fall through to
+                                    // cancel-cleanup path so the order is not left active.
+                                    tracing::error!(
+                                        "open fill: aggregate_executions failed for order {}: {agg_err}; \
+                                         treating as not-filled and attempting cancel",
+                                        order_id
+                                    );
+                                    let cleanup_err = self
+                                        .cleanup_unfilled_order(
+                                            &signal.pair.0,
+                                            &order_id,
+                                            "open fill aggregate error",
+                                        )
+                                        .await;
+                                    Err(anyhow::anyhow!(
+                                        "open fill aggregate error for order {order_id}: {agg_err}; cleanup: {cleanup_err}"
                                     ))
                                 }
-                                Err(e) => Err(anyhow::anyhow!(
-                                    "open fill timed out and get_child_orders failed: {e}; \
-                                     order {} may be orphan at exchange",
-                                    order_id
-                                )),
                             }
+                        }
+                        Ok(_) => {
+                            // No executions — check order state to decide how to clean up.
+                            Err(self
+                                .cleanup_unfilled_order(
+                                    &signal.pair.0,
+                                    &order_id,
+                                    "open fill timed out and",
+                                )
+                                .await)
                         }
                         Err(e) => Err(anyhow::anyhow!(
                             "open fill poll timeout + get_executions failed: {e}; \
@@ -304,7 +337,15 @@ impl Trader {
     /// crash, re-running it would open an unintended opposite-direction
     /// position. In that case, skip Phase 2 and return a best-effort exit
     /// price directly.
-    async fn fill_close_with_stale_recovery(&self, trade: &Trade) -> anyhow::Result<Decimal> {
+    ///
+    /// Returns `(exit_price, was_approximate)`.  `was_approximate` is `true`
+    /// when the exchange position was already gone and we used a best-effort
+    /// price (PriceStore mid or entry_price fallback). Callers should emit an
+    /// operator-visible alert when this flag is set.
+    async fn fill_close_with_stale_recovery(
+        &self,
+        trade: &Trade,
+    ) -> anyhow::Result<(Decimal, bool)> {
         let positions = self.api.get_positions(&trade.pair.0).await?;
         let still_open = positions.iter().any(|p| {
             exchange_side_to_direction(&p.side) == trade.direction && p.size > Decimal::ZERO
@@ -315,7 +356,8 @@ impl Trader {
                 "close_position: exchange position still open for trade {}; re-running Phase 2",
                 trade.id
             );
-            self.fill_close(trade).await
+            let price = self.fill_close(trade).await?;
+            Ok((price, false))
         } else {
             // Exchange has no matching position → Phase 2 completed before crash.
             // Skip Phase 2, return a best-effort exit price for Phase 3.
@@ -324,7 +366,8 @@ impl Trader {
                  completing Phase 3 with best-effort exit price",
                 trade.id
             );
-            self.resolve_stale_exit_price(trade).await
+            let price = self.resolve_stale_exit_price(trade).await?;
+            Ok((price, true))
         }
     }
 
@@ -583,12 +626,23 @@ impl OrderExecutor for Trader {
         // already completed at the exchange. We verify the exchange state
         // before dispatching another reverse order to avoid opening an
         // unintended opposite-direction position.
-        let exit_price_result = if !self.dry_run && was_stale_recovery {
+        // `stale_approximate` is set to true when fill_close_with_stale_recovery
+        // determines that the exchange position was already gone and falls back
+        // to a best-effort price. We fire an operator alert after Phase 3 in
+        // that case so the PnL approximation is always visible.
+        let mut stale_approximate = false;
+        let exit_price_result: anyhow::Result<Decimal> = if !self.dry_run && was_stale_recovery {
             tracing::warn!(
                 "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
                 trade.id
             );
-            self.fill_close_with_stale_recovery(&trade).await
+            match self.fill_close_with_stale_recovery(&trade).await {
+                Ok((price, approximate)) => {
+                    stale_approximate = approximate;
+                    Ok(price)
+                }
+                Err(e) => Err(e),
+            }
         } else {
             self.fill_close(&trade).await
         };
@@ -733,7 +787,7 @@ impl OrderExecutor for Trader {
         let trade_id = closed_trade.id;
         let account_name = self.account_name.clone();
         let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
-            account_name,
+            account_name: account_name.clone(),
             trade_id,
             pnl_amount,
             reason: exit_reason.as_str().to_owned(),
@@ -743,6 +797,31 @@ impl OrderExecutor for Trader {
                 tracing::warn!("slack notification failed: {e}");
             }
         });
+
+        // W2: stale-recovery approximate price alert — operator must audit PnL.
+        if stale_approximate {
+            let notifier = self.notifier.clone();
+            let pair = closed_trade.pair.clone();
+            let strategy_name = closed_trade.strategy_name.clone();
+            let reason = format!(
+                "stale-recovery close for trade {trade_id}: exit price was APPROXIMATED \
+                 (PriceStore mid or entry_price fallback) — DB PnL may be inaccurate, \
+                 manual audit against exchange records recommended"
+            );
+            tokio::spawn(async move {
+                let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                    auto_trader_notify::OrderFailedEvent {
+                        account_name,
+                        strategy_name,
+                        pair,
+                        reason,
+                    },
+                );
+                if let Err(notify_err) = notifier.send(ev).await {
+                    tracing::warn!("stale-recovery alert send failed: {notify_err}");
+                }
+            });
+        }
 
         tracing::info!(
             "CLOSE: {} {} pnl={} reason={:?} dry_run={}",
