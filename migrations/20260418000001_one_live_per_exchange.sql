@@ -8,10 +8,11 @@ UPDATE trading_accounts
 SET exchange = lower(trim(exchange))
 WHERE exchange <> lower(trim(exchange));
 
--- DB CHECK: exchange は常に lower(trim()) 済み。
+-- DB CHECK: exchange は lowercase alphanumeric + underscore のみ許可。
+-- trim/lower 正規化の結果に加え、tab/newline 等の非可視文字も一括拒否。
 ALTER TABLE trading_accounts
     ADD CONSTRAINT trading_accounts_exchange_normalized
-    CHECK (exchange = lower(trim(exchange)));
+    CHECK (exchange ~ '^[a-z0-9_]+$');
 
 -- 正規化済み値での partial unique: exchange 毎に live は 1 件のみ。
 CREATE UNIQUE INDEX IF NOT EXISTS trading_accounts_one_live_per_exchange
