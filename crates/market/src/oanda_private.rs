@@ -98,13 +98,24 @@ impl OandaPrivateApi {
         let text = resp.text().await.map_err(OandaApiError::from)?;
         if !status.is_success() {
             const MAX_ERR_BODY: usize = 512;
-            let body = if text.len() > MAX_ERR_BODY {
-                let truncated: String = text.chars().take(MAX_ERR_BODY).collect();
-                format!("{}... (truncated from {} chars)", truncated, text.len())
+            let truncated: String = text.chars().take(MAX_ERR_BODY).collect();
+            // Redact the account_id if it appears in the error body — OANDA
+            // sometimes echoes the accountID in error payloads and we don't
+            // want it leaking into logs/alerts alongside the status.
+            let redacted = if truncated.contains(&self.account_id) {
+                truncated.replace(&self.account_id, "<REDACTED_ACCOUNT_ID>")
             } else {
-                text
+                truncated
             };
-            return Err(anyhow::Error::from(OandaApiError::Api { status, body }));
+            let final_body = if text.len() > MAX_ERR_BODY {
+                format!("{}... (truncated from {} chars)", redacted, text.len())
+            } else {
+                redacted
+            };
+            return Err(anyhow::Error::from(OandaApiError::Api {
+                status,
+                body: final_body,
+            }));
         }
         serde_json::from_str(&text)
             .map_err(|e| anyhow::Error::from(OandaApiError::Parse(e.to_string())))
@@ -571,5 +582,42 @@ mod tests {
         // Input with a slash — would normally break the URL path if not encoded
         let ps = api.get_positions("USD/JPY").await.unwrap();
         assert_eq!(ps.len(), 0); // both zero units → empty
+    }
+
+    #[tokio::test]
+    async fn send_json_redacts_account_id_in_error_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/accounts/101-001-12345-001/orders"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "errorMessage": "Invalid request for accountID 101-001-12345-001",
+                "accountID": "101-001-12345-001"
+            })))
+            .mount(&server)
+            .await;
+
+        let api = OandaPrivateApi::new(
+            server.uri(),
+            "101-001-12345-001".to_string(),
+            "fake-token".to_string(),
+        );
+        let err = api
+            .send_child_order(SendChildOrderRequest {
+                product_code: "USD_JPY".to_string(),
+                child_order_type: ChildOrderType::Market,
+                side: crate::bitflyer_private::Side::Buy,
+                size: rust_decimal::Decimal::from(1000),
+                price: None,
+                minute_to_expire: None,
+                time_in_force: None,
+            })
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("101-001-12345-001"),
+            "account_id leaked: {msg}"
+        );
+        assert!(msg.contains("REDACTED"), "redaction marker missing: {msg}");
     }
 }

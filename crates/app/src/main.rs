@@ -77,22 +77,28 @@ async fn main() -> anyhow::Result<()> {
     let mut exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
     exchange_apis.insert(Exchange::BitflyerCfd, bitflyer_api.clone());
 
+    // Resolve OANDA account_id from env (trimmed, non-empty) → config fallback.
+    // Used by both the ExchangeApi registry and the FX market monitor so
+    // they share identical resolution semantics.
+    fn resolve_oanda_account_id(config: &auto_trader_core::config::AppConfig) -> Option<String> {
+        std::env::var("OANDA_ACCOUNT_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                config
+                    .oanda
+                    .as_ref()
+                    .map(|c| c.account_id.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
     // OANDA ExchangeApi — registered when OANDA_API_KEY is set and either
     // OANDA_ACCOUNT_ID env var or [oanda].account_id in config is provided.
     // If absent, Oanda trading_accounts are simply skipped at dispatch
     // (same behavior as any exchange whose client isn't in the registry).
-    let oanda_account_id_env = std::env::var("OANDA_ACCOUNT_ID").ok();
-    let oanda_account_id = oanda_account_id_env
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(String::from)
-        .or_else(|| {
-            config
-                .oanda
-                .as_ref()
-                .map(|c| c.account_id.clone())
-                .filter(|s| !s.trim().is_empty())
-        });
+    let oanda_account_id = resolve_oanda_account_id(&config);
     let oanda_api_key = std::env::var("OANDA_API_KEY")
         .ok()
         .filter(|s| !s.trim().is_empty());
@@ -169,19 +175,27 @@ async fn main() -> anyhow::Result<()> {
                         p.clone(),
                     ));
                 }
-                let account_id = std::env::var("OANDA_ACCOUNT_ID")
-                    .unwrap_or_else(|_| oanda_config.account_id.clone());
-                let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
-                Some(
-                    MarketMonitor::new(
-                        oanda,
-                        fx_pairs,
-                        config.monitor.interval_secs,
-                        FX_TIMEFRAME,
-                        price_tx.clone(),
-                    )
-                    .with_db(pool.clone()),
-                )
+                match resolve_oanda_account_id(&config) {
+                    Some(account_id) => {
+                        let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
+                        Some(
+                            MarketMonitor::new(
+                                oanda,
+                                fx_pairs,
+                                config.monitor.interval_secs,
+                                FX_TIMEFRAME,
+                                price_tx.clone(),
+                            )
+                            .with_db(pool.clone()),
+                        )
+                    }
+                    None => {
+                        tracing::warn!(
+                            "FX monitor: no OANDA account_id available (should have been caught earlier)"
+                        );
+                        None
+                    }
+                }
             }
             _ => {
                 tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
