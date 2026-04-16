@@ -782,7 +782,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-                // [live].enabled=false なら live 口座の close を素通しする。
+                // [live].enabled=false なら live 口座の close を skip する。
                 // 起動時 gate と belt-and-suspenders。stale live positions は
                 // manual cleanup が必要。
                 if account_type == "live" && !crypto_monitor_live_enabled {
@@ -1059,7 +1059,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-            // [live].enabled=false なら live 口座の strategy exit を素通しする。
+            // [live].enabled=false なら live 口座の strategy exit を skip する。
             if account_type == "live" && !exit_live_enabled {
                 tracing::warn!(
                     "skipping strategy exit for live account {} trade {}: [live].enabled=false",
@@ -1183,7 +1183,7 @@ async fn main() -> anyhow::Result<()> {
                 if exchange != Exchange::BitflyerCfd {
                     continue;
                 }
-                // [live].enabled=false なら live 口座の signal を素通しする。
+                // [live].enabled=false なら live 口座の signal を拒否し、発注経路に入れない。
                 // 起動時 gate と belt-and-suspenders。runtime に REST で live 行が
                 // 追加された場合も発注を防ぐ。
                 if pac.account_type == "live" && !executor_live_enabled {

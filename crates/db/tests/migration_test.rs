@@ -1,6 +1,5 @@
-// risk_halts table and trades_one_active_per_strategy_pair index were removed
-// in migration 20260417000001_revert_pr2_unused.sql. The tests below verify
-// that the revert migration applied correctly.
+// Verify: (1) revert migration dropped risk_halts + trades_one_active_per_strategy_pair,
+// (2) one_live_per_exchange migration added the partial unique index.
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn trading_accounts_one_live_per_exchange_unique_exists(pool: sqlx::PgPool) {
