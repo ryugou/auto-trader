@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 
 pub struct MarketMonitor {
-    pub(crate) client: OandaClient,
+    client: OandaClient,
     pairs: Vec<Pair>,
     interval_secs: u64,
     timeframe: String,
@@ -125,7 +125,17 @@ impl MarketMonitor {
 #[async_trait]
 impl MarketFeed for MarketMonitor {
     async fn run(
-        self: Arc<Self>,
+        self: Box<Self>,
+        _price_store: Arc<PriceStore>,
+        price_tx: mpsc::Sender<PriceEvent>,
+    ) -> anyhow::Result<()> {
+        (*self).run_inner(_price_store, price_tx).await
+    }
+}
+
+impl MarketMonitor {
+    async fn run_inner(
+        self,
         _price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()> {

@@ -254,11 +254,12 @@ async fn connect_and_stream(
                     tracing::debug!("bitflyer tick drop: drain channel full");
                 }
                 mpsc::error::TrySendError::Closed(_) => {
-                    // Drain task died — shouldn't happen in normal operation.
-                    tracing::warn!(
-                        "bitflyer tick drop: drain channel closed; PriceStore updates stopped"
+                    tracing::error!(
+                        "bitflyer tick drain channel closed; PriceStore updates stopped — stopping feed"
                     );
-                    break;
+                    return Err(anyhow::anyhow!(
+                        "bitflyer tick drain channel closed; PriceStore updates stopped"
+                    ));
                 }
             }
         }
@@ -362,23 +363,11 @@ async fn connect_and_stream(
 #[async_trait]
 impl MarketFeed for BitflyerMonitor {
     async fn run(
-        self: Arc<Self>,
+        self: Box<Self>,
         price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()> {
-        // Consume the Arc to get owned BitflyerMonitor state (seed vectors,
-        // WS URL, etc). Requires the caller to hold exactly 1 strong ref
-        // when calling run() — main.rs ensures this by consuming the
-        // feeds HashMap before spawn (no Arc::new(feeds) wrapper).
-        let monitor = match Arc::try_unwrap(self) {
-            Ok(m) => m,
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "BitflyerMonitor::run called with shared Arc (>1 strong ref); \
-                     caller must pass owned feed — see main.rs feeds HashMap consumption"
-                ));
-            }
-        };
-        monitor.run_inner(price_store, price_tx).await
+        // Box<Self> gives us owned BitflyerMonitor via *self; no try_unwrap needed.
+        (*self).run_inner(price_store, price_tx).await
     }
 }

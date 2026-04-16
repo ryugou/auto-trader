@@ -645,11 +645,11 @@ async fn main() -> anyhow::Result<()> {
     // Build the market-feed registry — one entry per exchange that is
     // configured and has credentials. Adding a new exchange's price feed
     // = impl MarketFeed for NewFeed + insert here.
-    let mut feeds: HashMap<Exchange, Arc<dyn MarketFeed>> = HashMap::new();
+    let mut feeds: HashMap<Exchange, Box<dyn MarketFeed>> = HashMap::new();
 
     // OANDA feed (optional)
     if let Some(fx_monitor) = fx_monitor {
-        feeds.insert(Exchange::Oanda, Arc::new(fx_monitor));
+        feeds.insert(Exchange::Oanda, Box::new(fx_monitor));
     }
 
     // bitFlyer feed (optional)
@@ -680,7 +680,7 @@ async fn main() -> anyhow::Result<()> {
                 std::mem::take(&mut bitflyer_lows_seed),
                 std::mem::take(&mut bitflyer_closes_seed),
             );
-            feeds.insert(Exchange::BitflyerCfd, Arc::new(bf_feed));
+            feeds.insert(Exchange::BitflyerCfd, Box::new(bf_feed));
         }
     }
     // Build the price store once all monitor setup has had a chance
@@ -698,9 +698,8 @@ async fn main() -> anyhow::Result<()> {
     // (no intermediate raw-tick channel needed).
     // Collect handles so we can abort them on shutdown, mirroring the
     // old fx_monitor_handle / bitflyer_handle abort semantics.
-    // Consume the HashMap so each feed's Arc has exactly 1 strong ref
-    // when passed to tokio::spawn — this lets BitflyerMonitor::run
-    // succeed with Arc::try_unwrap without cloning seed vectors.
+    // Box<dyn MarketFeed> encodes single ownership; feeds are consumed
+    // by the for loop and moved into each spawned task.
     let mut feed_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for (exchange, feed) in feeds {
         let feed_price_store = price_store.clone();

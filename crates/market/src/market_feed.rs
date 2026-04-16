@@ -20,7 +20,7 @@ pub trait MarketFeed: Send + Sync {
     /// Returning `Err` stops this feed (main.rs logs it). Normal termination
     /// is when `price_tx` closes (channel dropped) — impl should exit cleanly.
     async fn run(
-        self: Arc<Self>,
+        self: Box<Self>,
         price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()>;
