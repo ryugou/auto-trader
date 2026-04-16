@@ -338,3 +338,28 @@ async fn get_executions_handles_multiple_fills() {
     assert_eq!(execs[1].size, dec!(500));
     assert_eq!(execs[1].price, dec!(148.510));
 }
+
+#[tokio::test]
+async fn get_executions_errors_on_cancelled_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/orders/6600"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "order": {
+                "id": "6600",
+                "state": "CANCELLED",
+                "instrument": "USD_JPY",
+                "units": "1000",
+                "cancelledTime": "2026-04-16T05:00:01Z",
+                "cancellingTransactionID": "6601",
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    let err = api.get_executions("USD_JPY", "6600").await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("CANCELLED"), "expected CANCELLED in: {msg}");
+    assert!(msg.contains("6600"), "expected order id 6600 in: {msg}");
+}

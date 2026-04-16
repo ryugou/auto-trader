@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!(
             "OANDA ExchangeApi not registered \
-             (set OANDA_API_KEY and either OANDA_ACCOUNT_ID env or [oanda].account_id in config to enable)"
+             (requires OANDA_API_KEY env + account_id (OANDA_ACCOUNT_ID env or [oanda].account_id config) + [oanda].api_url in config)"
         );
     }
 

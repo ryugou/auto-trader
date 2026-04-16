@@ -204,7 +204,37 @@ impl ExchangeApi for OandaPrivateApi {
             .ok_or_else(|| OandaApiError::Parse(format!("missing 'order' field: {order_body}")))?;
 
         let state = order.get("state").and_then(|v| v.as_str()).unwrap_or("");
-        if state != "FILLED" {
+        if state == "FILLED" {
+            // fall through to fill-fetch logic below
+        } else if matches!(state, "CANCELLED" | "REJECTED" | "EXPIRED") {
+            // Terminal non-filled state — fail fast so Trader::poll_executions
+            // doesn't waste 5 s spinning before timing out.
+            let mut details = Vec::new();
+            for key in [
+                "cancellingTransactionID",
+                "cancellationTransactionID",
+                "rejectTransactionID",
+                "reissueRejectTransactionID",
+                "cancelledTime",
+                "rejectReason",
+            ] {
+                if let Some(v) = order.get(key).and_then(|v| v.as_str()) {
+                    details.push(format!("{key}={v}"));
+                }
+            }
+            let suffix = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join(", "))
+            };
+            anyhow::bail!(
+                "order {} reached terminal non-filled state {}{}",
+                child_order_acceptance_id,
+                state,
+                suffix
+            );
+        } else {
+            // Still pending / working — caller will poll again.
             return Ok(Vec::new());
         }
         let fill_ids: Vec<String> = order
@@ -387,9 +417,12 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
         .and_then(|v| v.as_str())
         .unwrap_or("PENDING");
     let child_order_state = match oanda_state {
-        "FILLED" | "TRIGGERED" => ChildOrderState::Completed,
+        "FILLED" => ChildOrderState::Completed,
         "CANCELLED" => ChildOrderState::Canceled,
-        _ => ChildOrderState::Active, // PENDING or unknown → treat as active
+        // TRIGGERED means a stop/take-profit order has fired and is now live
+        // as a market/limit order — it is not yet filled, so treat as Active.
+        "TRIGGERED" | "PENDING" => ChildOrderState::Active,
+        _ => ChildOrderState::Active, // conservative default
     };
 
     let units_str = order.get("units").and_then(|v| v.as_str()).unwrap_or("0");
@@ -421,7 +454,10 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
             .unwrap_or_default(),
         outstanding_size: Decimal::ZERO,
         cancel_size: Decimal::ZERO,
-        executed_size: size,
+        executed_size: match child_order_state {
+            ChildOrderState::Completed => size,
+            _ => Decimal::ZERO,
+        },
         total_commission: Decimal::ZERO,
     })
 }
