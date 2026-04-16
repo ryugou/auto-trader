@@ -175,17 +175,16 @@ async fn main() -> anyhow::Result<()> {
         if let (Some(api_key), Some(oanda_config)) =
             (resolve_oanda_api_key(), config.oanda.as_ref())
         {
-            // Register this monitor's pairs as expected feeds
-            // before handing them to MarketMonitor (which takes
-            // ownership of fx_pairs).
-            for p in &fx_pairs {
-                expected_feeds.push(crate::price_store::FeedKey::new(
-                    auto_trader_core::types::Exchange::Oanda,
-                    p.clone(),
-                ));
-            }
             match resolve_oanda_account_id(&config) {
                 Some(account_id) => {
+                    // Register this monitor's pairs as expected feeds now that
+                    // we've confirmed FX monitor will actually start.
+                    for p in &fx_pairs {
+                        expected_feeds.push(crate::price_store::FeedKey::new(
+                            auto_trader_core::types::Exchange::Oanda,
+                            p.clone(),
+                        ));
+                    }
                     let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
                     Some(
                         MarketMonitor::new(

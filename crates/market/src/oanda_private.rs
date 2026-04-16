@@ -181,11 +181,12 @@ impl ExchangeApi for OandaPrivateApi {
             .send_json(self.authed(Method::POST, &path).json(&order_body))
             .await?;
 
-        // OANDA v3 uses orderCreateTransaction.id as the order ID for subsequent
-        // /orders/{orderID} calls. A separate orderCreateTransaction.orderID
-        // field isn't part of the documented schema today, but try it first as
-        // a defensive fallback in case OANDA introduces it — falls through to
-        // .id (the canonical field) otherwise.
+        // For subsequent /orders/{id} calls, prefer orderCreateTransaction.orderID
+        // when present and fall back to orderCreateTransaction.id otherwise.
+        // `orderID` is not part of the documented OANDA v3 schema today, but we
+        // accept it defensively in case OANDA introduces or returns it in some
+        // response shapes — falls through to `.id` (the canonical field in
+        // current practice) otherwise.
         let tx = body.get("orderCreateTransaction").ok_or_else(|| {
             OandaApiError::Parse(format!(
                 "missing orderCreateTransaction in response: {body}"
