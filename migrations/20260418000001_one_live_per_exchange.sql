@@ -37,6 +37,9 @@ END $$;
 
 -- DB CHECK: exchange は lowercase alphanumeric + underscore のみ許可。
 -- trim/lower 正規化の結果に加え、tab/newline 等の非可視文字も一括拒否。
+-- 再実行時に "constraint already exists" で失敗しないよう、先に削除してから再作成。
+ALTER TABLE trading_accounts
+    DROP CONSTRAINT IF EXISTS trading_accounts_exchange_normalized;
 ALTER TABLE trading_accounts
     ADD CONSTRAINT trading_accounts_exchange_normalized
     CHECK (exchange ~ '^[a-z0-9_]+$');
