@@ -4,7 +4,7 @@ use crate::oanda::OandaClient;
 use crate::price_store::PriceStore;
 use async_trait::async_trait;
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Candle, Exchange, Pair};
+use auto_trader_core::types::{Exchange, Pair};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -124,19 +124,6 @@ impl MarketMonitor {
 
 #[async_trait]
 impl MarketFeed for MarketMonitor {
-    fn exchange(&self) -> Exchange {
-        Exchange::Oanda
-    }
-
-    async fn warmup_candles(
-        &self,
-        pair: &Pair,
-        timeframe: &str,
-        count: usize,
-    ) -> anyhow::Result<Vec<Candle>> {
-        self.client.get_candles(pair, timeframe, count as u32).await
-    }
-
     async fn run(
         self: Arc<Self>,
         _price_store: Arc<PriceStore>,

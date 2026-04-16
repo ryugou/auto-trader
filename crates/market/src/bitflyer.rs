@@ -4,7 +4,7 @@ use crate::market_feed::MarketFeed;
 use crate::price_store::{FeedKey, LatestTick, PriceStore};
 use async_trait::async_trait;
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Candle, Exchange, Pair};
+use auto_trader_core::types::{Exchange, Pair};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -119,6 +119,18 @@ impl BitflyerMonitor {
             );
         }
 
+        // Internal bounded channel: WS loop uses try_send (non-blocking, drops
+        // on full) and hands raw ticks to a dedicated drain task that performs
+        // the async PriceStore write. This keeps the WS read loop non-blocking,
+        // matching the semantics of the old raw_tick_tx channel.
+        let (tick_tx, mut tick_rx) = mpsc::channel::<(FeedKey, LatestTick)>(256);
+        let ps = price_store.clone();
+        tokio::spawn(async move {
+            while let Some((key, tick)) = tick_rx.recv().await {
+                ps.update(key, tick).await;
+            }
+        });
+
         let mut backoff_secs = 1u64;
 
         loop {
@@ -126,7 +138,7 @@ impl BitflyerMonitor {
                 &self.ws_url,
                 &self.pairs,
                 self.pool.as_ref(),
-                &price_store,
+                &tick_tx,
                 &price_tx,
                 &mut builders,
                 &mut closes_map,
@@ -166,7 +178,7 @@ async fn connect_and_stream(
     ws_url: &str,
     pairs: &[Pair],
     pool: Option<&PgPool>,
-    price_store: &Arc<PriceStore>,
+    tick_tx: &mpsc::Sender<(FeedKey, LatestTick)>,
     price_tx: &mpsc::Sender<PriceEvent>,
     builders: &mut HashMap<String, CandleBuilder>,
     closes_map: &mut HashMap<String, Vec<Decimal>>,
@@ -214,12 +226,13 @@ async fn connect_and_stream(
         let ts =
             chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?.with_timezone(&chrono::Utc);
 
-        // Write the raw tick directly to the PriceStore for feed health
-        // monitoring. Raw ticks carry sub-second wall-clock timestamps
-        // so the 60s freshness threshold can be met; M5 candle events
-        // only fire on period boundaries and are too coarse for health.
-        price_store
-            .update(
+        // Forward the raw tick to the drain task via try_send (non-blocking).
+        // Drops the tick if the channel is full — acceptable: the drain task
+        // will catch the next tick. Raw ticks carry sub-second wall-clock
+        // timestamps so the 60s freshness threshold is easily met even with
+        // occasional drops.
+        tick_tx
+            .try_send((
                 FeedKey::new(Exchange::BitflyerCfd, Pair::new(product_code)),
                 LatestTick {
                     price,
@@ -227,8 +240,8 @@ async fn connect_and_stream(
                     best_ask,
                     ts,
                 },
-            )
-            .await;
+            ))
+            .ok();
 
         // on_tick returns completed candle when period boundary is crossed
         let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
@@ -328,23 +341,6 @@ async fn connect_and_stream(
 
 #[async_trait]
 impl MarketFeed for BitflyerMonitor {
-    fn exchange(&self) -> Exchange {
-        Exchange::BitflyerCfd
-    }
-
-    /// bitFlyer has no REST candle API, so warmup history is loaded from the
-    /// DB and injected via `.with_candle_seed(...)` at construction time.
-    /// This method returns empty; strategy warmup for bitFlyer is done in
-    /// `main.rs` before constructing the monitor.
-    async fn warmup_candles(
-        &self,
-        _pair: &Pair,
-        _timeframe: &str,
-        _count: usize,
-    ) -> anyhow::Result<Vec<Candle>> {
-        Ok(vec![])
-    }
-
     async fn run(
         self: Arc<Self>,
         price_store: Arc<PriceStore>,

@@ -698,12 +698,15 @@ async fn main() -> anyhow::Result<()> {
     // Each feed manages its own connection lifecycle; price_store and
     // price_tx are passed at run-time so feeds write ticks directly
     // (no intermediate raw-tick channel needed).
+    // Collect handles so we can abort them on shutdown, mirroring the
+    // old fx_monitor_handle / bitflyer_handle abort semantics.
+    let mut feed_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for (exchange, feed) in feeds.iter() {
         let feed = feed.clone();
         let feed_price_store = price_store.clone();
         let feed_price_tx = price_tx.clone();
         let exchange_label = *exchange;
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tracing::info!("starting market feed for {:?}", exchange_label);
             if let Err(e) = feed.run(feed_price_store, feed_price_tx).await {
                 tracing::error!(
@@ -712,6 +715,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         });
+        feed_handles.push(handle);
     }
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
@@ -1746,8 +1750,11 @@ async fn main() -> anyhow::Result<()> {
     // Drop senders to signal downstream tasks to finish
     drop(price_tx);
     drop(trade_tx); // allow recorder to drain and exit
-    // Market feed tasks detect price_tx closure (dropped above) and
-    // exit cleanly on their own — no explicit abort needed.
+    // Abort feed tasks so they release their price_tx clones and let
+    // the engine see a closed channel → clean exit.
+    for h in feed_handles {
+        h.abort();
+    }
     overnight_handle.abort();
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
