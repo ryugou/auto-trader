@@ -13,6 +13,7 @@ use auto_trader_db::pool::create_pool;
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::exchange_api::ExchangeApi;
+use auto_trader_market::market_feed::MarketFeed;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
 use auto_trader_market::oanda_private::OandaPrivateApi;
@@ -142,16 +143,6 @@ async fn main() -> anyhow::Result<()> {
     // process actually launches.
     let mut expected_feeds: Vec<crate::price_store::FeedKey> = Vec::new();
 
-    // Channel for raw bitflyer ticks. Bounded so that a stalled
-    // consumer cannot grow memory without bound, but the websocket
-    // loop uses `try_send` and drops (with a warn) on full so it
-    // never stalls the trading path. Created early so that
-    // BitflyerMonitor can take a clone of the sender during its
-    // setup block; the drain task is spawned later, after
-    // PriceStore is constructed.
-    let (raw_tick_tx, mut raw_tick_rx) =
-        mpsc::channel::<auto_trader_market::bitflyer::RawTick>(1024);
-
     // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
     let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
@@ -192,7 +183,6 @@ async fn main() -> anyhow::Result<()> {
                             fx_pairs,
                             config.monitor.interval_secs,
                             FX_TIMEFRAME,
-                            price_tx.clone(),
                         )
                         .with_db(pool.clone()),
                     )
@@ -652,17 +642,18 @@ async fn main() -> anyhow::Result<()> {
         });
     let vegapunk_client_recorder = vegapunk_client_exec.clone();
 
-    // Task: FX Market monitor (optional)
-    let fx_monitor_handle = fx_monitor.map(|monitor| {
-        tokio::spawn(async move {
-            if let Err(e) = monitor.run().await {
-                tracing::error!("FX monitor error: {e}");
-            }
-        })
-    });
+    // Build the market-feed registry — one entry per exchange that is
+    // configured and has credentials. Adding a new exchange's price feed
+    // = impl MarketFeed for NewFeed + insert here.
+    let mut feeds: HashMap<Exchange, Box<dyn MarketFeed>> = HashMap::new();
 
-    // bitFlyer monitor (crypto)
-    let bitflyer_handle = if let Some(bf_config) = &config.bitflyer {
+    // OANDA feed (optional)
+    if let Some(fx_monitor) = fx_monitor {
+        feeds.insert(Exchange::Oanda, Box::new(fx_monitor));
+    }
+
+    // bitFlyer feed (optional)
+    if let Some(bf_config) = &config.bitflyer {
         let crypto_pairs: Vec<Pair> = config
             .pairs
             .crypto
@@ -678,31 +669,20 @@ async fn main() -> anyhow::Result<()> {
                     p.clone(),
                 ));
             }
-            let mut bf_monitor = auto_trader_market::bitflyer::BitflyerMonitor::new(
+            let bf_feed = auto_trader_market::bitflyer::BitflyerMonitor::new(
                 &bf_config.ws_url,
                 crypto_pairs,
                 CRYPTO_TIMEFRAME,
-                price_tx.clone(),
             )
             .with_db(pool.clone())
             .with_candle_seed(
                 std::mem::take(&mut bitflyer_highs_seed),
                 std::mem::take(&mut bitflyer_lows_seed),
                 std::mem::take(&mut bitflyer_closes_seed),
-            )
-            .with_raw_tick_sink(raw_tick_tx.clone());
-            Some(tokio::spawn(async move {
-                if let Err(e) = bf_monitor.run().await {
-                    tracing::error!("bitflyer monitor error: {e}");
-                }
-            }))
-        } else {
-            None
+            );
+            feeds.insert(Exchange::BitflyerCfd, Box::new(bf_feed));
         }
-    } else {
-        None
-    };
-
+    }
     // Build the price store once all monitor setup has had a chance
     // to populate `expected_feeds`. The store is shared between the
     // raw-tick drain task (which writes every websocket tick into
@@ -712,29 +692,30 @@ async fn main() -> anyhow::Result<()> {
     // are too coarse for the 60s freshness threshold.
     let price_store = crate::price_store::PriceStore::new(expected_feeds);
 
-    // Drain task: pull every raw bitflyer tick from the channel
-    // created earlier and write it into the PriceStore for the
-    // dashboard's market-feed health view. Runs forever as long
-    // as the BitflyerMonitor is alive.
-    let raw_tick_store = price_store.clone();
-    let _raw_tick_drain_handle = tokio::spawn(async move {
-        while let Some(tick) = raw_tick_rx.recv().await {
-            raw_tick_store
-                .update(
-                    crate::price_store::FeedKey::new(
-                        auto_trader_core::types::Exchange::BitflyerCfd,
-                        tick.pair,
-                    ),
-                    crate::price_store::LatestTick {
-                        price: tick.ltp,
-                        best_bid: tick.best_bid,
-                        best_ask: tick.best_ask,
-                        ts: tick.ts,
-                    },
-                )
-                .await;
-        }
-    });
+    // Spawn all market feeds via the unified MarketFeed registry.
+    // Each feed manages its own connection lifecycle; price_store and
+    // price_tx are passed at run-time so feeds write ticks directly
+    // (no intermediate raw-tick channel needed).
+    // Collect handles so we can abort them on shutdown, mirroring the
+    // old fx_monitor_handle / bitflyer_handle abort semantics.
+    // Box<dyn MarketFeed> encodes single ownership; feeds are consumed
+    // by the for loop and moved into each spawned task.
+    let mut feed_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    for (exchange, feed) in feeds {
+        let feed_price_store = price_store.clone();
+        let feed_price_tx = price_tx.clone();
+        let exchange_label = exchange;
+        let handle = tokio::spawn(async move {
+            tracing::info!("starting market feed for {:?}", exchange_label);
+            if let Err(e) = feed.run(feed_price_store, feed_price_tx).await {
+                tracing::error!(
+                    "market feed for {:?} exited with error: {e}",
+                    exchange_label
+                );
+            }
+        });
+        feed_handles.push(handle);
+    }
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
     let (macro_tx, _) =
@@ -1768,10 +1749,9 @@ async fn main() -> anyhow::Result<()> {
     // Drop senders to signal downstream tasks to finish
     drop(price_tx);
     drop(trade_tx); // allow recorder to drain and exit
-    if let Some(h) = fx_monitor_handle {
-        h.abort();
-    }
-    if let Some(h) = bitflyer_handle {
+    // Abort feed tasks so they release their price_tx clones and let
+    // the engine see a closed channel → clean exit.
+    for h in feed_handles {
         h.abort();
     }
     overnight_handle.abort();
