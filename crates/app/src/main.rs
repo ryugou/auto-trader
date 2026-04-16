@@ -543,10 +543,6 @@ async fn main() -> anyhow::Result<()> {
     // open and close paths even if they were added after startup via REST.
     let live_enabled = config.live.as_ref().is_some_and(|l| l.enabled);
 
-    // PR-1 startup gate: refuse to start if a live account exists but
-    // [live].enabled is false (or missing). Nothing more.
-    auto_trader::startup::check_live_gate(&db_accounts, config.live.as_ref())?;
-
     if let Some(ps) = config.position_sizing.as_ref() {
         tracing::info!(
             "position_sizing config (method='{}', risk_rate={}) is ignored — sizing is now per-strategy via Signal.allocation_pct",
