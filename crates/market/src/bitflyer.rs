@@ -1,3 +1,8 @@
+// Match old raw_tick_tx capacity (main.rs pre-refactor). Sized to
+// absorb brief bursts during heavy market activity without dropping
+// ticks; drain task typically empties the queue in <1ms.
+const PRICE_STORE_TICK_CHANNEL_CAP: usize = 1024;
+
 use crate::candle_builder::CandleBuilder;
 use crate::indicators;
 use crate::market_feed::MarketFeed;
@@ -123,7 +128,8 @@ impl BitflyerMonitor {
         // on full) and hands raw ticks to a dedicated drain task that performs
         // the async PriceStore write. This keeps the WS read loop non-blocking,
         // matching the semantics of the old raw_tick_tx channel.
-        let (tick_tx, mut tick_rx) = mpsc::channel::<(FeedKey, LatestTick)>(256);
+        let (tick_tx, mut tick_rx) =
+            mpsc::channel::<(FeedKey, LatestTick)>(PRICE_STORE_TICK_CHANNEL_CAP);
         let ps = price_store.clone();
         tokio::spawn(async move {
             while let Some((key, tick)) = tick_rx.recv().await {
@@ -231,17 +237,31 @@ async fn connect_and_stream(
         // will catch the next tick. Raw ticks carry sub-second wall-clock
         // timestamps so the 60s freshness threshold is easily met even with
         // occasional drops.
-        tick_tx
-            .try_send((
-                FeedKey::new(Exchange::BitflyerCfd, Pair::new(product_code)),
-                LatestTick {
-                    price,
-                    best_bid,
-                    best_ask,
-                    ts,
-                },
-            ))
-            .ok();
+        if let Err(e) = tick_tx.try_send((
+            FeedKey::new(Exchange::BitflyerCfd, Pair::new(product_code)),
+            LatestTick {
+                price,
+                best_bid,
+                best_ask,
+                ts,
+            },
+        )) {
+            match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    // Drain task can't keep up; log at debug (not warn) to
+                    // avoid flooding. PriceStore falls behind by 1 tick; not
+                    // fatal.
+                    tracing::debug!("bitflyer tick drop: drain channel full");
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    // Drain task died — shouldn't happen in normal operation.
+                    tracing::warn!(
+                        "bitflyer tick drop: drain channel closed; PriceStore updates stopped"
+                    );
+                    break;
+                }
+            }
+        }
 
         // on_tick returns completed candle when period boundary is crossed
         let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
@@ -346,20 +366,19 @@ impl MarketFeed for BitflyerMonitor {
         price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()> {
-        // Arc::try_unwrap gives us ownership when the caller holds the only
-        // reference. In main.rs the Arc is created solely to satisfy the trait
-        // bound and is immediately passed here, so unwrap always succeeds.
-        // If somehow a second reference exists we fall back to a clone, which
-        // copies the seed vecs (they are empty by run-time anyway).
-        let monitor = Arc::try_unwrap(self).unwrap_or_else(|arc| BitflyerMonitor {
-            ws_url: arc.ws_url.clone(),
-            pairs: arc.pairs.clone(),
-            timeframe: arc.timeframe.clone(),
-            pool: arc.pool.clone(),
-            closes_seed: arc.closes_seed.clone(),
-            highs_seed: arc.highs_seed.clone(),
-            lows_seed: arc.lows_seed.clone(),
-        });
+        // Consume the Arc to get owned BitflyerMonitor state (seed vectors,
+        // WS URL, etc). Requires the caller to hold exactly 1 strong ref
+        // when calling run() — main.rs ensures this by consuming the
+        // feeds HashMap before spawn (no Arc::new(feeds) wrapper).
+        let monitor = match Arc::try_unwrap(self) {
+            Ok(m) => m,
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "BitflyerMonitor::run called with shared Arc (>1 strong ref); \
+                     caller must pass owned feed — see main.rs feeds HashMap consumption"
+                ));
+            }
+        };
         monitor.run_inner(price_store, price_tx).await
     }
 }

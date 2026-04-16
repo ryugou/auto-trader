@@ -683,8 +683,6 @@ async fn main() -> anyhow::Result<()> {
             feeds.insert(Exchange::BitflyerCfd, Arc::new(bf_feed));
         }
     }
-    let feeds = Arc::new(feeds);
-
     // Build the price store once all monitor setup has had a chance
     // to populate `expected_feeds`. The store is shared between the
     // raw-tick drain task (which writes every websocket tick into
@@ -700,12 +698,14 @@ async fn main() -> anyhow::Result<()> {
     // (no intermediate raw-tick channel needed).
     // Collect handles so we can abort them on shutdown, mirroring the
     // old fx_monitor_handle / bitflyer_handle abort semantics.
+    // Consume the HashMap so each feed's Arc has exactly 1 strong ref
+    // when passed to tokio::spawn — this lets BitflyerMonitor::run
+    // succeed with Arc::try_unwrap without cloning seed vectors.
     let mut feed_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    for (exchange, feed) in feeds.iter() {
-        let feed = feed.clone();
+    for (exchange, feed) in feeds {
         let feed_price_store = price_store.clone();
         let feed_price_tx = price_tx.clone();
-        let exchange_label = *exchange;
+        let exchange_label = exchange;
         let handle = tokio::spawn(async move {
             tracing::info!("starting market feed for {:?}", exchange_label);
             if let Err(e) = feed.run(feed_price_store, feed_price_tx).await {
