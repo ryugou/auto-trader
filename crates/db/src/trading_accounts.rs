@@ -212,20 +212,16 @@ pub async fn create_account(
         .bind(&currency)
         .fetch_one(pool)
         .await
-        .map_err(|e| {
+        .map_err(|e| -> anyhow::Error {
             // Concurrent inserts can race past the app-layer pre-check above.
             // The DB partial unique index is the real guard; translate its
             // unique_violation (23505) into a friendly error.
             if let sqlx::Error::Database(ref db_err) = e
-                && db_err.constraint()
-                    == Some("trading_accounts_one_live_per_exchange")
+                && db_err.constraint() == Some("trading_accounts_one_live_per_exchange")
             {
-                return anyhow::anyhow!(
-                    "live account for exchange '{}' already exists (concurrent insert detected)",
-                    exchange
-                );
+                return anyhow::anyhow!("live account for exchange '{}' already exists", exchange);
             }
-            anyhow::anyhow!("{e}")
+            e.into()
         })?;
     Ok(TradingAccount::from(row))
 }
