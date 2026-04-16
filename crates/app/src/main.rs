@@ -73,12 +73,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Exchange API registry — maps Exchange variant to its private-API client.
     // Adding a new exchange = impl ExchangeApi for NewClient + insert here.
-    let mut _exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
-    _exchange_apis.insert(
-        Exchange::BitflyerCfd,
-        bitflyer_api.clone() as Arc<dyn ExchangeApi>,
-    );
-    let exchange_apis = Arc::new(_exchange_apis);
+    let mut exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
+    exchange_apis.insert(Exchange::BitflyerCfd, bitflyer_api.clone());
+    let exchange_apis = Arc::new(exchange_apis);
 
     // Notifier — Slack Webhook for operator alerts.
     let slack_webhook_url = std::env::var("SLACK_WEBHOOK_URL").ok();

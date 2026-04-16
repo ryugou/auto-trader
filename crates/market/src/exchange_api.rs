@@ -1,8 +1,8 @@
 //! Trait abstraction over exchange-specific Private API clients.
 //!
 //! Adding a new exchange means implementing this trait for a new client
-//! struct. Trader / main.rs / Reconciler / BalanceSync consume the trait
-//! object, so strategy + DB + Signal layers are already exchange-agnostic.
+//! struct. `Trader` and `main.rs` dispatch consume the trait object, so
+//! strategy + DB + Signal layers are already exchange-agnostic.
 
 use async_trait::async_trait;
 
