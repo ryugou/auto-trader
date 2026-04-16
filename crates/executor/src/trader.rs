@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
-use auto_trader_market::bitflyer_private::{ChildOrderType, SendChildOrderRequest, Side};
+use auto_trader_market::bitflyer_private::{
+    ChildOrderState, ChildOrderType, Execution, SendChildOrderRequest, Side,
+};
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::price_store::{FeedKey, PriceStore};
 use auto_trader_notify::{Notifier, NotifyEvent, OrderFilledEvent, PositionClosedEvent};
@@ -30,6 +32,23 @@ use crate::position_sizer::PositionSizer;
 /// this helper so the ledger never carries fractional yen.
 fn truncate_yen(amount: Decimal) -> Decimal {
     amount.round_dp_with_strategy(0, RoundingStrategy::ToZero)
+}
+
+/// Aggregate a non-empty execution list into (volume-weighted avg price, total size).
+///
+/// Used when `poll_executions` timed out but a follow-up `get_executions` call
+/// confirmed the order did fill. Returns an error if the executions are empty
+/// or total size is zero (caller should have guarded against the empty case).
+fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal)> {
+    let total_size: Decimal = execs.iter().map(|e| e.size).sum();
+    if total_size.is_zero() {
+        anyhow::bail!(
+            "aggregate_executions: total size is zero across {} execs",
+            execs.len()
+        );
+    }
+    let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
+    Ok((total_notional / total_size, total_size))
 }
 
 pub struct Trader {
@@ -99,12 +118,76 @@ impl Trader {
         } else {
             let req = self.signal_to_send_child_order(signal, quantity);
             let resp = self.api.send_child_order(req).await?;
-            self.poll_executions(
-                &resp.child_order_acceptance_id,
-                &signal.pair.0,
-                Duration::from_secs(5),
-            )
-            .await
+            let order_id = resp.child_order_acceptance_id.clone();
+            match self
+                .poll_executions(&order_id, &signal.pair.0, Duration::from_secs(5))
+                .await
+            {
+                Ok((price, qty)) => Ok((price, qty)),
+                Err(poll_err) => {
+                    // Timeout — the order may or may not have filled at the exchange.
+                    // Consult the exchange before giving up to avoid creating an
+                    // orphan position that never gets recorded in the DB.
+                    tracing::warn!(
+                        "open fill poll timeout for order {}: {poll_err}; reconciling via exchange",
+                        order_id
+                    );
+                    // One additional attempt after a short pause.
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    match self.api.get_executions(&signal.pair.0, &order_id).await {
+                        Ok(execs) if !execs.is_empty() => {
+                            // Fill did happen — aggregate to get avg price + total size.
+                            let (avg_price, total_size) = aggregate_executions(&execs)?;
+                            tracing::info!(
+                                "open fill reconciled after timeout: order {} filled {} @ {}",
+                                order_id,
+                                total_size,
+                                avg_price
+                            );
+                            Ok((avg_price, total_size))
+                        }
+                        Ok(_) => {
+                            // No executions. Check order state to decide how to clean up.
+                            match self.api.get_child_orders(&signal.pair.0, &order_id).await {
+                                Ok(orders) => {
+                                    let state = orders.first().map(|o| o.child_order_state);
+                                    let is_terminal = matches!(
+                                        state,
+                                        Some(
+                                            ChildOrderState::Completed
+                                                | ChildOrderState::Canceled
+                                                | ChildOrderState::Expired
+                                                | ChildOrderState::Rejected
+                                        ) | None
+                                    );
+                                    // Attempt cancel if still active (best-effort).
+                                    if !is_terminal {
+                                        let _ = self
+                                            .api
+                                            .cancel_child_order(&signal.pair.0, &order_id)
+                                            .await;
+                                    }
+                                    Err(anyhow::anyhow!(
+                                        "open fill timed out and order {} state={:?} (not filled)",
+                                        order_id,
+                                        state
+                                    ))
+                                }
+                                Err(e) => Err(anyhow::anyhow!(
+                                    "open fill timed out and get_child_orders failed: {e}; \
+                                     order {} may be orphan at exchange",
+                                    order_id
+                                )),
+                            }
+                        }
+                        Err(e) => Err(anyhow::anyhow!(
+                            "open fill poll timeout + get_executions failed: {e}; \
+                             order {} may be orphan at exchange",
+                            order_id
+                        )),
+                    }
+                }
+            }
         }
     }
 
@@ -212,6 +295,79 @@ impl Trader {
             minute_to_expire: None,
             time_in_force: None,
         }
+    }
+
+    /// Phase 2 variant for stale-lock crash recovery (live only).
+    ///
+    /// Before dispatching a new reverse order, verify whether the exchange
+    /// still holds the position. If Phase 2 already succeeded before the
+    /// crash, re-running it would open an unintended opposite-direction
+    /// position. In that case, skip Phase 2 and return a best-effort exit
+    /// price directly.
+    async fn fill_close_with_stale_recovery(&self, trade: &Trade) -> anyhow::Result<Decimal> {
+        let positions = self.api.get_positions(&trade.pair.0).await?;
+        let still_open = positions.iter().any(|p| {
+            exchange_side_to_direction(&p.side) == trade.direction && p.size > Decimal::ZERO
+        });
+        if still_open {
+            // Exchange still has the position → Phase 2 really failed, re-run it.
+            tracing::info!(
+                "close_position: exchange position still open for trade {}; re-running Phase 2",
+                trade.id
+            );
+            self.fill_close(trade).await
+        } else {
+            // Exchange has no matching position → Phase 2 completed before crash.
+            // Skip Phase 2, return a best-effort exit price for Phase 3.
+            tracing::warn!(
+                "close_position: exchange shows trade {} already closed; \
+                 completing Phase 3 with best-effort exit price",
+                trade.id
+            );
+            self.resolve_stale_exit_price(trade).await
+        }
+    }
+
+    /// Best-effort exit price for a trade that was closed at the exchange but
+    /// whose Phase 3 DB update never completed (process crash after Phase 2).
+    ///
+    /// Returns the current PriceStore mid-price, or falls back to `entry_price`
+    /// if no price data is available. Logs a warning in either case so the
+    /// operator can cross-check against exchange records.
+    async fn resolve_stale_exit_price(&self, trade: &Trade) -> anyhow::Result<Decimal> {
+        let feed_key = FeedKey::new(self.exchange, trade.pair.clone());
+        match self.price_store.latest_bid_ask(&feed_key).await {
+            Some((bid, ask)) => {
+                let mid = (bid + ask) / Decimal::from(2);
+                tracing::warn!(
+                    "resolve_stale_exit_price: trade {} using PriceStore mid {} as exit price",
+                    trade.id,
+                    mid
+                );
+                Ok(mid)
+            }
+            None => {
+                tracing::warn!(
+                    "resolve_stale_exit_price: trade {} no PriceStore data for {}; \
+                     using entry_price {} as approximate exit price",
+                    trade.id,
+                    trade.pair,
+                    trade.entry_price
+                );
+                Ok(trade.entry_price)
+            }
+        }
+    }
+}
+
+/// Map an exchange-side string to a `Direction`.
+///
+/// Used when comparing exchange position sides against DB trade directions.
+fn exchange_side_to_direction(side: &str) -> Direction {
+    if side.eq_ignore_ascii_case("BUY") {
+        Direction::Long
+    } else {
+        Direction::Short
     }
 }
 
@@ -405,7 +561,7 @@ impl OrderExecutor for Trader {
         // This is the ownership token that prevents concurrent close paths
         // from BOTH dispatching opposite-side orders to the exchange.
         // If we don't get the lock, another close already won this race.
-        let trade = auto_trader_db::trades::acquire_close_lock(
+        let lock = auto_trader_db::trades::acquire_close_lock(
             &self.pool,
             uuid,
             self.account_id,
@@ -416,11 +572,27 @@ impl OrderExecutor for Trader {
                 "trade {id} not in 'open' state (already closed/closing or belongs to another account)"
             )
         })?;
+        let trade = lock.trade;
+        let was_stale_recovery = lock.was_stale_recovery;
 
         // Phase 2: Execute live fill outside the DB transaction. This is
         // safe because the trade is now status='closing' — no other path
         // will reach fill_close for this trade until we release the lock.
-        let exit_price = match self.fill_close(&trade).await {
+        //
+        // If we re-acquired a STALE lock (crash recovery), Phase 2 may have
+        // already completed at the exchange. We verify the exchange state
+        // before dispatching another reverse order to avoid opening an
+        // unintended opposite-direction position.
+        let exit_price_result = if !self.dry_run && was_stale_recovery {
+            tracing::warn!(
+                "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
+                trade.id
+            );
+            self.fill_close_with_stale_recovery(&trade).await
+        } else {
+            self.fill_close(&trade).await
+        };
+        let exit_price = match exit_price_result {
             Ok(price) => price,
             Err(e) => {
                 // Roll back the lock so future close attempts can retry.

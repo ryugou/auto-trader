@@ -11,6 +11,15 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Internal row for acquire_close_lock — captures both the trade columns and
+/// the pre-update `closing_started_at` so the caller can detect stale recovery.
+#[derive(sqlx::FromRow)]
+struct AcquireLockRow {
+    #[sqlx(flatten)]
+    trade: TradeRow,
+    old_closing_started_at: Option<DateTime<Utc>>,
+}
+
 // ---------------------------------------------------------------------------
 // New API for Trader
 // ---------------------------------------------------------------------------
@@ -160,39 +169,68 @@ pub const STALE_CLOSING_THRESHOLD_SECS: i64 = 300;
 /// This is the **only** correct entry point for closing a trade in
 /// live mode: it prevents two concurrent close paths from both
 /// dispatching opposite-side orders to the exchange.
-pub async fn acquire_close_lock<'e, E>(
-    executor: E,
+/// Result of [`acquire_close_lock`]: the locked trade plus a flag indicating
+/// whether this was a stale-recovery re-acquisition (i.e. the row was already
+/// in `closing` state before we locked it). Callers MUST check this flag before
+/// dispatching a new exchange close order — the position may already be closed
+/// at the exchange if the previous holder crashed after Phase 2 succeeded.
+pub struct CloseLockAcquired {
+    pub trade: Trade,
+    /// `true` when we re-acquired a stale `closing` row (crash recovery path).
+    /// `false` for the normal `open → closing` transition.
+    pub was_stale_recovery: bool,
+}
+
+pub async fn acquire_close_lock(
+    pool: &PgPool,
     trade_id: Uuid,
     account_id: Uuid,
-) -> anyhow::Result<Option<Trade>>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row = sqlx::query_as::<_, TradeRow>(
-        r#"UPDATE trades
+) -> anyhow::Result<Option<CloseLockAcquired>> {
+    // Use a CTE to capture the row's pre-update closing_started_at so we can
+    // determine whether this is a fresh lock or a stale-recovery re-acquisition.
+    let row = sqlx::query_as::<_, AcquireLockRow>(
+        r#"WITH pre AS (
+             SELECT closing_started_at AS old_closing_started_at
+             FROM trades
+             WHERE id = $1 AND account_id = $2
+           )
+           UPDATE trades
            SET status = 'closing',
                closing_started_at = NOW()
-           WHERE id = $1
-             AND account_id = $2
+           FROM pre
+           WHERE trades.id = $1
+             AND trades.account_id = $2
              AND (
-               status = 'open'
+               trades.status = 'open'
                OR (
-                 status = 'closing'
-                 AND closing_started_at IS NOT NULL
-                 AND closing_started_at < NOW() - INTERVAL '1 second' * $3
+                 trades.status = 'closing'
+                 AND trades.closing_started_at IS NOT NULL
+                 AND trades.closing_started_at < NOW() - INTERVAL '1 second' * $3
                )
              )
-           RETURNING id, strategy_name, pair, exchange, direction, entry_price, exit_price,
-                     stop_loss, take_profit, quantity, leverage, fees, account_id,
-                     entry_at, exit_at, pnl_amount,
-                     exit_reason, status, created_at, max_hold_until"#,
+           RETURNING trades.id, trades.strategy_name, trades.pair, trades.exchange,
+                     trades.direction, trades.entry_price, trades.exit_price,
+                     trades.stop_loss, trades.take_profit, trades.quantity, trades.leverage,
+                     trades.fees, trades.account_id,
+                     trades.entry_at, trades.exit_at, trades.pnl_amount,
+                     trades.exit_reason, trades.status, trades.created_at, trades.max_hold_until,
+                     pre.old_closing_started_at"#,
     )
     .bind(trade_id)
     .bind(account_id)
     .bind(STALE_CLOSING_THRESHOLD_SECS)
-    .fetch_optional(executor)
+    .fetch_optional(pool)
     .await?;
-    row.map(|r| r.try_into()).transpose()
+
+    row.map(|r| {
+        let was_stale_recovery = r.old_closing_started_at.is_some();
+        let trade: Trade = r.trade.try_into()?;
+        Ok(CloseLockAcquired {
+            trade,
+            was_stale_recovery,
+        })
+    })
+    .transpose()
 }
 
 /// Release a close lock by transitioning `closing` back to `open`.
@@ -370,6 +408,133 @@ pub async fn release_margin(
     .execute(&mut *tx)
     .await?;
 
+    Ok(())
+}
+
+/// Fetch all trades with `status IN ('open', 'closing')` for a given account.
+///
+/// Used by the startup reconciler to identify DB rows that may have drifted
+/// from exchange state during a previous shutdown or crash.
+pub async fn list_open_or_closing_by_account(
+    pool: &PgPool,
+    account_id: Uuid,
+) -> anyhow::Result<Vec<Trade>> {
+    let rows = sqlx::query_as::<_, TradeRow>(
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, account_id,
+                  entry_at, exit_at, pnl_amount,
+                  exit_reason, status, created_at, max_hold_until
+           FROM trades
+           WHERE account_id = $1 AND status IN ('open', 'closing')
+           ORDER BY entry_at DESC"#,
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
+/// Close a trade using a synthetic (best-effort) exit price.
+///
+/// Used by the startup reconciler when the exchange position is confirmed
+/// closed but Phase 3 never completed. Records the reconciliation `reason_tag`
+/// as the `exit_reason` in the DB so audit queries can distinguish these rows
+/// from normally-closed trades.
+///
+/// `ExitReason` does not have a variant for reconciliation, so we write the
+/// tag directly via raw SQL (the `exit_reason` column is a plain text field).
+pub async fn close_trade_reconciled(
+    pool: &PgPool,
+    trade_id: Uuid,
+    exit_price: Decimal,
+    pnl_amount: Decimal,
+    reason_tag: &str,
+) -> anyhow::Result<()> {
+    let exit_at = chrono::Utc::now();
+
+    // Fetch the trade to compute margin for the balance release.
+    let trade = sqlx::query_as::<_, TradeRow>(
+        r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
+                  stop_loss, take_profit, quantity, leverage, fees, account_id,
+                  entry_at, exit_at, pnl_amount,
+                  exit_reason, status, created_at, max_hold_until
+           FROM trades
+           WHERE id = $1 AND status IN ('open', 'closing')"#,
+    )
+    .bind(trade_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("close_trade_reconciled: trade {trade_id} not found or already closed")
+    })?;
+
+    // Truncate toward zero to keep ledger integer.
+    let margin = (trade.entry_price * trade.quantity / trade.leverage)
+        .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+
+    let mut tx = pool.begin().await?;
+
+    let rows_affected = sqlx::query(
+        r#"UPDATE trades
+           SET exit_price = $2,
+               exit_at = $3,
+               pnl_amount = $4,
+               exit_reason = $5,
+               status = 'closed',
+               closing_started_at = NULL
+           WHERE id = $1 AND status IN ('open', 'closing')"#,
+    )
+    .bind(trade_id)
+    .bind(exit_price)
+    .bind(exit_at)
+    .bind(pnl_amount)
+    .bind(reason_tag)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        anyhow::bail!("close_trade_reconciled: trade {trade_id} not found or already closed");
+    }
+
+    // Release margin + pnl back to account balance.
+    let new_balance: Decimal = sqlx::query_scalar(
+        r#"UPDATE trading_accounts
+           SET current_balance = current_balance + $2 + $3
+           WHERE id = $1
+           RETURNING current_balance"#,
+    )
+    .bind(trade.account_id)
+    .bind(margin)
+    .bind(pnl_amount)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // Record margin_release event.
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'margin_release', $3, $4)"#,
+    )
+    .bind(trade.account_id)
+    .bind(trade_id)
+    .bind(margin)
+    .bind(new_balance - pnl_amount)
+    .execute(&mut *tx)
+    .await?;
+
+    // Record trade_close event.
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'trade_close', $3, $4)"#,
+    )
+    .bind(trade.account_id)
+    .bind(trade_id)
+    .bind(pnl_amount)
+    .bind(new_balance)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
