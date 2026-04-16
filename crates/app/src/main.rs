@@ -520,13 +520,28 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // `LIVE_DRY_RUN` env overrides `[live].dry_run` config. "1/true/yes/on" → true.
+    // `LIVE_DRY_RUN` env overrides `[live].dry_run` config.
+    // Trim whitespace and lowercase before matching so " True\n" is valid.
+    // Unknown values fall back to [live].dry_run and emit a warning.
     let live_cfg_dry_run = config.live.as_ref().is_some_and(|l| l.dry_run);
-    let live_forces_dry_run: bool = match std::env::var("LIVE_DRY_RUN").ok().as_deref() {
-        Some("1" | "true" | "yes" | "on") => true,
-        Some("0" | "false" | "no" | "off") => false,
-        _ => live_cfg_dry_run,
+    let live_forces_dry_run: bool = match std::env::var("LIVE_DRY_RUN").ok() {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => {
+                tracing::warn!(
+                    "invalid LIVE_DRY_RUN value {:?} (expected 1/true/yes/on/0/false/no/off); falling back to [live].dry_run={}",
+                    raw,
+                    live_cfg_dry_run
+                );
+                live_cfg_dry_run
+            }
+        },
+        None => live_cfg_dry_run,
     };
+    // Runtime gate: [live].enabled=false means live accounts are skipped at
+    // open and close paths even if they were added after startup via REST.
+    let live_enabled = config.live.as_ref().is_some_and(|l| l.enabled);
 
     // PR-1 startup gate: refuse to start if a live account exists but
     // [live].enabled is false (or missing). Nothing more.
@@ -731,6 +746,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
+    let crypto_monitor_live_enabled = live_enabled;
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -766,6 +782,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+                // [live].enabled=false なら live 口座の close を素通しする。
+                // 起動時 gate と belt-and-suspenders。stale live positions は
+                // manual cleanup が必要。
+                if account_type == "live" && !crypto_monitor_live_enabled {
+                    tracing::warn!(
+                        "skipping close for live account {} trade {}: [live].enabled=false",
+                        account_name,
+                        trade.id
+                    );
+                    continue;
+                }
                 let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
@@ -993,6 +1020,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
     let exit_live_forces_dry_run = live_forces_dry_run;
+    let exit_live_enabled = live_enabled;
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade joined with account info in one query so we
@@ -1031,6 +1059,15 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
+            // [live].enabled=false なら live 口座の strategy exit を素通しする。
+            if account_type == "live" && !exit_live_enabled {
+                tracing::warn!(
+                    "skipping strategy exit for live account {} trade {}: [live].enabled=false",
+                    account_name,
+                    trade.id
+                );
+                continue;
+            }
             let dry_run = account_type == "paper" || exit_live_forces_dry_run;
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
@@ -1097,6 +1134,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_notifier = notifier.clone();
     let executor_position_sizer = shared_position_sizer.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
+    let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
     let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
@@ -1143,6 +1181,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 if exchange != Exchange::BitflyerCfd {
+                    continue;
+                }
+                // [live].enabled=false なら live 口座の signal を素通しする。
+                // 起動時 gate と belt-and-suspenders。runtime に REST で live 行が
+                // 追加された場合も発注を防ぐ。
+                if pac.account_type == "live" && !executor_live_enabled {
+                    tracing::warn!(
+                        "skipping signal for live account {} ({}): [live].enabled=false",
+                        pac.name,
+                        pac.id
+                    );
                     continue;
                 }
                 let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;

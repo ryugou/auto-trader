@@ -160,6 +160,25 @@ pub async fn create_account(
             req.account_type
         );
     }
+    // live 口座は同一 exchange に 1 件のみ許可 (bitFlyer API client が
+    // singleton のため、複数行があると margin / collateral 共有で会計破綻する)。
+    if req.account_type == "live" {
+        let existing: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM trading_accounts
+             WHERE exchange = $1 AND account_type = 'live'
+             LIMIT 1",
+        )
+        .bind(&req.exchange)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((existing_id,)) = existing {
+            anyhow::bail!(
+                "live account for exchange '{}' already exists (id={}); only 1 live account per exchange is supported",
+                req.exchange,
+                existing_id
+            );
+        }
+    }
     let currency = normalize_currency(&req.currency);
     if let Err(msg) = validate_initial_balance(&currency, req.initial_balance) {
         anyhow::bail!(msg);
@@ -220,4 +239,49 @@ pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn live_req(exchange: &str) -> CreateTradingAccount {
+        CreateTradingAccount {
+            name: format!("live-{exchange}"),
+            exchange: exchange.to_string(),
+            initial_balance: dec!(50000),
+            leverage: dec!(1),
+            strategy: "bb_mean_revert_v1".to_string(),
+            account_type: "live".to_string(),
+            currency: "JPY".to_string(),
+        }
+    }
+
+    /// A second live INSERT for the same exchange must be rejected by the
+    /// app-layer pre-check (mirrors the DB partial unique index).
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn duplicate_live_insert_same_exchange_fails(pool: sqlx::PgPool) {
+        let req = live_req("bitflyer_cfd");
+        create_account(&pool, &req).await.expect("first insert ok");
+        let err = create_account(&pool, &req)
+            .await
+            .expect_err("second live insert should fail");
+        assert!(
+            err.to_string().contains("already exists"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A live account for a different exchange must be allowed (independent
+    /// collateral pools).
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn live_insert_different_exchange_succeeds(pool: sqlx::PgPool) {
+        create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("first exchange ok");
+        create_account(&pool, &live_req("oanda"))
+            .await
+            .expect("different exchange should succeed");
+    }
 }

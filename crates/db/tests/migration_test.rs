@@ -3,6 +3,21 @@
 // that the revert migration applied correctly.
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn trading_accounts_one_live_per_exchange_unique_exists(pool: sqlx::PgPool) {
+    let row: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes
+         WHERE indexname = 'trading_accounts_one_live_per_exchange')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        row.0,
+        "partial unique index trading_accounts_one_live_per_exchange should exist"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn risk_halts_table_is_dropped_after_revert_migration(pool: sqlx::PgPool) {
     let row: (bool,) = sqlx::query_as(
         "SELECT EXISTS (

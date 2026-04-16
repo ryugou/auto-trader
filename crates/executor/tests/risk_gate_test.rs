@@ -15,8 +15,8 @@ fn passes_when_price_tick_is_fresh() {
 }
 
 #[test]
-fn rejects_on_exact_limit_breach() {
-    // age == freshness_secs is still Pass (> not >=)
+fn passes_on_exact_limit_boundary() {
+    // age == freshness_secs is still Pass (> not >=); only strictly greater rejects
     assert!(matches!(eval_price_freshness(60, 60), GateDecision::Pass));
 }
 

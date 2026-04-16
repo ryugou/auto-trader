@@ -117,9 +117,8 @@ params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 2
 price_freshness_secs = 60  # price tick がこの秒数より古ければ新規発注禁止
 
 # === Live execution ===
-# enabled = true でない限り LiveTrader は起動しない。
 # dry_run が true の間は発注手前で no-op 通知のみ。
 # LIVE_DRY_RUN env が設定されていればそちらが優先される。
 [live]
-enabled = false
+enabled = false  # true にしないと live 口座での取引が起動時・runtime 両方で拒否される
 dry_run = true
