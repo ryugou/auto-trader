@@ -168,6 +168,12 @@ impl BitflyerMonitor {
                         tracing::info!("price channel closed, stopping bitflyer monitor");
                         return Ok(());
                     }
+                    if tick_tx.is_closed() {
+                        tracing::error!(
+                            "bitflyer feed: tick drain channel permanently closed, stopping feed (no reconnect)"
+                        );
+                        return Err(e);
+                    }
                     tracing::warn!(
                         "bitflyer websocket error, reconnecting in {backoff_secs}s: {e}"
                     );
