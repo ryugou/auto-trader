@@ -94,14 +94,22 @@ async fn main() -> anyhow::Result<()> {
             })
     }
 
+    // Resolve OANDA api_key from env (trimmed, non-empty).
+    // Used by both the ExchangeApi registry and the FX market monitor so
+    // they share identical resolution semantics.
+    fn resolve_oanda_api_key() -> Option<String> {
+        std::env::var("OANDA_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     // OANDA ExchangeApi — registered when OANDA_API_KEY is set and either
     // OANDA_ACCOUNT_ID env var or [oanda].account_id in config is provided.
     // If absent, Oanda trading_accounts are simply skipped at dispatch
     // (same behavior as any exchange whose client isn't in the registry).
     let oanda_account_id = resolve_oanda_account_id(&config);
-    let oanda_api_key = std::env::var("OANDA_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
+    let oanda_api_key = resolve_oanda_api_key();
     if let (Some(account_id), Some(api_key), Some(oanda_config)) =
         (oanda_account_id, oanda_api_key, config.oanda.as_ref())
     {
@@ -164,43 +172,42 @@ async fn main() -> anyhow::Result<()> {
         config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
     };
     let fx_monitor: Option<MarketMonitor> = if !fx_pairs.is_empty() {
-        match (std::env::var("OANDA_API_KEY"), config.oanda.as_ref()) {
-            (Ok(api_key), Some(oanda_config)) if !api_key.trim().is_empty() => {
-                // Register this monitor's pairs as expected feeds
-                // before handing them to MarketMonitor (which takes
-                // ownership of fx_pairs).
-                for p in &fx_pairs {
-                    expected_feeds.push(crate::price_store::FeedKey::new(
-                        auto_trader_core::types::Exchange::Oanda,
-                        p.clone(),
-                    ));
-                }
-                match resolve_oanda_account_id(&config) {
-                    Some(account_id) => {
-                        let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
-                        Some(
-                            MarketMonitor::new(
-                                oanda,
-                                fx_pairs,
-                                config.monitor.interval_secs,
-                                FX_TIMEFRAME,
-                                price_tx.clone(),
-                            )
-                            .with_db(pool.clone()),
+        if let (Some(api_key), Some(oanda_config)) =
+            (resolve_oanda_api_key(), config.oanda.as_ref())
+        {
+            // Register this monitor's pairs as expected feeds
+            // before handing them to MarketMonitor (which takes
+            // ownership of fx_pairs).
+            for p in &fx_pairs {
+                expected_feeds.push(crate::price_store::FeedKey::new(
+                    auto_trader_core::types::Exchange::Oanda,
+                    p.clone(),
+                ));
+            }
+            match resolve_oanda_account_id(&config) {
+                Some(account_id) => {
+                    let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
+                    Some(
+                        MarketMonitor::new(
+                            oanda,
+                            fx_pairs,
+                            config.monitor.interval_secs,
+                            FX_TIMEFRAME,
+                            price_tx.clone(),
                         )
-                    }
-                    None => {
-                        tracing::warn!(
-                            "FX monitor: no OANDA account_id available (should have been caught earlier)"
-                        );
-                        None
-                    }
+                        .with_db(pool.clone()),
+                    )
+                }
+                None => {
+                    tracing::warn!(
+                        "FX monitor: no OANDA account_id available (should have been caught earlier)"
+                    );
+                    None
                 }
             }
-            _ => {
-                tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
-                None
-            }
+        } else {
+            tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
+            None
         }
     } else {
         tracing::info!("no FX pairs configured, FX monitor disabled");

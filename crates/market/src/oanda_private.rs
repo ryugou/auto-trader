@@ -98,19 +98,22 @@ impl OandaPrivateApi {
         let text = resp.text().await.map_err(OandaApiError::from)?;
         if !status.is_success() {
             const MAX_ERR_BODY: usize = 512;
-            let truncated: String = text.chars().take(MAX_ERR_BODY).collect();
-            // Redact the account_id if it appears in the error body — OANDA
-            // sometimes echoes the accountID in error payloads and we don't
-            // want it leaking into logs/alerts alongside the status.
-            let redacted = if truncated.contains(&self.account_id) {
-                truncated.replace(&self.account_id, "<REDACTED_ACCOUNT_ID>")
+            // Redact account_id from the FULL body first so occurrences beyond
+            // the truncation boundary are still scrubbed.
+            let redacted_full = if text.contains(&self.account_id) {
+                text.replace(&self.account_id, "<REDACTED_ACCOUNT_ID>")
+            } else {
+                text
+            };
+            let truncated: String = redacted_full.chars().take(MAX_ERR_BODY).collect();
+            let final_body = if redacted_full.chars().count() > MAX_ERR_BODY {
+                format!(
+                    "{}... (truncated from {} chars)",
+                    truncated,
+                    redacted_full.chars().count()
+                )
             } else {
                 truncated
-            };
-            let final_body = if text.len() > MAX_ERR_BODY {
-                format!("{}... (truncated from {} chars)", redacted, text.len())
-            } else {
-                redacted
             };
             return Err(anyhow::Error::from(OandaApiError::Api {
                 status,
@@ -619,5 +622,44 @@ mod tests {
             "account_id leaked: {msg}"
         );
         assert!(msg.contains("REDACTED"), "redaction marker missing: {msg}");
+    }
+
+    #[tokio::test]
+    async fn send_json_redacts_account_id_even_past_truncation_boundary() {
+        let server = MockServer::start().await;
+        // Body where account_id appears around char 600 (past 512 boundary).
+        let padding = "x".repeat(550);
+        let body = format!(
+            "{{\"errorMessage\": \"{}\", \"accountID\": \"101-001-12345-001\"}}",
+            padding
+        );
+        Mock::given(method("POST"))
+            .and(path("/v3/accounts/101-001-12345-001/orders"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let api = OandaPrivateApi::new(
+            server.uri(),
+            "101-001-12345-001".to_string(),
+            "fake-token".to_string(),
+        );
+        let err = api
+            .send_child_order(SendChildOrderRequest {
+                product_code: "USD_JPY".to_string(),
+                child_order_type: ChildOrderType::Market,
+                side: crate::bitflyer_private::Side::Buy,
+                size: rust_decimal::Decimal::from(1000),
+                price: None,
+                minute_to_expire: None,
+                time_in_force: None,
+            })
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("101-001-12345-001"),
+            "account_id leaked past truncation: {msg}"
+        );
     }
 }
