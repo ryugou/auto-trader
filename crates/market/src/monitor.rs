@@ -1,36 +1,32 @@
 use crate::indicators;
+use crate::market_feed::MarketFeed;
 use crate::oanda::OandaClient;
+use crate::price_store::PriceStore;
+use async_trait::async_trait;
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Exchange, Pair};
+use auto_trader_core::types::{Candle, Exchange, Pair};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 
 pub struct MarketMonitor {
-    client: OandaClient,
+    pub(crate) client: OandaClient,
     pairs: Vec<Pair>,
     interval_secs: u64,
     timeframe: String,
-    tx: mpsc::Sender<PriceEvent>,
     pool: Option<PgPool>,
 }
 
 impl MarketMonitor {
-    pub fn new(
-        client: OandaClient,
-        pairs: Vec<Pair>,
-        interval_secs: u64,
-        timeframe: &str,
-        tx: mpsc::Sender<PriceEvent>,
-    ) -> Self {
+    pub fn new(client: OandaClient, pairs: Vec<Pair>, interval_secs: u64, timeframe: &str) -> Self {
         Self {
             client,
             pairs,
             interval_secs,
             timeframe: timeframe.to_string(),
-            tx,
             pool: None,
         }
     }
@@ -40,26 +36,11 @@ impl MarketMonitor {
         self
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
-        let mut tick = interval(Duration::from_secs(self.interval_secs));
-        loop {
-            tick.tick().await;
-            for pair in &self.pairs {
-                match self.fetch_and_emit(pair).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        if self.tx.is_closed() {
-                            tracing::info!("price channel closed, stopping monitor");
-                            return Ok(());
-                        }
-                        tracing::error!("monitor error for {pair}: {e}");
-                    }
-                }
-            }
-        }
-    }
-
-    async fn fetch_and_emit(&self, pair: &Pair) -> anyhow::Result<()> {
+    async fn fetch_and_emit(
+        &self,
+        pair: &Pair,
+        price_tx: &mpsc::Sender<PriceEvent>,
+    ) -> anyhow::Result<()> {
         let candles = self.client.get_candles(pair, &self.timeframe, 100).await?;
         let latest = match candles.last() {
             Some(c) => c.clone(),
@@ -136,7 +117,46 @@ impl MarketMonitor {
             candle: latest,
             indicators,
         };
-        self.tx.send(event).await?;
+        price_tx.send(event).await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl MarketFeed for MarketMonitor {
+    fn exchange(&self) -> Exchange {
+        Exchange::Oanda
+    }
+
+    async fn warmup_candles(
+        &self,
+        pair: &Pair,
+        timeframe: &str,
+        count: usize,
+    ) -> anyhow::Result<Vec<Candle>> {
+        self.client.get_candles(pair, timeframe, count as u32).await
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _price_store: Arc<PriceStore>,
+        price_tx: mpsc::Sender<PriceEvent>,
+    ) -> anyhow::Result<()> {
+        let mut tick = interval(Duration::from_secs(self.interval_secs));
+        loop {
+            tick.tick().await;
+            for pair in &self.pairs {
+                match self.fetch_and_emit(pair, &price_tx).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if price_tx.is_closed() {
+                            tracing::info!("price channel closed, stopping monitor");
+                            return Ok(());
+                        }
+                        tracing::error!("monitor error for {pair}: {e}");
+                    }
+                }
+            }
+        }
     }
 }
