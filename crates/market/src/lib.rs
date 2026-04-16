@@ -5,5 +5,6 @@ pub mod exchange_api;
 pub mod indicators;
 pub mod monitor;
 pub mod oanda;
+pub mod oanda_private;
 pub mod price_store;
 pub mod provider;

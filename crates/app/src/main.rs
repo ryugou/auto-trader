@@ -15,6 +15,7 @@ use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
+use auto_trader_market::oanda_private::OandaPrivateApi;
 use auto_trader_notify::Notifier;
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
@@ -75,6 +76,57 @@ async fn main() -> anyhow::Result<()> {
     // Adding a new exchange = impl ExchangeApi for NewClient + insert here.
     let mut exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
     exchange_apis.insert(Exchange::BitflyerCfd, bitflyer_api.clone());
+
+    // Resolve OANDA account_id from env (trimmed, non-empty) → config fallback.
+    // Used by both the ExchangeApi registry and the FX market monitor so
+    // they share identical resolution semantics.
+    fn resolve_oanda_account_id(config: &auto_trader_core::config::AppConfig) -> Option<String> {
+        std::env::var("OANDA_ACCOUNT_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                config
+                    .oanda
+                    .as_ref()
+                    .map(|c| c.account_id.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
+    // Resolve OANDA api_key from env (trimmed, non-empty).
+    // Used by both the ExchangeApi registry and the FX market monitor so
+    // they share identical resolution semantics.
+    fn resolve_oanda_api_key() -> Option<String> {
+        std::env::var("OANDA_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    // OANDA ExchangeApi — registered when OANDA_API_KEY is set and either
+    // OANDA_ACCOUNT_ID env var or [oanda].account_id in config is provided.
+    // If absent, Oanda trading_accounts are simply skipped at dispatch
+    // (same behavior as any exchange whose client isn't in the registry).
+    let oanda_account_id = resolve_oanda_account_id(&config);
+    let oanda_api_key = resolve_oanda_api_key();
+    if let (Some(account_id), Some(api_key), Some(oanda_config)) =
+        (oanda_account_id, oanda_api_key, config.oanda.as_ref())
+    {
+        let oanda_api: Arc<dyn ExchangeApi> = Arc::new(OandaPrivateApi::new(
+            oanda_config.api_url.clone(),
+            account_id,
+            api_key,
+        ));
+        exchange_apis.insert(Exchange::Oanda, oanda_api);
+        tracing::info!("OANDA ExchangeApi registered");
+    } else {
+        tracing::info!(
+            "OANDA ExchangeApi not registered \
+             (requires OANDA_API_KEY env + account_id (OANDA_ACCOUNT_ID env or [oanda].account_id config) + [oanda].api_url in config)"
+        );
+    }
+
     let exchange_apis = Arc::new(exchange_apis);
 
     // Notifier — Slack Webhook for operator alerts.
@@ -120,35 +172,41 @@ async fn main() -> anyhow::Result<()> {
         config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
     };
     let fx_monitor: Option<MarketMonitor> = if !fx_pairs.is_empty() {
-        match (std::env::var("OANDA_API_KEY"), config.oanda.as_ref()) {
-            (Ok(api_key), Some(oanda_config)) if !api_key.trim().is_empty() => {
-                // Register this monitor's pairs as expected feeds
-                // before handing them to MarketMonitor (which takes
-                // ownership of fx_pairs).
-                for p in &fx_pairs {
-                    expected_feeds.push(crate::price_store::FeedKey::new(
-                        auto_trader_core::types::Exchange::Oanda,
-                        p.clone(),
-                    ));
-                }
-                let account_id = std::env::var("OANDA_ACCOUNT_ID")
-                    .unwrap_or_else(|_| oanda_config.account_id.clone());
-                let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
-                Some(
-                    MarketMonitor::new(
-                        oanda,
-                        fx_pairs,
-                        config.monitor.interval_secs,
-                        FX_TIMEFRAME,
-                        price_tx.clone(),
+        if let (Some(api_key), Some(oanda_config)) =
+            (resolve_oanda_api_key(), config.oanda.as_ref())
+        {
+            match resolve_oanda_account_id(&config) {
+                Some(account_id) => {
+                    // Register this monitor's pairs as expected feeds now that
+                    // we've confirmed FX monitor will actually start.
+                    for p in &fx_pairs {
+                        expected_feeds.push(crate::price_store::FeedKey::new(
+                            auto_trader_core::types::Exchange::Oanda,
+                            p.clone(),
+                        ));
+                    }
+                    let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
+                    Some(
+                        MarketMonitor::new(
+                            oanda,
+                            fx_pairs,
+                            config.monitor.interval_secs,
+                            FX_TIMEFRAME,
+                            price_tx.clone(),
+                        )
+                        .with_db(pool.clone()),
                     )
-                    .with_db(pool.clone()),
-                )
+                }
+                None => {
+                    tracing::warn!(
+                        "FX monitor: no OANDA account_id available (should have been caught earlier)"
+                    );
+                    None
+                }
             }
-            _ => {
-                tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
-                None
-            }
+        } else {
+            tracing::info!("OANDA not configured or API key not set, FX monitor disabled");
+            None
         }
     } else {
         tracing::info!("no FX pairs configured, FX monitor disabled");
