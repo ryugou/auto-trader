@@ -237,15 +237,34 @@ impl ExchangeApi for OandaPrivateApi {
             // Still pending / working — caller will poll again.
             return Ok(Vec::new());
         }
-        let fill_ids: Vec<String> = order
-            .get("fillingTransactionIDs")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let fill_ids: Vec<String> = {
+            // Prefer array form fillingTransactionIDs; fall back to singular
+            // fillingTransactionID; error if neither present for a FILLED order.
+            let from_array = order
+                .get("fillingTransactionIDs")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            if !from_array.is_empty() {
+                from_array
+            } else if let Some(id) = order
+                .get("fillingTransactionID")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                vec![id.to_string()]
+            } else {
+                return Err(OandaApiError::Parse(format!(
+                    "filled order {} missing fillingTransactionIDs / fillingTransactionID",
+                    child_order_acceptance_id
+                ))
+                .into());
+            }
+        };
 
         // 2. For each fill transaction, fetch it and map to an Execution.
         let mut out = Vec::new();
@@ -402,12 +421,14 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
     let id = order
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| OandaApiError::Parse(format!("order missing 'id': {order}")))?
         .to_string();
     let instrument = order
         .get("instrument")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| OandaApiError::Parse(format!("order missing 'instrument': {order}")))?
         .to_string();
 
     // Map OANDA state string to ChildOrderState enum.
@@ -425,8 +446,13 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
         _ => ChildOrderState::Active, // conservative default
     };
 
-    let units_str = order.get("units").and_then(|v| v.as_str()).unwrap_or("0");
-    let units: i64 = units_str.parse().unwrap_or(0);
+    let units_str = order
+        .get("units")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| OandaApiError::Parse(format!("order missing 'units': {order}")))?;
+    let units: i64 = units_str.parse().map_err(|e| {
+        OandaApiError::Parse(format!("order 'units' parse error: {e} value={units_str}"))
+    })?;
     // ChildOrder.side is String ("BUY"/"SELL") in bitFlyer types.
     let side = if units >= 0 { "BUY" } else { "SELL" }.to_string();
     let size = Decimal::from(units.unsigned_abs());
