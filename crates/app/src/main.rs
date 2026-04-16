@@ -15,6 +15,7 @@ use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
+use auto_trader_market::oanda_private::OandaPrivateApi;
 use auto_trader_notify::Notifier;
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
@@ -75,6 +76,42 @@ async fn main() -> anyhow::Result<()> {
     // Adding a new exchange = impl ExchangeApi for NewClient + insert here.
     let mut exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
     exchange_apis.insert(Exchange::BitflyerCfd, bitflyer_api.clone());
+
+    // OANDA ExchangeApi — only registered when OANDA_API_KEY + OANDA_ACCOUNT_ID
+    // are set. If absent, Oanda trading_accounts are simply skipped at dispatch
+    // (same behavior as any exchange whose client isn't in the registry).
+    let oanda_account_id_env = std::env::var("OANDA_ACCOUNT_ID").ok();
+    let oanda_account_id = oanda_account_id_env
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(String::from)
+        .or_else(|| {
+            config
+                .oanda
+                .as_ref()
+                .map(|c| c.account_id.clone())
+                .filter(|s| !s.trim().is_empty())
+        });
+    let oanda_api_key = std::env::var("OANDA_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if let (Some(account_id), Some(api_key), Some(oanda_config)) =
+        (oanda_account_id, oanda_api_key, config.oanda.as_ref())
+    {
+        let oanda_api: Arc<dyn ExchangeApi> = Arc::new(OandaPrivateApi::new(
+            oanda_config.api_url.clone(),
+            account_id,
+            api_key,
+        ));
+        exchange_apis.insert(Exchange::Oanda, oanda_api);
+        tracing::info!("OANDA ExchangeApi registered");
+    } else {
+        tracing::info!(
+            "OANDA ExchangeApi not registered \
+             (OANDA_API_KEY / OANDA_ACCOUNT_ID / [oanda] config missing)"
+        );
+    }
+
     let exchange_apis = Arc::new(exchange_apis);
 
     // Notifier — Slack Webhook for operator alerts.
