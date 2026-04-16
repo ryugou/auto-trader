@@ -44,13 +44,21 @@ fn encode_path(s: &str) -> String {
 #[derive(Debug, thiserror::Error)]
 pub enum OandaApiError {
     #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error("OANDA API error {status}: {body}")]
     Api { status: StatusCode, body: String },
     #[error("response parse error: {0}")]
     Parse(String),
     #[error("invalid config: {0}")]
     Config(String),
+}
+
+impl From<reqwest::Error> for OandaApiError {
+    fn from(e: reqwest::Error) -> Self {
+        // Redact the request URL from the error message to prevent account_id leakage
+        // (reqwest::Error.Display includes the full URL, which embeds the account_id)
+        OandaApiError::Http(e.without_url())
+    }
 }
 
 pub struct OandaPrivateApi {
@@ -85,9 +93,9 @@ impl OandaPrivateApi {
         &self,
         builder: reqwest::RequestBuilder,
     ) -> anyhow::Result<serde_json::Value> {
-        let resp = builder.send().await.map_err(OandaApiError::Http)?;
+        let resp = builder.send().await.map_err(OandaApiError::from)?;
         let status = resp.status();
-        let text = resp.text().await.map_err(OandaApiError::Http)?;
+        let text = resp.text().await.map_err(OandaApiError::from)?;
         if !status.is_success() {
             const MAX_ERR_BODY: usize = 512;
             let body = if text.len() > MAX_ERR_BODY {
