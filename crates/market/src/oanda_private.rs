@@ -37,6 +37,10 @@ use crate::bitflyer_private::{
 };
 use crate::exchange_api::ExchangeApi;
 
+fn encode_path(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OandaApiError {
     #[error("HTTP request failed: {0}")]
@@ -150,7 +154,7 @@ impl ExchangeApi for OandaPrivateApi {
             }
         });
 
-        let path = format!("/v3/accounts/{}/orders", self.account_id);
+        let path = format!("/v3/accounts/{}/orders", encode_path(&self.account_id));
         let body: serde_json::Value = self
             .send_json(self.authed(Method::POST, &path).json(&order_body))
             .await?;
@@ -178,7 +182,8 @@ impl ExchangeApi for OandaPrivateApi {
         // Returns { order: {...} }. Map to Vec<ChildOrder> with a single element.
         let path = format!(
             "/v3/accounts/{}/orders/{}",
-            self.account_id, child_order_acceptance_id
+            encode_path(&self.account_id),
+            encode_path(child_order_acceptance_id)
         );
         let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
 
@@ -198,7 +203,8 @@ impl ExchangeApi for OandaPrivateApi {
         //    only in the ORDER_FILL transaction record.
         let order_path = format!(
             "/v3/accounts/{}/orders/{}",
-            self.account_id, child_order_acceptance_id
+            encode_path(&self.account_id),
+            encode_path(child_order_acceptance_id)
         );
         let order_body: serde_json::Value = self
             .send_json(self.authed(Method::GET, &order_path))
@@ -273,7 +279,11 @@ impl ExchangeApi for OandaPrivateApi {
         // 2. For each fill transaction, fetch it and map to an Execution.
         let mut out = Vec::new();
         for tx_id in fill_ids {
-            let tx_path = format!("/v3/accounts/{}/transactions/{}", self.account_id, tx_id);
+            let tx_path = format!(
+                "/v3/accounts/{}/transactions/{}",
+                encode_path(&self.account_id),
+                encode_path(&tx_id)
+            );
             let tx_body: serde_json::Value =
                 self.send_json(self.authed(Method::GET, &tx_path)).await?;
             let tx = tx_body.get("transaction").ok_or_else(|| {
@@ -338,7 +348,8 @@ impl ExchangeApi for OandaPrivateApi {
         // Fields sfd and swap_point_accumulate have no OANDA equivalent — set to ZERO.
         let path = format!(
             "/v3/accounts/{}/positions/{}",
-            self.account_id, product_code
+            encode_path(&self.account_id),
+            encode_path(product_code)
         );
         let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
         let pos = body
@@ -385,7 +396,7 @@ impl ExchangeApi for OandaPrivateApi {
     async fn get_collateral(&self) -> anyhow::Result<Collateral> {
         // OANDA: GET /v3/accounts/{id}/summary
         //   -> { account: { balance, marginAvailable, marginUsed, unrealizedPL, ... } }
-        let path = format!("/v3/accounts/{}/summary", self.account_id);
+        let path = format!("/v3/accounts/{}/summary", encode_path(&self.account_id));
         let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
         let account = body
             .get("account")
@@ -424,7 +435,8 @@ impl ExchangeApi for OandaPrivateApi {
         // OANDA: PUT /v3/accounts/{id}/orders/{orderID}/cancel
         let path = format!(
             "/v3/accounts/{}/orders/{}/cancel",
-            self.account_id, child_order_acceptance_id
+            encode_path(&self.account_id),
+            encode_path(child_order_acceptance_id)
         );
         let _ = self.send_json(self.authed(Method::PUT, &path)).await?;
         Ok(())
@@ -452,7 +464,7 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
         .to_string();
 
     // Map OANDA state string to ChildOrderState enum.
-    // OANDA states: PENDING, FILLED, TRIGGERED, CANCELLED.
+    // OANDA states: PENDING, FILLED, TRIGGERED, CANCELLED, EXPIRED, REJECTED.
     let oanda_state = order
         .get("state")
         .and_then(|v| v.as_str())
@@ -460,6 +472,8 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
     let child_order_state = match oanda_state {
         "FILLED" => ChildOrderState::Completed,
         "CANCELLED" => ChildOrderState::Canceled,
+        "EXPIRED" => ChildOrderState::Expired,
+        "REJECTED" => ChildOrderState::Rejected,
         // TRIGGERED means a stop/take-profit order has fired and is now live
         // as a market/limit order — it is not yet filled, so treat as Active.
         "TRIGGERED" | "PENDING" => ChildOrderState::Active,
@@ -506,4 +520,36 @@ fn order_json_to_child(order: &serde_json::Value) -> anyhow::Result<ChildOrder> 
         },
         total_commission: Decimal::ZERO,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn positions_path_escapes_special_chars() {
+        let server = MockServer::start().await;
+        // Register mock for the PRE-encoded path so we can detect proper encoding
+        Mock::given(method("GET"))
+            .and(path("/v3/accounts/101-001-12345-001/positions/USD%2FJPY"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "position": {
+                    "long":  { "units": "0", "averagePrice": "0" },
+                    "short": { "units": "0", "averagePrice": "0" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let api = OandaPrivateApi::new(
+            server.uri(),
+            "101-001-12345-001".to_string(),
+            "fake-token".to_string(),
+        );
+        // Input with a slash — would normally break the URL path if not encoded
+        let ps = api.get_positions("USD/JPY").await.unwrap();
+        assert_eq!(ps.len(), 0); // both zero units → empty
+    }
 }
