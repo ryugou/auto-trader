@@ -3,6 +3,23 @@
 //! Auth: Bearer token (simple, no HMAC). Account-scoped: every request
 //! includes the OANDA account ID in the URL path.
 //! Rate limit: 120 req/sec per account.
+//!
+//! ## Known limitations (tracked)
+//!
+//! - `get_child_orders` returns a single-element Vec with incomplete fields
+//!   (child_order_type hardcoded to Market, price=0). Only used for
+//!   reconciliation today; Trader doesn't call it. Refine when a real
+//!   consumer needs richer data.
+//! - `get_positions` maps to bitFlyer-shaped `ExchangePosition` where
+//!   several fields (commission, require_collateral, pnl, sfd, leverage)
+//!   are left zero because OANDA's `/positions/{instrument}` doesn't
+//!   expose them uniformly. Pull swap/financing via `/transactions` if
+//!   needed.
+//! - Seed migration (`20260419000001_oanda_paper_seed.sql`) uses
+//!   `ON CONFLICT (id) DO NOTHING`; if an operator inserts another paper
+//!   OANDA row with a different UUID, both will coexist. Acceptable for
+//!   paper; tighten via a partial unique index if live-OANDA multi-row
+//!   risk surfaces.
 
 use async_trait::async_trait;
 use reqwest::{Client, Method, StatusCode};
@@ -79,43 +96,50 @@ impl ExchangeApi for OandaPrivateApi {
         &self,
         req: SendChildOrderRequest,
     ) -> anyhow::Result<SendChildOrderResponse> {
-        // Map bitFlyer-shaped request to OANDA order:
-        //   Side::Buy + size  => signed units = +size (long)
-        //   Side::Sell + size => signed units = -size (short)
-        // OANDA units is integer (1 unit = 1 base currency unit).
-        // `size` on SendChildOrderRequest is Decimal; truncate to i64.
+        // Only MARKET orders are supported. Trader never emits LIMIT today;
+        // reject explicitly rather than sending a broken LIMIT+FOK combo.
+        if !matches!(req.child_order_type, ChildOrderType::Market) {
+            anyhow::bail!(
+                "OandaPrivateApi only supports MARKET orders currently; LIMIT support is a future addition"
+            );
+        }
+
+        // Require integer units. OANDA's smallest unit is 1 (= 1 base currency
+        // unit). Fractional or zero sizes are never valid and silently rounding
+        // them is dangerous.
         use crate::bitflyer_private::Side;
+        use rust_decimal::prelude::ToPrimitive;
+
+        if req.size.is_sign_negative() || req.size.is_zero() {
+            anyhow::bail!(
+                "OandaPrivateApi: size must be positive non-zero: {}",
+                req.size
+            );
+        }
+        if req.size.fract() != rust_decimal::Decimal::ZERO {
+            anyhow::bail!(
+                "OandaPrivateApi: size must be an integer number of units (got {})",
+                req.size
+            );
+        }
+        let units_abs: i64 = req.size.to_i64().ok_or_else(|| {
+            anyhow::anyhow!("OandaPrivateApi: size {} does not fit in i64", req.size)
+        })?;
         let sign = match req.side {
             Side::Buy => 1i64,
             Side::Sell => -1i64,
         };
-        let units_abs: i64 = req
-            .size
-            .to_string()
-            .parse::<f64>()
-            .map_err(|_| OandaApiError::Config(format!("bad size: {}", req.size)))?
-            as i64;
         let signed_units = sign * units_abs;
 
-        let order_type = match req.child_order_type {
-            ChildOrderType::Market => "MARKET",
-            ChildOrderType::Limit => "LIMIT",
-        };
-
-        let mut order_body = serde_json::json!({
+        let order_body = serde_json::json!({
             "order": {
-                "type": order_type,
+                "type": "MARKET",
                 "instrument": req.product_code,
                 "units": signed_units.to_string(),
                 "timeInForce": "FOK",
                 "positionFill": "DEFAULT",
             }
         });
-        if matches!(req.child_order_type, ChildOrderType::Limit)
-            && let Some(price) = req.price
-        {
-            order_body["order"]["price"] = serde_json::json!(price.to_string());
-        }
 
         let path = format!("/v3/accounts/{}/orders", self.account_id);
         let body: serde_json::Value = self
@@ -160,61 +184,81 @@ impl ExchangeApi for OandaPrivateApi {
         _product_code: &str,
         child_order_acceptance_id: &str,
     ) -> anyhow::Result<Vec<Execution>> {
-        // OANDA: fills come back as orderFillTransaction inside the
-        // transaction list. For a filled MARKET order, the fill id is
-        // orderID + "FILL" suffix, but safer: query the order and
-        // look for state=FILLED + averagePrice + filledTime.
-        //
-        // For v1 (wiremock-driven), GET the order and if its state is
-        // FILLED, synthesize a single Execution.
-        let path = format!(
+        // 1. Fetch order; check state; collect fillingTransactionIDs.
+        //    The order object itself doesn't carry per-fill price — that lives
+        //    only in the ORDER_FILL transaction record.
+        let order_path = format!(
             "/v3/accounts/{}/orders/{}",
             self.account_id, child_order_acceptance_id
         );
-        let body: serde_json::Value = self.send_json(self.authed(Method::GET, &path)).await?;
-        let order = body
+        let order_body: serde_json::Value = self
+            .send_json(self.authed(Method::GET, &order_path))
+            .await?;
+        let order = order_body
             .get("order")
-            .ok_or_else(|| OandaApiError::Parse(format!("missing 'order' field: {body}")))?;
-        let state = order
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("PENDING");
+            .ok_or_else(|| OandaApiError::Parse(format!("missing 'order' field: {order_body}")))?;
+
+        let state = order.get("state").and_then(|v| v.as_str()).unwrap_or("");
         if state != "FILLED" {
             return Ok(Vec::new());
         }
+        let fill_ids: Vec<String> = order
+            .get("fillingTransactionIDs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Extract filling info. OANDA embeds filledTime + averagePrice in the order.
-        let price = order
-            .get("averagePrice")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Decimal::from_str(s).ok())
-            .ok_or_else(|| OandaApiError::Parse(format!("missing averagePrice: {order}")))?;
-        let units: i64 = order
-            .get("units")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| OandaApiError::Parse(format!("missing units: {order}")))?;
-        // ChildOrder.side / Execution.side are String in bitFlyer types.
-        let side = if units > 0 { "BUY" } else { "SELL" }.to_string();
-        let size = Decimal::from(units.unsigned_abs());
+        // 2. For each fill transaction, fetch it and map to an Execution.
+        let mut out = Vec::new();
+        for tx_id in fill_ids {
+            let tx_path = format!("/v3/accounts/{}/transactions/{}", self.account_id, tx_id);
+            let tx_body: serde_json::Value =
+                self.send_json(self.authed(Method::GET, &tx_path)).await?;
+            let tx = tx_body.get("transaction").ok_or_else(|| {
+                OandaApiError::Parse(format!("missing 'transaction' field: {tx_body}"))
+            })?;
 
-        // Commission/financing — OANDA reports these in the underlying
-        // transaction record. Leave as zero; callers can fold in later
-        // via get_positions → financing if needed.
-        Ok(vec![Execution {
-            id: 0, // OANDA has no numeric exec id; 0 placeholder
-            child_order_id: child_order_acceptance_id.to_string(),
-            child_order_acceptance_id: child_order_acceptance_id.to_string(),
-            side,
-            price,
-            size,
-            commission: Decimal::ZERO,
-            exec_date: order
-                .get("filledTime")
+            // OANDA fill transaction shape (ORDER_FILL type):
+            //   { type: "ORDER_FILL", price, units, time, commission?, ... }
+            let price = tx
+                .get("price")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Decimal::from_str(s).ok())
+                .ok_or_else(|| OandaApiError::Parse(format!("missing price in fill: {tx}")))?;
+            let units_signed: i64 = tx
+                .get("units")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| OandaApiError::Parse(format!("missing units in fill: {tx}")))?;
+            let side_str = if units_signed > 0 { "BUY" } else { "SELL" };
+            let size = Decimal::from(units_signed.unsigned_abs());
+            let commission = tx
+                .get("commission")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Decimal::from_str(s).ok())
+                .unwrap_or(Decimal::ZERO);
+            let exec_date = tx
+                .get("time")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_default(),
-        }])
+                .unwrap_or_default();
+
+            out.push(Execution {
+                id: 0, // OANDA has no numeric exec id; 0 placeholder
+                child_order_id: child_order_acceptance_id.to_string(),
+                child_order_acceptance_id: child_order_acceptance_id.to_string(),
+                side: side_str.to_string(),
+                price,
+                size,
+                commission,
+                exec_date,
+            });
+        }
+        Ok(out)
     }
 
     async fn get_positions(&self, product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {

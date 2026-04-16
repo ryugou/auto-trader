@@ -77,8 +77,9 @@ async fn main() -> anyhow::Result<()> {
     let mut exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
     exchange_apis.insert(Exchange::BitflyerCfd, bitflyer_api.clone());
 
-    // OANDA ExchangeApi — only registered when OANDA_API_KEY + OANDA_ACCOUNT_ID
-    // are set. If absent, Oanda trading_accounts are simply skipped at dispatch
+    // OANDA ExchangeApi — registered when OANDA_API_KEY is set and either
+    // OANDA_ACCOUNT_ID env var or [oanda].account_id in config is provided.
+    // If absent, Oanda trading_accounts are simply skipped at dispatch
     // (same behavior as any exchange whose client isn't in the registry).
     let oanda_account_id_env = std::env::var("OANDA_ACCOUNT_ID").ok();
     let oanda_account_id = oanda_account_id_env
@@ -108,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!(
             "OANDA ExchangeApi not registered \
-             (OANDA_API_KEY / OANDA_ACCOUNT_ID / [oanda] config missing)"
+             (set OANDA_API_KEY and either OANDA_ACCOUNT_ID env or [oanda].account_id in config to enable)"
         );
     }
 

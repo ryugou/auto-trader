@@ -87,3 +87,120 @@ async fn get_positions_splits_long_and_short() {
     assert_eq!(ps[0].size, dec!(1000));
     assert_eq!(ps[0].price, dec!(148.500));
 }
+
+#[tokio::test]
+async fn send_child_order_rejects_zero_size() {
+    let server = MockServer::start().await;
+    let api = api(&server.uri());
+    let err = api
+        .send_child_order(SendChildOrderRequest {
+            product_code: "USD_JPY".to_string(),
+            child_order_type: ChildOrderType::Market,
+            side: Side::Buy,
+            size: dec!(0),
+            price: None,
+            minute_to_expire: None,
+            time_in_force: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("size"));
+}
+
+#[tokio::test]
+async fn send_child_order_rejects_limit() {
+    let server = MockServer::start().await;
+    let api = api(&server.uri());
+    let err = api
+        .send_child_order(SendChildOrderRequest {
+            product_code: "USD_JPY".to_string(),
+            child_order_type: ChildOrderType::Limit,
+            side: Side::Buy,
+            size: dec!(1000),
+            price: Some(dec!(148.5)),
+            minute_to_expire: None,
+            time_in_force: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("MARKET") || err.to_string().contains("LIMIT"));
+}
+
+#[tokio::test]
+async fn get_executions_follows_fill_transaction() {
+    let server = MockServer::start().await;
+    // 1st hop: GET /orders/{id} returns FILLED order with fill IDs
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/orders/6372"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "order": {
+                "id": "6372",
+                "state": "FILLED",
+                "fillingTransactionIDs": ["6373"],
+                "instrument": "USD_JPY",
+                "units": "1000",
+                "createTime": "2026-04-16T05:00:00Z",
+                "filledTime": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+    // 2nd hop: GET /transactions/6373 returns ORDER_FILL with price
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/transactions/6373"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transaction": {
+                "id": "6373",
+                "type": "ORDER_FILL",
+                "units": "1000",
+                "price": "148.523",
+                "commission": "0.0",
+                "time": "2026-04-16T05:00:01Z",
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    let execs = api.get_executions("USD_JPY", "6372").await.unwrap();
+    assert_eq!(execs.len(), 1);
+    assert_eq!(execs[0].price, dec!(148.523));
+    assert_eq!(execs[0].size, dec!(1000));
+    assert_eq!(execs[0].side, "BUY");
+}
+
+#[tokio::test]
+async fn get_executions_empty_when_not_filled() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v3/accounts/101-001-12345-001/orders/6372"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "order": {
+                "id": "6372",
+                "state": "PENDING",
+                "instrument": "USD_JPY",
+                "units": "1000",
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    let execs = api.get_executions("USD_JPY", "6372").await.unwrap();
+    assert!(execs.is_empty());
+}
+
+#[tokio::test]
+async fn cancel_child_order_sends_put() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/v3/accounts/101-001-12345-001/orders/6372/cancel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "orderCancelTransaction": { "id": "6373" }
+        })))
+        .mount(&server)
+        .await;
+
+    let api = api(&server.uri());
+    api.cancel_child_order("USD_JPY", "6372").await.unwrap();
+}
