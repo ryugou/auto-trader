@@ -1004,9 +1004,10 @@ impl wiremock::Respond for TimedResponder {
 ///   - aggregate succeeds → execute returns Ok with correct fill price
 ///   - DB trade is inserted with status='open'
 ///
-/// Mock strategy: CountingResponder returns [] for the first `empty_until`
-/// calls (exhausting poll_executions' ~4 attempts), then returns the filled
-/// response for the reconcile call.
+/// Mock strategy: TimedResponder returns [] until its wall-clock timeout
+/// elapses, ensuring all poll_executions requests during the poll window
+/// see no fills. Once timeout passes, the reconcile call receives the
+/// filled response deterministically.
 #[sqlx::test(migrations = "../../migrations")]
 async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
     use auto_trader_core::executor::OrderExecutor;
@@ -1025,14 +1026,14 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
         .mount(&server)
         .await;
 
-    // TimedResponder: returns [] until 5s have elapsed (matching poll_executions'
-    // budget), then returns the filled execution for the reconcile call.
+    // TimedResponder: returns [] until 200ms have elapsed (matching the injected
+    // poll_timeout), then returns the filled execution for the reconcile call.
     // This is deterministic regardless of how many poll attempts occur.
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
         .respond_with(TimedResponder {
             start: std::time::Instant::now(),
-            timeout: std::time::Duration::from_secs(5),
+            timeout: std::time::Duration::from_millis(200),
             filled_response: serde_json::json!([
                 {
                     "id": 10,
@@ -1051,13 +1052,8 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
 
     let account_id = seed_live_account(&pool).await;
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
-    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
-
-    // NOTE: tokio::time::pause() cannot be used here. execute() calls insert_trade
-    // (pool acquisition) AFTER the sleep-heavy poll_executions loop. sqlx pools use
-    // tokio::time::timeout internally for connection acquisition; pausing time causes
-    // PoolTimedOut even when connections are available. The test therefore takes ~5s
-    // for the poll_executions timeout to elapse naturally.
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store)
+        .with_poll_timeout(std::time::Duration::from_millis(200));
 
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
     let result = trader.execute(&signal).await;
@@ -1163,11 +1159,8 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
 
     let account_id = seed_live_account(&pool).await;
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
-    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
-
-    // NOTE: tokio::time::pause() is incompatible with sqlx::test pools here —
-    // execute() does DB writes (acquire pool connection) after the poll_executions
-    // sleep loop, and paused tokio time causes PoolTimedOut during that acquisition.
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store)
+        .with_poll_timeout(std::time::Duration::from_millis(200));
 
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
     let result = trader.execute(&signal).await;
@@ -1222,14 +1215,14 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
         .mount(&server)
         .await;
 
-    // TimedResponder: returns [] until 5s elapsed, then returns the zero-size exec.
+    // TimedResponder: returns [] until 200ms elapsed, then returns the zero-size exec.
     // poll_executions will skip the zero-size exec (total_size==0) and keep looping;
-    // after the 5s timeout the reconcile call gets it → aggregate_executions fails.
+    // after the 200ms timeout the reconcile call gets it → aggregate_executions fails.
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
         .respond_with(TimedResponder {
             start: std::time::Instant::now(),
-            timeout: std::time::Duration::from_secs(5),
+            timeout: std::time::Duration::from_millis(200),
             filled_response: serde_json::json!([
                 {
                     "id": 30,
@@ -1284,10 +1277,8 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
 
     let account_id = seed_live_account(&pool).await;
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
-    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
-
-    // NOTE: tokio::time::pause() is incompatible with sqlx::test pools here —
-    // see timeout_then_executions_filled_returns_ok for explanation.
+    let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store)
+        .with_poll_timeout(std::time::Duration::from_millis(200));
 
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
     let result = trader.execute(&signal).await;

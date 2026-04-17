@@ -66,6 +66,10 @@ pub struct Trader {
     /// HashMap on every signal/SL/TP check.
     position_sizer: Arc<PositionSizer>,
     dry_run: bool,
+    /// Timeout passed to `poll_executions` for both open and close fills.
+    /// Defaults to 5 s in production; can be shortened in tests via
+    /// `with_poll_timeout`.
+    poll_timeout: Duration,
 }
 
 impl Trader {
@@ -90,10 +94,12 @@ impl Trader {
             }
         };
 
+        // Note: Completed is NOT listed here — a Completed order IS filled and
+        // must be handled by the caller (not cleaned up). This function is only
+        // reached for non-Completed states.
         let is_terminal = matches!(
             state,
-            Some(ChildOrderState::Completed)
-                | Some(ChildOrderState::Canceled)
+            Some(ChildOrderState::Canceled)
                 | Some(ChildOrderState::Expired)
                 | Some(ChildOrderState::Rejected)
         );
@@ -139,7 +145,15 @@ impl Trader {
             notifier,
             position_sizer,
             dry_run,
+            poll_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// Override the poll timeout used by `fill_open` and `fill_close`.
+    /// Primarily used in integration tests to avoid 5 s waits.
+    pub fn with_poll_timeout(mut self, timeout: Duration) -> Self {
+        self.poll_timeout = timeout;
+        self
     }
 
     /// fill_open: signal → 約定価格 + 実数量
@@ -168,7 +182,7 @@ impl Trader {
             let resp = self.api.send_child_order(req).await?;
             let order_id = resp.child_order_acceptance_id.clone();
             match self
-                .poll_executions(&order_id, &signal.pair.0, Duration::from_secs(5))
+                .poll_executions(&order_id, &signal.pair.0, self.poll_timeout)
                 .await
             {
                 Ok((price, qty)) => Ok((price, qty)),
@@ -219,18 +233,105 @@ impl Trader {
                             }
                         }
                         Ok(_) => {
-                            // No executions — check order state to decide how to clean up.
-                            let cleanup_err = self
-                                .cleanup_unfilled_order(
-                                    &signal.pair.0,
-                                    &order_id,
-                                    "open fill failed (no executions reported)",
-                                )
-                                .await;
-                            Err(anyhow::anyhow!(
-                                "open fill: poll_executions failed for order {order_id}: {poll_err}; \
-                                 reconciliation found no executions; cleanup: {cleanup_err}"
-                            ))
+                            // No executions — check order state before deciding how to handle.
+                            match self.api.get_child_orders(&signal.pair.0, &order_id).await {
+                                Ok(orders) if !orders.is_empty() => {
+                                    let order = &orders[0];
+                                    match order.child_order_state {
+                                        ChildOrderState::Completed => {
+                                            // Order IS filled. get_executions was empty — likely a
+                                            // transient API lag. Retry once after a short pause;
+                                            // if still empty, fall back to order-level avg_price.
+                                            tokio::time::sleep(Duration::from_millis(500)).await;
+                                            match self
+                                                .api
+                                                .get_executions(&signal.pair.0, &order_id)
+                                                .await
+                                            {
+                                                Ok(execs) if !execs.is_empty() => {
+                                                    let (avg_price, total_size) =
+                                                        aggregate_executions(&execs)?;
+                                                    Ok((avg_price, total_size))
+                                                }
+                                                _ => {
+                                                    // Fall back to order-level data.
+                                                    if order.average_price > Decimal::ZERO
+                                                        && order.executed_size > Decimal::ZERO
+                                                    {
+                                                        tracing::warn!(
+                                                            "open fill: order {} Completed but get_executions empty; \
+                                                             using order-level avg_price={} executed_size={}",
+                                                            order_id,
+                                                            order.average_price,
+                                                            order.executed_size
+                                                        );
+                                                        Ok((
+                                                            order.average_price,
+                                                            order.executed_size,
+                                                        ))
+                                                    } else {
+                                                        Err(anyhow::anyhow!(
+                                                            "open fill: order {} Completed but no execution data available; \
+                                                             ORPHAN — manual reconciliation required",
+                                                            order_id
+                                                        ))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        ChildOrderState::Active => {
+                                            // Not terminal — attempt cancel.
+                                            let cleanup_err = self
+                                                .cleanup_unfilled_order(
+                                                    &signal.pair.0,
+                                                    &order_id,
+                                                    "open fill failed (no executions, order active)",
+                                                )
+                                                .await;
+                                            Err(anyhow::anyhow!(
+                                                "open fill: poll_executions failed for order {order_id}: {poll_err}; \
+                                                 reconciliation found no executions; cleanup: {cleanup_err}"
+                                            ))
+                                        }
+                                        _ => {
+                                            // Canceled / Expired / Rejected — terminal, not filled.
+                                            Err(anyhow::anyhow!(
+                                                "open fill: order {order_id} state={:?} (terminal, not filled)",
+                                                order.child_order_state
+                                            ))
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    // No order record found — unexpected. Attempt cancel anyway.
+                                    let cleanup_err = self
+                                        .cleanup_unfilled_order(
+                                            &signal.pair.0,
+                                            &order_id,
+                                            "open fill failed (no executions, no order found)",
+                                        )
+                                        .await;
+                                    Err(anyhow::anyhow!(
+                                        "open fill: poll_executions failed for order {order_id}: {poll_err}; \
+                                         reconciliation found no executions or order; cleanup: {cleanup_err}"
+                                    ))
+                                }
+                                Err(e) => {
+                                    let cleanup_err = self
+                                        .cleanup_unfilled_order(
+                                            &signal.pair.0,
+                                            &order_id,
+                                            &format!(
+                                                "open fill failed (get_child_orders error: {e})"
+                                            ),
+                                        )
+                                        .await;
+                                    Err(anyhow::anyhow!(
+                                        "open fill: poll_executions failed for order {order_id}: {poll_err}; \
+                                         get_child_orders error: {e}; cleanup: {cleanup_err}"
+                                    ))
+                                }
+                            }
                         }
                         Err(e) => {
                             let cleanup_err = self
@@ -276,7 +377,7 @@ impl Trader {
                 .poll_executions(
                     &resp.child_order_acceptance_id,
                     &trade.pair.0,
-                    Duration::from_secs(5),
+                    self.poll_timeout,
                 )
                 .await?;
             Ok(price)
@@ -484,7 +585,7 @@ impl Trader {
             .poll_executions(
                 &resp.child_order_acceptance_id,
                 &trade.pair.0,
-                Duration::from_secs(5),
+                self.poll_timeout,
             )
             .await?;
         Ok(price)
