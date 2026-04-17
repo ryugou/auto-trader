@@ -228,11 +228,18 @@ impl Trader {
                                 )
                                 .await)
                         }
-                        Err(e) => Err(anyhow::anyhow!(
-                            "open fill poll timeout + get_executions failed: {e}; \
-                             order {} may be orphan at exchange",
-                            order_id
-                        )),
+                        Err(e) => {
+                            let cleanup_err = self
+                                .cleanup_unfilled_order(
+                                    &signal.pair.0,
+                                    &order_id,
+                                    &format!("open fill failed (get_executions error: {e})"),
+                                )
+                                .await;
+                            Err(anyhow::anyhow!(
+                                "open fill: poll_executions failed + get_executions failed for order {order_id}: {e}; cleanup: {cleanup_err}"
+                            ))
+                        }
                     }
                 }
             }
