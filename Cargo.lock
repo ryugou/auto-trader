@@ -123,6 +123,7 @@ dependencies = [
  "auto-trader-vegapunk",
  "axum",
  "chrono",
+ "futures-util",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",

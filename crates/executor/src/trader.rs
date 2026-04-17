@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
-    ChildOrderType, Execution, SendChildOrderRequest, Side,
+    ChildOrderState, ChildOrderType, Execution, SendChildOrderRequest, Side,
 };
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::price_store::{FeedKey, PriceStore};
@@ -81,11 +81,8 @@ impl Trader {
         order_id: &str,
         context: &str,
     ) -> anyhow::Error {
-        let state_label = match self.api.get_child_orders(pair, order_id).await {
-            Ok(orders) => orders
-                .first()
-                .map(|o| format!("{:?}", o.child_order_state))
-                .unwrap_or_else(|| "UNKNOWN".to_string()),
+        let state = match self.api.get_child_orders(pair, order_id).await {
+            Ok(orders) => orders.first().map(|o| o.child_order_state),
             Err(e) => {
                 return anyhow::anyhow!(
                     "{context}: get_child_orders failed for order {order_id}: {e}; may be orphan"
@@ -94,25 +91,28 @@ impl Trader {
         };
 
         let is_terminal = matches!(
-            state_label.as_str(),
-            "Completed" | "Canceled" | "Expired" | "Rejected"
+            state,
+            Some(ChildOrderState::Completed)
+                | Some(ChildOrderState::Canceled)
+                | Some(ChildOrderState::Expired)
+                | Some(ChildOrderState::Rejected)
         );
 
         if is_terminal {
             return anyhow::anyhow!(
-                "{context}: order {order_id} state={} (not filled, no cleanup needed)",
-                state_label
+                "{context}: order {order_id} state={:?} (not filled, no cleanup needed)",
+                state
             );
         }
 
         match self.api.cancel_child_order(pair, order_id).await {
             Ok(_) => anyhow::anyhow!(
-                "{context}: order {order_id} state={} (cancel requested)",
-                state_label
+                "{context}: order {order_id} state={:?} (cancel requested)",
+                state
             ),
             Err(cancel_err) => anyhow::anyhow!(
-                "{context}: order {order_id} state={} — CANCEL ATTEMPT FAILED: {cancel_err}; MANUAL INTERVENTION MAY BE REQUIRED",
-                state_label
+                "{context}: order {order_id} state={:?} — CANCEL ATTEMPT FAILED: {cancel_err}; MANUAL INTERVENTION MAY BE REQUIRED",
+                state
             ),
         }
     }
@@ -353,6 +353,10 @@ impl Trader {
     /// position. In that case, skip Phase 2 and return a best-effort exit
     /// price directly.
     ///
+    /// Also handles partial fills: if the exchange position size is less than
+    /// `trade.quantity`, only the remaining size is closed to prevent over-close
+    /// (which would otherwise open an unintended opposite position).
+    ///
     /// Returns `(exit_price, was_approximate)`.  `was_approximate` is `true`
     /// when the exchange position was already gone and we used a best-effort
     /// price (PriceStore mid or entry_price fallback). Callers should emit an
@@ -362,32 +366,28 @@ impl Trader {
         trade: &Trade,
     ) -> anyhow::Result<(Decimal, bool)> {
         let positions = self.api.get_positions(&trade.pair.0).await?;
-        let still_open = positions
+
+        let total_exchange_size: Decimal = positions
             .iter()
-            .any(|p| match exchange_side_to_direction(&p.side) {
-                Some(exchange_direction) => {
-                    p.product_code == trade.pair.0
-                        && exchange_direction == trade.direction
-                        && p.size > Decimal::ZERO
+            .filter_map(|p| match exchange_side_to_direction(&p.side) {
+                Some(exchange_direction)
+                    if p.product_code == trade.pair.0 && exchange_direction == trade.direction =>
+                {
+                    Some(p.size)
                 }
-                None => {
+                None if p.product_code == trade.pair.0 => {
                     tracing::warn!(
                         "stale recovery: unknown exchange side '{}' for position on {}, ignoring",
                         p.side,
                         p.product_code
                     );
-                    false
+                    None
                 }
-            });
-        if still_open {
-            // Exchange still has the position → Phase 2 really failed, re-run it.
-            tracing::info!(
-                "close_position: exchange position still open for trade {}; re-running Phase 2",
-                trade.id
-            );
-            let price = self.fill_close(trade).await?;
-            Ok((price, false))
-        } else {
+                _ => None,
+            })
+            .sum();
+
+        if total_exchange_size == Decimal::ZERO {
             // Exchange has no matching position → Phase 2 completed before crash.
             // Skip Phase 2, return a best-effort exit price for Phase 3.
             tracing::warn!(
@@ -397,7 +397,75 @@ impl Trader {
             );
             let price = self.resolve_stale_exit_price(trade).await?;
             Ok((price, true))
+        } else if total_exchange_size == trade.quantity {
+            // Full quantity still open → Phase 2 really failed, re-run it.
+            tracing::info!(
+                "stale recovery: exchange has full size {} for trade {}, re-running Phase 2",
+                total_exchange_size,
+                trade.id
+            );
+            let price = self.fill_close(trade).await?;
+            Ok((price, false))
+        } else if total_exchange_size < trade.quantity {
+            // Partial fill before crash: close only remaining size to avoid
+            // over-close which would open an unintended opposite position.
+            tracing::warn!(
+                "stale recovery: partial fill detected — trade.quantity={} but exchange has {} \
+                 remaining; closing only remaining size to avoid over-close",
+                trade.quantity,
+                total_exchange_size
+            );
+            let price = self.fill_close_size(trade, total_exchange_size).await?;
+            // The DB row still records trade.quantity; the already-filled delta was
+            // handled in the original Phase 2 before the crash. We approximate here.
+            Ok((price, true))
+        } else {
+            // Exchange size > trade.quantity — invariant violation. A single
+            // exchange account per process should never have more than trade.quantity
+            // in the same direction for this pair. Bail rather than risk oscillation.
+            anyhow::bail!(
+                "stale recovery: exchange position size {} exceeds trade.quantity {} for trade \
+                 {}; invariant violated — refusing to close to avoid oscillation. \
+                 Manual intervention required.",
+                total_exchange_size,
+                trade.quantity,
+                trade.id
+            )
         }
+    }
+
+    /// Close a specific size (not necessarily `trade.quantity`) on the exchange.
+    ///
+    /// Used by stale recovery when a partial fill was detected: the remaining
+    /// exchange position is smaller than `trade.quantity`, so we close only what
+    /// the exchange actually holds to prevent over-close / unintended reversal.
+    async fn fill_close_size(&self, trade: &Trade, size: Decimal) -> anyhow::Result<Decimal> {
+        if self.dry_run {
+            // Dry-run: return price from PriceStore regardless of size (same as fill_close).
+            return self.fill_close(trade).await;
+        }
+        let side = match trade.direction {
+            Direction::Long => Side::Sell,
+            Direction::Short => Side::Buy,
+        };
+        let req = SendChildOrderRequest {
+            product_code: trade.pair.0.clone(),
+            child_order_type: ChildOrderType::Market,
+            side,
+            size,
+            price: None,
+            minute_to_expire: None,
+            time_in_force: None,
+        };
+        let resp = self.api.send_child_order(req).await?;
+        let (price, _qty) = self
+            .poll_executions(
+                &resp.child_order_acceptance_id,
+                &trade.pair.0,
+                Duration::from_secs(5),
+            )
+            .await?;
+        Ok(price)
     }
 
     /// Best-effort exit price for a trade that was closed at the exchange but

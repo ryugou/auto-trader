@@ -110,6 +110,12 @@ pub enum ExitReason {
     StrategyIndicatorReversal,
     /// Time-based fail-safe — `max_hold_until` deadline reached.
     StrategyTimeLimit,
+    /// Closed by the startup reconciler: the exchange position was gone but
+    /// Phase 3 (DB update) never completed before a process crash.
+    /// Distinguishes reconciled closes from normal SL/TP/manual exits in
+    /// audit queries; previously written as a raw &str which caused the
+    /// TradeRow mapper to bail on unknown strings.
+    Reconciled,
 }
 
 impl ExitReason {
@@ -125,6 +131,7 @@ impl ExitReason {
             ExitReason::StrategyTrailingMa => "strategy_trailing_ma",
             ExitReason::StrategyIndicatorReversal => "strategy_indicator_reversal",
             ExitReason::StrategyTimeLimit => "strategy_time_limit",
+            ExitReason::Reconciled => "reconciled",
         }
     }
 }

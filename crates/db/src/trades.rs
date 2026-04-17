@@ -437,18 +437,15 @@ pub async fn list_open_or_closing_by_account(
 /// Close a trade using a synthetic (best-effort) exit price.
 ///
 /// Used by the startup reconciler when the exchange position is confirmed
-/// closed but Phase 3 never completed. Records the reconciliation `reason_tag`
-/// as the `exit_reason` in the DB so audit queries can distinguish these rows
-/// from normally-closed trades.
-///
-/// `ExitReason` does not have a variant for reconciliation, so we write the
-/// tag directly via raw SQL (the `exit_reason` column is a plain text field).
+/// closed but Phase 3 never completed. Pass `ExitReason::Reconciled` (or
+/// another variant) so the TradeRow mapper can round-trip the value without
+/// erroring on an unknown string.
 pub async fn close_trade_reconciled(
     pool: &PgPool,
     trade_id: Uuid,
     exit_price: Decimal,
     pnl_amount: Decimal,
-    reason_tag: &str,
+    exit_reason: ExitReason,
 ) -> anyhow::Result<()> {
     let exit_at = chrono::Utc::now();
 
@@ -488,7 +485,7 @@ pub async fn close_trade_reconciled(
     .bind(exit_price)
     .bind(exit_at)
     .bind(pnl_amount)
-    .bind(reason_tag)
+    .bind(exit_reason.as_str())
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -905,6 +902,7 @@ impl TryFrom<TradeRow> for Trade {
                 "strategy_trailing_ma" => Ok(ExitReason::StrategyTrailingMa),
                 "strategy_indicator_reversal" => Ok(ExitReason::StrategyIndicatorReversal),
                 "strategy_time_limit" => Ok(ExitReason::StrategyTimeLimit),
+                "reconciled" => Ok(ExitReason::Reconciled),
                 other => Err(anyhow::anyhow!("unknown exit_reason: {other}")),
             })
             .transpose()?;

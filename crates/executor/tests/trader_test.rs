@@ -1055,6 +1055,12 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
 
+    // NOTE: tokio::time::pause() cannot be used here. execute() calls insert_trade
+    // (pool acquisition) AFTER the sleep-heavy poll_executions loop. sqlx pools use
+    // tokio::time::timeout internally for connection acquisition; pausing time causes
+    // PoolTimedOut even when connections are available. The test therefore takes ~5s
+    // for the poll_executions timeout to elapse naturally.
+
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
     let result = trader.execute(&signal).await;
 
@@ -1160,6 +1166,10 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
     let account_id = seed_live_account(&pool).await;
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    // NOTE: tokio::time::pause() is incompatible with sqlx::test pools here —
+    // execute() does DB writes (acquire pool connection) after the poll_executions
+    // sleep loop, and paused tokio time causes PoolTimedOut during that acquisition.
 
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
     let result = trader.execute(&signal).await;
@@ -1277,6 +1287,9 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
     let account_id = seed_live_account(&pool).await;
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
+
+    // NOTE: tokio::time::pause() is incompatible with sqlx::test pools here —
+    // see timeout_then_executions_filled_returns_ok for explanation.
 
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
     let result = trader.execute(&signal).await;

@@ -8,7 +8,7 @@
 //! NOT periodic — only at startup. A mid-session reconciler would be a
 //! separate concern.
 
-use auto_trader_core::types::Direction;
+use auto_trader_core::types::{Direction, ExitReason};
 use auto_trader_db::trades;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::price_store::{FeedKey, PriceStore};
@@ -99,29 +99,32 @@ async fn reconcile_one_account(
         return Ok(());
     }
 
-    // Gather unique pairs, fetch exchange positions for each.
-    let mut pairs = std::collections::HashSet::new();
+    // Gather unique pairs, fetch exchange positions for each — concurrently.
+    let mut pairs_set = std::collections::HashSet::new();
     for t in &db_trades {
-        pairs.insert(t.pair.0.clone());
+        pairs_set.insert(t.pair.0.clone());
     }
+    let pairs: Vec<String> = pairs_set.into_iter().collect();
 
-    let mut exchange_positions: HashMap<
+    let fetches = pairs.iter().map(|pair| {
+        let account_name = account.name.clone();
+        async move {
+            let ps = get_positions_with_retry(api, pair, &account_name)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "startup reconcile: get_positions({pair}) exhausted retries for {}: {e}",
+                        account_name
+                    )
+                })?;
+            Ok::<_, anyhow::Error>((pair.clone(), ps))
+        }
+    });
+    let results = futures_util::future::try_join_all(fetches).await?;
+    let exchange_positions: HashMap<
         String,
         Vec<auto_trader_market::bitflyer_private::ExchangePosition>,
-    > = HashMap::new();
-    for pair in pairs {
-        // Use retry wrapper to absorb brief API blips (W3).
-        // Fails after MAX_ATTEMPTS if the outage is sustained.
-        let ps = get_positions_with_retry(api, &pair, &account.name)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "startup reconcile: get_positions({pair}) exhausted retries for {}: {e}",
-                    account.name
-                )
-            })?;
-        exchange_positions.insert(pair, ps);
-    }
+    > = results.into_iter().collect();
 
     for trade in &db_trades {
         let pair_positions = exchange_positions
@@ -155,7 +158,11 @@ async fn reconcile_one_account(
                      closing with best-effort exit price",
                     trade.id
                 );
-                force_close_db_only(pool, trade, price_store, "startup_reconcile_orphan").await?;
+                tracing::warn!(
+                    "startup reconcile: trade {} force-closed (reason=orphan)",
+                    trade.id
+                );
+                force_close_db_only(pool, trade, price_store).await?;
             }
             ("closing", true) => {
                 tracing::warn!(
@@ -172,7 +179,11 @@ async fn reconcile_one_account(
                      completing Phase 3 with best-effort exit price",
                     trade.id
                 );
-                force_close_db_only(pool, trade, price_store, "startup_reconcile_phase3").await?;
+                tracing::warn!(
+                    "startup reconcile: trade {} force-closed (reason=phase3)",
+                    trade.id
+                );
+                force_close_db_only(pool, trade, price_store).await?;
             }
             (other, _) => {
                 // Should never happen — list_open_or_closing_by_account filters to
@@ -192,7 +203,6 @@ async fn force_close_db_only(
     pool: &PgPool,
     trade: &auto_trader_core::types::Trade,
     price_store: &PriceStore,
-    reason_tag: &str,
 ) -> anyhow::Result<()> {
     // Best-effort exit price: PriceStore mid, fallback to entry_price.
     let feed_key = FeedKey::new(trade.exchange, trade.pair.clone());
@@ -217,7 +227,7 @@ async fn force_close_db_only(
     // Truncate pnl to whole yen.
     let pnl = pnl.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
 
-    trades::close_trade_reconciled(pool, trade.id, exit_price, pnl, reason_tag).await?;
+    trades::close_trade_reconciled(pool, trade.id, exit_price, pnl, ExitReason::Reconciled).await?;
     Ok(())
 }
 
@@ -564,8 +574,8 @@ mod reconcile_tests {
                 .await
                 .unwrap();
         assert_eq!(
-            exit_reason, "startup_reconcile_orphan",
-            "exit_reason must be tagged as orphan reconcile"
+            exit_reason, "reconciled",
+            "exit_reason must be 'reconciled' for startup-reconcile force-close"
         );
     }
 
@@ -648,8 +658,8 @@ mod reconcile_tests {
                 .await
                 .unwrap();
         assert_eq!(
-            exit_reason, "startup_reconcile_phase3",
-            "exit_reason must be tagged as phase3 reconcile"
+            exit_reason, "reconciled",
+            "exit_reason must be 'reconciled' for startup-reconcile phase3 force-close"
         );
     }
 
@@ -669,6 +679,12 @@ mod reconcile_tests {
             .await
             .unwrap()
             .unwrap();
+
+        // Virtualize time after DB seeding: the retry logic uses tokio::time::sleep
+        // (2s → 4s backoff), which auto-advances when no tasks are runnable under
+        // paused time. Pause must come after DB operations since the pool uses real
+        // timeouts internally.
+        tokio::time::pause();
         let accounts = vec![account];
         let apis = build_apis(api);
         let price_store = empty_price_store();
