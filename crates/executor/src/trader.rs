@@ -902,8 +902,8 @@ impl OrderExecutor for Trader {
             let pair = closed_trade.pair.clone();
             let strategy_name = closed_trade.strategy_name.clone();
             let reason = format!(
-                "stale-recovery close for trade {trade_id}: exit price was APPROXIMATED \
-                 (PriceStore mid or entry_price fallback) — DB PnL may be inaccurate, \
+                "stale-recovery close for trade {trade_id}: reconciliation used an approximation \
+                 during close recovery — exit price and/or PnL attribution may be inaccurate; \
                  manual audit against exchange records recommended"
             );
             tokio::spawn(async move {

@@ -27,12 +27,12 @@ pub async fn reconcile_live_accounts_at_startup(
         let exchange = match resolve_exchange_enum(&account.exchange) {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!(
-                    "startup reconcile: unknown exchange '{}' for account {} — skipping: {e}",
-                    account.exchange,
-                    account.name
+                anyhow::bail!(
+                    "startup reconcile: live account '{}' has unknown exchange '{}': {e}; \
+                     cannot reconcile — refusing to start",
+                    account.name,
+                    account.exchange
                 );
-                continue;
             }
         };
 
