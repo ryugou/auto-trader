@@ -131,19 +131,35 @@ async fn reconcile_one_account(
             .get(&trade.pair.0)
             .cloned()
             .unwrap_or_default();
-        let exchange_has_matching = pair_positions.iter().any(|p| {
+        let mut exchange_has_matching = false;
+        let mut exchange_has_conflicting = false;
+
+        for p in &pair_positions {
+            if p.size <= Decimal::ZERO {
+                continue;
+            }
             match matches_direction(&p.side, &trade.direction) {
-                Some(true) => p.size > Decimal::ZERO,
-                Some(false) => false,
+                Some(true) => exchange_has_matching = true,
+                Some(false) => exchange_has_conflicting = true,
                 None => {
                     tracing::warn!(
-                        "startup reconcile: unknown side '{}' in exchange position for {}; assuming position exists (conservative)",
-                        p.side, p.product_code
+                        "startup reconcile: unknown side '{}' for {} — treating as conflict",
+                        p.side,
+                        p.product_code
                     );
-                    true // conservative: don't force-close
+                    exchange_has_conflicting = true;
                 }
             }
-        });
+        }
+
+        if exchange_has_conflicting {
+            anyhow::bail!(
+                "startup reconcile: trade {} has conflicting/unknown exchange position for {}; \
+                 refusing auto-reconciliation — manual intervention required",
+                trade.id,
+                trade.pair.0
+            );
+        }
 
         match (trade.status.as_str(), exchange_has_matching) {
             ("open", true) => {

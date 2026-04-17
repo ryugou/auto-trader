@@ -968,23 +968,22 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
 }
 
 // ---------------------------------------------------------------------------
-// CountingResponder: stateful wiremock responder using AtomicUsize
+// TimedResponder: wall-clock-based wiremock responder
 // ---------------------------------------------------------------------------
 
-/// Stateful responder that returns an empty-array response for the first
-/// `empty_until` calls and the `filled_response` thereafter.  This is used
-/// to deterministically exhaust `poll_executions`' ~4 attempts before the
-/// one-shot reconcile call fires the real response.
-struct CountingResponder {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    empty_until: usize,
+/// Returns an empty-array response until `timeout` has elapsed from `start`,
+/// then returns `filled_response`.  Uses `std::time::Instant` (wall clock) so
+/// it remains correct even when tokio time is not paused, and inherently
+/// matches `poll_executions`' own 5 s budget — eliminating call-count flakiness.
+struct TimedResponder {
+    start: std::time::Instant,
+    timeout: std::time::Duration,
     filled_response: serde_json::Value,
 }
 
-impl wiremock::Respond for CountingResponder {
+impl wiremock::Respond for TimedResponder {
     fn respond(&self, _req: &wiremock::Request) -> wiremock::ResponseTemplate {
-        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if n < self.empty_until {
+        if self.start.elapsed() < self.timeout {
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
         } else {
             wiremock::ResponseTemplate::new(200).set_body_json(self.filled_response.clone())
@@ -1026,15 +1025,14 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
         .mount(&server)
         .await;
 
-    // Stateful responder: first 7 calls → [] (exhausts poll_executions' ~7 iterations
-    // before the 5s timeout), call 7+ → filled exec (reconcile call).
-    // poll_executions makes exactly 7 get_executions calls before timing out
-    // (exponential backoff 100ms→200ms→400ms→800ms→1600ms×3, total ~4700ms < 5s).
+    // TimedResponder: returns [] until 5s have elapsed (matching poll_executions'
+    // budget), then returns the filled execution for the reconcile call.
+    // This is deterministic regardless of how many poll attempts occur.
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(CountingResponder {
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            empty_until: 7,
+        .respond_with(TimedResponder {
+            start: std::time::Instant::now(),
+            timeout: std::time::Duration::from_secs(5),
             filled_response: serde_json::json!([
                 {
                     "id": 10,
@@ -1116,12 +1114,12 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
         .mount(&server)
         .await;
 
-    // All get_executions → [] (stateful responder with empty_until=usize::MAX means always [])
+    // All get_executions → [] (TimedResponder with far-future timeout → always returns [])
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(CountingResponder {
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            empty_until: usize::MAX,
+        .respond_with(TimedResponder {
+            start: std::time::Instant::now(),
+            timeout: std::time::Duration::from_secs(3600),
             filled_response: serde_json::json!([]),
         })
         .mount(&server)
@@ -1224,14 +1222,14 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
         .mount(&server)
         .await;
 
-    // Stateful: first 7 calls → [] (exhausts poll_executions), call 7+ → zero-size exec.
-    // poll_executions skips non-empty execs with total_size==0 and keeps looping;
-    // after the 5s timeout the reconcile call gets the zero-size exec → aggregate fails.
+    // TimedResponder: returns [] until 5s elapsed, then returns the zero-size exec.
+    // poll_executions will skip the zero-size exec (total_size==0) and keep looping;
+    // after the 5s timeout the reconcile call gets it → aggregate_executions fails.
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
-        .respond_with(CountingResponder {
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            empty_until: 7,
+        .respond_with(TimedResponder {
+            start: std::time::Instant::now(),
+            timeout: std::time::Duration::from_secs(5),
             filled_response: serde_json::json!([
                 {
                     "id": 30,

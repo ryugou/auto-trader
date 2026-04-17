@@ -220,13 +220,17 @@ impl Trader {
                         }
                         Ok(_) => {
                             // No executions — check order state to decide how to clean up.
-                            Err(self
+                            let cleanup_err = self
                                 .cleanup_unfilled_order(
                                     &signal.pair.0,
                                     &order_id,
                                     "open fill failed (no executions reported)",
                                 )
-                                .await)
+                                .await;
+                            Err(anyhow::anyhow!(
+                                "open fill: poll_executions failed for order {order_id}: {poll_err}; \
+                                 reconciliation found no executions; cleanup: {cleanup_err}"
+                            ))
                         }
                         Err(e) => {
                             let cleanup_err = self
@@ -374,27 +378,38 @@ impl Trader {
     ) -> anyhow::Result<(Decimal, bool)> {
         let positions = self.api.get_positions(&trade.pair.0).await?;
 
-        let total_exchange_size: Decimal = positions
+        let mut total_exchange_size = Decimal::ZERO;
+        let mut has_any_for_product = false;
+
+        for p in positions
             .iter()
-            .filter_map(|p| match exchange_side_to_direction(&p.side) {
-                Some(exchange_direction)
-                    if p.product_code == trade.pair.0 && exchange_direction == trade.direction =>
-                {
-                    Some(p.size)
+            .filter(|p| p.product_code == trade.pair.0 && p.size > Decimal::ZERO)
+        {
+            has_any_for_product = true;
+            match exchange_side_to_direction(&p.side) {
+                Some(d) if d == trade.direction => total_exchange_size += p.size,
+                Some(d) => {
+                    anyhow::bail!(
+                        "stale recovery: opposite-side position for trade {} ({:?} vs {:?}, size={}); \
+                         refusing auto-recover — manual intervention required",
+                        trade.id,
+                        d,
+                        trade.direction,
+                        p.size
+                    );
                 }
-                None if p.product_code == trade.pair.0 => {
-                    tracing::warn!(
-                        "stale recovery: unknown exchange side '{}' for position on {}, ignoring",
+                None => {
+                    anyhow::bail!(
+                        "stale recovery: unknown side '{}' for trade {} on {}; manual intervention required",
                         p.side,
+                        trade.id,
                         p.product_code
                     );
-                    None
                 }
-                _ => None,
-            })
-            .sum();
+            }
+        }
 
-        if total_exchange_size == Decimal::ZERO {
+        if !has_any_for_product {
             // Exchange has no matching position → Phase 2 completed before crash.
             // Skip Phase 2, return a best-effort exit price for Phase 3.
             tracing::warn!(
