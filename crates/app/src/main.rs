@@ -2,6 +2,7 @@ mod api;
 mod enriched_ingest;
 mod price_store;
 mod regime;
+mod startup_reconcile;
 mod weekly_batch;
 mod wilson;
 
@@ -769,6 +770,23 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // IMPORTANT: before spawning monitor/executor tasks, reconcile any live
+    // DB rows that might have drifted during last shutdown. This is a one-time
+    // recovery, not periodic. Unconditional: paper-only setups no-op; live
+    // accounts with no exchange API correctly bail.
+    startup_reconcile::reconcile_live_accounts_at_startup(
+        &pool,
+        &db_accounts,
+        &exchange_apis,
+        price_store.clone(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "startup reconcile failed: {e}; refusing to start with potentially inconsistent state"
+        )
+    })?;
+
     // FX position monitor removed: FX paper trading is currently disabled.
     // Drain the forwarded FX price channel so senders do not block.
     let mut price_monitor_rx = price_monitor_rx;
@@ -788,7 +806,6 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
-    let crypto_monitor_live_enabled = live_enabled;
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
@@ -824,17 +841,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-                // [live].enabled=false なら live 口座の close を skip する。
-                // 起動時 gate と belt-and-suspenders。stale live positions は
-                // manual cleanup が必要。
-                if account_type == "live" && !crypto_monitor_live_enabled {
-                    tracing::warn!(
-                        "skipping close for live account {} trade {}: [live].enabled=false",
-                        account_name,
-                        trade.id
-                    );
-                    continue;
-                }
+                // [live].enabled=false blocks NEW live orders only, not existing-position
+                // close paths. A position opened when enabled=true must remain closable
+                // even after the operator toggles enabled=false for safety reasons.
                 let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
@@ -1070,7 +1079,6 @@ async fn main() -> anyhow::Result<()> {
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
     let exit_live_forces_dry_run = live_forces_dry_run;
-    let exit_live_enabled = live_enabled;
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
             // Look up the trade joined with account info in one query so we
@@ -1109,15 +1117,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-            // [live].enabled=false なら live 口座の strategy exit を skip する。
-            if account_type == "live" && !exit_live_enabled {
-                tracing::warn!(
-                    "skipping strategy exit for live account {} trade {}: [live].enabled=false",
-                    account_name,
-                    trade.id
-                );
-                continue;
-            }
+            // [live].enabled=false blocks NEW live orders only, not existing-position
+            // close paths. A position opened when enabled=true must remain closable
+            // even after the operator toggles enabled=false for safety reasons.
             let dry_run = account_type == "paper" || exit_live_forces_dry_run;
             let Some(api) = exit_exchange_apis.get(&trade.exchange) else {
                 tracing::warn!(

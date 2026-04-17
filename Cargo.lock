@@ -112,6 +112,7 @@ name = "auto-trader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "auto-trader-core",
  "auto-trader-db",
  "auto-trader-executor",
@@ -122,6 +123,7 @@ dependencies = [
  "auto-trader-vegapunk",
  "axum",
  "chrono",
+ "futures-util",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",

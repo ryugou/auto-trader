@@ -22,7 +22,7 @@ sqlx = { workspace = true }
 rust_decimal_macros = "1"
 serde_json = { workspace = true }
 wiremock = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 sqlx = { workspace = true }
 auto-trader-core = { workspace = true }
 auto-trader-db = { workspace = true }
