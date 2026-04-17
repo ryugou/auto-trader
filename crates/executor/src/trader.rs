@@ -94,21 +94,24 @@ impl Trader {
             }
         };
 
-        // Note: Completed is NOT listed here — a Completed order IS filled and
-        // must be handled by the caller (not cleaned up). This function is only
-        // reached for non-Completed states.
-        let is_terminal = matches!(
-            state,
+        match state {
+            Some(ChildOrderState::Completed) => {
+                return anyhow::anyhow!(
+                    "{context}: order {order_id} state=Completed — order filled but fill details \
+                     could not be aggregated; manual reconciliation required"
+                );
+            }
             Some(ChildOrderState::Canceled)
-                | Some(ChildOrderState::Expired)
-                | Some(ChildOrderState::Rejected)
-        );
-
-        if is_terminal {
-            return anyhow::anyhow!(
-                "{context}: order {order_id} state={:?} (not filled, no cleanup needed)",
-                state
-            );
+            | Some(ChildOrderState::Expired)
+            | Some(ChildOrderState::Rejected) => {
+                return anyhow::anyhow!(
+                    "{context}: order {order_id} state={:?} (not filled, no cleanup needed)",
+                    state
+                );
+            }
+            _ => {
+                // Active/Unknown — attempt cancel
+            }
         }
 
         match self.api.cancel_child_order(pair, order_id).await {

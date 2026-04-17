@@ -126,20 +126,32 @@ async fn reconcile_one_account(
         Vec<auto_trader_market::bitflyer_private::ExchangePosition>,
     > = results.into_iter().collect();
 
+    // Group DB trades by (pair, direction) for aggregate comparison.
+    // Multiple DB trades can share the same (pair, direction) while the exchange
+    // holds one aggregated position — compare totals, not per-trade quantities.
+    let mut db_groups: HashMap<
+        (String, Direction),
+        (Decimal, Vec<&auto_trader_core::types::Trade>),
+    > = HashMap::new();
     for trade in &db_trades {
-        let pair_positions = exchange_positions
-            .get(&trade.pair.0)
-            .cloned()
-            .unwrap_or_default();
-        let mut exchange_has_matching = false;
-        let mut exchange_has_conflicting = false;
+        let key = (trade.pair.0.clone(), trade.direction);
+        let entry = db_groups.entry(key).or_insert((Decimal::ZERO, Vec::new()));
+        entry.0 += trade.quantity;
+        entry.1.push(trade);
+    }
 
+    for ((pair, direction), (db_total_qty, trades)) in &db_groups {
+        let pair_positions = exchange_positions.get(pair).cloned().unwrap_or_default();
+
+        // Check for conflicting positions (opposite-side or unknown side).
+        let mut exchange_has_conflicting = false;
+        let mut matching_exchange_size = Decimal::ZERO;
         for p in &pair_positions {
             if p.size <= Decimal::ZERO {
                 continue;
             }
-            match matches_direction(&p.side, &trade.direction) {
-                Some(true) => exchange_has_matching = true,
+            match matches_direction(&p.side, direction) {
+                Some(true) => matching_exchange_size += p.size,
                 Some(false) => exchange_has_conflicting = true,
                 None => {
                     tracing::warn!(
@@ -154,79 +166,78 @@ async fn reconcile_one_account(
 
         if exchange_has_conflicting {
             anyhow::bail!(
-                "startup reconcile: trade {} has conflicting/unknown exchange position for {}; \
-                 refusing auto-reconciliation — manual intervention required",
-                trade.id,
-                trade.pair.0
+                "startup reconcile: conflicting exchange position for {} {:?} on account {}; \
+                 manual intervention required",
+                pair,
+                direction,
+                account.name
             );
         }
 
-        let matching_exchange_size: Decimal = pair_positions
-            .iter()
-            .filter(|p| {
-                p.size > Decimal::ZERO
-                    && matches!(matches_direction(&p.side, &trade.direction), Some(true))
-            })
-            .map(|p| p.size)
-            .sum();
+        // Compare aggregate sizes only when exchange has a matching position.
+        if matching_exchange_size > Decimal::ZERO && matching_exchange_size != *db_total_qty {
+            anyhow::bail!(
+                "startup reconcile: size mismatch for {} {:?} — DB total={} but exchange has {}; \
+                 manual intervention required",
+                pair,
+                direction,
+                db_total_qty,
+                matching_exchange_size
+            );
+        }
 
-        match (trade.status.as_str(), exchange_has_matching) {
-            ("open", true) => {
-                if matching_exchange_size != trade.quantity {
-                    anyhow::bail!(
-                        "startup reconcile: trade {} size mismatch — DB quantity={} but exchange \
-                         has {}; refusing auto-reconciliation — manual intervention required",
-                        trade.id,
-                        trade.quantity,
-                        matching_exchange_size
+        // Aggregate is consistent; now process individual trades.
+        let exchange_has_matching = matching_exchange_size > Decimal::ZERO;
+        for trade in trades {
+            match (trade.status.as_str(), exchange_has_matching) {
+                ("open", true) => {
+                    tracing::info!(
+                        "startup reconcile: trade {} consistent (DB=open, exchange=open)",
+                        trade.id
                     );
                 }
-                tracing::info!(
-                    "startup reconcile: trade {} consistent (DB=open, exchange=open)",
-                    trade.id
-                );
-            }
-            ("open", false) => {
-                tracing::warn!(
-                    "startup reconcile: trade {} DB=open but exchange has no matching position; \
-                     closing with best-effort exit price",
-                    trade.id
-                );
-                tracing::warn!(
-                    "startup reconcile: trade {} force-closed (reason=orphan)",
-                    trade.id
-                );
-                force_close_db_only(pool, trade, price_store).await?;
-            }
-            ("closing", true) => {
-                tracing::warn!(
-                    "startup reconcile: trade {} DB=closing but exchange position still open — \
-                     resetting to open for retry by normal close monitor",
-                    trade.id
-                );
-                // Revert closing → open so the normal monitor loop will retry close.
-                trades::release_close_lock(pool, trade.id).await?;
-            }
-            ("closing", false) => {
-                tracing::warn!(
-                    "startup reconcile: trade {} DB=closing and exchange shows no position — \
-                     completing Phase 3 with best-effort exit price",
-                    trade.id
-                );
-                tracing::warn!(
-                    "startup reconcile: trade {} force-closed (reason=phase3)",
-                    trade.id
-                );
-                force_close_db_only(pool, trade, price_store).await?;
-            }
-            (other, _) => {
-                // Should never happen — list_open_or_closing_by_account filters to
-                // status IN ('open', 'closing'). Bail rather than silently skipping.
-                anyhow::bail!(
-                    "startup reconcile: unexpected status '{}' for trade {}",
-                    other,
-                    trade.id
-                );
+                ("open", false) => {
+                    tracing::warn!(
+                        "startup reconcile: trade {} DB=open but exchange has no matching position; \
+                         closing with best-effort exit price",
+                        trade.id
+                    );
+                    tracing::warn!(
+                        "startup reconcile: trade {} force-closed (reason=orphan)",
+                        trade.id
+                    );
+                    force_close_db_only(pool, trade, price_store).await?;
+                }
+                ("closing", true) => {
+                    tracing::warn!(
+                        "startup reconcile: trade {} DB=closing but exchange position still open — \
+                         resetting to open for retry by normal close monitor",
+                        trade.id
+                    );
+                    // Revert closing → open so the normal monitor loop will retry close.
+                    trades::release_close_lock(pool, trade.id).await?;
+                }
+                ("closing", false) => {
+                    tracing::warn!(
+                        "startup reconcile: trade {} DB=closing and exchange shows no position — \
+                         completing Phase 3 with best-effort exit price",
+                        trade.id
+                    );
+                    tracing::warn!(
+                        "startup reconcile: trade {} force-closed (reason=phase3)",
+                        trade.id
+                    );
+                    force_close_db_only(pool, trade, price_store).await?;
+                }
+                (other, _) => {
+                    // Should never happen — list_open_or_closing_by_account filters to
+                    // status IN ('open', 'closing'). Bail rather than silently skipping.
+                    anyhow::bail!(
+                        "startup reconcile: unexpected status '{}' for trade {}",
+                        other,
+                        trade.id
+                    );
+                }
             }
         }
     }

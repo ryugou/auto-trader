@@ -494,42 +494,8 @@ pub async fn close_trade_reconciled(
         anyhow::bail!("close_trade_reconciled: trade {trade_id} not found or already closed");
     }
 
-    // Release margin + pnl back to account balance.
-    let new_balance: Decimal = sqlx::query_scalar(
-        r#"UPDATE trading_accounts
-           SET current_balance = current_balance + $2 + $3
-           WHERE id = $1
-           RETURNING current_balance"#,
-    )
-    .bind(trade.account_id)
-    .bind(margin)
-    .bind(pnl_amount)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    // Record margin_release event.
-    sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
-           VALUES ($1, $2, 'margin_release', $3, $4)"#,
-    )
-    .bind(trade.account_id)
-    .bind(trade_id)
-    .bind(margin)
-    .bind(new_balance - pnl_amount)
-    .execute(&mut *tx)
-    .await?;
-
-    // Record trade_close event.
-    sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
-           VALUES ($1, $2, 'trade_close', $3, $4)"#,
-    )
-    .bind(trade.account_id)
-    .bind(trade_id)
-    .bind(pnl_amount)
-    .bind(new_balance)
-    .execute(&mut *tx)
-    .await?;
+    // Release margin + pnl back to account balance via shared helper.
+    release_margin(&mut tx, trade.account_id, trade_id, margin, pnl_amount).await?;
 
     tx.commit().await?;
     Ok(())
