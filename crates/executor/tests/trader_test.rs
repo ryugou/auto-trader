@@ -971,19 +971,25 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
 // TimedResponder: wall-clock-based wiremock responder
 // ---------------------------------------------------------------------------
 
-/// Returns an empty-array response until `timeout` has elapsed from `start`,
-/// then returns `filled_response`.  Uses `std::time::Instant` (wall clock) so
-/// it remains correct even when tokio time is not paused, and inherently
-/// matches `poll_executions`' own 5 s budget — eliminating call-count flakiness.
+/// Returns an empty-array response until `timeout` has elapsed from the first
+/// request, then returns `filled_response`.  Uses `std::time::Instant` (wall
+/// clock) so it remains correct even when tokio time is not paused, and
+/// inherently matches `poll_executions`' own 5 s budget — eliminating
+/// call-count flakiness.
+///
+/// The start time is lazily initialized on the first request via `OnceLock` so
+/// that DB seeding / setup time before the first wiremock hit does not eat into
+/// the timeout budget.
 struct TimedResponder {
-    start: std::time::Instant,
+    start: std::sync::OnceLock<std::time::Instant>,
     timeout: std::time::Duration,
     filled_response: serde_json::Value,
 }
 
 impl wiremock::Respond for TimedResponder {
     fn respond(&self, _req: &wiremock::Request) -> wiremock::ResponseTemplate {
-        if self.start.elapsed() < self.timeout {
+        let start = self.start.get_or_init(std::time::Instant::now);
+        if start.elapsed() < self.timeout {
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
         } else {
             wiremock::ResponseTemplate::new(200).set_body_json(self.filled_response.clone())
@@ -1032,7 +1038,7 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
         .respond_with(TimedResponder {
-            start: std::time::Instant::now(),
+            start: std::sync::OnceLock::new(),
             timeout: std::time::Duration::from_millis(200),
             filled_response: serde_json::json!([
                 {
@@ -1114,7 +1120,7 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
         .respond_with(TimedResponder {
-            start: std::time::Instant::now(),
+            start: std::sync::OnceLock::new(),
             timeout: std::time::Duration::from_secs(3600),
             filled_response: serde_json::json!([]),
         })
@@ -1221,7 +1227,7 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
     Mock::given(method("GET"))
         .and(path_regex(r"/v1/me/getexecutions.*"))
         .respond_with(TimedResponder {
-            start: std::time::Instant::now(),
+            start: std::sync::OnceLock::new(),
             timeout: std::time::Duration::from_millis(200),
             filled_response: serde_json::json!([
                 {

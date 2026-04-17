@@ -161,8 +161,26 @@ async fn reconcile_one_account(
             );
         }
 
+        let matching_exchange_size: Decimal = pair_positions
+            .iter()
+            .filter(|p| {
+                p.size > Decimal::ZERO
+                    && matches!(matches_direction(&p.side, &trade.direction), Some(true))
+            })
+            .map(|p| p.size)
+            .sum();
+
         match (trade.status.as_str(), exchange_has_matching) {
             ("open", true) => {
+                if matching_exchange_size != trade.quantity {
+                    anyhow::bail!(
+                        "startup reconcile: trade {} size mismatch — DB quantity={} but exchange \
+                         has {}; refusing auto-reconciliation — manual intervention required",
+                        trade.id,
+                        trade.quantity,
+                        matching_exchange_size
+                    );
+                }
                 tracing::info!(
                     "startup reconcile: trade {} consistent (DB=open, exchange=open)",
                     trade.id

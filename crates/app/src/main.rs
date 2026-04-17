@@ -772,20 +772,20 @@ async fn main() -> anyhow::Result<()> {
 
     // IMPORTANT: before spawning monitor/executor tasks, reconcile any live
     // DB rows that might have drifted during last shutdown. This is a one-time
-    // recovery, not periodic. Skip when no exchange APIs are configured
-    // (paper-only setups have no exchange state to check).
-    if !exchange_apis.is_empty() {
-        startup_reconcile::reconcile_live_accounts_at_startup(
-            &pool,
-            &db_accounts,
-            &exchange_apis,  // Arc<HashMap<...>> derefs to &HashMap via Deref
-            price_store.clone(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(
+    // recovery, not periodic. Unconditional: paper-only setups no-op; live
+    // accounts with no exchange API correctly bail.
+    startup_reconcile::reconcile_live_accounts_at_startup(
+        &pool,
+        &db_accounts,
+        &exchange_apis,
+        price_store.clone(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
             "startup reconcile failed: {e}; refusing to start with potentially inconsistent state"
-        ))?;
-    }
+        )
+    })?;
 
     // FX position monitor removed: FX paper trading is currently disabled.
     // Drain the forwarded FX price channel so senders do not block.
