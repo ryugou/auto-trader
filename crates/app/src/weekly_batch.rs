@@ -92,13 +92,21 @@ pub async fn run(
         proposal.rationale
     );
 
-    // 6. Validate and persist proposed params
+    // 6. Validate and persist proposed params.
+    // Normalize to only the three allowed keys before writing so that stale or
+    // hallucinated keys (e.g. `sl_pct`, `allocation_pct`) are never written back
+    // to the DB despite the cleanup migration that removed them.
     if let Err(e) = validate_params(&proposal.params) {
         tracing::warn!("weekly_batch: LLM proposed invalid params, rejecting: {e}");
         tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
         return Ok(());
     }
-    persist_params(pool, STRATEGY, &proposal.params)
+    let normalized = serde_json::json!({
+        "entry_channel": proposal.params["entry_channel"],
+        "exit_channel": proposal.params["exit_channel"],
+        "atr_baseline_bars": proposal.params["atr_baseline_bars"],
+    });
+    persist_params(pool, STRATEGY, &normalized)
         .await
         .context("persist_params")?;
 
@@ -107,7 +115,7 @@ pub async fn run(
          根拠: {}\n\
          期待効果: {}\n\
          新パラメータ: {}",
-        proposal.rationale, proposal.expected_effect, proposal.params,
+        proposal.rationale, proposal.expected_effect, normalized,
     );
     insert_system_notification(pool, &notification_message)
         .await

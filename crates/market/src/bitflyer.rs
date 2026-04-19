@@ -108,24 +108,32 @@ impl BitflyerMonitor {
         let mut builders: HashMap<String, CandleBuilder> = HashMap::new();
         // Secondary H1 builders — Donchian / Squeeze strategies use 1H candles
         // to reduce false breakouts on daily-bar-designed logic.
+        // Only created when the primary timeframe is not already H1; if it were,
+        // both `builders` and `h1_builders` would emit H1 candles → duplicate events.
         let mut h1_builders: HashMap<String, CandleBuilder> = HashMap::new();
         for pair in &self.pairs {
             builders.insert(
                 pair.0.clone(),
                 CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, self.timeframe.clone()),
             );
-            // Always create H1 builders alongside the primary timeframe so
-            // trend strategies receive 1H PriceEvents even when self.timeframe = "M5".
-            h1_builders.insert(
-                pair.0.clone(),
-                CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, "H1".to_string()),
-            );
+            if self.timeframe != "H1" {
+                h1_builders.insert(
+                    pair.0.clone(),
+                    CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, "H1".to_string()),
+                );
+            }
         }
         // Seed indicator state from caller-provided history. Move out rather
         // than cloning to avoid duplicate copies of every warmup vector.
         let mut closes_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.closes_seed);
         let mut highs_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.highs_seed);
         let mut lows_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.lows_seed);
+        // Latest indicator map per pair from the most recent primary-timeframe candle.
+        // Carried forward to H1 PriceEvents so entry_indicators JSONB is non-empty
+        // for telemetry and DB storage. Strategies that consume H1 events compute
+        // their own indicators from their internal VecDeque history.
+        let mut latest_primary_indicators: HashMap<String, HashMap<String, Decimal>> =
+            HashMap::new();
         for (pair, closes) in &closes_map {
             tracing::info!(
                 "bitflyer warmup: seeded {} {} closes for {}",
@@ -162,6 +170,7 @@ impl BitflyerMonitor {
                 &mut closes_map,
                 &mut highs_map,
                 &mut lows_map,
+                &mut latest_primary_indicators,
             )
             .await
             {
@@ -302,6 +311,7 @@ async fn connect_and_stream(
     closes_map: &mut HashMap<String, Vec<Decimal>>,
     highs_map: &mut HashMap<String, Vec<Decimal>>,
     lows_map: &mut HashMap<String, Vec<Decimal>>,
+    latest_primary_indicators: &mut HashMap<String, HashMap<String, Decimal>>,
 ) -> anyhow::Result<()> {
     let (ws, _) = connect_async(ws_url).await?;
     let (mut write, mut read) = ws.split();
@@ -390,13 +400,16 @@ async fn connect_and_stream(
                 candle, closes_map, highs_map, lows_map,
                 true, // full indicator map for primary timeframe
             );
+            // Cache the latest primary indicators so H1 PriceEvents can carry
+            // them for entry_indicators JSONB telemetry.
+            latest_primary_indicators.insert(product_code.clone(), event.indicators.clone());
             if price_tx.send(event).await.is_err() {
                 tracing::info!("price channel closed, stopping bitflyer monitor");
                 return Ok(());
             }
         }
 
-        // --- H1 candle (always generated alongside the primary timeframe) ---
+        // --- H1 candle (only when h1_builders is populated, i.e. primary != H1) ---
         if let Some(h1_builder) = h1_builders.get_mut(product_code) {
             let h1_from_tick = h1_builder.on_tick(price, size, ts, best_bid, best_ask);
             let h1_from_complete = h1_builder.try_complete(ts, best_bid, best_ask);
@@ -406,17 +419,20 @@ async fn connect_and_stream(
                 {
                     tracing::warn!("failed to save H1 crypto candle: {e}");
                 }
-                // H1 events use their own indicator state (separate per-timeframe
-                // vectors would require significant refactor; strategies using H1
-                // candles compute indicators from their own VecDeque history).
-                // Emit with an empty indicator map — all consuming strategies
-                // are self-sufficient in their indicator computation.
+                // Carry forward the most-recent primary-timeframe indicators.
+                // Strategies that consume H1 events compute their own indicators
+                // from their internal VecDeque history; this map is primarily
+                // for entry_indicators JSONB telemetry / DB storage.
+                let h1_indicators = latest_primary_indicators
+                    .get(product_code)
+                    .cloned()
+                    .unwrap_or_default();
                 let h1_event = PriceEvent {
                     pair: h1_candle.pair.clone(),
                     exchange: Exchange::BitflyerCfd,
                     timestamp: h1_candle.timestamp,
                     candle: h1_candle,
-                    indicators: HashMap::new(),
+                    indicators: h1_indicators,
                 };
                 if price_tx.send(h1_event).await.is_err() {
                     tracing::info!("price channel closed, stopping bitflyer monitor");

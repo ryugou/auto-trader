@@ -55,8 +55,8 @@ const RSI_SHORT_THRESHOLD: Decimal = dec!(75);
 /// ATR multiplier for stop-loss. 1.5× ATR places the SL just outside
 /// the recent noise range — tight enough for mean-reversion discipline.
 const ATR_MULT: Decimal = dec!(1.5);
-/// Maximum stop-loss as a fraction of entry price. Caps the SL during
-/// low-volatility periods so the position monitor has a sensible floor.
+/// Maximum stop-loss as a fraction of entry price. Caps the ATR-based
+/// SL during high-volatility periods so it does not exceed 3% of entry.
 const SL_CAP: Decimal = dec!(0.03);
 /// Maximum risk per trade as a fraction of account balance.
 const TARGET_RISK_PCT: Decimal = dec!(0.02);
