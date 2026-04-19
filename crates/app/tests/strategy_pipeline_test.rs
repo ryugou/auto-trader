@@ -85,6 +85,7 @@ fn make_event_tf(
 /// squeeze strategies a clear breakout. Returns the slice up to (but
 /// not including) the breakout candle so callers can warm the strategy
 /// first.
+#[allow(dead_code)]
 fn flat_then_trend(
     base: Decimal,
     flat_bars: usize,

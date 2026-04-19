@@ -185,6 +185,9 @@ impl Strategy for SqueezeMomentumV1 {
         // ATR-based stop-loss, capped at SL_CAP.
         let atr = indicators::atr(&highs, &lows, &closes, ATR_PERIOD)?;
         let stop_loss_pct = (atr * ATR_MULT / entry).min(SL_CAP);
+        if stop_loss_pct <= Decimal::ZERO {
+            return None; // ATR=0, no volatility to trade
+        }
         // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
         let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
 

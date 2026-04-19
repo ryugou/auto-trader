@@ -195,8 +195,6 @@ async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalys
 fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
     let entry = params["entry_channel"].as_u64().unwrap_or(20);
     let exit = params["exit_channel"].as_u64().unwrap_or(10);
-    let sl = params["sl_pct"].as_f64().unwrap_or(0.03);
-    let alloc = params["allocation_pct"].as_f64().unwrap_or(1.0);
     let baseline = params["atr_baseline_bars"].as_u64().unwrap_or(50);
 
     if !(10..=30).contains(&entry) {
@@ -204,12 +202,6 @@ fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
     }
     if !(5..=15).contains(&exit) {
         anyhow::bail!("exit_channel {exit} out of range [5, 15]");
-    }
-    if !(0.0..=0.10).contains(&sl) || sl <= 0.0 {
-        anyhow::bail!("sl_pct {sl} out of range (0.0, 0.10]");
-    }
-    if !(0.50..=1.0).contains(&alloc) {
-        anyhow::bail!("allocation_pct {alloc} out of range [0.50, 1.0]");
     }
     if !(20..=100).contains(&baseline) {
         anyhow::bail!("atr_baseline_bars {baseline} out of range [20, 100]");
@@ -364,8 +356,7 @@ fn build_gemini_prompt(
     prompt.push_str(
         "\n## 指示\n\
          上記データを踏まえ、`donchian_trend_evolve_v1` 戦略の最適なパラメータを提案してください。\
-         パラメータキー: entry_channel (整数), exit_channel (整数), sl_pct (小数), \
-         allocation_pct (0.0〜1.0), atr_baseline_bars (整数)。\n\
+         パラメータキー: entry_channel (整数), exit_channel (整数), atr_baseline_bars (整数)。\n\
          以下のJSON形式のみで応答すること:\n\
          {\"params\":{...},\"rationale\":\"変更理由\",\"expected_effect\":\"期待効果\"}\n",
     );
