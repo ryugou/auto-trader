@@ -16,8 +16,10 @@
 //! are tight by design — 1.5× ATR places the SL just outside recent noise.
 //!
 //! ## Position sizing
-//! `allocation_pct = min(2% / stop_loss_pct, 50%)`. Risks at most 2% of
-//! account per trade; caps at 50% to prevent over-exposure when ATR is tiny.
+//! `allocation_pct = min(1% / stop_loss_pct, 50%)`. With 2× account leverage
+//! the executor sizes as `balance × leverage × allocation_pct / price`, so
+//! actual risk = `1% × 2 = 2%` of account per trade. Caps at 50% to prevent
+//! over-exposure when ATR is tiny.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when price returns to SMA20 (BB middle).
@@ -58,8 +60,11 @@ const ATR_MULT: Decimal = dec!(1.5);
 /// Maximum stop-loss as a fraction of entry price. Caps the ATR-based
 /// SL during high-volatility periods so it does not exceed 3% of entry.
 const SL_CAP: Decimal = dec!(0.03);
-/// Maximum risk per trade as a fraction of account balance.
-const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Target risk per trade as an *unleveraged* fraction of account balance.
+/// The executor sizes as `balance × leverage × allocation_pct / price`, so
+/// actual risk = `TARGET_RISK_PCT × leverage`. At 2× leverage this produces
+/// a 2% actual risk. Adjust if account leverage changes.
+const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade. Prevents full account deployment when
 /// ATR SL is very small.
 const ALLOCATION_CAP: Decimal = dec!(0.50);

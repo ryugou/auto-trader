@@ -29,8 +29,11 @@ const ATR_PERIOD: usize = 14;
 const ATR_MULT: Decimal = dec!(3.0);
 /// Maximum stop-loss fraction — same as baseline.
 const SL_CAP: Decimal = dec!(0.05);
-/// Maximum risk per trade as a fraction of account balance.
-const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Target risk per trade as an *unleveraged* fraction of account balance.
+/// The executor sizes as `balance × leverage × allocation_pct / price`, so
+/// actual risk = `TARGET_RISK_PCT × leverage`. At 2× leverage this produces
+/// a 2% actual risk. Adjust if account leverage changes.
+const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade.
 const ALLOCATION_CAP: Decimal = dec!(0.50);
 /// This strategy uses 1H candles, same as baseline donchian_trend_v1.

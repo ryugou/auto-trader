@@ -25,8 +25,9 @@
 //! without over-sizing the risk.
 //!
 //! ## Position sizing
-//! `allocation_pct = min(2% / stop_loss_pct, 50%)`. Risks at most 2%
-//! of account per trade; caps at 50% to prevent over-exposure.
+//! `allocation_pct = min(1% / stop_loss_pct, 50%)`. With 2× account leverage
+//! actual risk = `1% × 2 = 2%` of account per trade; caps at 50% to prevent
+//! over-exposure.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when current close < EMA(21).
@@ -67,8 +68,11 @@ const SWING_LOOKBACK: usize = 5;
 const ATR_MULT: Decimal = dec!(2.5);
 /// Maximum stop-loss as a fraction of entry price.
 const SL_CAP: Decimal = dec!(0.05);
-/// Maximum risk per trade as a fraction of account balance.
-const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Target risk per trade as an *unleveraged* fraction of account balance.
+/// The executor sizes as `balance × leverage × allocation_pct / price`, so
+/// actual risk = `TARGET_RISK_PCT × leverage`. At 2× leverage this produces
+/// a 2% actual risk. Adjust if account leverage changes.
+const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade.
 const ALLOCATION_CAP: Decimal = dec!(0.50);
 const TIME_LIMIT_HOURS: i64 = 48;
