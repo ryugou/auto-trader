@@ -222,6 +222,9 @@ impl Strategy for DonchianTrendEvolveV1 {
         if event.exchange != Exchange::BitflyerCfd {
             return Vec::new();
         }
+        if event.candle.timeframe != TIMEFRAME {
+            return Vec::new();
+        }
         let key = event.pair.0.clone();
         let Some(history) = self.history.get(&key) else {
             return Vec::new();
@@ -380,17 +383,14 @@ mod tests {
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
         // ATR-based SL: positive and at most SL_CAP (5%).
-        assert!(sig.stop_loss_pct > Decimal::ZERO);
-        assert!(sig.stop_loss_pct <= dec!(0.05));
-        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
-        assert!(sig.allocation_pct > Decimal::ZERO);
-        assert!(sig.allocation_pct <= dec!(0.50));
-        // ATR-based SL: positive and at most SL_CAP (5%).
         assert!(
             sig.stop_loss_pct > Decimal::ZERO && sig.stop_loss_pct <= dec!(0.05),
             "ATR-based SL must be in (0, SL_CAP=5%], got {}",
             sig.stop_loss_pct
         );
+        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        assert!(sig.allocation_pct > Decimal::ZERO);
+        assert!(sig.allocation_pct <= dec!(0.50));
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
     }

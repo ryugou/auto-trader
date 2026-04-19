@@ -213,6 +213,9 @@ impl Strategy for BbMeanRevertV1 {
         if event.exchange != Exchange::BitflyerCfd {
             return Vec::new();
         }
+        if event.candle.timeframe != TIMEFRAME {
+            return Vec::new();
+        }
         let key = event.pair.0.clone();
         let Some(history) = self.history.get(&key) else {
             return Vec::new();
