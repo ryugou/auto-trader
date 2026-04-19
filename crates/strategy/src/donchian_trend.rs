@@ -1,13 +1,13 @@
 //! 標準ブレイクアウト v1 (`donchian_trend_v1`).
 //!
-//! Turtle Traders System 1 adapted for FX_BTC_JPY (M5). The original
+//! Turtle Traders System 1 adapted for FX_BTC_JPY (1H). The original
 //! Turtle System enters on a 20-day breakout and exits on a 10-day
 //! reverse breakout, intentionally avoiding fixed take-profit targets so
 //! winners can run ([Original Turtle Trading Rules](https://oxfordstrat.com/coasdfASD32/uploads/2016/01/turtle-rules.pdf)).
 //!
-//! This implementation uses 20-bar / 10-bar Donchian channels on the M5
-//! timeframe — proportionally short relative to "20 days" but appropriate
-//! for the higher trade frequency of crypto.
+//! This implementation uses 20-bar / 10-bar Donchian channels on the 1H
+//! timeframe — M5 produced too many false breakouts; 1H aligns better
+//! with the trend-following nature of the logic.
 //!
 //! ## Entry rules
 //! - **Long**: previous bar's close > prior 20-bar high AND ATR(14) >
@@ -16,10 +16,13 @@
 //! - **Short**: mirror — close < 20-bar low AND elevated ATR.
 //!
 //! ## Stop loss
-//! Flat **3 % from entry price** (`SL_PCT`). Trend strategies want a
-//! slightly wider safety net than mean-reversion ones because the entry
-//! is on a momentum break and small retraces are normal. Sizing is
-//! independent of the SL distance — see `allocation_pct` on Signal.
+//! ATR(14)-based: `min(ATR × 3.0 / entry, 5%)`. Turtle System 1 uses
+//! N-based stops (N = ATR); 3× ATR is within the original recommended
+//! range and provides breathing room for normal trend retraces.
+//!
+//! ## Position sizing
+//! `allocation_pct = min(2% / stop_loss_pct, 50%)`. Risks at most 2%
+//! of account per trade; caps at 50% to prevent over-exposure.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when current close < prior 10-bar low.
@@ -42,17 +45,19 @@ const ENTRY_CHANNEL: usize = 20;
 const EXIT_CHANNEL: usize = 10;
 const ATR_PERIOD: usize = 14;
 const ATR_BASELINE_BARS: usize = 50;
-/// Stop-loss as a flat percentage of entry price. Trend strategies want
-/// a slightly wider safety net than mean-reversion ones because the
-/// entry is on a momentum break and short-term retraces are normal.
-const SL_PCT: Decimal = dec!(0.03);
-/// Capital allocation per trade. Trend trades are infrequent but
-/// directionally strong, and this strategy has its own dedicated paper
-/// account — leaving cash idle is pure waste. 100 % is safe at 2×
-/// leverage + a 3 % SL: the SL fires before the maintenance-margin
-/// threshold and the exchange can't auto-liquidate first.
-const ALLOCATION_PCT: Decimal = dec!(1.00);
+/// ATR multiplier for stop-loss. 3× ATR is within the Turtle System's
+/// original N-based stop recommendation — wide enough for trend retraces.
+const ATR_MULT: Decimal = dec!(3.0);
+/// Maximum stop-loss as a fraction of entry price.
+const SL_CAP: Decimal = dec!(0.05);
+/// Maximum risk per trade as a fraction of account balance.
+const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Maximum allocation per trade.
+const ALLOCATION_CAP: Decimal = dec!(0.50);
 const HISTORY_LEN: usize = 200;
+/// This strategy uses 1H candles (trend-following; M5 produced excessive
+/// false breakouts on a daily-bar-designed logic).
+const TIMEFRAME: &str = "H1";
 
 pub struct DonchianTrendV1 {
     name: String,
@@ -140,6 +145,9 @@ impl Strategy for DonchianTrendV1 {
         if event.exchange != Exchange::BitflyerCfd {
             return None;
         }
+        if event.candle.timeframe != TIMEFRAME {
+            return None;
+        }
         if !self.pairs.iter().any(|p| p == &event.pair) {
             return None;
         }
@@ -169,10 +177,10 @@ impl Strategy for DonchianTrendV1 {
         }
 
         let entry = event.candle.close;
-        let sl_offset = entry * SL_PCT;
-
-        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
-        let stop_loss_pct = sl_offset / entry;
+        // ATR-based stop-loss, capped at SL_CAP.
+        let stop_loss_pct = (atr * ATR_MULT / entry).min(SL_CAP);
+        // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
+        let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
 
         if entry > channel_high {
             return Some(Signal {
@@ -184,7 +192,7 @@ impl Strategy for DonchianTrendV1 {
                 take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
-                allocation_pct: ALLOCATION_PCT,
+                allocation_pct,
                 max_hold_until: None,
             });
         }
@@ -197,7 +205,7 @@ impl Strategy for DonchianTrendV1 {
                 take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
-                allocation_pct: ALLOCATION_PCT,
+                allocation_pct,
                 max_hold_until: None,
             });
         }
@@ -209,6 +217,9 @@ impl Strategy for DonchianTrendV1 {
     async fn warmup(&mut self, events: &[PriceEvent]) {
         for event in events {
             if event.exchange != Exchange::BitflyerCfd {
+                continue;
+            }
+            if event.candle.timeframe != TIMEFRAME {
                 continue;
             }
             if !self.pairs.iter().any(|p| p == &event.pair) {
@@ -281,7 +292,7 @@ mod tests {
             candle: Candle {
                 pair: Pair::new(pair),
                 exchange: Exchange::BitflyerCfd,
-                timeframe: "M5".to_string(),
+                timeframe: "H1".to_string(),
                 open: close,
                 high,
                 low,
@@ -328,6 +339,17 @@ mod tests {
         assert!(s.on_price(&e).await.is_none());
     }
 
+    /// M5 candles must be silently ignored — this strategy runs on H1.
+    #[tokio::test]
+    async fn ignores_non_h1_timeframe() {
+        let mut s = DonchianTrendV1::new("dt".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        let mut e = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
+        e.candle.timeframe = "M5".to_string();
+        for _ in 0..120 {
+            assert!(s.on_price(&e).await.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn long_breakout_above_channel_with_volatility_expansion() {
         let mut s = DonchianTrendV1::new("dt".to_string(), vec![Pair::new("FX_BTC_JPY")]);
@@ -355,10 +377,39 @@ mod tests {
         assert!(signal.is_some(), "expected long breakout signal");
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        // SL pct must equal SL_PCT (3%)
-        assert_eq!(sig.stop_loss_pct, dec!(0.03));
+        // ATR-based SL: positive and at most SL_CAP (5%).
+        assert!(sig.stop_loss_pct > Decimal::ZERO);
+        assert!(sig.stop_loss_pct <= dec!(0.05));
+        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        assert!(sig.allocation_pct > Decimal::ZERO);
+        assert!(sig.allocation_pct <= dec!(0.50));
         // Turtle has NO fixed TP — dynamic exit strategy uses None
         assert!(sig.take_profit_pct.is_none());
+    }
+
+    /// The old flat SL_PCT (3%) must no longer appear.
+    #[tokio::test]
+    async fn sl_and_allocation_are_atr_derived() {
+        let mut s = DonchianTrendV1::new("dt".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        for i in 0..100 {
+            let drift = Decimal::from(i % 5) * dec!(1000);
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(10000000) + drift,
+                    dec!(10010000) + drift,
+                    dec!(9990000) + drift,
+                ))
+                .await;
+        }
+        let breakout = make_event("FX_BTC_JPY", dec!(11000000), dec!(11200000), dec!(10800000));
+        let sig = s.on_price(&breakout).await.unwrap();
+        assert_ne!(
+            sig.stop_loss_pct,
+            dec!(0.03),
+            "SL must be ATR-based, not flat 3%"
+        );
+        assert!(sig.allocation_pct <= dec!(0.50));
     }
 
     #[tokio::test]

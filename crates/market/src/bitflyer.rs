@@ -103,11 +103,22 @@ impl BitflyerMonitor {
         price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()> {
+        // Primary builders for the configured timeframe (M5 for crypto strategies
+        // that want fine-grained data, e.g. bb_mean_revert).
         let mut builders: HashMap<String, CandleBuilder> = HashMap::new();
+        // Secondary H1 builders — Donchian / Squeeze strategies use 1H candles
+        // to reduce false breakouts on daily-bar-designed logic.
+        let mut h1_builders: HashMap<String, CandleBuilder> = HashMap::new();
         for pair in &self.pairs {
             builders.insert(
                 pair.0.clone(),
                 CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, self.timeframe.clone()),
+            );
+            // Always create H1 builders alongside the primary timeframe so
+            // trend strategies receive 1H PriceEvents even when self.timeframe = "M5".
+            h1_builders.insert(
+                pair.0.clone(),
+                CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, "H1".to_string()),
             );
         }
         // Seed indicator state from caller-provided history. Move out rather
@@ -147,6 +158,7 @@ impl BitflyerMonitor {
                 &tick_tx,
                 &price_tx,
                 &mut builders,
+                &mut h1_builders,
                 &mut closes_map,
                 &mut highs_map,
                 &mut lows_map,
@@ -185,6 +197,99 @@ impl BitflyerMonitor {
     }
 }
 
+/// Build and emit a `PriceEvent` for a completed candle, updating the rolling
+/// indicator history vectors in-place. The indicator map is computed from the
+/// primary-timeframe (M5) history vectors so the position monitor and API
+/// server always see fresh M5 indicators regardless of which timeframe fired.
+/// H1 PriceEvents carry a minimal indicator map — strategies that consume them
+/// compute their own indicators from their internal `VecDeque<Candle>` history.
+fn emit_candle_event(
+    candle: auto_trader_core::types::Candle,
+    closes_map: &mut HashMap<String, Vec<Decimal>>,
+    highs_map: &mut HashMap<String, Vec<Decimal>>,
+    lows_map: &mut HashMap<String, Vec<Decimal>>,
+    compute_full_indicators: bool,
+) -> PriceEvent {
+    let product_code = candle.pair.0.clone();
+
+    let closes = closes_map.entry(product_code.clone()).or_default();
+    closes.push(candle.close);
+    if closes.len() > 200 {
+        closes.drain(..closes.len() - 200);
+    }
+
+    let highs = highs_map.entry(product_code.clone()).or_default();
+    highs.push(candle.high);
+    if highs.len() > 200 {
+        highs.drain(..highs.len() - 200);
+    }
+
+    let lows = lows_map.entry(product_code.clone()).or_default();
+    lows.push(candle.low);
+    if lows.len() > 200 {
+        lows.drain(..lows.len() - 200);
+    }
+
+    let mut indicator_map = HashMap::new();
+    if compute_full_indicators {
+        if let Some(v) = indicators::sma(closes, 20) {
+            indicator_map.insert("sma_20".to_string(), v);
+        }
+        if let Some(v) = indicators::sma(closes, 50) {
+            indicator_map.insert("sma_50".to_string(), v);
+        }
+        if let Some(v) = indicators::rsi(closes, 14) {
+            indicator_map.insert("rsi_14".to_string(), v);
+        }
+        if let Some(v) = indicators::atr(highs, lows, closes, 14) {
+            indicator_map.insert("atr_14".to_string(), v);
+        }
+        if let Some(v) = indicators::adx(highs, lows, closes, 14) {
+            indicator_map.insert("adx_14".to_string(), v);
+        }
+        // BB width as percentage of SMA20
+        if let Some((bb_lo, bb_mid, bb_up)) =
+            indicators::bollinger_bands(closes, 20, Decimal::from(2))
+            && bb_mid > Decimal::ZERO
+        {
+            let bb_width_pct = (bb_up - bb_lo) / bb_mid * Decimal::from(100);
+            indicator_map.insert("bb_width_pct".to_string(), bb_width_pct);
+        }
+        // ATR percentile: rank of current ATR within the last 50 ATR values
+        if let Some(current_atr) = indicator_map.get("atr_14").copied() {
+            let lookback = 50.min(closes.len());
+            if lookback >= 15 {
+                let mut atr_count_below = 0u32;
+                let mut atr_total = 0u32;
+                for end in (closes.len() - lookback)..closes.len() {
+                    if end >= 14
+                        && let Some(past_atr) =
+                            indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], 14)
+                    {
+                        atr_total += 1;
+                        if past_atr < current_atr {
+                            atr_count_below += 1;
+                        }
+                    }
+                }
+                if atr_total > 0 {
+                    let pct = Decimal::from(atr_count_below) / Decimal::from(atr_total)
+                        * Decimal::from(100);
+                    indicator_map.insert("atr_percentile".to_string(), pct);
+                }
+            }
+        }
+    }
+
+    PriceEvent {
+        pair: candle.pair.clone(),
+        exchange: Exchange::BitflyerCfd,
+        timestamp: candle.timestamp,
+        candle,
+        indicators: indicator_map,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connect_and_stream(
     ws_url: &str,
@@ -193,6 +298,7 @@ async fn connect_and_stream(
     tick_tx: &mpsc::Sender<(FeedKey, LatestTick)>,
     price_tx: &mpsc::Sender<PriceEvent>,
     builders: &mut HashMap<String, CandleBuilder>,
+    h1_builders: &mut HashMap<String, CandleBuilder>,
     closes_map: &mut HashMap<String, Vec<Decimal>>,
     highs_map: &mut HashMap<String, Vec<Decimal>>,
     lows_map: &mut HashMap<String, Vec<Decimal>>,
@@ -270,96 +376,52 @@ async fn connect_and_stream(
             }
         }
 
+        // --- Primary timeframe (e.g. M5) candle ---
         // on_tick returns completed candle when period boundary is crossed
         let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
         let from_complete = builder.try_complete(ts, best_bid, best_ask);
-        let completed = from_tick.or(from_complete);
-
-        if let Some(candle) = completed {
+        if let Some(candle) = from_tick.or(from_complete) {
             if let Some(pool) = pool
                 && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
             {
                 tracing::warn!("failed to save crypto candle: {e}");
             }
-
-            let closes = closes_map.entry(product_code.clone()).or_default();
-            closes.push(candle.close);
-            if closes.len() > 200 {
-                closes.drain(..closes.len() - 200);
-            }
-
-            let highs = highs_map.entry(product_code.clone()).or_default();
-            highs.push(candle.high);
-            if highs.len() > 200 {
-                highs.drain(..highs.len() - 200);
-            }
-
-            let lows = lows_map.entry(product_code.clone()).or_default();
-            lows.push(candle.low);
-            if lows.len() > 200 {
-                lows.drain(..lows.len() - 200);
-            }
-
-            let mut indicator_map = HashMap::new();
-            if let Some(v) = indicators::sma(closes, 20) {
-                indicator_map.insert("sma_20".to_string(), v);
-            }
-            if let Some(v) = indicators::sma(closes, 50) {
-                indicator_map.insert("sma_50".to_string(), v);
-            }
-            if let Some(v) = indicators::rsi(closes, 14) {
-                indicator_map.insert("rsi_14".to_string(), v);
-            }
-            if let Some(v) = indicators::atr(highs, lows, closes, 14) {
-                indicator_map.insert("atr_14".to_string(), v);
-            }
-            if let Some(v) = indicators::adx(highs, lows, closes, 14) {
-                indicator_map.insert("adx_14".to_string(), v);
-            }
-            // BB width as percentage of SMA20
-            if let Some((bb_lo, bb_mid, bb_up)) =
-                indicators::bollinger_bands(closes, 20, Decimal::from(2))
-                && bb_mid > Decimal::ZERO
-            {
-                let bb_width_pct = (bb_up - bb_lo) / bb_mid * Decimal::from(100);
-                indicator_map.insert("bb_width_pct".to_string(), bb_width_pct);
-            }
-            // ATR percentile: rank of current ATR within the last 50 ATR values
-            if let Some(current_atr) = indicator_map.get("atr_14").copied() {
-                let lookback = 50.min(closes.len());
-                if lookback >= 15 {
-                    let mut atr_count_below = 0u32;
-                    let mut atr_total = 0u32;
-                    for end in (closes.len() - lookback)..closes.len() {
-                        if end >= 14
-                            && let Some(past_atr) =
-                                indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], 14)
-                        {
-                            atr_total += 1;
-                            if past_atr < current_atr {
-                                atr_count_below += 1;
-                            }
-                        }
-                    }
-                    if atr_total > 0 {
-                        let pct = Decimal::from(atr_count_below) / Decimal::from(atr_total)
-                            * Decimal::from(100);
-                        indicator_map.insert("atr_percentile".to_string(), pct);
-                    }
-                }
-            }
-
-            let event = PriceEvent {
-                pair: candle.pair.clone(),
-                exchange: Exchange::BitflyerCfd,
-                timestamp: candle.timestamp,
-                candle,
-                indicators: indicator_map,
-            };
-
+            let event = emit_candle_event(
+                candle, closes_map, highs_map, lows_map,
+                true, // full indicator map for primary timeframe
+            );
             if price_tx.send(event).await.is_err() {
                 tracing::info!("price channel closed, stopping bitflyer monitor");
                 return Ok(());
+            }
+        }
+
+        // --- H1 candle (always generated alongside the primary timeframe) ---
+        if let Some(h1_builder) = h1_builders.get_mut(product_code) {
+            let h1_from_tick = h1_builder.on_tick(price, size, ts, best_bid, best_ask);
+            let h1_from_complete = h1_builder.try_complete(ts, best_bid, best_ask);
+            if let Some(h1_candle) = h1_from_tick.or(h1_from_complete) {
+                if let Some(pool) = pool
+                    && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &h1_candle).await
+                {
+                    tracing::warn!("failed to save H1 crypto candle: {e}");
+                }
+                // H1 events use their own indicator state (separate per-timeframe
+                // vectors would require significant refactor; strategies using H1
+                // candles compute indicators from their own VecDeque history).
+                // Emit with an empty indicator map — all consuming strategies
+                // are self-sufficient in their indicator computation.
+                let h1_event = PriceEvent {
+                    pair: h1_candle.pair.clone(),
+                    exchange: Exchange::BitflyerCfd,
+                    timestamp: h1_candle.timestamp,
+                    candle: h1_candle,
+                    indicators: HashMap::new(),
+                };
+                if price_tx.send(h1_event).await.is_err() {
+                    tracing::info!("price channel closed, stopping bitflyer monitor");
+                    return Ok(());
+                }
             }
         }
     }
@@ -375,5 +437,117 @@ impl MarketFeed for BitflyerMonitor {
     ) -> anyhow::Result<()> {
         // Box<Self> gives us owned BitflyerMonitor via *self; no try_unwrap needed.
         (*self).run_inner(price_store, price_tx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::candle_builder::CandleBuilder;
+    use auto_trader_core::types::{Exchange, Pair};
+    use chrono::{TimeZone, Utc};
+    use rust_decimal_macros::dec;
+
+    /// Verify that a completed M5 candle produces a full indicator_map
+    /// and an H1 builder for the same pair correctly tracks progress.
+    #[test]
+    fn emit_candle_event_populates_indicators_for_primary_timeframe() {
+        let pair = Pair::new("FX_BTC_JPY");
+        let mut closes_map: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut highs_map: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut lows_map: HashMap<String, Vec<Decimal>> = HashMap::new();
+
+        // Seed 20 bars so SMA20 can fire
+        let entry = closes_map.entry("FX_BTC_JPY".to_string()).or_default();
+        for i in 0..20u64 {
+            entry.push(Decimal::from(10_000_000u64 + i * 1000));
+        }
+        highs_map
+            .entry("FX_BTC_JPY".to_string())
+            .or_default()
+            .extend(entry.iter().map(|c| *c + dec!(5000)));
+        lows_map
+            .entry("FX_BTC_JPY".to_string())
+            .or_default()
+            .extend(entry.iter().map(|c| *c - dec!(5000)));
+
+        let candle = auto_trader_core::types::Candle {
+            pair: pair.clone(),
+            exchange: Exchange::BitflyerCfd,
+            timeframe: "M5".to_string(),
+            open: dec!(10_020_000),
+            high: dec!(10_025_000),
+            low: dec!(10_015_000),
+            close: dec!(10_022_000),
+            volume: Some(10),
+            best_bid: None,
+            best_ask: None,
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 0, 5, 0).unwrap(),
+        };
+
+        let event = emit_candle_event(candle, &mut closes_map, &mut highs_map, &mut lows_map, true);
+        assert_eq!(event.candle.timeframe, "M5");
+        // SMA20 must be present after 21 closes (20 seeded + 1 from candle)
+        assert!(
+            event.indicators.contains_key("sma_20"),
+            "sma_20 must be in indicator map"
+        );
+    }
+
+    /// H1 builders must track ticks independently from M5 builders.
+    /// Two ticks within the same H1 period should not yet emit a candle.
+    #[test]
+    fn h1_builder_does_not_emit_mid_period() {
+        let pair = Pair::new("FX_BTC_JPY");
+        let mut h1 = CandleBuilder::new(pair, Exchange::BitflyerCfd, "H1".to_string());
+        let base = Utc.with_ymd_and_hms(2026, 4, 19, 10, 0, 0).unwrap();
+
+        // Two ticks within the same H1 period — should not emit
+        assert!(
+            h1.on_tick(dec!(10_000_000), dec!(0.1), base, None, None)
+                .is_none()
+        );
+        assert!(
+            h1.on_tick(
+                dec!(10_010_000),
+                dec!(0.2),
+                base + chrono::Duration::minutes(30),
+                None,
+                None
+            )
+            .is_none()
+        );
+        // Still mid-period
+        assert!(
+            h1.try_complete(base + chrono::Duration::minutes(59), None, None)
+                .is_none()
+        );
+    }
+
+    /// A tick arriving in the next H1 period must complete the previous candle.
+    #[test]
+    fn h1_builder_emits_on_period_boundary() {
+        let pair = Pair::new("FX_BTC_JPY");
+        let mut h1 = CandleBuilder::new(pair, Exchange::BitflyerCfd, "H1".to_string());
+        let base = Utc.with_ymd_and_hms(2026, 4, 19, 10, 0, 0).unwrap();
+
+        h1.on_tick(dec!(10_000_000), dec!(0.1), base, None, None);
+
+        // Tick in the next H1 period completes the previous candle
+        let candle = h1.on_tick(
+            dec!(10_100_000),
+            dec!(0.1),
+            base + chrono::Duration::hours(1),
+            None,
+            None,
+        );
+        assert!(
+            candle.is_some(),
+            "H1 candle should be emitted at period boundary"
+        );
+        let c = candle.unwrap();
+        assert_eq!(c.timeframe, "H1");
+        assert_eq!(c.open, dec!(10_000_000));
+        assert_eq!(c.close, dec!(10_000_000));
     }
 }

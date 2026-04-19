@@ -1,13 +1,19 @@
 //! Parameterizable Donchian Trend strategy (`donchian_trend_evolve_v1`).
 //!
-//! Mirrors [`super::donchian_trend::DonchianTrendV1`] in logic but reads all
-//! tunable constants from a JSON params blob at construction time. The params
-//! are loaded from the `strategy_params` DB table at startup and refreshed by
-//! the weekly evolution batch.
+//! Mirrors [`super::donchian_trend::DonchianTrendV1`] in logic but reads
+//! tunable channel parameters from a JSON params blob at construction time.
+//! The params are loaded from the `strategy_params` DB table at startup and
+//! refreshed by the weekly evolution batch.
 //!
 //! Default values (used when a key is absent) are identical to the baseline
 //! `donchian_trend_v1` constants so a fresh deployment without DB params
 //! produces equivalent behaviour.
+//!
+//! Stop-loss and position sizing are ATR-based (same as `donchian_trend_v1`):
+//! hardcoded multiplier 3.0 and cap 5% for the SL, capped 2% risk per trade
+//! for allocation. These are not exposed as evolvable params because changing
+//! them independently of the channel parameters creates hard-to-interpret
+//! interactions; the LLM evolution targets channel shape first.
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
@@ -19,14 +25,22 @@ use std::collections::{HashMap, VecDeque};
 
 const HISTORY_LEN: usize = 200;
 const ATR_PERIOD: usize = 14;
+/// ATR multiplier for stop-loss — same as baseline donchian_trend_v1.
+const ATR_MULT: Decimal = dec!(3.0);
+/// Maximum stop-loss fraction — same as baseline.
+const SL_CAP: Decimal = dec!(0.05);
+/// Maximum risk per trade as a fraction of account balance.
+const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Maximum allocation per trade.
+const ALLOCATION_CAP: Decimal = dec!(0.50);
+/// This strategy uses 1H candles, same as baseline donchian_trend_v1.
+const TIMEFRAME: &str = "H1";
 
 pub struct DonchianTrendEvolveV1 {
     name: String,
     pairs: Vec<Pair>,
     entry_channel: usize,
     exit_channel: usize,
-    sl_pct: Decimal,
-    allocation_pct: Decimal,
     atr_baseline_bars: usize,
     history: HashMap<String, VecDeque<Candle>>,
 }
@@ -35,24 +49,12 @@ impl DonchianTrendEvolveV1 {
     /// Construct with params loaded from the `strategy_params` DB table.
     /// Falls back to the baseline `donchian_trend_v1` defaults for any
     /// missing key.
+    ///
+    /// Clamped to safe ranges so a bad LLM proposal that slipped past
+    /// weekly_batch validation can't produce dangerous signals.
     pub fn new(name: String, pairs: Vec<Pair>, params: serde_json::Value) -> Self {
-        // Clamp all params to safe ranges so a bad LLM proposal
-        // that slipped past weekly_batch validation can't produce
-        // dangerous signals.
         let entry_channel = (params["entry_channel"].as_u64().unwrap_or(20) as usize).clamp(10, 30);
         let exit_channel = (params["exit_channel"].as_u64().unwrap_or(10) as usize).clamp(5, 15);
-        let sl_pct = params["sl_pct"]
-            .as_f64()
-            .and_then(|v| Decimal::try_from(v).ok())
-            .unwrap_or(dec!(0.03))
-            .max(dec!(0.01))
-            .min(dec!(0.10));
-        let allocation_pct = params["allocation_pct"]
-            .as_f64()
-            .and_then(|v| Decimal::try_from(v).ok())
-            .unwrap_or(dec!(1.00))
-            .max(dec!(0.50))
-            .min(dec!(1.00));
         let atr_baseline_bars =
             (params["atr_baseline_bars"].as_u64().unwrap_or(50) as usize).clamp(20, 100);
         Self {
@@ -60,8 +62,6 @@ impl DonchianTrendEvolveV1 {
             pairs,
             entry_channel,
             exit_channel,
-            sl_pct,
-            allocation_pct,
             atr_baseline_bars,
             history: HashMap::new(),
         }
@@ -128,6 +128,9 @@ impl Strategy for DonchianTrendEvolveV1 {
         if event.exchange != Exchange::BitflyerCfd {
             return None;
         }
+        if event.candle.timeframe != TIMEFRAME {
+            return None;
+        }
         if !self.pairs.iter().any(|p| p == &event.pair) {
             return None;
         }
@@ -156,10 +159,10 @@ impl Strategy for DonchianTrendEvolveV1 {
         }
 
         let entry = event.candle.close;
-        let sl_offset = entry * self.sl_pct;
-
-        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
-        let stop_loss_pct = sl_offset / entry;
+        // ATR-based stop-loss, capped at SL_CAP.
+        let stop_loss_pct = (atr * ATR_MULT / entry).min(SL_CAP);
+        // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
+        let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
 
         if entry > channel_high {
             return Some(Signal {
@@ -171,7 +174,7 @@ impl Strategy for DonchianTrendEvolveV1 {
                 take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
-                allocation_pct: self.allocation_pct,
+                allocation_pct,
                 max_hold_until: None,
             });
         }
@@ -184,7 +187,7 @@ impl Strategy for DonchianTrendEvolveV1 {
                 take_profit_pct: None,
                 confidence: 0.6,
                 timestamp: event.timestamp,
-                allocation_pct: self.allocation_pct,
+                allocation_pct,
                 max_hold_until: None,
             });
         }
@@ -196,6 +199,9 @@ impl Strategy for DonchianTrendEvolveV1 {
     async fn warmup(&mut self, events: &[PriceEvent]) {
         for event in events {
             if event.exchange != Exchange::BitflyerCfd {
+                continue;
+            }
+            if event.candle.timeframe != TIMEFRAME {
                 continue;
             }
             if !self.pairs.iter().any(|p| p == &event.pair) {
@@ -265,7 +271,7 @@ mod tests {
             candle: Candle {
                 pair: Pair::new(pair),
                 exchange: Exchange::BitflyerCfd,
-                timeframe: "M5".to_string(),
+                timeframe: "H1".to_string(),
                 open: close,
                 high,
                 low,
@@ -283,8 +289,6 @@ mod tests {
         serde_json::json!({
             "entry_channel": 20,
             "exit_channel": 10,
-            "sl_pct": 0.03,
-            "allocation_pct": 1.0,
             "atr_baseline_bars": 50
         })
     }
@@ -294,8 +298,6 @@ mod tests {
         let params = serde_json::json!({
             "entry_channel": 18,
             "exit_channel": 8,
-            "sl_pct": 0.04,
-            "allocation_pct": 0.8,
             "atr_baseline_bars": 30
         });
         let s =
@@ -303,8 +305,6 @@ mod tests {
         assert_eq!(s.entry_channel, 18);
         assert_eq!(s.exit_channel, 8);
         assert_eq!(s.atr_baseline_bars, 30);
-        assert_eq!(s.sl_pct, dec!(0.04));
-        assert_eq!(s.allocation_pct, dec!(0.8));
     }
 
     #[test]
@@ -317,8 +317,25 @@ mod tests {
         assert_eq!(s.entry_channel, 20);
         assert_eq!(s.exit_channel, 10);
         assert_eq!(s.atr_baseline_bars, 50);
-        assert_eq!(s.sl_pct, dec!(0.03));
-        assert_eq!(s.allocation_pct, dec!(1.00));
+    }
+
+    /// Legacy sl_pct / allocation_pct keys in the JSON must be silently ignored
+    /// (they were removed in favour of ATR-based calculation).
+    #[test]
+    fn constructor_ignores_legacy_sl_allocation_params() {
+        let params = serde_json::json!({
+            "entry_channel": 20,
+            "exit_channel": 10,
+            "sl_pct": 0.04,       // formerly configurable, now ignored
+            "allocation_pct": 0.8, // formerly configurable, now ignored
+            "atr_baseline_bars": 50
+        });
+        let s =
+            DonchianTrendEvolveV1::new("test".to_string(), vec![Pair::new("FX_BTC_JPY")], params);
+        // Only channel params should be parsed; SL and allocation are ATR-derived at runtime.
+        assert_eq!(s.entry_channel, 20);
+        assert_eq!(s.exit_channel, 10);
+        assert_eq!(s.atr_baseline_bars, 50);
     }
 
     #[tokio::test]
@@ -333,12 +350,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_breakout_with_custom_params() {
+    async fn long_breakout_with_atr_based_sl() {
         let params = serde_json::json!({
             "entry_channel": 20,
             "exit_channel": 10,
-            "sl_pct": 0.04,
-            "allocation_pct": 0.8,
             "atr_baseline_bars": 50
         });
         let mut s =
@@ -361,11 +376,17 @@ mod tests {
         assert!(signal.is_some(), "expected long breakout signal");
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        // SL pct must equal custom sl_pct (4%)
-        assert_eq!(sig.stop_loss_pct, dec!(0.04));
+        // ATR-based SL: positive and at most SL_CAP (5%).
+        assert!(sig.stop_loss_pct > Decimal::ZERO);
+        assert!(sig.stop_loss_pct <= dec!(0.05));
+        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        assert!(sig.allocation_pct > Decimal::ZERO);
+        assert!(sig.allocation_pct <= dec!(0.50));
+        // Old flat values must not appear.
+        assert_ne!(sig.stop_loss_pct, dec!(0.03));
+        assert_ne!(sig.stop_loss_pct, dec!(0.04));
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
-        assert_eq!(sig.allocation_pct, dec!(0.8));
     }
 
     #[tokio::test]

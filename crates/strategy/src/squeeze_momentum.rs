@@ -1,12 +1,15 @@
 //! 攻めボラティリティ v1 (`squeeze_momentum_v1`).
 //!
-//! TTM Squeeze (John Carter) adapted for FX_BTC_JPY (M5). The textbook
+//! TTM Squeeze (John Carter) adapted for FX_BTC_JPY (1H). The textbook
 //! TTM Squeeze fires when Bollinger Bands compress *inside* the Keltner
 //! Channels for a sustained period and then re-expand outside, signaling
 //! a volatility breakout. The bias direction is taken from the momentum
 //! histogram (close vs SMA) — we use a simplified `close - SMA(20)` as
 //! the momentum proxy ([TrendSpider TTM Squeeze guide](https://trendspider.com/learning-center/introduction-to-ttm-squeeze/),
 //! [EBC Financial overview](https://www.ebc.com/forex/top-ways-to-master-the-ttm-squeeze-trading-strategy)).
+//!
+//! Moved from M5 → 1H to reduce false breakouts. Daily-bar-designed logic
+//! suffered excessive whipsaws on 5-minute data.
 //!
 //! ## Entry rules
 //! - **Squeeze condition**: BB(20, 2σ) is fully inside KC(20, 1.5×ATR)
@@ -17,10 +20,13 @@
 //! - **Short**: squeeze fires AND momentum is negative AND decreased.
 //!
 //! ## Stop loss
-//! Flat **4 % from entry price** (`SL_PCT`). Squeeze releases can
-//! whipsaw — give the trade enough room to survive a single bad bar.
-//! Sizing is independent of the SL distance — see `allocation_pct` on
-//! Signal.
+//! ATR(14)-based: `min(ATR × 2.5 / entry, 5%)`. Squeeze releases can
+//! whipsaw — 2.5× ATR gives the trade room to survive a single bad bar
+//! without over-sizing the risk.
+//!
+//! ## Position sizing
+//! `allocation_pct = min(2% / stop_loss_pct, 50%)`. Risks at most 2%
+//! of account per trade; caps at 50% to prevent over-exposure.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when current close < EMA(21).
@@ -54,20 +60,22 @@ const EMA_TRAIL_PERIOD: usize = 21;
 /// compression (not noise) while roughly doubling signal rate.
 const SQUEEZE_BARS: usize = 3;
 /// Bars looked back for the historical-needed minimum (kept for the
-/// `len < needed + 2` guard even though SL is now flat-percentage).
+/// `len < needed + 2` guard even though SL is now ATR-based).
 const SWING_LOOKBACK: usize = 5;
-/// Stop-loss as a flat percentage of entry price. Squeeze releases can
-/// whipsaw — give the trade enough room to survive a single bad bar.
-const SL_PCT: Decimal = dec!(0.04);
-/// Capital allocation per trade. Squeeze entries are rare and the
-/// "all-in shot" is the strategy's edge. 95 % rather than 100 % because
-/// the SL is at -4 % and at full allocation the maintenance-margin
-/// ratio at SL hit is right at the exchange's liquidation line — a
-/// 5 % buffer means slippage on the SL fill can't trip a forced close
-/// before our own SL does.
-const ALLOCATION_PCT: Decimal = dec!(0.95);
+/// ATR multiplier for stop-loss. 2.5× ATR is wide enough to survive
+/// post-squeeze whipsaws without over-extending the risk budget.
+const ATR_MULT: Decimal = dec!(2.5);
+/// Maximum stop-loss as a fraction of entry price.
+const SL_CAP: Decimal = dec!(0.05);
+/// Maximum risk per trade as a fraction of account balance.
+const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Maximum allocation per trade.
+const ALLOCATION_CAP: Decimal = dec!(0.50);
 const TIME_LIMIT_HOURS: i64 = 48;
 const HISTORY_LEN: usize = 200;
+/// This strategy uses 1H candles (trend-following; M5 produced excessive
+/// false breakouts on a daily-bar-designed logic).
+const TIMEFRAME: &str = "H1";
 
 pub struct SqueezeMomentumV1 {
     name: String,
@@ -130,6 +138,9 @@ impl Strategy for SqueezeMomentumV1 {
         if event.exchange != Exchange::BitflyerCfd {
             return None;
         }
+        if event.candle.timeframe != TIMEFRAME {
+            return None;
+        }
         if !self.pairs.iter().any(|p| p == &event.pair) {
             return None;
         }
@@ -161,6 +172,9 @@ impl Strategy for SqueezeMomentumV1 {
 
         // Direction comes from momentum proxy = close - SMA(20).
         let closes = Self::closes(history);
+        let highs = Self::highs(history);
+        let lows = Self::lows(history);
+
         let sma20 = indicators::sma(&closes, BB_PERIOD)?;
         let mom_curr = closes[closes.len() - 1] - sma20;
         // Previous bar's momentum: rebuild SMA on closes[..len-1]
@@ -168,10 +182,11 @@ impl Strategy for SqueezeMomentumV1 {
         let mom_prev = closes[closes.len() - 2] - sma20_prev;
 
         let entry = event.candle.close;
-        let sl_offset = entry * SL_PCT;
-
-        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
-        let stop_loss_pct = sl_offset / entry;
+        // ATR-based stop-loss, capped at SL_CAP.
+        let atr = indicators::atr(&highs, &lows, &closes, ATR_PERIOD)?;
+        let stop_loss_pct = (atr * ATR_MULT / entry).min(SL_CAP);
+        // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
+        let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
 
         // Long: positive and rising momentum
         if mom_curr > Decimal::ZERO && mom_curr > mom_prev {
@@ -184,7 +199,7 @@ impl Strategy for SqueezeMomentumV1 {
                 take_profit_pct: None,
                 confidence: 0.55,
                 timestamp: event.timestamp,
-                allocation_pct: ALLOCATION_PCT,
+                allocation_pct,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
@@ -198,7 +213,7 @@ impl Strategy for SqueezeMomentumV1 {
                 take_profit_pct: None,
                 confidence: 0.55,
                 timestamp: event.timestamp,
-                allocation_pct: ALLOCATION_PCT,
+                allocation_pct,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
@@ -210,6 +225,9 @@ impl Strategy for SqueezeMomentumV1 {
     async fn warmup(&mut self, events: &[PriceEvent]) {
         for event in events {
             if event.exchange != Exchange::BitflyerCfd {
+                continue;
+            }
+            if event.candle.timeframe != TIMEFRAME {
                 continue;
             }
             if !self.pairs.iter().any(|p| p == &event.pair) {
@@ -286,7 +304,7 @@ mod tests {
             candle: Candle {
                 pair: Pair::new(pair),
                 exchange: Exchange::BitflyerCfd,
-                timeframe: "M5".to_string(),
+                timeframe: "H1".to_string(),
                 open: close,
                 high,
                 low,
@@ -333,6 +351,17 @@ mod tests {
         assert!(s.on_price(&e).await.is_none());
     }
 
+    /// M5 candles must be silently ignored — this strategy runs on H1.
+    #[tokio::test]
+    async fn ignores_non_h1_timeframe() {
+        let mut s = SqueezeMomentumV1::new("sq".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        let mut e = make_event("FX_BTC_JPY", dec!(10000000), dec!(10010000), dec!(9990000));
+        e.candle.timeframe = "M5".to_string();
+        for _ in 0..100 {
+            assert!(s.on_price(&e).await.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn fires_long_after_squeeze_release_with_momentum() {
         let mut s = SqueezeMomentumV1::new("sq".to_string(), vec![Pair::new("FX_BTC_JPY")]);
@@ -354,8 +383,18 @@ mod tests {
         assert!(signal.is_some(), "expected long squeeze-momentum signal");
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        // SL pct must equal SL_PCT (4%)
-        assert_eq!(sig.stop_loss_pct, dec!(0.04));
+        // ATR-based SL: positive and at most SL_CAP (5%).
+        assert!(sig.stop_loss_pct > Decimal::ZERO);
+        assert!(sig.stop_loss_pct <= dec!(0.05));
+        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        assert!(sig.allocation_pct > Decimal::ZERO);
+        assert!(sig.allocation_pct <= dec!(0.50));
+        // Old flat SL_PCT was 4% — must differ now.
+        assert_ne!(
+            sig.stop_loss_pct,
+            dec!(0.04),
+            "SL must be ATR-based, not flat 4%"
+        );
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
         assert!(sig.max_hold_until.is_some());

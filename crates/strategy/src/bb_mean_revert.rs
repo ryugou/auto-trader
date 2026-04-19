@@ -12,11 +12,12 @@
 //!   a higher-high.
 //!
 //! ## Stop loss
-//! Flat **2 % from entry price** (`SL_PCT`). Mean-reversion entries
-//! are tight by design — if the reversion thesis fails, get out at -2 %.
-//! Sizing is decoupled from the SL distance via `allocation_pct` on
-//! the emitted Signal, so the SL value is purely a price level for
-//! the position monitor to enforce.
+//! ATR(14)-based: `min(ATR × 1.5 / entry, 3%)`. Mean-reversion entries
+//! are tight by design — 1.5× ATR places the SL just outside recent noise.
+//!
+//! ## Position sizing
+//! `allocation_pct = min(2% / stop_loss_pct, 50%)`. Risks at most 2% of
+//! account per trade; caps at 50% to prevent over-exposure when ATR is tiny.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when price returns to SMA20 (BB middle).
@@ -43,6 +44,7 @@ use std::collections::{HashMap, VecDeque};
 
 const BB_PERIOD: usize = 20;
 const RSI_PERIOD: usize = 14;
+const ATR_PERIOD: usize = 14;
 /// Number of historical candles each per-pair `VecDeque` keeps. Enough
 /// for BB(20) + RSI(14+1) + the "previous bar lower-low" check, with
 /// some headroom for the warmup-from-DB seed (200 bars in main.rs).
@@ -50,17 +52,20 @@ const HISTORY_LEN: usize = 200;
 
 const RSI_LONG_THRESHOLD: Decimal = dec!(25);
 const RSI_SHORT_THRESHOLD: Decimal = dec!(75);
-/// Stop-loss as a flat percentage of entry price. Mean-reversion entries
-/// are tight by design — if the reversion thesis fails, get out at -2 %.
-const SL_PCT: Decimal = dec!(0.02);
-/// Capital allocation per trade. Each strategy runs on its own
-/// dedicated paper account with no expected concurrent positions, so
-/// leaving cash idle wastes the experiment. 100 % is safe at 2×
-/// leverage + a 2 % SL because the SL fires well before the
-/// maintenance-margin threshold, so the exchange can't force-close
-/// before our own SL does.
-const ALLOCATION_PCT: Decimal = dec!(1.00);
+/// ATR multiplier for stop-loss. 1.5× ATR places the SL just outside
+/// the recent noise range — tight enough for mean-reversion discipline.
+const ATR_MULT: Decimal = dec!(1.5);
+/// Maximum stop-loss as a fraction of entry price. Caps the SL during
+/// low-volatility periods so the position monitor has a sensible floor.
+const SL_CAP: Decimal = dec!(0.03);
+/// Maximum risk per trade as a fraction of account balance.
+const TARGET_RISK_PCT: Decimal = dec!(0.02);
+/// Maximum allocation per trade. Prevents full account deployment when
+/// ATR SL is very small.
+const ALLOCATION_CAP: Decimal = dec!(0.50);
 const TIME_LIMIT_HOURS: i64 = 24;
+/// This strategy uses M5 candles (scalping / mean-reversion).
+const TIMEFRAME: &str = "M5";
 
 pub struct BbMeanRevertV1 {
     name: String,
@@ -88,6 +93,14 @@ impl BbMeanRevertV1 {
     fn closes(history: &VecDeque<Candle>) -> Vec<Decimal> {
         history.iter().map(|c| c.close).collect()
     }
+
+    fn highs(history: &VecDeque<Candle>) -> Vec<Decimal> {
+        history.iter().map(|c| c.high).collect()
+    }
+
+    fn lows(history: &VecDeque<Candle>) -> Vec<Decimal> {
+        history.iter().map(|c| c.low).collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -100,6 +113,9 @@ impl Strategy for BbMeanRevertV1 {
         if event.exchange != Exchange::BitflyerCfd {
             return None;
         }
+        if event.candle.timeframe != TIMEFRAME {
+            return None;
+        }
         if !self.pairs.iter().any(|p| p == &event.pair) {
             return None;
         }
@@ -108,26 +124,30 @@ impl Strategy for BbMeanRevertV1 {
         let history = self.history.get(&key)?;
 
         // Need at least BB_PERIOD candles plus one previous bar for the
-        // capitulation check. RSI needs its own history too.
-        if history.len() < BB_PERIOD.max(RSI_PERIOD + 1) + 1 {
+        // capitulation check, RSI history, and ATR(14) lead-in.
+        if history.len() < BB_PERIOD.max(RSI_PERIOD + 1).max(ATR_PERIOD + 1) + 1 {
             return None;
         }
 
         let closes = Self::closes(history);
+        let highs = Self::highs(history);
+        let lows = Self::lows(history);
+
         let (lower, _middle, upper) = indicators::bollinger_bands(&closes, BB_PERIOD, dec!(2.5))?;
         let rsi = indicators::rsi(&closes, RSI_PERIOD)?;
+        let atr = indicators::atr(&highs, &lows, &closes, ATR_PERIOD)?;
         let entry = event.candle.close;
+
+        // ATR-based stop-loss, capped at SL_CAP.
+        let stop_loss_pct = (atr * ATR_MULT / entry).min(SL_CAP);
+        // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
+        let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
 
         // Previous bar's low/high for the lower-low / higher-high
         // capitulation confirmation.
         let len = history.len();
         let prev_candle = &history[len - 2];
         let curr_candle = &history[len - 1];
-
-        let sl_offset = entry * SL_PCT;
-
-        // stop_loss_pct = sl_offset / entry (ratio, direction-independent)
-        let stop_loss_pct = sl_offset / entry;
 
         // Long setup: oversold extreme + capitulation candle
         if entry < lower && rsi < RSI_LONG_THRESHOLD && curr_candle.low < prev_candle.low {
@@ -140,7 +160,7 @@ impl Strategy for BbMeanRevertV1 {
                 take_profit_pct: None,
                 confidence: 0.65,
                 timestamp: event.timestamp,
-                allocation_pct: ALLOCATION_PCT,
+                allocation_pct,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
@@ -155,7 +175,7 @@ impl Strategy for BbMeanRevertV1 {
                 take_profit_pct: None,
                 confidence: 0.65,
                 timestamp: event.timestamp,
-                allocation_pct: ALLOCATION_PCT,
+                allocation_pct,
                 max_hold_until: Some(event.timestamp + Duration::hours(TIME_LIMIT_HOURS)),
             });
         }
@@ -170,6 +190,9 @@ impl Strategy for BbMeanRevertV1 {
     async fn warmup(&mut self, events: &[PriceEvent]) {
         for event in events {
             if event.exchange != Exchange::BitflyerCfd {
+                continue;
+            }
+            if event.candle.timeframe != TIMEFRAME {
                 continue;
             }
             if !self.pairs.iter().any(|p| p == &event.pair) {
@@ -289,6 +312,18 @@ mod tests {
         assert!(s.on_price(&e).await.is_none());
     }
 
+    /// Non-M5 candles must be silently ignored so BB stays on M5-only data.
+    #[tokio::test]
+    async fn ignores_non_m5_timeframe() {
+        let mut s = BbMeanRevertV1::new("bb".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        let mut e = make_event("FX_BTC_JPY", dec!(10000000), dec!(10010000), dec!(9990000));
+        e.candle.timeframe = "H1".to_string();
+        // Even after many bars, H1 events must not trigger a signal.
+        for _ in 0..50 {
+            assert!(s.on_price(&e).await.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn long_signal_at_oversold_extreme_with_capitulation() {
         let mut s = BbMeanRevertV1::new("bb".to_string(), vec![Pair::new("FX_BTC_JPY")]);
@@ -317,12 +352,44 @@ mod tests {
         );
         let sig = signal.unwrap();
         assert_eq!(sig.direction, Direction::Long);
-        // SL pct must equal SL_PCT (2%)
-        assert_eq!(sig.stop_loss_pct, dec!(0.02));
+        // ATR-based SL: must be positive and at most SL_CAP (3%).
+        assert!(sig.stop_loss_pct > Decimal::ZERO);
+        assert!(sig.stop_loss_pct <= dec!(0.03));
+        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        assert!(sig.allocation_pct > Decimal::ZERO);
+        assert!(sig.allocation_pct <= dec!(0.50));
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
         // 24h fail-safe must be set
         assert!(sig.max_hold_until.is_some());
+    }
+
+    /// ATR-based SL and risk-linked sizing change proportionally with
+    /// market volatility — they must never return the old flat constants.
+    #[tokio::test]
+    async fn sl_and_allocation_are_atr_derived() {
+        let mut s = BbMeanRevertV1::new("bb".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        // Warm up: 30 candles
+        for i in 0..30 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(10000000) + Decimal::from(i * 100),
+                    dec!(10005000) + Decimal::from(i * 100),
+                    dec!(9995000) + Decimal::from(i * 100),
+                ))
+                .await;
+        }
+        let crash = make_event("FX_BTC_JPY", dec!(9000000), dec!(9050000), dec!(8990000));
+        let sig = s.on_price(&crash).await.unwrap();
+        // The old flat SL_PCT was 0.02 — the ATR-based value must differ.
+        assert_ne!(
+            sig.stop_loss_pct,
+            dec!(0.02),
+            "SL must be ATR-based, not flat 2%"
+        );
+        // The old flat ALLOCATION_PCT was 1.00 — risk-linked must be ≤ 50%.
+        assert!(sig.allocation_pct <= dec!(0.50));
     }
 
     #[tokio::test]
