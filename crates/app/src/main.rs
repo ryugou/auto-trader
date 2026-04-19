@@ -328,8 +328,7 @@ async fn main() -> anyhow::Result<()> {
                     .map(|j| j.0)
                     .unwrap_or_else(|| {
                         serde_json::json!({
-                            "entry_channel": 20, "exit_channel": 10,
-                            "sl_pct": 0.03, "allocation_pct": 1.0, "atr_baseline_bars": 50
+                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
                         })
                     });
                 engine.add_strategy(
