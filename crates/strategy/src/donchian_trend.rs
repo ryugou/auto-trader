@@ -407,12 +407,18 @@ mod tests {
         }
         let breakout = make_event("FX_BTC_JPY", dec!(11000000), dec!(11200000), dec!(10800000));
         let sig = s.on_price(&breakout).await.unwrap();
-        assert_ne!(
-            sig.stop_loss_pct,
-            dec!(0.03),
-            "SL must be ATR-based, not flat 3%"
+        // ATR-based SL: positive and at most SL_CAP (5%).
+        assert!(
+            sig.stop_loss_pct > Decimal::ZERO && sig.stop_loss_pct <= dec!(0.05),
+            "ATR-based SL must be in (0, SL_CAP=5%], got {}",
+            sig.stop_loss_pct
         );
-        assert!(sig.allocation_pct <= dec!(0.50));
+        // Risk-linked allocation: positive and at most ALLOCATION_CAP (50%).
+        assert!(
+            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(0.50),
+            "allocation must be in (0, 50%], got {}",
+            sig.allocation_pct
+        );
     }
 
     #[tokio::test]

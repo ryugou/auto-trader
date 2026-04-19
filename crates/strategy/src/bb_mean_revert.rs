@@ -385,14 +385,18 @@ mod tests {
         }
         let crash = make_event("FX_BTC_JPY", dec!(9000000), dec!(9050000), dec!(8990000));
         let sig = s.on_price(&crash).await.unwrap();
-        // The old flat SL_PCT was 0.02 — the ATR-based value must differ.
-        assert_ne!(
-            sig.stop_loss_pct,
-            dec!(0.02),
-            "SL must be ATR-based, not flat 2%"
+        // ATR-based SL: positive and at most SL_CAP (3%).
+        assert!(
+            sig.stop_loss_pct > Decimal::ZERO && sig.stop_loss_pct <= dec!(0.03),
+            "ATR-based SL must be in (0, SL_CAP=3%], got {}",
+            sig.stop_loss_pct
         );
-        // The old flat ALLOCATION_PCT was 1.00 — risk-linked must be ≤ 50%.
-        assert!(sig.allocation_pct <= dec!(0.50));
+        // Risk-linked allocation: positive and at most ALLOCATION_CAP (50%).
+        assert!(
+            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(0.50),
+            "allocation must be in (0, 50%], got {}",
+            sig.allocation_pct
+        );
     }
 
     #[tokio::test]

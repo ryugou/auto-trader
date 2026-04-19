@@ -101,10 +101,32 @@ pub async fn run(
         tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
         return Ok(());
     }
+    let Some(entry_channel) = proposal
+        .params
+        .get("entry_channel")
+        .and_then(|v| v.as_i64())
+    else {
+        tracing::warn!("weekly_batch: LLM proposed non-integer/missing entry_channel, rejecting");
+        return Ok(());
+    };
+    let Some(exit_channel) = proposal.params.get("exit_channel").and_then(|v| v.as_i64()) else {
+        tracing::warn!("weekly_batch: LLM proposed non-integer/missing exit_channel, rejecting");
+        return Ok(());
+    };
+    let Some(atr_baseline_bars) = proposal
+        .params
+        .get("atr_baseline_bars")
+        .and_then(|v| v.as_i64())
+    else {
+        tracing::warn!(
+            "weekly_batch: LLM proposed non-integer/missing atr_baseline_bars, rejecting"
+        );
+        return Ok(());
+    };
     let normalized = serde_json::json!({
-        "entry_channel": proposal.params["entry_channel"],
-        "exit_channel": proposal.params["exit_channel"],
-        "atr_baseline_bars": proposal.params["atr_baseline_bars"],
+        "entry_channel": entry_channel,
+        "exit_channel": exit_channel,
+        "atr_baseline_bars": atr_baseline_bars,
     });
     persist_params(pool, STRATEGY, &normalized)
         .await

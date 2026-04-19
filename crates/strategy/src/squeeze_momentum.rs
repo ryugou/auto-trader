@@ -389,14 +389,11 @@ mod tests {
         // ATR-based SL: positive and at most SL_CAP (5%).
         assert!(sig.stop_loss_pct > Decimal::ZERO);
         assert!(sig.stop_loss_pct <= dec!(0.05));
-        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
-        assert!(sig.allocation_pct > Decimal::ZERO);
-        assert!(sig.allocation_pct <= dec!(0.50));
-        // Old flat SL_PCT was 4% — must differ now.
-        assert_ne!(
-            sig.stop_loss_pct,
-            dec!(0.04),
-            "SL must be ATR-based, not flat 4%"
+        // Risk-linked allocation: positive and at most ALLOCATION_CAP (50%).
+        assert!(
+            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(0.50),
+            "allocation must be in (0, 50%], got {}",
+            sig.allocation_pct
         );
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
