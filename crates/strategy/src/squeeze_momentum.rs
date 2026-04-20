@@ -40,8 +40,7 @@
 //!   - Short: stop = min(low over last 22 bars) + ATR(14) × 3.0
 //! - 48-hour fail-safe via `max_hold_until`.
 //!
-//! Why Chandelier over EMA trailing: EMA tracks price average (ボラ非適
-//! 応). ATR×3 tracks volatility itself — after a squeeze fire ATR expands,
+//! Why Chandelier over EMA trailing: EMA tracks price average (ボラ非適応). ATR×3 tracks volatility itself — after a squeeze fire ATR expands,
 //! automatically widening the stop to let the breakout run. As the trend
 //! matures and ATR stabilises, the stop tightens naturally.
 //! (Perry Kaufman "Trading Systems and Methods", Van Tharp "Trade Your
@@ -611,5 +610,79 @@ mod tests {
             1,
             "at bars_held == DELAY_BARS (boundary), trailing should be active"
         );
+    }
+
+    #[tokio::test]
+    async fn chandelier_no_exit_when_atr_is_zero() {
+        use chrono::Duration;
+        let mut s = SqueezeMomentumV1::new("sq".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        let base_ts = Utc::now() - Duration::hours(60);
+        // Build 50 perfectly flat bars so ATR(14) = 0.
+        let p = dec!(10000000);
+        for i in 0..50 {
+            let ts = base_ts + Duration::hours(i);
+            let _ = s.on_price(&make_event_at("FX_BTC_JPY", p, p, p, ts)).await;
+        }
+        // Position entered well into the flat history (bar 40).
+        let entry_ts = base_ts + Duration::hours(40);
+        let pos = make_position("sq", Direction::Long, p, entry_ts);
+
+        // Test on_open_positions with a FLAT event (still no volatility).
+        // ATR on 51 perfectly flat bars = 0, so on_open_positions should
+        // return early and NOT emit a chandelier exit.
+        let flat_event = make_event_at("FX_BTC_JPY", p, p, p, base_ts + Duration::hours(51));
+        let _ = s.on_price(&flat_event).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &flat_event)
+            .await;
+        assert_eq!(
+            exits.len(),
+            0,
+            "ATR=0 should produce no chandelier exits, got {} exits",
+            exits.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn chandelier_exits_short_on_break() {
+        use chrono::Duration;
+        let mut s = SqueezeMomentumV1::new("sq".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        let base_ts = Utc::now() - Duration::hours(60);
+        // 50 bars of FALLING history → lowest_low is recent, short position should trail.
+        for i in 0..50 {
+            let ts = base_ts + Duration::hours(i);
+            let p = dec!(10000000) - Decimal::from(i) * dec!(10000);
+            let _ = s
+                .on_price(&make_event_at(
+                    "FX_BTC_JPY",
+                    p,
+                    p + dec!(5000),
+                    p - dec!(5000),
+                    ts,
+                ))
+                .await;
+        }
+        // Short position entered at bar 40 (well past delay).
+        let entry_ts = base_ts + Duration::hours(40);
+        let pos = make_position("sq", Direction::Short, dec!(9600000), entry_ts);
+        // Sharp RISE above Chandelier stop (lowest_low + ATR×3).
+        let spike_ts = base_ts + Duration::hours(51);
+        let spike = make_event_at(
+            "FX_BTC_JPY",
+            dec!(11000000),
+            dec!(11050000),
+            dec!(10950000),
+            spike_ts,
+        );
+        let _ = s.on_price(&spike).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &spike)
+            .await;
+        assert_eq!(
+            exits.len(),
+            1,
+            "expected Short chandelier exit on upward break"
+        );
+        assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
     }
 }
