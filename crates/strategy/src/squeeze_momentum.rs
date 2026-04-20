@@ -323,11 +323,19 @@ impl Strategy for SqueezeMomentumV1 {
             // Delay phase: count bars since entry. During the first
             // DELAY_BARS bars, only the fixed SL (managed by the position
             // monitor) protects — don't apply the trailing stop yet.
-            let bars_held = history
-                .iter()
-                .rev()
-                .take_while(|c| c.timestamp > pos.trade.entry_at)
-                .count();
+            // Count completed bars since entry by flooring entry_at to the H1 period start,
+            // so the delay phase is consistent regardless of exact fill timing within the candle.
+            use chrono::Timelike;
+            let entry_hour = pos
+                .trade
+                .entry_at
+                .with_minute(0)
+                .unwrap()
+                .with_second(0)
+                .unwrap()
+                .with_nanosecond(0)
+                .unwrap();
+            let bars_held = history.iter().filter(|c| c.timestamp > entry_hour).count();
             if bars_held < DELAY_BARS {
                 continue;
             }
@@ -508,7 +516,7 @@ mod tests {
         let pos = make_position("sq", Direction::Long, dec!(10400000), entry_ts);
 
         // Sharp drop well below Chandelier stop.
-        let drop_ts = base_ts + Duration::hours(51);
+        let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
             dec!(9000000),
@@ -549,7 +557,7 @@ mod tests {
         let pos = make_position("sq", Direction::Long, dec!(10490000), entry_ts);
 
         // Drop below Chandelier stop — but still in delay phase.
-        let drop_ts = base_ts + Duration::hours(51);
+        let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
             dec!(9000000),
@@ -595,7 +603,7 @@ mod tests {
         let pos = make_position("sq", Direction::Long, dec!(10470000), entry_ts);
 
         // Drop below Chandelier stop — should exit (delay phase over).
-        let drop_ts = base_ts + Duration::hours(51);
+        let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
             dec!(9000000),
@@ -630,7 +638,7 @@ mod tests {
         // Test on_open_positions with a FLAT event (still no volatility).
         // ATR on 51 perfectly flat bars = 0, so on_open_positions should
         // return early and NOT emit a chandelier exit.
-        let flat_event = make_event_at("FX_BTC_JPY", p, p, p, base_ts + Duration::hours(51));
+        let flat_event = make_event_at("FX_BTC_JPY", p, p, p, base_ts + Duration::hours(50));
         let _ = s.on_price(&flat_event).await;
         let exits = s
             .on_open_positions(std::slice::from_ref(&pos), &flat_event)
@@ -666,7 +674,7 @@ mod tests {
         let entry_ts = base_ts + Duration::hours(40);
         let pos = make_position("sq", Direction::Short, dec!(9600000), entry_ts);
         // Sharp RISE above Chandelier stop (lowest_low + ATR×3).
-        let spike_ts = base_ts + Duration::hours(51);
+        let spike_ts = base_ts + Duration::hours(50);
         let spike = make_event_at(
             "FX_BTC_JPY",
             dec!(11000000),
