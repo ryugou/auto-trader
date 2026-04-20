@@ -201,17 +201,18 @@ impl BitflyerMonitor {
 
 /// Build and emit a `PriceEvent` for a completed candle, updating the rolling
 /// indicator history vectors in-place. The indicator map is computed from the
-/// primary-timeframe (M5) history vectors so the position monitor and API
-/// server always see fresh M5 indicators regardless of which timeframe fired.
-/// H1 PriceEvents carry a minimal indicator map — strategies that consume them
-/// compute their own indicators from their internal `VecDeque<Candle>` history.
+/// primary-timeframe history vectors so the position monitor and API
+/// server always see fresh primary-timeframe indicators regardless of which
+/// timeframe fired. H1 PriceEvents carry a namespaced indicator map —
+/// strategies that consume them compute their own indicators from their
+/// internal `VecDeque<Candle>` history.
 fn emit_candle_event(
     candle: auto_trader_core::types::Candle,
     closes_map: &mut HashMap<String, Vec<Decimal>>,
     highs_map: &mut HashMap<String, Vec<Decimal>>,
     lows_map: &mut HashMap<String, Vec<Decimal>>,
     compute_full_indicators: bool,
-) -> PriceEvent {
+) -> (PriceEvent, HashMap<String, Decimal>) {
     let product_code = candle.pair.0.clone();
 
     let closes = closes_map.entry(product_code.clone()).or_default();
@@ -283,13 +284,14 @@ fn emit_candle_event(
         }
     }
 
-    PriceEvent {
+    let event = PriceEvent {
         pair: candle.pair.clone(),
         exchange: Exchange::BitflyerCfd,
         timestamp: candle.timestamp,
         candle,
-        indicators: indicator_map,
-    }
+        indicators: indicator_map.clone(),
+    };
+    (event, indicator_map)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -382,16 +384,18 @@ async fn connect_and_stream(
         // on_tick returns completed candle when period boundary is crossed
         let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
         let from_complete = builder.try_complete(ts, best_bid, best_ask);
+        let mut latest_indicators_for_pair: Option<HashMap<String, Decimal>> = None;
         if let Some(candle) = from_tick.or(from_complete) {
             if let Some(pool) = pool
                 && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
             {
                 tracing::warn!("failed to save crypto candle: {e}");
             }
-            let event = emit_candle_event(
+            let (event, indicators) = emit_candle_event(
                 candle, closes_map, highs_map, lows_map,
                 true, // full indicator map for primary timeframe
             );
+            latest_indicators_for_pair = Some(indicators);
             if price_tx.send(event).await.is_err() {
                 tracing::info!("price channel closed, stopping bitflyer monitor");
                 return Ok(());
@@ -408,17 +412,24 @@ async fn connect_and_stream(
                 {
                     tracing::warn!("failed to save H1 crypto candle: {e}");
                 }
-                // Do not carry forward primary-timeframe indicators onto H1 candle events.
-                // These events may trigger signals whose entry_indicators are persisted
-                // directly from this map, so attaching M5/primary indicators would mislabel
-                // H1-triggered trades in analytics. Until H1-specific indicators are
-                // computed here, emit an empty map instead.
+                // Carry forward primary-timeframe indicators with m5_ prefix onto H1 events.
+                // This namespacing allows analytics to distinguish the source timeframe
+                // while H1-triggered trades retain ATR/ADX/regime context for entry_indicators
+                // persistence without mislabeling them as H1-native indicators.
+                let h1_indicators = if let Some(primary_indicators) = &latest_indicators_for_pair {
+                    primary_indicators
+                        .iter()
+                        .map(|(key, value)| (format!("m5_{key}"), *value))
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    HashMap::new()
+                };
                 let h1_event = PriceEvent {
                     pair: h1_candle.pair.clone(),
                     exchange: Exchange::BitflyerCfd,
                     timestamp: h1_candle.timestamp,
                     candle: h1_candle,
-                    indicators: HashMap::new(),
+                    indicators: h1_indicators,
                 };
                 if price_tx.send(h1_event).await.is_err() {
                     tracing::info!("price channel closed, stopping bitflyer monitor");
@@ -487,7 +498,8 @@ mod tests {
             timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 0, 5, 0).unwrap(),
         };
 
-        let event = emit_candle_event(candle, &mut closes_map, &mut highs_map, &mut lows_map, true);
+        let (event, _indicators) =
+            emit_candle_event(candle, &mut closes_map, &mut highs_map, &mut lows_map, true);
         assert_eq!(event.candle.timeframe, "M5");
         // SMA20 must be present after 21 closes (20 seeded + 1 from candle)
         assert!(

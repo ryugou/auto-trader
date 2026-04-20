@@ -223,10 +223,13 @@ async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalys
 /// Rejects any proposal with out-of-range values to prevent the
 /// evolve strategy from running with dangerous parameters.
 fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
-    let entry = params["entry_channel"].as_u64().unwrap_or(20);
-    let exit = params["exit_channel"].as_u64().unwrap_or(10);
-    let baseline = params["atr_baseline_bars"].as_u64().unwrap_or(50);
+    let entry = params["entry_channel"].as_i64().unwrap_or(20);
+    let exit = params["exit_channel"].as_i64().unwrap_or(10);
+    let baseline = params["atr_baseline_bars"].as_i64().unwrap_or(50);
 
+    if entry < 0 || exit < 0 || baseline < 0 {
+        anyhow::bail!("negative parameter values not allowed");
+    }
     if !(10..=30).contains(&entry) {
         anyhow::bail!("entry_channel {entry} out of range [10, 30]");
     }
