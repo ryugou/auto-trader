@@ -432,9 +432,12 @@ async fn connect_and_stream(
                 let h1_indicators = latest_indicators
                     .get(product_code)
                     .map(|ind| {
-                        ind.iter()
-                            .map(|(key, value)| (format!("{primary_tf_prefix}_{key}"), *value))
-                            .collect::<HashMap<_, _>>()
+                        let mut combined = ind.clone(); // unprefixed originals (backward compat)
+                        for (key, value) in ind {
+                            // Add prefixed duplicates for timeframe disambiguation in analytics
+                            combined.insert(format!("{primary_tf_prefix}_{key}"), *value);
+                        }
+                        combined
                     })
                     .unwrap_or_default();
                 let h1_event = PriceEvent {

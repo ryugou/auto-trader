@@ -163,12 +163,14 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
         HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
+        signal.stop_loss_pct,
     );
     assert!(
         qty.is_some(),
-        "donchian signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        "donchian signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={}, stop_loss_pct={})",
         HINT_PRICE,
-        signal.allocation_pct
+        signal.allocation_pct,
+        signal.stop_loss_pct
     );
     let qty = qty.unwrap();
     assert!(qty >= MIN_LOT, "quantity {qty} must be at least {MIN_LOT}");
@@ -213,12 +215,14 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
+        signal.stop_loss_pct,
     );
     assert!(
         qty.is_some(),
-        "squeeze signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        "squeeze signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={}, stop_loss_pct={})",
         HINT_PRICE,
-        signal.allocation_pct
+        signal.allocation_pct,
+        signal.stop_loss_pct
     );
 }
 
@@ -257,12 +261,14 @@ async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
         HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
+        signal.stop_loss_pct,
     );
     assert!(
         qty.is_some(),
-        "bb_mean_revert signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        "bb_mean_revert signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={}, stop_loss_pct={})",
         HINT_PRICE,
-        signal.allocation_pct
+        signal.allocation_pct,
+        signal.stop_loss_pct
     );
 }
 
@@ -277,6 +283,7 @@ async fn sizer_handles_degenerate_inputs_without_panic() {
         dec!(11000000),
         LEVERAGE,
         dec!(0.5),
+        dec!(0.02),
     );
     assert_eq!(qty, None);
 }
