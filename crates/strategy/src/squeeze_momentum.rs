@@ -335,7 +335,15 @@ impl Strategy for SqueezeMomentumV1 {
                 .unwrap()
                 .with_nanosecond(0)
                 .unwrap();
-            let bars_held = history.iter().filter(|c| c.timestamp > entry_hour).count();
+            // Count completed bars since entry. Candle timestamps are period
+            // starts; entry_hour is floored to the same boundary. Use >= so the
+            // candle whose period contains the entry is counted as bar 0.
+            // DELAY_BARS=3 means bars 0,1,2 are in delay; bar 3+ is trailing.
+            let bars_held = history
+                .iter()
+                .filter(|c| c.timestamp >= entry_hour)
+                .count()
+                .saturating_sub(1); // don't count the entry bar itself
             if bars_held < DELAY_BARS {
                 continue;
             }
