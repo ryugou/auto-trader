@@ -2,33 +2,12 @@ use auto_trader_core::types::Pair;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
-/// Position sizer with **pure capacity-based** sizing.
+/// Position sizer: converts Signal.allocation_pct → concrete quantity.
 ///
-/// The sizer's only job is "given an account balance and the current
-/// price, how many units can we hold?" — it does NOT look at any chart
-/// information (stop-loss distance, ATR, indicator state, …). That
-/// separation matches the conceptual layering of the system:
-///
-/// - **Signal layer (chart-only)**: a strategy decides "buy / sell" and
-///   what price levels constitute SL / TP.
-/// - **Execution layer (balance-only)**: the sizer decides how many
-///   units to actually buy.
-///
-/// Each strategy declares an `allocation_pct` on the Signal it emits
-/// to express how aggressively it wants to commit capital per trade
-/// (e.g. 0.30 for the conservative strategy, 0.90 for the aggressive
-/// one). The sizer multiplies that fraction with the account's capacity:
-///
-/// ```text
-/// quantity = floor(
-///     (balance × leverage × allocation_pct / entry_price) / min_lot
-/// ) × min_lot
-/// ```
-///
-/// `allocation_pct = 1.0` means "use the entire account's leveraged
-/// notional", which is what crypto traders sometimes call full kelly.
-/// `allocation_pct < 1.0` always leaves headroom for adverse price moves
-/// and for subsequent trades.
+/// allocation_pct is now risk-linked: strategies compute it as
+/// `min(target_risk / stop_loss_pct, cap)` to limit per-trade account
+/// risk. The sizer's job is purely mechanical — it applies leverage,
+/// divides by price, and rounds to min_lot.
 pub struct PositionSizer {
     min_order_sizes: HashMap<Pair, Decimal>,
 }
@@ -63,10 +42,9 @@ impl PositionSizer {
             return None;
         }
 
-        // Pure capacity formula. No SL distance, no risk_rate, no chart
-        // information of any kind. The strategy's chart-derived stop
-        // levels live on the Signal and are honored by the position
-        // monitor; they are not an input to sizing.
+        // Mechanical sizing: apply leverage and allocation_pct, divide by
+        // price. allocation_pct already encodes risk (target_risk / SL_pct)
+        // so no further chart information is needed here.
         let raw_qty = balance * leverage * allocation_pct / entry_price;
 
         let min_size = self

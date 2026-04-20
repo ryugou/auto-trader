@@ -164,6 +164,7 @@ impl BitflyerMonitor {
                 &mut closes_map,
                 &mut highs_map,
                 &mut lows_map,
+                &self.timeframe,
             )
             .await
             {
@@ -306,6 +307,7 @@ async fn connect_and_stream(
     closes_map: &mut HashMap<String, Vec<Decimal>>,
     highs_map: &mut HashMap<String, Vec<Decimal>>,
     lows_map: &mut HashMap<String, Vec<Decimal>>,
+    primary_timeframe: &str,
 ) -> anyhow::Result<()> {
     let (ws, _) = connect_async(ws_url).await?;
     let (mut write, mut read) = ws.split();
@@ -319,6 +321,13 @@ async fn connect_and_stream(
         });
         write.send(Message::Text(subscribe.to_string())).await?;
     }
+
+    // Per-pair cache of the most recent primary-timeframe indicator map.
+    // Declared outside the tick loop so H1 candles that complete on a tick
+    // where no primary candle fires can still carry the last-known indicators.
+    let mut latest_indicators: HashMap<String, HashMap<String, Decimal>> = HashMap::new();
+    // Dynamic prefix derived from the primary timeframe (e.g. "m5", "h1").
+    let primary_tf_prefix = primary_timeframe.to_lowercase();
 
     while let Some(msg) = read.next().await {
         let msg = msg?;
@@ -384,18 +393,19 @@ async fn connect_and_stream(
         // on_tick returns completed candle when period boundary is crossed
         let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
         let from_complete = builder.try_complete(ts, best_bid, best_ask);
-        let mut latest_indicators_for_pair: Option<HashMap<String, Decimal>> = None;
         if let Some(candle) = from_tick.or(from_complete) {
             if let Some(pool) = pool
                 && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
             {
                 tracing::warn!("failed to save crypto candle: {e}");
             }
+            let pair_key = candle.pair.0.clone();
             let (event, indicators) = emit_candle_event(
                 candle, closes_map, highs_map, lows_map,
                 true, // full indicator map for primary timeframe
             );
-            latest_indicators_for_pair = Some(indicators);
+            // Persist indicators so H1 candles on subsequent ticks can use them.
+            latest_indicators.insert(pair_key, indicators);
             if price_tx.send(event).await.is_err() {
                 tracing::info!("price channel closed, stopping bitflyer monitor");
                 return Ok(());
@@ -412,18 +422,21 @@ async fn connect_and_stream(
                 {
                     tracing::warn!("failed to save H1 crypto candle: {e}");
                 }
-                // Carry forward primary-timeframe indicators with m5_ prefix onto H1 events.
-                // This namespacing allows analytics to distinguish the source timeframe
-                // while H1-triggered trades retain ATR/ADX/regime context for entry_indicators
-                // persistence without mislabeling them as H1-native indicators.
-                let h1_indicators = if let Some(primary_indicators) = &latest_indicators_for_pair {
-                    primary_indicators
-                        .iter()
-                        .map(|(key, value)| (format!("m5_{key}"), *value))
-                        .collect::<HashMap<_, _>>()
-                } else {
-                    HashMap::new()
-                };
+                // Carry forward primary-timeframe indicators with a dynamic prefix
+                // (e.g. "m5_") onto H1 events. This namespacing lets analytics
+                // distinguish the source timeframe while H1-triggered trades retain
+                // ATR/ADX/regime context for entry_indicators persistence without
+                // mislabeling them as H1-native indicators.
+                // Uses the per-pair cache so indicators are available even when the
+                // primary candle did not complete on this same tick.
+                let h1_indicators = latest_indicators
+                    .get(product_code)
+                    .map(|ind| {
+                        ind.iter()
+                            .map(|(key, value)| (format!("{primary_tf_prefix}_{key}"), *value))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
                 let h1_event = PriceEvent {
                     pair: h1_candle.pair.clone(),
                     exchange: Exchange::BitflyerCfd,

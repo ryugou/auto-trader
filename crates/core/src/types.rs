@@ -153,12 +153,14 @@ pub struct Signal {
     /// Fraction of leveraged account capacity the strategy wants to
     /// commit to this trade. Must be in (0, 1].
     ///
+    /// Strategies compute this as `min(TARGET_RISK_PCT / stop_loss_pct, CAP)`
+    /// to limit per-trade risk. With leverage L, the actual account risk at
+    /// SL hit is `allocation_pct × stop_loss_pct × L`. For example,
+    /// TARGET_RISK_PCT=1%, SL=2%, leverage=2 → allocation=50%, actual
+    /// risk = 50% × 2% × 2 = 2%.
+    ///
     /// The sizer turns this into a quantity via
     /// `floor((balance × leverage × allocation_pct / price) / min_lot)`.
-    /// `allocation_pct` is the **only** sizing knob the strategy gets;
-    /// chart-derived values (SL distance, ATR, …) intentionally do not
-    /// influence quantity, matching the layering "signal = chart,
-    /// execution = balance".
     #[serde(default = "default_allocation_pct")]
     pub allocation_pct: Decimal,
     /// Optional time-based fail-safe: position monitor will force-close
