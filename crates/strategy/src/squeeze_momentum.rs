@@ -40,7 +40,7 @@
 //!   - Short: stop = min(low over last 22 bars) + ATR(14) × 3.0
 //! - 48-hour fail-safe via `max_hold_until`.
 //!
-//! Why Chandelier over EMA trailing: EMA tracks price average (ボラ非適応). ATR×3 tracks volatility itself — after a squeeze fire ATR expands,
+//! Why Chandelier over EMA trailing: EMA tracks price average (ボラ非適応). ATR×3 tracks volatility itself — after a squeeze fires, ATR expands,
 //! automatically widening the stop to let the breakout run. As the trend
 //! matures and ATR stabilises, the stop tightens naturally.
 //! (Perry Kaufman "Trading Systems and Methods", Van Tharp "Trade Your
