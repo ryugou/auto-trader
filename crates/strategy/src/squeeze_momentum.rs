@@ -69,9 +69,9 @@ const ATR_MULT: Decimal = dec!(2.5);
 /// Maximum stop-loss as a fraction of entry price.
 const SL_CAP: Decimal = dec!(0.05);
 /// Target risk per trade as an *unleveraged* fraction of account balance.
-/// The executor sizes as `balance × leverage × allocation_pct / price`, so
-/// actual risk = `TARGET_RISK_PCT × leverage`. At 2× leverage this produces
-/// a 2% actual risk. Adjust if account leverage changes.
+/// Target per-trade risk budget. The leverage-aware risk cap is enforced
+/// by PositionSizer (which knows the actual account leverage), so this
+/// value does not need manual adjustment when leverage changes.
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade.
 const ALLOCATION_CAP: Decimal = dec!(0.50);

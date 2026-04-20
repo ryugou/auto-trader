@@ -17,7 +17,7 @@
 //!
 //! ## Position sizing
 //! `allocation_pct = min(1% / stop_loss_pct, 50%)`. With 2× account leverage
-//! the executor sizes as `balance × leverage × allocation_pct / price`, so
+//! The leverage-aware risk cap is enforced by PositionSizer, so this
 //! actual risk = `1% × 2 = 2%` of account per trade. Caps at 50% to prevent
 //! over-exposure when ATR is tiny.
 //!
@@ -61,9 +61,9 @@ const ATR_MULT: Decimal = dec!(1.5);
 /// SL during high-volatility periods so it does not exceed 3% of entry.
 const SL_CAP: Decimal = dec!(0.03);
 /// Target risk per trade as an *unleveraged* fraction of account balance.
-/// The executor sizes as `balance × leverage × allocation_pct / price`, so
-/// actual risk = `TARGET_RISK_PCT × leverage`. At 2× leverage this produces
-/// a 2% actual risk. Adjust if account leverage changes.
+/// Target per-trade risk budget. The leverage-aware risk cap is enforced
+/// by PositionSizer (which knows the actual account leverage), so this
+/// value does not need manual adjustment when leverage changes.
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade. Prevents full account deployment when
 /// ATR SL is very small.
