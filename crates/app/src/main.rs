@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
     // AND its corresponding strategy warmup loader. Sharing the same constant
     // here prevents drift between live polling/streaming and warmup history.
     const CRYPTO_TIMEFRAME: &str = "M5";
+    const CRYPTO_H1_TIMEFRAME: &str = "H1";
     const FX_TIMEFRAME: &str = "M5";
     const WARMUP_LIMIT: i64 = 200;
 
@@ -327,8 +328,7 @@ async fn main() -> anyhow::Result<()> {
                     .map(|j| j.0)
                     .unwrap_or_else(|| {
                         serde_json::json!({
-                            "entry_channel": 20, "exit_channel": 10,
-                            "sl_pct": 0.03, "allocation_pct": 1.0, "atr_baseline_bars": 50
+                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
                         })
                     });
                 engine.add_strategy(
@@ -480,6 +480,41 @@ async fn main() -> anyhow::Result<()> {
             engine.warmup(&events).await;
             tracing::info!(
                 "strategy warmup: fed {n} bitflyer_cfd {CRYPTO_TIMEFRAME} candles for {}",
+                pair.0
+            );
+        }
+
+        // Crypto: bitflyer_cfd — 1H candles for Donchian / Squeeze strategies.
+        // These strategies filter by timeframe so M5 warmup events above are
+        // already silently ignored by them; the H1 events below are silently
+        // ignored by bb_mean_revert. Loading both ensures every strategy starts
+        // with a warm indicator cache regardless of its timeframe preference.
+        for pair in &crypto_pairs_for_warmup {
+            let h1_candles = load_warmup_history(
+                &pool,
+                ExchangeTy::BitflyerCfd.as_str(),
+                &pair.0,
+                CRYPTO_H1_TIMEFRAME,
+                WARMUP_LIMIT,
+            )
+            .await;
+            if h1_candles.is_empty() {
+                continue;
+            }
+            let n = h1_candles.len();
+            let h1_events: Vec<PriceEvent> = h1_candles
+                .into_iter()
+                .map(|c| PriceEvent {
+                    pair: c.pair.clone(),
+                    exchange: ExchangeTy::BitflyerCfd,
+                    timestamp: c.timestamp,
+                    candle: c,
+                    indicators: StdHashMap::new(),
+                })
+                .collect();
+            engine.warmup(&h1_events).await;
+            tracing::info!(
+                "strategy warmup: fed {n} bitflyer_cfd {CRYPTO_H1_TIMEFRAME} candles for {}",
                 pair.0
             );
         }

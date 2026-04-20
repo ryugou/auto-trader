@@ -683,6 +683,7 @@ impl OrderExecutor for Trader {
                 hint_price,
                 leverage,
                 signal.allocation_pct,
+                signal.stop_loss_pct,
             )
             .ok_or_else(|| {
                 anyhow::anyhow!(

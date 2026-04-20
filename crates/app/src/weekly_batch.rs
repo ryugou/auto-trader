@@ -92,13 +92,43 @@ pub async fn run(
         proposal.rationale
     );
 
-    // 6. Validate and persist proposed params
+    // 6. Validate and persist proposed params.
+    // Normalize to only the three allowed keys before writing so that stale or
+    // hallucinated keys (e.g. `sl_pct`, `allocation_pct`) are never written back
+    // to the DB despite the cleanup migration that removed them.
     if let Err(e) = validate_params(&proposal.params) {
         tracing::warn!("weekly_batch: LLM proposed invalid params, rejecting: {e}");
         tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
         return Ok(());
     }
-    persist_params(pool, STRATEGY, &proposal.params)
+    let Some(entry_channel) = proposal
+        .params
+        .get("entry_channel")
+        .and_then(|v| v.as_i64())
+    else {
+        tracing::warn!("weekly_batch: LLM proposed non-integer/missing entry_channel, rejecting");
+        return Ok(());
+    };
+    let Some(exit_channel) = proposal.params.get("exit_channel").and_then(|v| v.as_i64()) else {
+        tracing::warn!("weekly_batch: LLM proposed non-integer/missing exit_channel, rejecting");
+        return Ok(());
+    };
+    let Some(atr_baseline_bars) = proposal
+        .params
+        .get("atr_baseline_bars")
+        .and_then(|v| v.as_i64())
+    else {
+        tracing::warn!(
+            "weekly_batch: LLM proposed non-integer/missing atr_baseline_bars, rejecting"
+        );
+        return Ok(());
+    };
+    let normalized = serde_json::json!({
+        "entry_channel": entry_channel,
+        "exit_channel": exit_channel,
+        "atr_baseline_bars": atr_baseline_bars,
+    });
+    persist_params(pool, STRATEGY, &normalized)
         .await
         .context("persist_params")?;
 
@@ -107,7 +137,7 @@ pub async fn run(
          根拠: {}\n\
          期待効果: {}\n\
          新パラメータ: {}",
-        proposal.rationale, proposal.expected_effect, proposal.params,
+        proposal.rationale, proposal.expected_effect, normalized,
     );
     insert_system_notification(pool, &notification_message)
         .await
@@ -193,23 +223,18 @@ async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalys
 /// Rejects any proposal with out-of-range values to prevent the
 /// evolve strategy from running with dangerous parameters.
 fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
-    let entry = params["entry_channel"].as_u64().unwrap_or(20);
-    let exit = params["exit_channel"].as_u64().unwrap_or(10);
-    let sl = params["sl_pct"].as_f64().unwrap_or(0.03);
-    let alloc = params["allocation_pct"].as_f64().unwrap_or(1.0);
-    let baseline = params["atr_baseline_bars"].as_u64().unwrap_or(50);
+    let entry = params["entry_channel"].as_i64().unwrap_or(20);
+    let exit = params["exit_channel"].as_i64().unwrap_or(10);
+    let baseline = params["atr_baseline_bars"].as_i64().unwrap_or(50);
 
+    if entry < 0 || exit < 0 || baseline < 0 {
+        anyhow::bail!("negative parameter values not allowed");
+    }
     if !(10..=30).contains(&entry) {
         anyhow::bail!("entry_channel {entry} out of range [10, 30]");
     }
     if !(5..=15).contains(&exit) {
         anyhow::bail!("exit_channel {exit} out of range [5, 15]");
-    }
-    if !(0.0..=0.10).contains(&sl) || sl <= 0.0 {
-        anyhow::bail!("sl_pct {sl} out of range (0.0, 0.10]");
-    }
-    if !(0.50..=1.0).contains(&alloc) {
-        anyhow::bail!("allocation_pct {alloc} out of range [0.50, 1.0]");
     }
     if !(20..=100).contains(&baseline) {
         anyhow::bail!("atr_baseline_bars {baseline} out of range [20, 100]");
@@ -364,8 +389,7 @@ fn build_gemini_prompt(
     prompt.push_str(
         "\n## 指示\n\
          上記データを踏まえ、`donchian_trend_evolve_v1` 戦略の最適なパラメータを提案してください。\
-         パラメータキー: entry_channel (整数), exit_channel (整数), sl_pct (小数), \
-         allocation_pct (0.0〜1.0), atr_baseline_bars (整数)。\n\
+         パラメータキー: entry_channel (整数), exit_channel (整数), atr_baseline_bars (整数)。\n\
          以下のJSON形式のみで応答すること:\n\
          {\"params\":{...},\"rationale\":\"変更理由\",\"expected_effect\":\"期待効果\"}\n",
     );

@@ -46,7 +46,20 @@ fn live_account_sizer() -> PositionSizer {
 }
 
 fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEvent {
-    let ts = Utc.timestamp_opt(1_700_000_000 + idx * 300, 0).unwrap();
+    make_event_tf(close, high, low, idx, "M5")
+}
+
+fn make_event_tf(
+    close: Decimal,
+    high: Decimal,
+    low: Decimal,
+    idx: i64,
+    timeframe: &str,
+) -> PriceEvent {
+    let interval = if timeframe == "H1" { 3600 } else { 300 };
+    let ts = Utc
+        .timestamp_opt(1_700_000_000 + idx * interval, 0)
+        .unwrap();
     PriceEvent {
         pair: Pair::new(PAIR),
         exchange: Exchange::BitflyerCfd,
@@ -54,7 +67,7 @@ fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEve
         candle: Candle {
             pair: Pair::new(PAIR),
             exchange: Exchange::BitflyerCfd,
-            timeframe: "M5".to_string(),
+            timeframe: timeframe.to_string(),
             open: close,
             high,
             low,
@@ -72,31 +85,44 @@ fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEve
 /// squeeze strategies a clear breakout. Returns the slice up to (but
 /// not including) the breakout candle so callers can warm the strategy
 /// first.
+#[allow(dead_code)]
 fn flat_then_trend(
     base: Decimal,
     flat_bars: usize,
     trend_step: Decimal,
     trend_bars: usize,
 ) -> Vec<PriceEvent> {
+    flat_then_trend_tf(base, flat_bars, trend_step, trend_bars, "M5")
+}
+
+fn flat_then_trend_tf(
+    base: Decimal,
+    flat_bars: usize,
+    trend_step: Decimal,
+    trend_bars: usize,
+    timeframe: &str,
+) -> Vec<PriceEvent> {
     let mut out = Vec::with_capacity(flat_bars + trend_bars);
     for i in 0..flat_bars {
         // Tiny zig-zag so ATR isn't literally zero.
         let drift = if i % 2 == 0 { dec!(1000) } else { dec!(-1000) };
         let close = base + drift;
-        out.push(make_event(
+        out.push(make_event_tf(
             close,
             close + dec!(2000),
             close - dec!(2000),
             i as i64,
+            timeframe,
         ));
     }
     for i in 0..trend_bars {
         let close = base + trend_step * Decimal::from((i + 1) as u64);
-        out.push(make_event(
+        out.push(make_event_tf(
             close,
             close + dec!(3000),
             close - dec!(3000),
             (flat_bars + i) as i64,
+            timeframe,
         ));
     }
     out
@@ -115,7 +141,8 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
 
     // Warm up with 100 flat bars around 11M, then push a clear upside
     // breakout sequence so the channel + ATR filter both pass.
-    let warm = flat_then_trend(dec!(11000000), 100, dec!(20000), 30);
+    // Donchian now filters to H1 timeframe — feed H1 candles.
+    let warm = flat_then_trend_tf(dec!(11000000), 100, dec!(20000), 30, "H1");
     let mut emitted = None;
     for event in warm {
         if let Some(sig) = strat.on_price(&event).await {
@@ -136,12 +163,14 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
         HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
+        signal.stop_loss_pct,
     );
     assert!(
         qty.is_some(),
-        "donchian signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        "donchian signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={}, stop_loss_pct={})",
         HINT_PRICE,
-        signal.allocation_pct
+        signal.allocation_pct,
+        signal.stop_loss_pct
     );
     let qty = qty.unwrap();
     assert!(qty >= MIN_LOT, "quantity {qty} must be at least {MIN_LOT}");
@@ -155,17 +184,19 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         SqueezeMomentumV1::new("squeeze_momentum_v1".to_string(), vec![Pair::new(PAIR)]);
     let sizer = live_account_sizer();
 
-    // 80 ultra-flat bars to force BB inside KC (build a sustained
+    // 80 ultra-flat H1 bars to force BB inside KC (build a sustained
     // squeeze counter), then a clear upside expansion.
+    // Squeeze now filters to H1 timeframe.
     let mut events: Vec<PriceEvent> = (0..80)
-        .map(|i| make_event(dec!(11000000), dec!(11000100), dec!(10999900), i))
+        .map(|i| make_event_tf(dec!(11000000), dec!(11000100), dec!(10999900), i, "H1"))
         .collect();
     // Big up-bar that releases the squeeze with positive momentum.
-    events.push(make_event(
+    events.push(make_event_tf(
         dec!(11500000),
         dec!(11600000),
         dec!(11000000),
         80,
+        "H1",
     ));
 
     let mut emitted = None;
@@ -184,12 +215,14 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
+        signal.stop_loss_pct,
     );
     assert!(
         qty.is_some(),
-        "squeeze signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        "squeeze signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={}, stop_loss_pct={})",
         HINT_PRICE,
-        signal.allocation_pct
+        signal.allocation_pct,
+        signal.stop_loss_pct
     );
 }
 
@@ -228,12 +261,14 @@ async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
         HINT_PRICE,
         LEVERAGE,
         signal.allocation_pct,
+        signal.stop_loss_pct,
     );
     assert!(
         qty.is_some(),
-        "bb_mean_revert signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={})",
+        "bb_mean_revert signal must size to >0 on a 30k JPY account (hint_price={}, allocation_pct={}, stop_loss_pct={})",
         HINT_PRICE,
-        signal.allocation_pct
+        signal.allocation_pct,
+        signal.stop_loss_pct
     );
 }
 
@@ -248,6 +283,7 @@ async fn sizer_handles_degenerate_inputs_without_panic() {
         dec!(11000000),
         LEVERAGE,
         dec!(0.5),
+        dec!(0.02),
     );
     assert_eq!(qty, None);
 }
