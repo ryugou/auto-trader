@@ -59,7 +59,7 @@ impl DonchianTrendEvolveV1 {
         let entry_channel = (params["entry_channel"].as_u64().unwrap_or(20) as usize).clamp(10, 30);
         let exit_channel = (params["exit_channel"].as_u64().unwrap_or(10) as usize).clamp(5, 15);
         let atr_baseline_bars =
-            (params["atr_baseline_bars"].as_u64().unwrap_or(50) as usize).clamp(20, 100);
+            (params["atr_baseline_bars"].as_u64().unwrap_or(20) as usize).clamp(20, 100);
         Self {
             name,
             pairs,
@@ -325,7 +325,7 @@ mod tests {
         );
         assert_eq!(s.entry_channel, 20);
         assert_eq!(s.exit_channel, 10);
-        assert_eq!(s.atr_baseline_bars, 50);
+        assert_eq!(s.atr_baseline_bars, 20);
     }
 
     /// Legacy sl_pct / allocation_pct keys in the JSON must be silently ignored
@@ -342,6 +342,7 @@ mod tests {
         let s =
             DonchianTrendEvolveV1::new("test".to_string(), vec![Pair::new("FX_BTC_JPY")], params);
         // Only channel params should be parsed; SL and allocation are ATR-derived at runtime.
+        // atr_baseline_bars=50 is explicitly set in JSON and within clamp range [20,100].
         assert_eq!(s.entry_channel, 20);
         assert_eq!(s.exit_channel, 10);
         assert_eq!(s.atr_baseline_bars, 50);

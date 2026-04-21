@@ -45,7 +45,12 @@ use std::collections::{HashMap, VecDeque};
 const ENTRY_CHANNEL: usize = 20;
 const EXIT_CHANNEL: usize = 10;
 const ATR_PERIOD: usize = 14;
-const ATR_BASELINE_BARS: usize = 50;
+/// Lowered from 50 → 20 for H1 timeframe. With 1H bars, 50 bars = 50
+/// hours of ATR history which requires 65+ bars total (50 + ATR_PERIOD + 1)
+/// before the first signal can fire. At 20 bars the requirement drops to
+/// 35 bars (≈ 1.5 days of H1 data), and 20 hours of ATR baseline is still
+/// sufficient to distinguish genuine volatility expansion from noise.
+const ATR_BASELINE_BARS: usize = 20;
 /// ATR multiplier for stop-loss. 3× ATR is within the Turtle System's
 /// original N-based stop recommendation — wide enough for trend retraces.
 const ATR_MULT: Decimal = dec!(3.0);
