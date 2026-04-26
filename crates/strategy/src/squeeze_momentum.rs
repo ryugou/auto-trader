@@ -541,25 +541,26 @@ mod tests {
                 .await;
         }
 
-        // Position entered at bar 40 (10 bars ago → well past DELAY_BARS=3).
-        // Entry 8500000, SL 8300000 → sl_distance=200000.
-        // Close at drop event = 9000000 → unrealized=500000 >= 200000 (1R passes).
-        let entry_ts = base_ts + Duration::hours(40);
+        // Position entered at bar 10 (40 bars ago → well past DELAY_BARS=3).
+        // Entry 10100000 (aligned with bar 10 price), SL 9900000 → sl_distance=200000.
+        // At bar 50 (drop close 10350000): unrealized=10350000-10100000=250000 >= 200000 ✓
+        // Chandelier stop ≈ 10465000, and 10350000 < 10465000 ✓
+        let entry_ts = base_ts + Duration::hours(10);
         let pos = make_position_with_sl(
             "sq",
             Direction::Long,
-            dec!(8500000),
-            dec!(8300000),
+            dec!(10100000),
+            dec!(9900000),
             entry_ts,
         );
 
-        // Sharp drop well below Chandelier stop.
+        // Close in profit above 1R, but below Chandelier stop.
         let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
-            dec!(9000000),
-            dec!(9050000),
-            dec!(8950000),
+            dec!(10350000),
+            dec!(10380000),
+            dec!(10320000),
             drop_ts,
         );
         let _ = s.on_price(&drop).await;
@@ -637,24 +638,25 @@ mod tests {
         // Position entered at bar 47 (exactly 3 bars ago = DELAY_BARS).
         // bars_held = 3 (bars 48, 49, 50 are after entry).
         // `bars_held < DELAY_BARS` is `3 < 3` = false → trailing IS active.
-        // Entry 8500000, SL 8300000 → sl_distance=200000.
-        // Close at drop event = 9000000 → unrealized=500000 >= 200000 (1R passes).
+        // Entry 10200000, SL 10000000 → sl_distance=200000.
+        // At drop (close=10430000): unrealized=10430000-10200000=230000 >= 200000 ✓
+        // Chandelier stop ≈ 10465000, drop close 10430000 < 10465000 ✓
         let entry_ts = base_ts + Duration::hours(47);
         let pos = make_position_with_sl(
             "sq",
             Direction::Long,
-            dec!(8500000),
-            dec!(8300000),
+            dec!(10200000),
+            dec!(10000000),
             entry_ts,
         );
 
-        // Drop below Chandelier stop — should exit (delay phase over).
+        // Close between entry+sl_distance and Chandelier stop: should exit (delay phase over).
         let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
-            dec!(9000000),
-            dec!(9050000),
-            dec!(8950000),
+            dec!(10430000),
+            dec!(10450000),
+            dec!(10410000),
             drop_ts,
         );
         let _ = s.on_price(&drop).await;
@@ -716,24 +718,26 @@ mod tests {
                 ))
                 .await;
         }
-        // Short position entered at bar 40 (well past delay).
-        // Entry 11500000, SL 11700000 → sl_distance=200000 (stop above entry for Short).
-        // Close at spike event = 11000000 → unrealized=500000 >= 200000 (1R passes).
-        let entry_ts = base_ts + Duration::hours(40);
+        // Short position entered at bar 10 (40 bars ago → well past delay).
+        // Entry 9900000 (aligned with bar 10 price), SL 10100000 → sl_distance=200000.
+        // At bar 50 (close 9600000): unrealized=9900000-9600000=300000 >= 200000 ✓
+        // Chandelier stop (short) = lowest_low + ATR*3 ≈ 9510000 + 30000 = 9540000.
+        // Close 9600000 > 9540000 → trail_break for short ✓
+        let entry_ts = base_ts + Duration::hours(10);
         let pos = make_position_with_sl(
             "sq",
             Direction::Short,
-            dec!(11500000),
-            dec!(11700000),
+            dec!(9900000),
+            dec!(10100000),
             entry_ts,
         );
         // Sharp RISE above Chandelier stop (lowest_low + ATR×3).
         let spike_ts = base_ts + Duration::hours(50);
         let spike = make_event_at(
             "FX_BTC_JPY",
-            dec!(11000000),
-            dec!(11050000),
-            dec!(10950000),
+            dec!(9600000),
+            dec!(9650000),
+            dec!(9550000),
             spike_ts,
         );
         let _ = s.on_price(&spike).await;
