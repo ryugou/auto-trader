@@ -249,6 +249,17 @@ impl Strategy for DonchianTrendEvolveV1 {
             if pos.trade.pair.0 != key {
                 continue;
             }
+
+            // 1R minimum: same as baseline donchian_trend_v1.
+            let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
+            let unrealized = match pos.trade.direction {
+                Direction::Long => close - pos.trade.entry_price,
+                Direction::Short => pos.trade.entry_price - close,
+            };
+            if unrealized < sl_distance {
+                continue;
+            }
+
             let trailing_break = match pos.trade.direction {
                 Direction::Long => close < exit_low,
                 Direction::Short => close > exit_high,
@@ -416,6 +427,10 @@ mod tests {
                 ))
                 .await;
         }
+        // Entry 10000000, SL 9800000 → sl_distance=200000.
+        // Drop close = 10500000 → unrealized=500000 >= 200000 (1R passes).
+        // Exit channel low (10 bars of lows=10950000) = 10950000.
+        // 10500000 < 10950000 → trailing break fires.
         let pos = Position {
             trade: Trade {
                 id: Uuid::new_v4(),
@@ -424,9 +439,9 @@ mod tests {
                 pair: Pair::new("FX_BTC_JPY"),
                 exchange: Exchange::BitflyerCfd,
                 direction: Direction::Long,
-                entry_price: dec!(11000000),
+                entry_price: dec!(10000000),
                 exit_price: None,
-                stop_loss: dec!(0),
+                stop_loss: dec!(9800000),
                 take_profit: None,
                 quantity: dec!(0.001),
                 leverage: dec!(2),
@@ -446,5 +461,63 @@ mod tests {
             .await;
         assert_eq!(exits.len(), 1);
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
+    }
+
+    /// 1R guard: if unrealized profit < SL distance, the trailing channel
+    /// exit must NOT fire even when close is below the exit-channel low.
+    #[tokio::test]
+    async fn position_no_exit_when_1r_not_reached() {
+        let mut s = DonchianTrendEvolveV1::new(
+            "dte".to_string(),
+            vec![Pair::new("FX_BTC_JPY")],
+            default_params(),
+        );
+        // 100 bars at 11M; exit channel low = 10950000.
+        for _ in 0..100 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(11000000),
+                    dec!(11050000),
+                    dec!(10950000),
+                ))
+                .await;
+        }
+        // Entry 10800000, SL 10600000 → sl_distance=200000.
+        // Drop close = 10500000 → unrealized = 10500000 - 10800000 = -300000 < 0.
+        // 1R guard fires: no exit even though 10500000 < exit_low=10950000.
+        let pos = Position {
+            trade: Trade {
+                id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
+                strategy_name: "dte".to_string(),
+                pair: Pair::new("FX_BTC_JPY"),
+                exchange: Exchange::BitflyerCfd,
+                direction: Direction::Long,
+                entry_price: dec!(10800000),
+                exit_price: None,
+                stop_loss: dec!(10600000),
+                take_profit: None,
+                quantity: dec!(0.001),
+                leverage: dec!(2),
+                fees: dec!(0),
+                entry_at: Utc::now(),
+                exit_at: None,
+                pnl_amount: None,
+                exit_reason: None,
+                status: TradeStatus::Open,
+                max_hold_until: None,
+            },
+        };
+        let drop_event = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));
+        let _ = s.on_price(&drop_event).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &drop_event)
+            .await;
+        assert!(
+            exits.is_empty(),
+            "1R not reached → no trailing exit, got {} exits",
+            exits.len()
+        );
     }
 }

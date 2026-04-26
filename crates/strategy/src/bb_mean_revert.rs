@@ -243,6 +243,20 @@ impl Strategy for BbMeanRevertV1 {
             if pos.trade.pair.0 != key {
                 continue;
             }
+
+            // 1R minimum: don't exit until unrealized profit >= SL distance.
+            // This guarantees R:R >= 1:1 structurally — without this guard,
+            // the BB midline exit fires before the trade has moved 1× the SL
+            // distance, making R:R < 1 by design.
+            let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
+            let unrealized = match pos.trade.direction {
+                Direction::Long => close - pos.trade.entry_price,
+                Direction::Short => pos.trade.entry_price - close,
+            };
+            if unrealized < sl_distance {
+                continue; // Haven't reached 1R yet — let it run or hit SL.
+            }
+
             // Mean-reversion target reached: long that retraced up to
             // SMA20 or short that retraced down to SMA20.
             let mean_reached = match pos.trade.direction {
@@ -291,6 +305,16 @@ mod tests {
     }
 
     fn make_position(strategy: &str, pair: &str, direction: Direction, entry: Decimal) -> Position {
+        make_position_with_sl(strategy, pair, direction, entry, dec!(0))
+    }
+
+    fn make_position_with_sl(
+        strategy: &str,
+        pair: &str,
+        direction: Direction,
+        entry: Decimal,
+        stop_loss: Decimal,
+    ) -> Position {
         Position {
             trade: Trade {
                 id: Uuid::new_v4(),
@@ -301,7 +325,7 @@ mod tests {
                 direction,
                 entry_price: entry,
                 exit_price: None,
-                stop_loss: dec!(0),
+                stop_loss,
                 take_profit: None,
                 quantity: dec!(0.001),
                 leverage: dec!(2),
@@ -421,8 +445,15 @@ mod tests {
                 ))
                 .await;
         }
-        // Long position bought at 9.5M
-        let pos = make_position("bb", "FX_BTC_JPY", Direction::Long, dec!(9500000));
+        // Long position bought at 9.5M with SL at 9.3M (sl_distance=200K).
+        // Unrealized at close=10M: 500K >= 200K → 1R guard passes.
+        let pos = make_position_with_sl(
+            "bb",
+            "FX_BTC_JPY",
+            Direction::Long,
+            dec!(9500000),
+            dec!(9300000),
+        );
         // Mark price now back at 10M (≥ middle SMA20 = 10M) → exit
         let event = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
         let exits = s
@@ -432,6 +463,48 @@ mod tests {
         assert_eq!(exits[0].trade_id, pos.trade.id);
         assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);
         assert_eq!(exits[0].close_price, dec!(10000000));
+    }
+
+    /// 1R guard: if unrealized profit < SL distance, the BB mean-reached
+    /// exit must NOT fire even when price is at or above SMA20.
+    #[tokio::test]
+    async fn open_positions_no_exit_when_1r_not_reached() {
+        let mut s = BbMeanRevertV1::new("bb".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        // Warm history around 10M — SMA20 = 10M.
+        for _ in 0..30 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(10000000),
+                    dec!(10005000),
+                    dec!(9995000),
+                ))
+                .await;
+        }
+        // Long position: entry=9800000, SL=9600000 → sl_distance=200000.
+        // Close=9900000 → unrealized=100000 < 200000 (hasn't reached 1R).
+        // Price 9900000 < SMA20 10000000 so mean_reached is false anyway,
+        // but even if we use close=10000000 (mean reached), 1R guard fires.
+        let pos = make_position_with_sl(
+            "bb",
+            "FX_BTC_JPY",
+            Direction::Long,
+            dec!(9800000),
+            dec!(9600000),
+        );
+        // close=10000000 satisfies mean_reached (Long: close >= middle=10M)
+        // but unrealized=200000 is NOT strictly > sl_distance=200000 (equal).
+        // The guard is `unrealized < sl_distance`, so equal passes.
+        // Use close=9950000: unrealized=150000 < sl_distance=200000 → no exit.
+        let event = make_event("FX_BTC_JPY", dec!(9950000), dec!(9960000), dec!(9940000));
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &event)
+            .await;
+        assert!(
+            exits.is_empty(),
+            "1R not reached → no exit, got {} exits",
+            exits.len()
+        );
     }
 
     #[tokio::test]

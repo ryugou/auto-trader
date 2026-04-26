@@ -274,6 +274,20 @@ impl Strategy for DonchianTrendV1 {
             if pos.trade.pair.0 != key {
                 continue;
             }
+
+            // 1R minimum: don't activate trailing exit until unrealized
+            // profit >= SL distance. Without this, the 10-bar trailing
+            // channel fires before the trade has moved 1× the SL distance,
+            // structurally forcing R:R < 1.
+            let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
+            let unrealized = match pos.trade.direction {
+                Direction::Long => close - pos.trade.entry_price,
+                Direction::Short => pos.trade.entry_price - close,
+            };
+            if unrealized < sl_distance {
+                continue;
+            }
+
             let trailing_break = match pos.trade.direction {
                 // Long exits when price slips below the prior 10-bar low
                 Direction::Long => close < exit_low,
@@ -321,7 +335,12 @@ mod tests {
         }
     }
 
-    fn make_position(strategy: &str, direction: Direction, entry: Decimal) -> Position {
+    fn make_position_with_sl(
+        strategy: &str,
+        direction: Direction,
+        entry: Decimal,
+        stop_loss: Decimal,
+    ) -> Position {
         Position {
             trade: Trade {
                 id: Uuid::new_v4(),
@@ -332,7 +351,7 @@ mod tests {
                 direction,
                 entry_price: entry,
                 exit_price: None,
-                stop_loss: dec!(0),
+                stop_loss,
                 take_profit: None,
                 quantity: dec!(0.001),
                 leverage: dec!(2),
@@ -447,8 +466,11 @@ mod tests {
                 ))
                 .await;
         }
-        // Long position from earlier
-        let pos = make_position("dt", Direction::Long, dec!(11000000));
+        // Long position: entry=10000000, SL=9800000 → sl_distance=200000.
+        // Drop close=10500000 → unrealized=500000 >= 200000 (1R passes).
+        // Exit channel low (10 bars of lows=10950000) = 10950000.
+        // 10500000 < 10950000 → trailing break fires.
+        let pos = make_position_with_sl("dt", Direction::Long, dec!(10000000), dec!(9800000));
         // Now price drops below the 10-bar low.
         let drop = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));
         // First push the drop into history
@@ -457,5 +479,35 @@ mod tests {
         assert_eq!(exits.len(), 1, "expected trailing channel exit");
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
         assert_eq!(exits[0].close_price, dec!(10500000));
+    }
+
+    /// 1R guard: if unrealized profit < SL distance, the trailing channel
+    /// exit must NOT fire even when close is below the exit-channel low.
+    #[tokio::test]
+    async fn open_positions_no_exit_when_1r_not_reached() {
+        let mut s = DonchianTrendV1::new("dt".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        // 100 bars at 11M; exit channel low = 10950000.
+        for _ in 0..100 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(11000000),
+                    dec!(11050000),
+                    dec!(10950000),
+                ))
+                .await;
+        }
+        // Entry 10800000, SL 10600000 → sl_distance=200000.
+        // Drop close = 10500000 → unrealized = 10500000 - 10800000 = -300000 < 0.
+        // 1R guard fires: no exit even though 10500000 < exit_low=10950000.
+        let pos = make_position_with_sl("dt", Direction::Long, dec!(10800000), dec!(10600000));
+        let drop = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));
+        let _ = s.on_price(&drop).await;
+        let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
+        assert!(
+            exits.is_empty(),
+            "1R not reached → no trailing exit, got {} exits",
+            exits.len()
+        );
     }
 }
