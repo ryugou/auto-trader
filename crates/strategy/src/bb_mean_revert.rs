@@ -244,10 +244,10 @@ impl Strategy for BbMeanRevertV1 {
                 continue;
             }
 
-            // 1R minimum: don't exit until unrealized profit >= SL distance.
-            // This guarantees R:R >= 1:1 structurally — without this guard,
-            // the BB midline exit fires before the trade has moved 1× the SL
-            // distance, making R:R < 1 by design.
+            // 1R minimum: don't emit the strategy's mean-reversion exit until
+            // unrealized profit >= SL distance. Only affects this exit path;
+            // other mechanisms (e.g. time-limit close, SL hit) may still close
+            // before 1R.
             let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
             let unrealized = match pos.trade.direction {
                 Direction::Long => close - pos.trade.entry_price,
@@ -481,22 +481,18 @@ mod tests {
                 ))
                 .await;
         }
-        // Long position: entry=9800000, SL=9600000 → sl_distance=200000.
-        // Close=9900000 → unrealized=100000 < 200000 (hasn't reached 1R).
-        // Price 9900000 < SMA20 10000000 so mean_reached is false anyway,
-        // but even if we use close=10000000 (mean reached), 1R guard fires.
+        // Entry 9900000, SL 9700000 → sl_distance=200000.
+        // Close 10050000 → unrealized=150000 < 200000 (1R not reached).
+        // Close 10050000 >= SMA20 10000000 → mean_reached IS true.
+        // But 1R guard prevents exit.
         let pos = make_position_with_sl(
             "bb",
             "FX_BTC_JPY",
             Direction::Long,
-            dec!(9800000),
-            dec!(9600000),
+            dec!(9900000),
+            dec!(9700000),
         );
-        // close=10000000 satisfies mean_reached (Long: close >= middle=10M)
-        // but unrealized=200000 is NOT strictly > sl_distance=200000 (equal).
-        // The guard is `unrealized < sl_distance`, so equal passes.
-        // Use close=9950000: unrealized=150000 < sl_distance=200000 → no exit.
-        let event = make_event("FX_BTC_JPY", dec!(9950000), dec!(9960000), dec!(9940000));
+        let event = make_event("FX_BTC_JPY", dec!(10050000), dec!(10060000), dec!(10040000));
         let exits = s
             .on_open_positions(std::slice::from_ref(&pos), &event)
             .await;

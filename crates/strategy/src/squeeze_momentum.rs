@@ -349,8 +349,8 @@ impl Strategy for SqueezeMomentumV1 {
                 continue;
             }
 
-            // 1R minimum: don't activate Chandelier trailing until
-            // unrealized profit >= SL distance. Ensures R:R >= 1:1.
+            // 1R minimum for this trailing rule: don't activate the
+            // Chandelier exit until unrealized profit >= the initial SL distance.
             let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
             let unrealized = match pos.trade.direction {
                 Direction::Long => close - pos.trade.entry_price,

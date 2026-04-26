@@ -275,10 +275,9 @@ impl Strategy for DonchianTrendV1 {
                 continue;
             }
 
-            // 1R minimum: don't activate trailing exit until unrealized
-            // profit >= SL distance. Without this, the 10-bar trailing
-            // channel fires before the trade has moved 1× the SL distance,
-            // structurally forcing R:R < 1.
+            // 1R minimum for this trailing exit: don't activate until
+            // unrealized profit >= SL distance. Only affects this exit path;
+            // other mechanisms may still close before 1R.
             let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
             let unrealized = match pos.trade.direction {
                 Direction::Long => close - pos.trade.entry_price,
