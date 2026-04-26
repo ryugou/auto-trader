@@ -775,8 +775,9 @@ mod tests {
 
         // Position entered at bar 40 (well past DELAY_BARS=3).
         // Entry 10400000, SL 10200000 → sl_distance=200000.
-        // Drop close = 10350000 → unrealized = 10350000 - 10400000 = -50000 < 0.
-        // 1R guard fires: no exit despite Chandelier break.
+        // Close 10450000 → unrealized = 10450000 - 10400000 = 50000 (0 < 50000 < 200000).
+        // Chandelier stop ≈ 10465000 (highest_high - ATR×3).
+        // 10450000 < 10465000 → trail_break=true, but 50000 < 200000 → no exit.
         let entry_ts = base_ts + Duration::hours(40);
         let pos = make_position_with_sl(
             "sq",
@@ -786,13 +787,13 @@ mod tests {
             entry_ts,
         );
 
-        // Drop is still below Chandelier stop but unrealized is negative.
+        // Drop below Chandelier stop but unrealized < 1R: 1R guard blocks exit.
         let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
-            dec!(10350000),
-            dec!(10400000),
-            dec!(10300000),
+            dec!(10450000),
+            dec!(10470000),
+            dec!(10430000),
             drop_ts,
         );
         let _ = s.on_price(&drop).await;

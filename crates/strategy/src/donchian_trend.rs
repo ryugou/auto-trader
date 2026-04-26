@@ -497,10 +497,11 @@ mod tests {
                 .await;
         }
         // Entry 10800000, SL 10600000 → sl_distance=200000.
-        // Drop close = 10500000 → unrealized = 10500000 - 10800000 = -300000 < 0.
-        // 1R guard fires: no exit even though 10500000 < exit_low=10950000.
+        // Close 10900000 → unrealized = 10900000 - 10800000 = 100000 (0 < 100000 < 200000).
+        // 10900000 < exit_low=10950000, so trailing would fire without guard.
+        // 1R guard: 100000 < 200000 → no exit.
         let pos = make_position_with_sl("dt", Direction::Long, dec!(10800000), dec!(10600000));
-        let drop = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));
+        let drop = make_event("FX_BTC_JPY", dec!(10900000), dec!(10950000), dec!(10850000));
         let _ = s.on_price(&drop).await;
         let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
         assert!(
