@@ -37,7 +37,7 @@ const SL_CAP: Decimal = dec!(0.05);
 /// value does not need manual adjustment when leverage changes.
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade.
-const ALLOCATION_CAP: Decimal = dec!(0.50);
+const ALLOCATION_CAP: Decimal = dec!(1.00);
 /// This strategy uses 1H candles, same as baseline donchian_trend_v1.
 const TIMEFRAME: &str = "H1";
 
@@ -407,9 +407,9 @@ mod tests {
             "ATR-based SL must be in (0, SL_CAP=5%], got {}",
             sig.stop_loss_pct
         );
-        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        // Risk-linked allocation: at most ALLOCATION_CAP (100%).
         assert!(sig.allocation_pct > Decimal::ZERO);
-        assert!(sig.allocation_pct <= dec!(0.50));
+        assert!(sig.allocation_pct <= dec!(1.00));
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
     }
