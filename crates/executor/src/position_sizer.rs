@@ -4,16 +4,21 @@ use std::collections::HashMap;
 
 /// Position sizer: converts Signal.allocation_pct → concrete quantity.
 ///
-/// This sizer enforces a TARGET_RISK_PCT target (2% account risk per trade)
-/// by computing risk-adjusted allocation based on stop-loss and leverage.
-/// Strategies provide stop_loss_pct and an aggressiveness cap (allocation_pct),
-/// and the sizer computes the actual allocation as:
-///   risk_alloc = min(TARGET_RISK_PCT / (stop_loss_pct × leverage), allocation_pct)
+/// Sizing strategy: **full-bet within no-liquidation constraint**.
+/// The maximum position size is capped so that a SL hit does NOT
+/// exceed the account balance, with a maintenance-margin buffer to
+/// ensure the SL fires before the exchange's forced liquidation.
 ///
-/// This ensures that actual account risk = balance × leverage × risk_alloc × stop_loss_pct
-/// is always ≤ balance × TARGET_RISK_PCT, regardless of leverage.
+///   max_alloc = (1 - MAINTENANCE_MARGIN_RATE) / (leverage × stop_loss_pct)
+///   risk_alloc = min(max_alloc, allocation_pct)
 ///
-/// The sizer then applies leverage, divides by price, and rounds to min_lot.
+/// Example: leverage=2, SL=1.5%, maintenance=50%
+///   max_alloc = 0.5 / (2 × 0.015) = 16.67 → capped by allocation_pct (1.0)
+///   → uses full balance (allocation = 1.0)
+///
+/// This means the account is "all-in" on every trade, but the SL
+/// always fires before liquidation. Risk per trade = SL% × leverage
+/// of the full balance.
 pub struct PositionSizer {
     min_order_sizes: HashMap<Pair, Decimal>,
 }
@@ -43,8 +48,10 @@ impl PositionSizer {
         allocation_pct: Decimal,
         stop_loss_pct: Decimal,
     ) -> Option<Decimal> {
-        // 2% actual account risk per trade
-        let target_risk_pct = Decimal::new(2, 2);
+        // bitFlyer CFD maintenance margin rate = 50%. The position must
+        // be sized so that a SL hit leaves enough equity above this
+        // threshold — i.e., the SL fires before forced liquidation.
+        let maintenance_margin_rate = Decimal::new(5, 1); // 0.50
 
         if balance <= Decimal::ZERO
             || entry_price <= Decimal::ZERO
@@ -56,12 +63,16 @@ impl PositionSizer {
             return None;
         }
 
-        // Risk-adjusted allocation: ensure actual risk ≤ target_risk_pct
-        // Actual risk at SL hit = balance × leverage × risk_alloc × stop_loss_pct
-        // We want: balance × leverage × risk_alloc × stop_loss_pct ≤ balance × target_risk_pct
-        // So: risk_alloc ≤ target_risk_pct / (leverage × stop_loss_pct)
-        // But also cap by the strategy's aggressiveness (allocation_pct)
-        let risk_alloc = (target_risk_pct / (leverage * stop_loss_pct)).min(allocation_pct);
+        // Max allocation so SL fires before liquidation:
+        //   SL loss = balance × leverage × alloc × stop_loss_pct
+        //   Must be ≤ balance × (1 - maintenance_margin_rate)
+        //   → alloc ≤ (1 - maintenance_margin_rate) / (leverage × stop_loss_pct)
+        //
+        // For typical values (leverage=2, SL=1.5%, maint=50%):
+        //   max_alloc = 0.5 / 0.03 = 16.67 → capped at allocation_pct (1.0)
+        //   → full-bet, SL loss = 3% of balance (well within margin)
+        let max_alloc = (Decimal::ONE - maintenance_margin_rate) / (leverage * stop_loss_pct);
+        let risk_alloc = max_alloc.min(allocation_pct);
 
         // Mechanical sizing: apply leverage and risk-adjusted allocation, divide by price.
         let raw_qty = balance * leverage * risk_alloc / entry_price;
@@ -119,9 +130,9 @@ mod tests {
 
     #[test]
     fn risk_adjustment_caps_high_leverage() {
-        // 100k balance × 10x lev × SL=2% → risk_alloc = min(2% / (10×2%), 1.0) = min(0.1, 1.0) = 0.1
-        // 100k × 10 × 0.1 / 10M = 0.01 BTC
-        // Actual risk = 100k × 10 × 0.1 × 2% = 2k (2% of balance)
+        // 100k balance × 10x lev × SL=2% → risk_alloc = min(0.5 / (10×2%), 1.0) = min(2.5, 1.0) = 1.0
+        // 100k × 10 × 1.0 / 10M = 0.1 BTC
+        // Actual risk = 100k × 10 × 1.0 × 2% = 20k (20% of balance, but SL fires before liquidation)
         let qty = btc_sizer().calculate_quantity(
             &Pair::new("FX_BTC_JPY"),
             dec!(100000),
@@ -130,7 +141,7 @@ mod tests {
             dec!(1.0),
             dec!(0.02),
         );
-        assert_eq!(qty, Some(dec!(0.01)));
+        assert_eq!(qty, Some(dec!(0.1)));
     }
 
     #[test]
@@ -151,8 +162,8 @@ mod tests {
 
     #[test]
     fn truncates_to_min_lot_multiple() {
-        // 30k × 2x × SL=2% → risk_alloc = min(2% / (2×2%), 0.9) = min(0.5, 0.9) = 0.5
-        // 30k × 2 × 0.5 / 11M ≈ 0.00272 → truncated to 0.002 BTC
+        // 30k × 2x × SL=2% → risk_alloc = min(0.5 / (2×2%), 0.9) = min(12.5, 0.9) = 0.9
+        // 30k × 2 × 0.9 / 11M ≈ 0.004909 → truncated to 0.004 BTC
         let qty = btc_sizer().calculate_quantity(
             &Pair::new("FX_BTC_JPY"),
             dec!(30000),
@@ -161,7 +172,7 @@ mod tests {
             dec!(0.9),
             dec!(0.02),
         );
-        assert_eq!(qty, Some(dec!(0.002)));
+        assert_eq!(qty, Some(dec!(0.004)));
     }
 
     #[test]
@@ -247,10 +258,10 @@ mod tests {
     fn the_30k_donchian_case_with_proper_risk_limiting() {
         // The original bug: 30k account, BTC ~11M, donchian fires, SL=2%
         // With 100% allocation cap and 2x leverage:
-        //   risk_alloc = min(2% / (2×2%), 1.0) = min(0.5, 1.0) = 0.5
-        //   qty = 30000 × 2 × 0.5 / 11042347 ≈ 0.002718
-        //   truncated to 0.002 BTC
-        // Actual risk = 30k × 2 × 0.5 × 2% = 600 JPY (2% of balance)
+        //   risk_alloc = min(0.5 / (2×2%), 1.0) = min(12.5, 1.0) = 1.0
+        //   qty = 30000 × 2 × 1.0 / 11042347 ≈ 0.005430
+        //   truncated to 0.005 BTC
+        // Actual risk = 30k × 2 × 1.0 × 2% = 1200 JPY (4% of balance, but SL fires before liquidation)
         let qty = btc_sizer().calculate_quantity(
             &Pair::new("FX_BTC_JPY"),
             dec!(30000),
@@ -259,6 +270,6 @@ mod tests {
             dec!(1.0),
             dec!(0.02),
         );
-        assert_eq!(qty, Some(dec!(0.002)));
+        assert_eq!(qty, Some(dec!(0.005)));
     }
 }
