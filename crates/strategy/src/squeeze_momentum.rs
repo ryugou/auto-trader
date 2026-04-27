@@ -50,7 +50,9 @@
 //! crashes, breakouts), expects ~30% win rate but R:R 1:3+ on winners.
 
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
+use auto_trader_core::strategy::{
+    ExitSignal, MacroUpdate, Strategy, StrategyExitReason, has_reached_one_r,
+};
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
@@ -351,12 +353,12 @@ impl Strategy for SqueezeMomentumV1 {
 
             // 1R minimum for this trailing rule: don't activate the
             // Chandelier exit until unrealized profit >= the initial SL distance.
-            let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
-            let unrealized = match pos.trade.direction {
-                Direction::Long => close - pos.trade.entry_price,
-                Direction::Short => pos.trade.entry_price - close,
-            };
-            if unrealized < sl_distance {
+            if !has_reached_one_r(
+                &pos.trade.direction,
+                pos.trade.entry_price,
+                pos.trade.stop_loss,
+                close,
+            ) {
                 continue;
             }
 

@@ -35,7 +35,9 @@
 //! ~40% win rate at R:R ~1:2 or better.
 
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
+use auto_trader_core::strategy::{
+    ExitSignal, MacroUpdate, Strategy, StrategyExitReason, has_reached_one_r,
+};
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use rust_decimal::Decimal;
@@ -278,12 +280,12 @@ impl Strategy for DonchianTrendV1 {
             // 1R minimum for this trailing exit: don't activate until
             // unrealized profit >= SL distance. Only affects this exit path;
             // other mechanisms may still close before 1R.
-            let sl_distance = (pos.trade.entry_price - pos.trade.stop_loss).abs();
-            let unrealized = match pos.trade.direction {
-                Direction::Long => close - pos.trade.entry_price,
-                Direction::Short => pos.trade.entry_price - close,
-            };
-            if unrealized < sl_distance {
+            if !has_reached_one_r(
+                &pos.trade.direction,
+                pos.trade.entry_price,
+                pos.trade.stop_loss,
+                close,
+            ) {
                 continue;
             }
 
@@ -478,6 +480,34 @@ mod tests {
         assert_eq!(exits.len(), 1, "expected trailing channel exit");
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
         assert_eq!(exits[0].close_price, dec!(10500000));
+    }
+
+    #[tokio::test]
+    async fn open_positions_short_exits_on_trailing_after_1r() {
+        let mut s = DonchianTrendV1::new("dt".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        // 100 bars at 11M. Exit channel high (10 bars of highs=11050000) = 11050000.
+        for _ in 0..100 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(11000000),
+                    dec!(11050000),
+                    dec!(10950000),
+                ))
+                .await;
+        }
+        // Short entry at 11300000, SL at 11500000 → sl_distance=200000.
+        // Spike close at 11100000: unrealized=11300000-11100000=200000 >= 200000 (1R boundary, passes).
+        // 11100000 > exit_high=11050000 → trailing break for Short → exit.
+        let pos = make_position_with_sl("dt", Direction::Short, dec!(11300000), dec!(11500000));
+        let spike = make_event("FX_BTC_JPY", dec!(11100000), dec!(11150000), dec!(11050000));
+        let _ = s.on_price(&spike).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &spike)
+            .await;
+        assert_eq!(exits.len(), 1, "expected trailing channel exit for Short");
+        assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
+        assert_eq!(exits[0].close_price, dec!(11100000));
     }
 
     /// 1R guard: if unrealized profit < SL distance, the trailing channel
