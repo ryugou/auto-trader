@@ -23,6 +23,7 @@ impl std::fmt::Display for Pair {
 pub enum Exchange {
     Oanda,
     BitflyerCfd,
+    GmoFx,
 }
 
 impl Exchange {
@@ -30,6 +31,7 @@ impl Exchange {
         match self {
             Exchange::Oanda => "oanda",
             Exchange::BitflyerCfd => "bitflyer_cfd",
+            Exchange::GmoFx => "gmo_fx",
         }
     }
 }
@@ -259,12 +261,15 @@ mod tests {
         assert_eq!(json, r#""bitflyer_cfd""#);
         let json = serde_json::to_string(&Exchange::Oanda).unwrap();
         assert_eq!(json, r#""oanda""#);
+        let json = serde_json::to_string(&Exchange::GmoFx).unwrap();
+        assert_eq!(json, r#""gmo_fx""#);
     }
 
     #[test]
     fn exchange_display() {
         assert_eq!(Exchange::Oanda.as_str(), "oanda");
         assert_eq!(Exchange::BitflyerCfd.as_str(), "bitflyer_cfd");
+        assert_eq!(Exchange::GmoFx.as_str(), "gmo_fx");
     }
 
     #[test]

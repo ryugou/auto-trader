@@ -32,6 +32,7 @@ fn exchange_from_str(s: &str) -> Option<Exchange> {
     match s {
         "oanda" => Some(Exchange::Oanda),
         "bitflyer_cfd" => Some(Exchange::BitflyerCfd),
+        "gmo_fx" => Some(Exchange::GmoFx),
         _ => None,
     }
 }
@@ -556,6 +557,38 @@ async fn main() -> anyhow::Result<()> {
                 pair.0
             );
         }
+
+        // FX: GmoFx. Load M5 candle history so strategies start with a warm
+        // indicator cache after restart (mirrors the OANDA warmup above).
+        for pair in &fx_pairs_for_warmup {
+            let candles = load_warmup_history(
+                &pool,
+                ExchangeTy::GmoFx.as_str(),
+                &pair.0,
+                FX_TIMEFRAME,
+                WARMUP_LIMIT,
+            )
+            .await;
+            if candles.is_empty() {
+                continue;
+            }
+            let n = candles.len();
+            let events: Vec<PriceEvent> = candles
+                .into_iter()
+                .map(|c| PriceEvent {
+                    pair: c.pair.clone(),
+                    exchange: ExchangeTy::GmoFx,
+                    timestamp: c.timestamp,
+                    candle: c,
+                    indicators: StdHashMap::new(),
+                })
+                .collect();
+            engine.warmup(&events).await;
+            tracing::info!(
+                "strategy warmup: fed {n} gmo_fx {FX_TIMEFRAME} candles for {}",
+                pair.0
+            );
+        }
     }
 
     // Collect actually registered strategy names for paper_account validation.
@@ -717,6 +750,32 @@ async fn main() -> anyhow::Result<()> {
                 std::mem::take(&mut bitflyer_closes_seed),
             );
             feeds.insert(Exchange::BitflyerCfd, Box::new(bf_feed));
+        }
+    }
+
+    // GMO Coin FX feed — always registered when FX pairs are configured.
+    // Uses the Public REST API (no auth required) to poll ticker prices every
+    // 5 seconds, building M5 + H1 candles via CandleBuilder.
+    {
+        let gmo_fx_pairs: Vec<Pair> = if !config.pairs.fx.is_empty() {
+            config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
+        } else {
+            Vec::new()
+        };
+        if !gmo_fx_pairs.is_empty() {
+            for p in &gmo_fx_pairs {
+                expected_feeds.push(crate::price_store::FeedKey::new(
+                    auto_trader_core::types::Exchange::GmoFx,
+                    p.clone(),
+                ));
+            }
+            let gmo_feed =
+                auto_trader_market::gmo_fx::GmoFxFeed::new(gmo_fx_pairs.clone(), FX_TIMEFRAME)
+                    .with_db(pool.clone());
+            feeds.insert(Exchange::GmoFx, Box::new(gmo_feed));
+            tracing::info!("GMO FX feed registered for {} pair(s)", gmo_fx_pairs.len());
+        } else {
+            tracing::info!("no FX pairs configured, GMO FX feed disabled");
         }
     }
     // Build the price store once all monitor setup has had a chance
