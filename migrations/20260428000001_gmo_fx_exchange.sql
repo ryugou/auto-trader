@@ -17,7 +17,7 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'Cannot migrate FX account to gmo_fx: open trades exist';
     END IF;
-END
+END;
 $$;
 
 UPDATE trading_accounts

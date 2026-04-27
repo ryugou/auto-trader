@@ -102,6 +102,9 @@ impl MarketFeed for GmoFxFeed {
         let symbols: std::collections::HashSet<String> = pair_map.keys().cloned().collect();
 
         let mut interval = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
+        // Prevent burst catch-up if a poll takes longer than the interval
+        // (e.g. slow HTTP response). Delay shifts subsequent ticks forward.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             interval.tick().await;
