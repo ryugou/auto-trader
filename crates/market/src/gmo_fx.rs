@@ -90,9 +90,16 @@ impl MarketFeed for GmoFxFeed {
             }
         }
 
-        // Track symbols we care about (must match GMO API's symbol format, e.g. "USD_JPY").
-        let symbols: std::collections::HashSet<String> =
-            self.pairs.iter().map(|p| p.0.clone()).collect();
+        // Precompute Pair + FeedKey per symbol to avoid per-tick allocations.
+        let pair_map: HashMap<String, (Pair, FeedKey)> = self
+            .pairs
+            .iter()
+            .map(|p| {
+                let key = FeedKey::new(Exchange::GmoFx, p.clone());
+                (p.0.clone(), (p.clone(), key))
+            })
+            .collect();
+        let symbols: std::collections::HashSet<String> = pair_map.keys().cloned().collect();
 
         let mut interval = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
 
@@ -224,13 +231,10 @@ impl MarketFeed for GmoFxFeed {
                 };
                 let ts = ts.with_timezone(&chrono::Utc);
                 let mid = (bid + ask) / Decimal::from(2);
-                let pair = Pair::new(&item.symbol);
-
-                // Update PriceStore with the latest tick.
-                let feed_key = FeedKey::new(Exchange::GmoFx, pair.clone());
+                let (_pair, feed_key) = &pair_map[&item.symbol];
                 price_store
                     .update(
-                        feed_key,
+                        feed_key.clone(),
                         LatestTick {
                             price: mid,
                             best_bid: Some(bid),
