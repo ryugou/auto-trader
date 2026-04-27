@@ -759,11 +759,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // GMO Coin FX feed — always registered when FX pairs are configured.
-    // GMO FX feed: only register when OANDA monitor is NOT active (mutually
-    // exclusive to avoid duplicate FX PriceEvents that double-trigger signals).
+    // GMO FX feed: always registered when FX pairs are configured.
     // Uses the Public REST API (no auth required) to poll ticker prices every
     // 5 seconds, building M5 + H1 candles via CandleBuilder.
-    if !feeds.contains_key(&Exchange::Oanda) {
+    // Even if OANDA is also active, GMO uses Exchange::GmoFx (separate key)
+    // so PriceEvents don't duplicate — strategies filter by account.exchange.
+    {
         let gmo_fx_pairs: Vec<Pair> = if !config.pairs.active.is_empty() {
             config.pairs.active.iter().map(|s| Pair::new(s)).collect()
         } else {
