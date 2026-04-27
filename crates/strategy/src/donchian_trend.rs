@@ -64,7 +64,7 @@ const SL_CAP: Decimal = dec!(0.05);
 /// value does not need manual adjustment when leverage changes.
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade.
-const ALLOCATION_CAP: Decimal = dec!(0.50);
+const ALLOCATION_CAP: Decimal = dec!(1.00);
 const HISTORY_LEN: usize = 200;
 /// This strategy uses 1H candles (trend-following; M5 produced excessive
 /// false breakouts on a daily-bar-designed logic).
@@ -415,9 +415,9 @@ mod tests {
         // ATR-based SL: positive and at most SL_CAP (5%).
         assert!(sig.stop_loss_pct > Decimal::ZERO);
         assert!(sig.stop_loss_pct <= dec!(0.05));
-        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        // Risk-linked allocation: at most ALLOCATION_CAP (100%).
         assert!(sig.allocation_pct > Decimal::ZERO);
-        assert!(sig.allocation_pct <= dec!(0.50));
+        assert!(sig.allocation_pct <= dec!(1.00));
         // Turtle has NO fixed TP — dynamic exit strategy uses None
         assert!(sig.take_profit_pct.is_none());
     }
@@ -445,9 +445,9 @@ mod tests {
             "ATR-based SL must be in (0, SL_CAP=5%], got {}",
             sig.stop_loss_pct
         );
-        // Risk-linked allocation: positive and at most ALLOCATION_CAP (50%).
+        // Risk-linked allocation: positive and at most ALLOCATION_CAP (100%).
         assert!(
-            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(0.50),
+            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(1.00),
             "allocation must be in (0, 50%], got {}",
             sig.allocation_pct
         );

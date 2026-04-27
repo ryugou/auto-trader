@@ -280,6 +280,7 @@ fn resolve_exchange_enum(s: &str) -> anyhow::Result<auto_trader_core::types::Exc
     match s {
         "bitflyer_cfd" => Ok(auto_trader_core::types::Exchange::BitflyerCfd),
         "oanda" => Ok(auto_trader_core::types::Exchange::Oanda),
+        "gmo_fx" => Ok(auto_trader_core::types::Exchange::GmoFx),
         other => anyhow::bail!("unknown exchange: {}", other),
     }
 }
@@ -321,6 +322,7 @@ mod tests {
     fn resolve_exchange_enum_known() {
         assert!(resolve_exchange_enum("bitflyer_cfd").is_ok());
         assert!(resolve_exchange_enum("oanda").is_ok());
+        assert!(resolve_exchange_enum("gmo_fx").is_ok());
     }
 
     #[test]

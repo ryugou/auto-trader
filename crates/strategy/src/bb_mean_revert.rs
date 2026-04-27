@@ -69,7 +69,7 @@ const SL_CAP: Decimal = dec!(0.03);
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
 /// Maximum allocation per trade. Prevents full account deployment when
 /// ATR SL is very small.
-const ALLOCATION_CAP: Decimal = dec!(0.50);
+const ALLOCATION_CAP: Decimal = dec!(1.00);
 const TIME_LIMIT_HOURS: i64 = 24;
 /// This strategy uses M5 candles (scalping / mean-reversion).
 const TIMEFRAME: &str = "M5";
@@ -388,9 +388,9 @@ mod tests {
         // ATR-based SL: must be positive and at most SL_CAP (3%).
         assert!(sig.stop_loss_pct > Decimal::ZERO);
         assert!(sig.stop_loss_pct <= dec!(0.03));
-        // Risk-linked allocation: at most ALLOCATION_CAP (50%).
+        // Risk-linked allocation: at most ALLOCATION_CAP (100%).
         assert!(sig.allocation_pct > Decimal::ZERO);
-        assert!(sig.allocation_pct <= dec!(0.50));
+        assert!(sig.allocation_pct <= dec!(1.00));
         // Dynamic exit strategy → TP is None
         assert!(sig.take_profit_pct.is_none());
         // 24h fail-safe must be set
@@ -421,9 +421,9 @@ mod tests {
             "ATR-based SL must be in (0, SL_CAP=3%], got {}",
             sig.stop_loss_pct
         );
-        // Risk-linked allocation: positive and at most ALLOCATION_CAP (50%).
+        // Risk-linked allocation: positive and at most ALLOCATION_CAP (100%).
         assert!(
-            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(0.50),
+            sig.allocation_pct > Decimal::ZERO && sig.allocation_pct <= dec!(1.00),
             "allocation must be in (0, 50%], got {}",
             sig.allocation_pct
         );
