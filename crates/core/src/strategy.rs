@@ -1,5 +1,6 @@
 use crate::event::PriceEvent;
-use crate::types::{ExitReason, Position, Signal};
+use crate::types::{Direction, ExitReason, Position, Signal};
+use rust_decimal::Decimal;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -66,6 +67,44 @@ pub struct ExitSignal {
     pub trade_id: Uuid,
     pub reason: StrategyExitReason,
     pub close_price: rust_decimal::Decimal,
+}
+
+/// Check if unrealized profit has reached 1R (= initial SL distance).
+/// Used by strategy exit logic to prevent exiting before the trade has
+/// moved at least as far as the stop-loss in the profit direction.
+///
+/// Defensive: if SL or entry is invalid (legacy row, DB corruption),
+/// returns `true` to allow exits to proceed — don't block normal exit
+/// logic due to bad data.
+pub fn has_reached_one_r(
+    direction: &Direction,
+    entry_price: Decimal,
+    stop_loss: Decimal,
+    current_price: Decimal,
+) -> bool {
+    // Defensive: if SL or entry is invalid (legacy row, DB corruption,
+    // SL on wrong side of entry), don't block exits — return true to
+    // let normal exit logic proceed.
+    if entry_price <= Decimal::ZERO || stop_loss <= Decimal::ZERO {
+        return true;
+    }
+    // SL on wrong side check: Long should have SL < entry, Short SL > entry.
+    let sl_on_correct_side = match direction {
+        Direction::Long => stop_loss < entry_price,
+        Direction::Short => stop_loss > entry_price,
+    };
+    if !sl_on_correct_side {
+        return true;
+    }
+    let sl_distance = (entry_price - stop_loss).abs();
+    if sl_distance.is_zero() {
+        return true;
+    }
+    let unrealized = match direction {
+        Direction::Long => current_price - entry_price,
+        Direction::Short => entry_price - current_price,
+    };
+    unrealized >= sl_distance
 }
 
 #[async_trait::async_trait]

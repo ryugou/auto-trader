@@ -36,7 +36,9 @@
 //! win rate at R:R ~1:1.2.
 
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
+use auto_trader_core::strategy::{
+    ExitSignal, MacroUpdate, Strategy, StrategyExitReason, has_reached_one_r,
+};
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
@@ -243,6 +245,20 @@ impl Strategy for BbMeanRevertV1 {
             if pos.trade.pair.0 != key {
                 continue;
             }
+
+            // 1R minimum: don't emit the strategy's mean-reversion exit until
+            // unrealized profit >= SL distance. Only affects this exit path;
+            // other mechanisms (e.g. time-limit close, SL hit) may still close
+            // before 1R.
+            if !has_reached_one_r(
+                &pos.trade.direction,
+                pos.trade.entry_price,
+                pos.trade.stop_loss,
+                close,
+            ) {
+                continue; // Haven't reached 1R yet — let it run or hit SL.
+            }
+
             // Mean-reversion target reached: long that retraced up to
             // SMA20 or short that retraced down to SMA20.
             let mean_reached = match pos.trade.direction {
@@ -290,7 +306,13 @@ mod tests {
         }
     }
 
-    fn make_position(strategy: &str, pair: &str, direction: Direction, entry: Decimal) -> Position {
+    fn make_position_with_sl(
+        strategy: &str,
+        pair: &str,
+        direction: Direction,
+        entry: Decimal,
+        stop_loss: Decimal,
+    ) -> Position {
         Position {
             trade: Trade {
                 id: Uuid::new_v4(),
@@ -301,7 +323,7 @@ mod tests {
                 direction,
                 entry_price: entry,
                 exit_price: None,
-                stop_loss: dec!(0),
+                stop_loss,
                 take_profit: None,
                 quantity: dec!(0.001),
                 leverage: dec!(2),
@@ -421,8 +443,15 @@ mod tests {
                 ))
                 .await;
         }
-        // Long position bought at 9.5M
-        let pos = make_position("bb", "FX_BTC_JPY", Direction::Long, dec!(9500000));
+        // Long position bought at 9.5M with SL at 9.3M (sl_distance=200K).
+        // Unrealized at close=10M: 500K >= 200K → 1R guard passes.
+        let pos = make_position_with_sl(
+            "bb",
+            "FX_BTC_JPY",
+            Direction::Long,
+            dec!(9500000),
+            dec!(9300000),
+        );
         // Mark price now back at 10M (≥ middle SMA20 = 10M) → exit
         let event = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
         let exits = s
@@ -432,6 +461,78 @@ mod tests {
         assert_eq!(exits[0].trade_id, pos.trade.id);
         assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);
         assert_eq!(exits[0].close_price, dec!(10000000));
+    }
+
+    /// 1R guard: if unrealized profit < SL distance, the BB mean-reached
+    /// exit must NOT fire even when price is at or above SMA20.
+    #[tokio::test]
+    async fn open_positions_no_exit_when_1r_not_reached() {
+        let mut s = BbMeanRevertV1::new("bb".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        // Warm history around 10M — SMA20 = 10M.
+        for _ in 0..30 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(10000000),
+                    dec!(10005000),
+                    dec!(9995000),
+                ))
+                .await;
+        }
+        // Entry 9900000, SL 9700000 → sl_distance=200000.
+        // Close 10050000 → unrealized=150000 < 200000 (1R not reached).
+        // Close 10050000 >= SMA20 10000000 → mean_reached IS true.
+        // But 1R guard prevents exit.
+        let pos = make_position_with_sl(
+            "bb",
+            "FX_BTC_JPY",
+            Direction::Long,
+            dec!(9900000),
+            dec!(9700000),
+        );
+        let event = make_event("FX_BTC_JPY", dec!(10050000), dec!(10060000), dec!(10040000));
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &event)
+            .await;
+        assert!(
+            exits.is_empty(),
+            "1R not reached → no exit, got {} exits",
+            exits.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn open_positions_short_exits_at_mean_after_1r() {
+        let mut s = BbMeanRevertV1::new("bb".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        // Warm history around 10M → SMA20 ≈ 10M.
+        for _ in 0..30 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(10000000),
+                    dec!(10005000),
+                    dec!(9995000),
+                ))
+                .await;
+        }
+        // Short entry at 10300000, SL at 10500000 → sl_distance=200000.
+        // Close at 9900000: unrealized=10300000-9900000=400000 >= 200000 (1R passes).
+        // 9900000 <= SMA20 10000000 → mean_reached for Short = true → exit.
+        let pos = make_position_with_sl(
+            "bb",
+            "FX_BTC_JPY",
+            Direction::Short,
+            dec!(10300000),
+            dec!(10500000),
+        );
+        let event = make_event("FX_BTC_JPY", dec!(9900000), dec!(9950000), dec!(9850000));
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &event)
+            .await;
+        assert_eq!(exits.len(), 1, "expected 1 mean-reached exit for Short");
+        assert_eq!(exits[0].trade_id, pos.trade.id);
+        assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);
+        assert_eq!(exits[0].close_price, dec!(9900000));
     }
 
     #[tokio::test]
@@ -447,7 +548,13 @@ mod tests {
                 ))
                 .await;
         }
-        let pos = make_position("not_bb", "FX_BTC_JPY", Direction::Long, dec!(9500000));
+        let pos = make_position_with_sl(
+            "not_bb",
+            "FX_BTC_JPY",
+            Direction::Long,
+            dec!(9500000),
+            dec!(9400000),
+        );
         let event = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
         let exits = s.on_open_positions(&[pos], &event).await;
         assert!(exits.is_empty());

@@ -16,7 +16,9 @@
 //! interactions; the LLM evolution targets channel shape first.
 
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
+use auto_trader_core::strategy::{
+    ExitSignal, MacroUpdate, Strategy, StrategyExitReason, has_reached_one_r,
+};
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use rust_decimal::Decimal;
@@ -249,6 +251,19 @@ impl Strategy for DonchianTrendEvolveV1 {
             if pos.trade.pair.0 != key {
                 continue;
             }
+
+            // 1R minimum for this trailing exit: don't activate until
+            // unrealized profit >= SL distance. Only affects this exit path;
+            // other mechanisms may still close before 1R.
+            if !has_reached_one_r(
+                &pos.trade.direction,
+                pos.trade.entry_price,
+                pos.trade.stop_loss,
+                close,
+            ) {
+                continue;
+            }
+
             let trailing_break = match pos.trade.direction {
                 Direction::Long => close < exit_low,
                 Direction::Short => close > exit_high,
@@ -416,6 +431,10 @@ mod tests {
                 ))
                 .await;
         }
+        // Entry 10000000, SL 9800000 → sl_distance=200000.
+        // Drop close = 10500000 → unrealized=500000 >= 200000 (1R passes).
+        // Exit channel low (10 bars of lows=10950000) = 10950000.
+        // 10500000 < 10950000 → trailing break fires.
         let pos = Position {
             trade: Trade {
                 id: Uuid::new_v4(),
@@ -424,9 +443,9 @@ mod tests {
                 pair: Pair::new("FX_BTC_JPY"),
                 exchange: Exchange::BitflyerCfd,
                 direction: Direction::Long,
-                entry_price: dec!(11000000),
+                entry_price: dec!(10000000),
                 exit_price: None,
-                stop_loss: dec!(0),
+                stop_loss: dec!(9800000),
                 take_profit: None,
                 quantity: dec!(0.001),
                 leverage: dec!(2),
@@ -446,5 +465,118 @@ mod tests {
             .await;
         assert_eq!(exits.len(), 1);
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
+    }
+
+    #[tokio::test]
+    async fn position_short_exits_on_trailing_after_1r() {
+        let mut s = DonchianTrendEvolveV1::new(
+            "dte".to_string(),
+            vec![Pair::new("FX_BTC_JPY")],
+            default_params(),
+        );
+        // 100 bars at 11M. Exit channel high (10 bars of highs=11050000) = 11050000.
+        for _ in 0..100 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(11000000),
+                    dec!(11050000),
+                    dec!(10950000),
+                ))
+                .await;
+        }
+        // Short entry at 11300000, SL at 11500000 → sl_distance=200000.
+        // Spike close at 11100000: unrealized=11300000-11100000=200000 >= 200000 (1R boundary, passes).
+        // 11100000 > exit_high=11050000 → trailing break for Short → exit.
+        let pos = Position {
+            trade: Trade {
+                id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
+                strategy_name: "dte".to_string(),
+                pair: Pair::new("FX_BTC_JPY"),
+                exchange: Exchange::BitflyerCfd,
+                direction: Direction::Short,
+                entry_price: dec!(11300000),
+                exit_price: None,
+                stop_loss: dec!(11500000),
+                take_profit: None,
+                quantity: dec!(0.001),
+                leverage: dec!(2),
+                fees: dec!(0),
+                entry_at: Utc::now(),
+                exit_at: None,
+                pnl_amount: None,
+                exit_reason: None,
+                status: TradeStatus::Open,
+                max_hold_until: None,
+            },
+        };
+        let spike = make_event("FX_BTC_JPY", dec!(11100000), dec!(11150000), dec!(11050000));
+        let _ = s.on_price(&spike).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &spike)
+            .await;
+        assert_eq!(exits.len(), 1, "expected trailing channel exit for Short");
+        assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
+        assert_eq!(exits[0].close_price, dec!(11100000));
+    }
+
+    /// 1R guard: if unrealized profit < SL distance, the trailing channel
+    /// exit must NOT fire even when close is below the exit-channel low.
+    #[tokio::test]
+    async fn position_no_exit_when_1r_not_reached() {
+        let mut s = DonchianTrendEvolveV1::new(
+            "dte".to_string(),
+            vec![Pair::new("FX_BTC_JPY")],
+            default_params(),
+        );
+        // 100 bars at 11M; exit channel low = 10950000.
+        for _ in 0..100 {
+            let _ = s
+                .on_price(&make_event(
+                    "FX_BTC_JPY",
+                    dec!(11000000),
+                    dec!(11050000),
+                    dec!(10950000),
+                ))
+                .await;
+        }
+        // Entry 10800000, SL 10600000 → sl_distance=200000.
+        // Close 10900000 → unrealized = 10900000 - 10800000 = 100000 (0 < 100000 < 200000).
+        // 10900000 < exit_low=10950000, so trailing would fire without guard.
+        // 1R guard: 100000 < 200000 → no exit.
+        let pos = Position {
+            trade: Trade {
+                id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
+                strategy_name: "dte".to_string(),
+                pair: Pair::new("FX_BTC_JPY"),
+                exchange: Exchange::BitflyerCfd,
+                direction: Direction::Long,
+                entry_price: dec!(10800000),
+                exit_price: None,
+                stop_loss: dec!(10600000),
+                take_profit: None,
+                quantity: dec!(0.001),
+                leverage: dec!(2),
+                fees: dec!(0),
+                entry_at: Utc::now(),
+                exit_at: None,
+                pnl_amount: None,
+                exit_reason: None,
+                status: TradeStatus::Open,
+                max_hold_until: None,
+            },
+        };
+        let drop_event = make_event("FX_BTC_JPY", dec!(10900000), dec!(10950000), dec!(10850000));
+        let _ = s.on_price(&drop_event).await;
+        let exits = s
+            .on_open_positions(std::slice::from_ref(&pos), &drop_event)
+            .await;
+        assert!(
+            exits.is_empty(),
+            "1R not reached → no trailing exit, got {} exits",
+            exits.len()
+        );
     }
 }

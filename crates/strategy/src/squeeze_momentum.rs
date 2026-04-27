@@ -50,7 +50,9 @@
 //! crashes, breakouts), expects ~30% win rate but R:R 1:3+ on winners.
 
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::strategy::{ExitSignal, MacroUpdate, Strategy, StrategyExitReason};
+use auto_trader_core::strategy::{
+    ExitSignal, MacroUpdate, Strategy, StrategyExitReason, has_reached_one_r,
+};
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
@@ -349,6 +351,17 @@ impl Strategy for SqueezeMomentumV1 {
                 continue;
             }
 
+            // 1R minimum for this trailing rule: don't activate the
+            // Chandelier exit until unrealized profit >= the initial SL distance.
+            if !has_reached_one_r(
+                &pos.trade.direction,
+                pos.trade.entry_price,
+                pos.trade.stop_loss,
+                close,
+            ) {
+                continue;
+            }
+
             // Chandelier Exit trailing stop.
             let trail_break = match pos.trade.direction {
                 Direction::Long => {
@@ -411,10 +424,11 @@ mod tests {
         make_event_at(pair, close, high, low, Utc::now())
     }
 
-    fn make_position(
+    fn make_position_with_sl(
         strategy: &str,
         direction: Direction,
         entry: Decimal,
+        stop_loss: Decimal,
         entry_at: chrono::DateTime<Utc>,
     ) -> Position {
         Position {
@@ -427,7 +441,7 @@ mod tests {
                 direction,
                 entry_price: entry,
                 exit_price: None,
-                stop_loss: dec!(0),
+                stop_loss,
                 take_profit: None,
                 quantity: dec!(0.001),
                 leverage: dec!(2),
@@ -520,17 +534,26 @@ mod tests {
                 .await;
         }
 
-        // Position entered at bar 40 (10 bars ago → well past DELAY_BARS=3).
-        let entry_ts = base_ts + Duration::hours(40);
-        let pos = make_position("sq", Direction::Long, dec!(10400000), entry_ts);
+        // Position entered at bar 10 (40 bars ago → well past DELAY_BARS=3).
+        // Entry 10100000 (aligned with bar 10 price), SL 9900000 → sl_distance=200000.
+        // At bar 50 (drop close 10350000): unrealized=10350000-10100000=250000 >= 200000 ✓
+        // Chandelier stop ≈ 10465000, and 10350000 < 10465000 ✓
+        let entry_ts = base_ts + Duration::hours(10);
+        let pos = make_position_with_sl(
+            "sq",
+            Direction::Long,
+            dec!(10100000),
+            dec!(9900000),
+            entry_ts,
+        );
 
-        // Sharp drop well below Chandelier stop.
+        // Close in profit above 1R, but below Chandelier stop.
         let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
-            dec!(9000000),
-            dec!(9050000),
-            dec!(8950000),
+            dec!(10350000),
+            dec!(10380000),
+            dec!(10320000),
             drop_ts,
         );
         let _ = s.on_price(&drop).await;
@@ -563,7 +586,13 @@ mod tests {
 
         // Position entered at bar 49 (1 bar ago → within DELAY_BARS=3).
         let entry_ts = base_ts + Duration::hours(49);
-        let pos = make_position("sq", Direction::Long, dec!(10490000), entry_ts);
+        let pos = make_position_with_sl(
+            "sq",
+            Direction::Long,
+            dec!(10490000),
+            dec!(10300000),
+            entry_ts,
+        );
 
         // Drop below Chandelier stop — but still in delay phase.
         let drop_ts = base_ts + Duration::hours(50);
@@ -608,16 +637,25 @@ mod tests {
         // Position entered at bar 47 (exactly 3 bars ago = DELAY_BARS).
         // bars_held = 3 (bars 48, 49, 50 are after entry).
         // `bars_held < DELAY_BARS` is `3 < 3` = false → trailing IS active.
+        // Entry 10200000, SL 10000000 → sl_distance=200000.
+        // At drop (close=10430000): unrealized=10430000-10200000=230000 >= 200000 ✓
+        // Chandelier stop ≈ 10465000, drop close 10430000 < 10465000 ✓
         let entry_ts = base_ts + Duration::hours(47);
-        let pos = make_position("sq", Direction::Long, dec!(10470000), entry_ts);
+        let pos = make_position_with_sl(
+            "sq",
+            Direction::Long,
+            dec!(10200000),
+            dec!(10000000),
+            entry_ts,
+        );
 
-        // Drop below Chandelier stop — should exit (delay phase over).
+        // Close between entry+sl_distance and Chandelier stop: should exit (delay phase over).
         let drop_ts = base_ts + Duration::hours(50);
         let drop = make_event_at(
             "FX_BTC_JPY",
-            dec!(9000000),
-            dec!(9050000),
-            dec!(8950000),
+            dec!(10430000),
+            dec!(10450000),
+            dec!(10410000),
             drop_ts,
         );
         let _ = s.on_price(&drop).await;
@@ -642,7 +680,7 @@ mod tests {
         }
         // Position entered well into the flat history (bar 40).
         let entry_ts = base_ts + Duration::hours(40);
-        let pos = make_position("sq", Direction::Long, p, entry_ts);
+        let pos = make_position_with_sl("sq", Direction::Long, p, p - dec!(100000), entry_ts);
 
         // Test on_open_positions with a FLAT event (still no volatility).
         // ATR on 51 perfectly flat bars = 0, so on_open_positions should
@@ -679,16 +717,26 @@ mod tests {
                 ))
                 .await;
         }
-        // Short position entered at bar 40 (well past delay).
-        let entry_ts = base_ts + Duration::hours(40);
-        let pos = make_position("sq", Direction::Short, dec!(9600000), entry_ts);
+        // Short position entered at bar 10 (40 bars ago → well past delay).
+        // Entry 9900000 (aligned with bar 10 price), SL 10100000 → sl_distance=200000.
+        // At bar 50 (close 9600000): unrealized=9900000-9600000=300000 >= 200000 ✓
+        // Chandelier stop (short) = lowest_low + ATR*3 ≈ 9510000 + 30000 = 9540000.
+        // Close 9600000 > 9540000 → trail_break for short ✓
+        let entry_ts = base_ts + Duration::hours(10);
+        let pos = make_position_with_sl(
+            "sq",
+            Direction::Short,
+            dec!(9900000),
+            dec!(10100000),
+            entry_ts,
+        );
         // Sharp RISE above Chandelier stop (lowest_low + ATR×3).
         let spike_ts = base_ts + Duration::hours(50);
         let spike = make_event_at(
             "FX_BTC_JPY",
-            dec!(11000000),
-            dec!(11050000),
-            dec!(10950000),
+            dec!(9600000),
+            dec!(9650000),
+            dec!(9550000),
             spike_ts,
         );
         let _ = s.on_price(&spike).await;
@@ -701,5 +749,62 @@ mod tests {
             "expected Short chandelier exit on upward break"
         );
         assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
+    }
+
+    /// 1R guard: if unrealized profit < SL distance, the Chandelier exit
+    /// must NOT fire even when delay phase is over and price breaks the
+    /// Chandelier level.
+    #[tokio::test]
+    async fn chandelier_no_exit_when_1r_not_reached() {
+        use chrono::Duration;
+
+        let mut s = SqueezeMomentumV1::new("sq".to_string(), vec![Pair::new("FX_BTC_JPY")]);
+        let base_ts = Utc::now() - Duration::hours(60);
+
+        // Build 50 bars of rising history; ATR ≈ 10000.
+        for i in 0..50 {
+            let ts = base_ts + Duration::hours(i);
+            let p = dec!(10000000) + Decimal::from(i) * dec!(10000);
+            let _ = s
+                .on_price(&make_event_at(
+                    "FX_BTC_JPY",
+                    p,
+                    p + dec!(5000),
+                    p - dec!(5000),
+                    ts,
+                ))
+                .await;
+        }
+
+        // Position entered at bar 40 (well past DELAY_BARS=3).
+        // Entry 10400000, SL 10200000 → sl_distance=200000.
+        // Close 10450000 → unrealized = 10450000 - 10400000 = 50000 (0 < 50000 < 200000).
+        // Chandelier stop ≈ 10465000 (highest_high - ATR×3).
+        // 10450000 < 10465000 → trail_break=true, but 50000 < 200000 → no exit.
+        let entry_ts = base_ts + Duration::hours(40);
+        let pos = make_position_with_sl(
+            "sq",
+            Direction::Long,
+            dec!(10400000),
+            dec!(10200000),
+            entry_ts,
+        );
+
+        // Drop below Chandelier stop but unrealized < 1R: 1R guard blocks exit.
+        let drop_ts = base_ts + Duration::hours(50);
+        let drop = make_event_at(
+            "FX_BTC_JPY",
+            dec!(10450000),
+            dec!(10470000),
+            dec!(10430000),
+            drop_ts,
+        );
+        let _ = s.on_price(&drop).await;
+        let exits = s.on_open_positions(std::slice::from_ref(&pos), &drop).await;
+        assert!(
+            exits.is_empty(),
+            "1R not reached → no Chandelier exit, got {} exits",
+            exits.len()
+        );
     }
 }
