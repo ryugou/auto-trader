@@ -329,8 +329,27 @@ async fn connect_and_stream(
     // Dynamic prefix derived from the primary timeframe (e.g. "m5", "h1").
     let primary_tf_prefix = primary_timeframe.to_lowercase();
 
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
+    // Heartbeat timeout: if no message arrives for this duration, assume
+    // the connection is dead (e.g. stale TCP after WiFi reconnect) and
+    // return an error so the outer loop reconnects. bitFlyer normally
+    // sends ticker updates every few seconds, so 120s silence is abnormal.
+    const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    loop {
+        let msg = match tokio::time::timeout(HEARTBEAT_TIMEOUT, read.next()).await {
+            Ok(Some(msg)) => msg?,
+            Ok(None) => {
+                // Stream ended normally (server closed).
+                return Ok(());
+            }
+            Err(_) => {
+                // No message for HEARTBEAT_TIMEOUT — connection is likely dead.
+                anyhow::bail!(
+                    "no WebSocket message received for {}s, assuming stale connection",
+                    HEARTBEAT_TIMEOUT.as_secs()
+                );
+            }
+        };
         let Message::Text(text) = msg else { continue };
 
         let rpc: JsonRpcMessage = match serde_json::from_str(&text) {
@@ -454,7 +473,6 @@ async fn connect_and_stream(
             }
         }
     }
-    Ok(())
 }
 
 #[async_trait]
