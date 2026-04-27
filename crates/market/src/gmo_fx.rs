@@ -1,7 +1,7 @@
 //! GMO Coin FX Market Feed — REST polling ticker → CandleBuilder.
 //!
 //! Uses the Public API (no auth required) to poll bid/ask prices
-//! at a configurable interval, then builds M5 + H1 candles via
+//! at a fixed 5-second interval, then builds M5 + H1 candles via
 //! CandleBuilder — same pattern as BitflyerMonitor.
 
 use crate::candle_builder::CandleBuilder;
@@ -106,7 +106,13 @@ impl MarketFeed for GmoFxFeed {
 
             // Poll the public ticker endpoint (no auth required).
             let resp = match client.get(format!("{BASE_URL}/v1/ticker")).send().await {
-                Ok(r) => r,
+                Ok(r) => match r.error_for_status() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("GMO FX ticker HTTP error: {e}");
+                        continue;
+                    }
+                },
                 Err(e) => {
                     tracing::warn!("GMO FX ticker poll failed: {e}");
                     continue;
@@ -131,18 +137,80 @@ impl MarketFeed for GmoFxFeed {
                     continue;
                 }
                 if item.status != "OPEN" {
-                    // Market closed (weekend / holiday).
+                    // Market closed (weekend / holiday) — flush any in-progress candle
+                    // so it doesn't linger until next market open (could be days for weekend).
+                    let now = chrono::Utc::now();
+                    if let Some(builder) = builders.get_mut(&item.symbol)
+                        && let Some(candle) = builder.try_complete(now, None, None)
+                    {
+                        if let Some(pool) = &self.pool
+                            && let Err(e) =
+                                auto_trader_db::candles::upsert_candle(pool, &candle).await
+                        {
+                            tracing::warn!("GMO FX: failed to save candle on market close: {e}");
+                        }
+                        let event = PriceEvent {
+                            pair: candle.pair.clone(),
+                            exchange: Exchange::GmoFx,
+                            timestamp: candle.timestamp,
+                            candle,
+                            indicators: HashMap::new(),
+                        };
+                        let _ = price_tx.send(event).await;
+                    }
+                    if let Some(h1_builder) = h1_builders.get_mut(&item.symbol)
+                        && let Some(h1_candle) = h1_builder.try_complete(now, None, None)
+                    {
+                        if let Some(pool) = &self.pool
+                            && let Err(e) =
+                                auto_trader_db::candles::upsert_candle(pool, &h1_candle).await
+                        {
+                            tracing::warn!("GMO FX: failed to save H1 candle on market close: {e}");
+                        }
+                        let h1_event = PriceEvent {
+                            pair: h1_candle.pair.clone(),
+                            exchange: Exchange::GmoFx,
+                            timestamp: h1_candle.timestamp,
+                            candle: h1_candle,
+                            indicators: HashMap::new(),
+                        };
+                        let _ = price_tx.send(h1_event).await;
+                    }
                     continue;
                 }
 
-                let Ok(bid) = Decimal::from_str(&item.bid) else {
-                    continue;
+                let bid = match Decimal::from_str(&item.bid) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "GMO FX: bid parse error for {}: '{}' — {e}",
+                            item.symbol,
+                            item.bid
+                        );
+                        continue;
+                    }
                 };
-                let Ok(ask) = Decimal::from_str(&item.ask) else {
-                    continue;
+                let ask = match Decimal::from_str(&item.ask) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "GMO FX: ask parse error for {}: '{}' — {e}",
+                            item.symbol,
+                            item.ask
+                        );
+                        continue;
+                    }
                 };
-                let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&item.timestamp) else {
-                    continue;
+                let ts = match chrono::DateTime::parse_from_rfc3339(&item.timestamp) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "GMO FX: timestamp parse error for {}: '{}' — {e}",
+                            item.symbol,
+                            item.timestamp
+                        );
+                        continue;
+                    }
                 };
                 let ts = ts.with_timezone(&chrono::Utc);
                 let mid = (bid + ask) / Decimal::from(2);
@@ -169,8 +237,7 @@ impl MarketFeed for GmoFxFeed {
                         builder.on_tick(mid, Decimal::ZERO, ts, Some(bid), Some(ask))
                 {
                     if let Some(pool) = &self.pool
-                        && let Err(e) =
-                            auto_trader_db::candles::upsert_candle(pool, &candle).await
+                        && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
                     {
                         tracing::warn!("GMO FX: failed to save candle: {e}");
                     }

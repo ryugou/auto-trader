@@ -757,10 +757,10 @@ async fn main() -> anyhow::Result<()> {
     // Uses the Public REST API (no auth required) to poll ticker prices every
     // 5 seconds, building M5 + H1 candles via CandleBuilder.
     {
-        let gmo_fx_pairs: Vec<Pair> = if !config.pairs.fx.is_empty() {
-            config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
+        let gmo_fx_pairs: Vec<Pair> = if !config.pairs.active.is_empty() {
+            config.pairs.active.iter().map(|s| Pair::new(s)).collect()
         } else {
-            Vec::new()
+            config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
         };
         if !gmo_fx_pairs.is_empty() {
             for p in &gmo_fx_pairs {
