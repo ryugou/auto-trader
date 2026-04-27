@@ -72,13 +72,25 @@ pub struct ExitSignal {
 /// Check if unrealized profit has reached 1R (= initial SL distance).
 /// Used by strategy exit logic to prevent exiting before the trade has
 /// moved at least as far as the stop-loss in the profit direction.
+///
+/// Defensive: if SL or entry is invalid (legacy row, DB corruption),
+/// returns `true` to allow exits to proceed — don't block normal exit
+/// logic due to bad data.
 pub fn has_reached_one_r(
     direction: &Direction,
     entry_price: Decimal,
     stop_loss: Decimal,
     current_price: Decimal,
 ) -> bool {
+    // Defensive: if SL or entry is invalid (legacy row, DB corruption),
+    // don't block exits — return true to let normal exit logic proceed.
+    if entry_price <= Decimal::ZERO || stop_loss <= Decimal::ZERO {
+        return true;
+    }
     let sl_distance = (entry_price - stop_loss).abs();
+    if sl_distance.is_zero() {
+        return true; // SL at entry = no meaningful 1R threshold.
+    }
     let unrealized = match direction {
         Direction::Long => current_price - entry_price,
         Direction::Short => entry_price - current_price,

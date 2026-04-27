@@ -306,10 +306,6 @@ mod tests {
         }
     }
 
-    fn make_position(strategy: &str, pair: &str, direction: Direction, entry: Decimal) -> Position {
-        make_position_with_sl(strategy, pair, direction, entry, dec!(0))
-    }
-
     fn make_position_with_sl(
         strategy: &str,
         pair: &str,
@@ -552,7 +548,13 @@ mod tests {
                 ))
                 .await;
         }
-        let pos = make_position("not_bb", "FX_BTC_JPY", Direction::Long, dec!(9500000));
+        let pos = make_position_with_sl(
+            "not_bb",
+            "FX_BTC_JPY",
+            Direction::Long,
+            dec!(9500000),
+            dec!(9400000),
+        );
         let event = make_event("FX_BTC_JPY", dec!(10000000), dec!(10005000), dec!(9995000));
         let exits = s.on_open_positions(&[pos], &event).await;
         assert!(exits.is_empty());

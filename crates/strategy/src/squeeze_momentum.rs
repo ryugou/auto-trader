@@ -424,15 +424,6 @@ mod tests {
         make_event_at(pair, close, high, low, Utc::now())
     }
 
-    fn make_position(
-        strategy: &str,
-        direction: Direction,
-        entry: Decimal,
-        entry_at: chrono::DateTime<Utc>,
-    ) -> Position {
-        make_position_with_sl(strategy, direction, entry, dec!(0), entry_at)
-    }
-
     fn make_position_with_sl(
         strategy: &str,
         direction: Direction,
@@ -595,7 +586,13 @@ mod tests {
 
         // Position entered at bar 49 (1 bar ago → within DELAY_BARS=3).
         let entry_ts = base_ts + Duration::hours(49);
-        let pos = make_position("sq", Direction::Long, dec!(10490000), entry_ts);
+        let pos = make_position_with_sl(
+            "sq",
+            Direction::Long,
+            dec!(10490000),
+            dec!(10300000),
+            entry_ts,
+        );
 
         // Drop below Chandelier stop — but still in delay phase.
         let drop_ts = base_ts + Duration::hours(50);
@@ -683,7 +680,7 @@ mod tests {
         }
         // Position entered well into the flat history (bar 40).
         let entry_ts = base_ts + Duration::hours(40);
-        let pos = make_position("sq", Direction::Long, p, entry_ts);
+        let pos = make_position_with_sl("sq", Direction::Long, p, p - dec!(100000), entry_ts);
 
         // Test on_open_positions with a FLAT event (still no volatility).
         // ATR on 51 perfectly flat bars = 0, so on_open_positions should
