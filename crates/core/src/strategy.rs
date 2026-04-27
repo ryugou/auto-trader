@@ -82,14 +82,23 @@ pub fn has_reached_one_r(
     stop_loss: Decimal,
     current_price: Decimal,
 ) -> bool {
-    // Defensive: if SL or entry is invalid (legacy row, DB corruption),
-    // don't block exits — return true to let normal exit logic proceed.
+    // Defensive: if SL or entry is invalid (legacy row, DB corruption,
+    // SL on wrong side of entry), don't block exits — return true to
+    // let normal exit logic proceed.
     if entry_price <= Decimal::ZERO || stop_loss <= Decimal::ZERO {
+        return true;
+    }
+    // SL on wrong side check: Long should have SL < entry, Short SL > entry.
+    let sl_on_correct_side = match direction {
+        Direction::Long => stop_loss < entry_price,
+        Direction::Short => stop_loss > entry_price,
+    };
+    if !sl_on_correct_side {
         return true;
     }
     let sl_distance = (entry_price - stop_loss).abs();
     if sl_distance.is_zero() {
-        return true; // SL at entry = no meaningful 1R threshold.
+        return true;
     }
     let unrealized = match direction {
         Direction::Long => current_price - entry_price,
