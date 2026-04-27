@@ -165,6 +165,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
     };
+    // Capture before fx_pairs is potentially moved into the OANDA monitor.
+    let fx_pairs_configured = !fx_pairs.is_empty();
     let fx_monitor: Option<MarketMonitor> = if !fx_pairs.is_empty() {
         if let (Some(api_key), Some(oanda_config)) =
             (resolve_oanda_api_key(), config.oanda.as_ref())
@@ -206,16 +208,19 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Warn if FX strategies are enabled but FX monitor is not running.
-    // The only remaining FX strategy in this repo is swing_llm_v1.
-    if fx_monitor.is_none() {
+    // Warn if FX strategies are enabled but NO FX price source will run.
+    // Price data can come from either the OANDA monitor or the GMO FX feed
+    // (registered whenever fx_pairs is non-empty), so only warn when both
+    // are absent.
+    if fx_monitor.is_none() && !fx_pairs_configured {
         let has_fx_strategy = config
             .strategies
             .iter()
             .any(|s| s.enabled && s.name.starts_with("swing_llm"));
         if has_fx_strategy {
             tracing::warn!(
-                "FX strategies are enabled but FX monitor is not running (OANDA not configured). \
+                "FX strategies are enabled but no FX price source is running \
+                 (neither OANDA nor GMO FX feed configured). \
                  These strategies will not receive price data."
             );
         }

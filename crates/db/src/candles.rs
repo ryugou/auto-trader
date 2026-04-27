@@ -69,6 +69,7 @@ impl TryFrom<CandleRow> for Candle {
         let exchange = match r.exchange.as_str() {
             "oanda" => Exchange::Oanda,
             "bitflyer_cfd" => Exchange::BitflyerCfd,
+            "gmo_fx" => Exchange::GmoFx,
             other => anyhow::bail!("unknown exchange: {other}"),
         };
         Ok(Candle {

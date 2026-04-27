@@ -156,7 +156,12 @@ impl MarketFeed for GmoFxFeed {
                             candle,
                             indicators: HashMap::new(),
                         };
-                        let _ = price_tx.send(event).await;
+                        if price_tx.send(event).await.is_err() {
+                            tracing::info!(
+                                "GMO FX feed: price channel closed during M5 flush, stopping"
+                            );
+                            return Ok(());
+                        }
                     }
                     if let Some(h1_builder) = h1_builders.get_mut(&item.symbol)
                         && let Some(h1_candle) = h1_builder.try_complete(now, None, None)
@@ -174,7 +179,12 @@ impl MarketFeed for GmoFxFeed {
                             candle: h1_candle,
                             indicators: HashMap::new(),
                         };
-                        let _ = price_tx.send(h1_event).await;
+                        if price_tx.send(h1_event).await.is_err() {
+                            tracing::info!(
+                                "GMO FX feed: price channel closed during H1 flush, stopping"
+                            );
+                            return Ok(());
+                        }
                     }
                     continue;
                 }
