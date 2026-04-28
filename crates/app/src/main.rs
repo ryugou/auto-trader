@@ -1360,20 +1360,9 @@ async fn main() -> anyhow::Result<()> {
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
-    let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
-            let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
-
-            if !is_crypto {
-                tracing::debug!(
-                    "ignoring non-crypto signal: {} {} (FX paper trading disabled)",
-                    signal.strategy_name,
-                    signal.pair
-                );
-                continue;
-            }
 
             // Re-read accounts from the DB for each signal.
             let db_accounts = match auto_trader_db::trading_accounts::list_all(&executor_pool).await
@@ -1385,13 +1374,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Crypto: dispatch signal only to accounts bound to this strategy.
+            // Dispatch signal to all accounts bound to this strategy (any exchange).
             let mut matched = false;
             for pac in &db_accounts {
                 if pac.strategy != signal.strategy_name {
                     continue;
                 }
-                // Only dispatch to crypto accounts here.
                 let exchange = match exchange_from_str(&pac.exchange) {
                     Some(e) => e,
                     None => {
