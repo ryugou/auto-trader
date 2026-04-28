@@ -769,7 +769,7 @@ impl OrderExecutor for Trader {
                 );
                 let notifier = self.notifier.clone();
                 let account_name = self.account_name.clone();
-                let exchange = self.exchange.as_str().to_owned();
+                let exchange = self.exchange;
                 let pair = trade.pair.clone();
                 let strategy_name = trade.strategy_name.clone();
                 let reason = format!("DB tx failed after exchange fill (orphan position): {e}");
@@ -796,7 +796,7 @@ impl OrderExecutor for Trader {
         let account_name = self.account_name.clone();
         let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
             account_name,
-            exchange: self.exchange.as_str().to_owned(),
+            exchange: self.exchange,
             trade_id: trade.id,
             pair: trade.pair.clone(),
             direction: trade.direction,
@@ -987,7 +987,7 @@ impl OrderExecutor for Trader {
                 );
                 let notifier = self.notifier.clone();
                 let account_name = self.account_name.clone();
-                let exchange = self.exchange.as_str().to_owned();
+                let exchange = self.exchange;
                 let strategy_name = trade.strategy_name.clone();
                 let pair = trade.pair.clone();
                 let trade_id = trade.id;
@@ -1018,7 +1018,7 @@ impl OrderExecutor for Trader {
         let account_name = self.account_name.clone();
         let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
             account_name: account_name.clone(),
-            exchange: self.exchange.as_str().to_owned(),
+            exchange: self.exchange,
             trade_id,
             pnl_amount,
             reason: exit_reason.as_str().to_owned(),
@@ -1032,7 +1032,7 @@ impl OrderExecutor for Trader {
         // W2: stale-recovery approximate price alert — operator must audit PnL.
         if stale_approximate {
             let notifier = self.notifier.clone();
-            let exchange = self.exchange.as_str().to_owned();
+            let exchange = self.exchange;
             let pair = closed_trade.pair.clone();
             let strategy_name = closed_trade.strategy_name.clone();
             let reason = format!(

@@ -1,7 +1,7 @@
 //! Slack Webhook 送信の統合テスト。wiremock でダミーの Slack サーバーを
 //! 立ち上げ、Notifier が適切なペイロードを POST することを検証する。
 
-use auto_trader_core::types::{Direction, Pair};
+use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_notify::*;
 use rust_decimal_macros::dec;
 use uuid::Uuid;
@@ -22,7 +22,7 @@ async fn notifier_posts_text_payload_to_slack_url() {
     let notifier = Notifier::new(Some(server.uri()));
     let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
         account_name: "通常".into(),
-        exchange: "bitflyer_cfd".into(),
+        exchange: Exchange::BitflyerCfd,
         trade_id: Uuid::nil(),
         pair: Pair::new("FX_BTC_JPY"),
         direction: Direction::Long,
@@ -47,6 +47,7 @@ async fn notifier_posts_text_payload_to_slack_url() {
         .as_str()
         .expect("body must have a string `text` field");
     assert!(text.contains("通常"), "text missing account_name: {text}");
+    assert!(text.contains("bitflyer_cfd"), "text missing exchange: {text}");
     assert!(text.contains("FX_BTC_JPY"), "text missing pair: {text}");
     assert!(text.contains("long"), "text missing direction: {text}");
     assert!(text.contains("0.005"), "text missing quantity: {text}");
@@ -66,7 +67,7 @@ async fn notifier_returns_error_on_5xx() {
     let notifier = Notifier::new(Some(server.uri()));
     let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
         account_name: "通常".into(),
-        exchange: "bitflyer_cfd".into(),
+        exchange: Exchange::BitflyerCfd,
         strategy_name: "test_strategy".into(),
         pair: Pair::new("FX_BTC_JPY"),
         reason: "price stale".into(),
@@ -83,7 +84,7 @@ async fn notifier_noop_when_url_none() {
     let notifier = Notifier::new(None);
     let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
-        exchange: "bitflyer_cfd".into(),
+        exchange: Exchange::BitflyerCfd,
         trade_id: Uuid::nil(),
         pnl_amount: dec!(500),
         reason: "take_profit".into(),
@@ -140,7 +141,7 @@ async fn notifier_http_error_does_not_leak_webhook_url() {
 
     let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
-        exchange: "bitflyer_cfd".into(),
+        exchange: Exchange::BitflyerCfd,
         trade_id: Uuid::nil(),
         pnl_amount: dec!(-100),
         reason: "stop_loss".into(),

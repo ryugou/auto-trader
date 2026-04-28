@@ -3,7 +3,7 @@
 //! `db::notifications` はアプリ内通知（UI ベル表示）専用で、オペレータが
 //! 外部で気付く通知はこの crate が担う。
 
-use auto_trader_core::types::{Direction, Pair};
+use auto_trader_core::types::{Direction, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderFilledEvent {
     pub account_name: String,
-    pub exchange: String,
+    pub exchange: Exchange,
     pub trade_id: Uuid,
     pub pair: Pair,
     pub direction: Direction,
@@ -25,7 +25,7 @@ pub struct OrderFilledEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderFailedEvent {
     pub account_name: String,
-    pub exchange: String,
+    pub exchange: Exchange,
     pub strategy_name: String,
     pub pair: Pair,
     pub reason: String,
@@ -34,7 +34,7 @@ pub struct OrderFailedEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionClosedEvent {
     pub account_name: String,
-    pub exchange: String,
+    pub exchange: Exchange,
     pub trade_id: Uuid,
     pub pnl_amount: Decimal,
     pub reason: String,
@@ -162,15 +162,29 @@ fn format_for_slack(event: &NotifyEvent) -> String {
     match event {
         NotifyEvent::OrderFilled(e) => format!(
             "✅ *約定* `{}` [{}] {} {} {} @ {} (trade {})",
-            e.account_name, e.exchange, e.pair, e.direction, e.quantity, e.price, e.trade_id
+            e.account_name,
+            e.exchange.as_str(),
+            e.pair,
+            e.direction,
+            e.quantity,
+            e.price,
+            e.trade_id
         ),
         NotifyEvent::OrderFailed(e) => format!(
             "❌ *発注失敗* `{}` [{}] {} {} — {}",
-            e.account_name, e.exchange, e.strategy_name, e.pair, e.reason
+            e.account_name,
+            e.exchange.as_str(),
+            e.strategy_name,
+            e.pair,
+            e.reason
         ),
         NotifyEvent::PositionClosed(e) => format!(
             "🔒 *クローズ* `{}` [{}] pnl={} reason={} (trade {})",
-            e.account_name, e.exchange, e.pnl_amount, e.reason, e.trade_id
+            e.account_name,
+            e.exchange.as_str(),
+            e.pnl_amount,
+            e.reason,
+            e.trade_id
         ),
     }
 }
@@ -184,7 +198,7 @@ mod tests {
     fn format_order_filled() {
         let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
             account_name: "通常".into(),
-            exchange: "bitflyer_cfd".into(),
+            exchange: Exchange::BitflyerCfd,
             trade_id: Uuid::nil(),
             pair: Pair::new("FX_BTC_JPY"),
             direction: Direction::Long,
@@ -195,6 +209,7 @@ mod tests {
         let s = format_for_slack(&ev);
         assert!(s.contains("約定"));
         assert!(s.contains("通常"));
+        assert!(s.contains("bitflyer_cfd"));
         assert!(s.contains("FX_BTC_JPY"));
         assert!(s.contains("11500000"));
     }
@@ -204,7 +219,7 @@ mod tests {
         let n = Notifier::new(None);
         let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
             account_name: "通常".into(),
-            exchange: "bitflyer_cfd".into(),
+            exchange: Exchange::BitflyerCfd,
             strategy_name: "test".into(),
             pair: Pair::new("FX_BTC_JPY"),
             reason: "test".into(),
