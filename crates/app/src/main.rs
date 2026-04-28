@@ -29,12 +29,7 @@ use tokio::sync::{Mutex, mpsc};
 use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
 
 fn exchange_from_str(s: &str) -> Option<Exchange> {
-    match s {
-        "oanda" => Some(Exchange::Oanda),
-        "bitflyer_cfd" => Some(Exchange::BitflyerCfd),
-        "gmo_fx" => Some(Exchange::GmoFx),
-        _ => None,
-    }
+    s.parse().ok()
 }
 
 #[tokio::main]
@@ -155,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     // AND its corresponding strategy warmup loader. Sharing the same constant
     // here prevents drift between live polling/streaming and warmup history.
     const CRYPTO_TIMEFRAME: &str = "M5";
-    const CRYPTO_H1_TIMEFRAME: &str = "H1";
+    const H1_TIMEFRAME: &str = "H1";
     const FX_TIMEFRAME: &str = "M5";
     const WARMUP_LIMIT: i64 = 200;
 
@@ -500,7 +495,7 @@ async fn main() -> anyhow::Result<()> {
                 &pool,
                 ExchangeTy::BitflyerCfd.as_str(),
                 &pair.0,
-                CRYPTO_H1_TIMEFRAME,
+                H1_TIMEFRAME,
                 WARMUP_LIMIT,
             )
             .await;
@@ -520,7 +515,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
             engine.warmup(&h1_events).await;
             tracing::info!(
-                "strategy warmup: fed {n} bitflyer_cfd {CRYPTO_H1_TIMEFRAME} candles for {}",
+                "strategy warmup: fed {n} bitflyer_cfd {H1_TIMEFRAME} candles for {}",
                 pair.0
             );
         }
@@ -603,7 +598,7 @@ async fn main() -> anyhow::Result<()> {
                 &pool,
                 ExchangeTy::GmoFx.as_str(),
                 &pair.0,
-                CRYPTO_H1_TIMEFRAME,
+                H1_TIMEFRAME,
                 WARMUP_LIMIT,
             )
             .await;
@@ -623,7 +618,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
             engine.warmup(&h1_events).await;
             tracing::info!(
-                "strategy warmup: fed {n} gmo_fx {CRYPTO_H1_TIMEFRAME} candles for {}",
+                "strategy warmup: fed {n} gmo_fx {H1_TIMEFRAME} candles for {}",
                 pair.0
             );
         }

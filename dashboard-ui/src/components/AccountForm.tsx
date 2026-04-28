@@ -36,7 +36,7 @@ export default function AccountForm({
   // config/default.toml — but using a select prevents typos and gives the
   // user a list of valid choices.
   const exchangeCategory: 'fx' | 'crypto' =
-    exchange === 'oanda' ? 'fx' : 'crypto'
+    exchange === 'oanda' || exchange === 'gmo_fx' ? 'fx' : 'crypto'
   const strategiesQuery = useQuery({
     queryKey: ['strategies', exchangeCategory],
     queryFn: () => api.strategies.list(exchangeCategory),
@@ -146,6 +146,7 @@ export default function AccountForm({
             >
               <option value="bitflyer_cfd">Crypto (bitFlyer)</option>
               <option value="oanda">FX (OANDA)</option>
+              <option value="gmo_fx">FX (GMO)</option>
             </select>
           </div>
           <div>

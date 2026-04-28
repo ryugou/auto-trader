@@ -132,7 +132,10 @@ impl BacktestRunner {
         initial_balance: Decimal,
         leverage: Decimal,
     ) -> anyhow::Result<BacktestReport> {
-        // Load candles from DB — get_candles returns DESC order, reverse for chronological
+        // Load candles from DB — get_candles returns DESC order, reverse for chronological.
+        // NOTE: exchange is hardcoded to "oanda" here. The backtest runner currently only
+        // supports OANDA FX pairs. To support other FX exchanges (gmo_fx) the
+        // runner would need an exchange parameter passed down from the caller.
         let mut candles =
             auto_trader_db::candles::get_candles(&self.pool, "oanda", &pair.0, timeframe, 10000)
                 .await?;

@@ -42,6 +42,27 @@ impl std::fmt::Display for Exchange {
     }
 }
 
+impl std::str::FromStr for Exchange {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "oanda" => Ok(Exchange::Oanda),
+            "bitflyer_cfd" => Ok(Exchange::BitflyerCfd),
+            "gmo_fx" => Ok(Exchange::GmoFx),
+            other => Err(format!(
+                "unknown exchange '{}' (known: {})",
+                other,
+                [Exchange::Oanda, Exchange::BitflyerCfd, Exchange::GmoFx]
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {

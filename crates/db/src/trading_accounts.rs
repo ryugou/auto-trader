@@ -3,6 +3,7 @@
 //! Unified account row replacing the old `paper_accounts` table.
 //! Backed by the `trading_accounts` table from migration 20260415000001.
 
+use auto_trader_core::types::Exchange;
 use chrono::{DateTime, Utc};
 use rust_decimal::{Decimal, RoundingStrategy};
 use rust_decimal_macros::dec;
@@ -173,6 +174,10 @@ pub async fn create_account(
             req.exchange
         );
     }
+    // Reject unknown exchange names so misconfigured accounts never reach the DB.
+    if let Err(e) = exchange.parse::<Exchange>() {
+        anyhow::bail!("{e}");
+    }
     // live 口座は同一 exchange に 1 件のみ許可 (bitFlyer API client が
     // singleton のため、複数行があると margin / collateral 共有で会計破綻する)。
     // 通常フローの早期失敗として SELECT で確認する。並行 INSERT が競合した場合は
@@ -322,5 +327,26 @@ mod tests {
         create_account(&pool, &live_req("oanda"))
             .await
             .expect("different exchange should succeed");
+    }
+
+    /// An unknown exchange name must be rejected before reaching the DB.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn create_account_rejects_unknown_exchange(pool: sqlx::PgPool) {
+        let req = CreateTradingAccount {
+            name: "bad-exchange".to_string(),
+            exchange: "unknown".to_string(),
+            initial_balance: dec!(50000),
+            leverage: dec!(1),
+            strategy: "bb_mean_revert_v1".to_string(),
+            account_type: "paper".to_string(),
+            currency: "JPY".to_string(),
+        };
+        let err = create_account(&pool, &req)
+            .await
+            .expect_err("unknown exchange should be rejected");
+        assert!(
+            err.to_string().contains("unknown exchange 'unknown'"),
+            "unexpected error: {err}"
+        );
     }
 }
