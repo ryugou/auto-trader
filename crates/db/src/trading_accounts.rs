@@ -173,6 +173,15 @@ pub async fn create_account(
             req.exchange
         );
     }
+    // Reject unknown exchange names so misconfigured accounts never reach the DB.
+    let known_exchanges = ["bitflyer_cfd", "oanda", "gmo_fx"];
+    if !known_exchanges.contains(&exchange.as_str()) {
+        anyhow::bail!(
+            "invalid exchange '{}' (must be one of: {})",
+            exchange,
+            known_exchanges.join(", ")
+        );
+    }
     // live 口座は同一 exchange に 1 件のみ許可 (bitFlyer API client が
     // singleton のため、複数行があると margin / collateral 共有で会計破綻する)。
     // 通常フローの早期失敗として SELECT で確認する。並行 INSERT が競合した場合は

@@ -74,7 +74,8 @@ export default function PageFilters({ value, onChange }: PageFiltersProps) {
           className={selectClass}
         >
           <option value="">全体</option>
-          <option value="oanda">FX</option>
+          <option value="oanda">FX (OANDA)</option>
+          <option value="gmo_fx">FX (GMO)</option>
           <option value="bitflyer_cfd">暗号資産</option>
         </select>
       </div>

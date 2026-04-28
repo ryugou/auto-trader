@@ -13,6 +13,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderFilledEvent {
     pub account_name: String,
+    pub exchange: String,
     pub trade_id: Uuid,
     pub pair: Pair,
     pub direction: Direction,
@@ -24,6 +25,7 @@ pub struct OrderFilledEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderFailedEvent {
     pub account_name: String,
+    pub exchange: String,
     pub strategy_name: String,
     pub pair: Pair,
     pub reason: String,
@@ -32,6 +34,7 @@ pub struct OrderFailedEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionClosedEvent {
     pub account_name: String,
+    pub exchange: String,
     pub trade_id: Uuid,
     pub pnl_amount: Decimal,
     pub reason: String,
@@ -158,16 +161,16 @@ impl Notifier {
 fn format_for_slack(event: &NotifyEvent) -> String {
     match event {
         NotifyEvent::OrderFilled(e) => format!(
-            "✅ *約定* `{}` {} {} {} @ {} (trade {})",
-            e.account_name, e.pair, e.direction, e.quantity, e.price, e.trade_id
+            "✅ *約定* `{}` [{}] {} {} {} @ {} (trade {})",
+            e.account_name, e.exchange, e.pair, e.direction, e.quantity, e.price, e.trade_id
         ),
         NotifyEvent::OrderFailed(e) => format!(
-            "❌ *発注失敗* `{}` {} {} — {}",
-            e.account_name, e.strategy_name, e.pair, e.reason
+            "❌ *発注失敗* `{}` [{}] {} {} — {}",
+            e.account_name, e.exchange, e.strategy_name, e.pair, e.reason
         ),
         NotifyEvent::PositionClosed(e) => format!(
-            "🔒 *クローズ* `{}` pnl={} reason={} (trade {})",
-            e.account_name, e.pnl_amount, e.reason, e.trade_id
+            "🔒 *クローズ* `{}` [{}] pnl={} reason={} (trade {})",
+            e.account_name, e.exchange, e.pnl_amount, e.reason, e.trade_id
         ),
     }
 }
@@ -181,6 +184,7 @@ mod tests {
     fn format_order_filled() {
         let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
             account_name: "通常".into(),
+            exchange: "bitflyer_cfd".into(),
             trade_id: Uuid::nil(),
             pair: Pair::new("FX_BTC_JPY"),
             direction: Direction::Long,
@@ -200,6 +204,7 @@ mod tests {
         let n = Notifier::new(None);
         let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
             account_name: "通常".into(),
+            exchange: "bitflyer_cfd".into(),
             strategy_name: "test".into(),
             pair: Pair::new("FX_BTC_JPY"),
             reason: "test".into(),

@@ -22,6 +22,7 @@ async fn notifier_posts_text_payload_to_slack_url() {
     let notifier = Notifier::new(Some(server.uri()));
     let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
         account_name: "通常".into(),
+        exchange: "bitflyer_cfd".into(),
         trade_id: Uuid::nil(),
         pair: Pair::new("FX_BTC_JPY"),
         direction: Direction::Long,
@@ -65,6 +66,7 @@ async fn notifier_returns_error_on_5xx() {
     let notifier = Notifier::new(Some(server.uri()));
     let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
         account_name: "通常".into(),
+        exchange: "bitflyer_cfd".into(),
         strategy_name: "test_strategy".into(),
         pair: Pair::new("FX_BTC_JPY"),
         reason: "price stale".into(),
@@ -81,6 +83,7 @@ async fn notifier_noop_when_url_none() {
     let notifier = Notifier::new(None);
     let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
+        exchange: "bitflyer_cfd".into(),
         trade_id: Uuid::nil(),
         pnl_amount: dec!(500),
         reason: "take_profit".into(),
@@ -137,6 +140,7 @@ async fn notifier_http_error_does_not_leak_webhook_url() {
 
     let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
+        exchange: "bitflyer_cfd".into(),
         trade_id: Uuid::nil(),
         pnl_amount: dec!(-100),
         reason: "stop_loss".into(),
