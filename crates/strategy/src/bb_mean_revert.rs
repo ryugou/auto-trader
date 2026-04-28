@@ -39,7 +39,7 @@ use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{
     ExitSignal, MacroUpdate, Strategy, StrategyExitReason, has_reached_one_r,
 };
-use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Signal};
+use auto_trader_core::types::{Candle, Direction, Pair, Position, Signal};
 use auto_trader_market::indicators;
 use chrono::Duration;
 use rust_decimal::Decimal;
@@ -117,9 +117,6 @@ impl Strategy for BbMeanRevertV1 {
     }
 
     async fn on_price(&mut self, event: &PriceEvent) -> Option<Signal> {
-        if event.exchange != Exchange::BitflyerCfd {
-            return None;
-        }
         if event.candle.timeframe != TIMEFRAME {
             return None;
         }
@@ -199,9 +196,6 @@ impl Strategy for BbMeanRevertV1 {
 
     async fn warmup(&mut self, events: &[PriceEvent]) {
         for event in events {
-            if event.exchange != Exchange::BitflyerCfd {
-                continue;
-            }
             if event.candle.timeframe != TIMEFRAME {
                 continue;
             }
@@ -217,9 +211,6 @@ impl Strategy for BbMeanRevertV1 {
         positions: &[Position],
         event: &PriceEvent,
     ) -> Vec<ExitSignal> {
-        if event.exchange != Exchange::BitflyerCfd {
-            return Vec::new();
-        }
         if event.candle.timeframe != TIMEFRAME {
             return Vec::new();
         }

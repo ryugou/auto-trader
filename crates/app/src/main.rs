@@ -594,6 +594,39 @@ async fn main() -> anyhow::Result<()> {
                 pair.0
             );
         }
+
+        // FX: GmoFx — H1 candles for Donchian/Squeeze strategies.
+        // Mirrors the bitFlyer H1 warmup above. Without this, Donchian/Squeeze
+        // on GmoFx would wait ~55 hours for H1 candles to accumulate after restart.
+        for pair in &fx_pairs_for_warmup {
+            let h1_candles = load_warmup_history(
+                &pool,
+                ExchangeTy::GmoFx.as_str(),
+                &pair.0,
+                CRYPTO_H1_TIMEFRAME,
+                WARMUP_LIMIT,
+            )
+            .await;
+            if h1_candles.is_empty() {
+                continue;
+            }
+            let n = h1_candles.len();
+            let h1_events: Vec<PriceEvent> = h1_candles
+                .into_iter()
+                .map(|c| PriceEvent {
+                    pair: c.pair.clone(),
+                    exchange: ExchangeTy::GmoFx,
+                    timestamp: c.timestamp,
+                    candle: c,
+                    indicators: StdHashMap::new(),
+                })
+                .collect();
+            engine.warmup(&h1_events).await;
+            tracing::info!(
+                "strategy warmup: fed {n} gmo_fx {CRYPTO_H1_TIMEFRAME} candles for {}",
+                pair.0
+            );
+        }
     }
 
     // Collect actually registered strategy names for paper_account validation.
@@ -1327,20 +1360,9 @@ async fn main() -> anyhow::Result<()> {
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
-    let crypto_pairs_set: Vec<String> = config.pairs.crypto.clone().unwrap_or_default();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
-            let is_crypto = crypto_pairs_set.iter().any(|p| p == &signal.pair.0);
-
-            if !is_crypto {
-                tracing::debug!(
-                    "ignoring non-crypto signal: {} {} (FX paper trading disabled)",
-                    signal.strategy_name,
-                    signal.pair
-                );
-                continue;
-            }
 
             // Re-read accounts from the DB for each signal.
             let db_accounts = match auto_trader_db::trading_accounts::list_all(&executor_pool).await
@@ -1352,13 +1374,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Crypto: dispatch signal only to accounts bound to this strategy.
+            // Dispatch signal to all accounts bound to this strategy (any exchange).
             let mut matched = false;
             for pac in &db_accounts {
                 if pac.strategy != signal.strategy_name {
                     continue;
                 }
-                // Only dispatch to crypto accounts here.
                 let exchange = match exchange_from_str(&pac.exchange) {
                     Some(e) => e,
                     None => {
