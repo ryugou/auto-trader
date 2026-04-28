@@ -51,8 +51,13 @@ impl std::str::FromStr for Exchange {
             "bitflyer_cfd" => Ok(Exchange::BitflyerCfd),
             "gmo_fx" => Ok(Exchange::GmoFx),
             other => Err(format!(
-                "unknown exchange '{}' (known: oanda, bitflyer_cfd, gmo_fx)",
-                other
+                "unknown exchange '{}' (known: {})",
+                other,
+                [Exchange::Oanda, Exchange::BitflyerCfd, Exchange::GmoFx]
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }

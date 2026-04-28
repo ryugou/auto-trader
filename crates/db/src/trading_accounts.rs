@@ -175,8 +175,8 @@ pub async fn create_account(
         );
     }
     // Reject unknown exchange names so misconfigured accounts never reach the DB.
-    if exchange.parse::<Exchange>().is_err() {
-        anyhow::bail!("invalid exchange '{exchange}'");
+    if let Err(e) = exchange.parse::<Exchange>() {
+        anyhow::bail!("{e}");
     }
     // live 口座は同一 exchange に 1 件のみ許可 (bitFlyer API client が
     // singleton のため、複数行があると margin / collateral 共有で会計破綻する)。
@@ -345,7 +345,7 @@ mod tests {
             .await
             .expect_err("unknown exchange should be rejected");
         assert!(
-            err.to_string().contains("invalid exchange"),
+            err.to_string().contains("unknown exchange 'unknown'"),
             "unexpected error: {err}"
         );
     }

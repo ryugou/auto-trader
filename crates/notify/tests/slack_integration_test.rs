@@ -47,7 +47,10 @@ async fn notifier_posts_text_payload_to_slack_url() {
         .as_str()
         .expect("body must have a string `text` field");
     assert!(text.contains("通常"), "text missing account_name: {text}");
-    assert!(text.contains("bitflyer_cfd"), "text missing exchange: {text}");
+    assert!(
+        text.contains("bitflyer_cfd"),
+        "text missing exchange: {text}"
+    );
     assert!(text.contains("FX_BTC_JPY"), "text missing pair: {text}");
     assert!(text.contains("long"), "text missing direction: {text}");
     assert!(text.contains("0.005"), "text missing quantity: {text}");
