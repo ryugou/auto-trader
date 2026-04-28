@@ -594,6 +594,39 @@ async fn main() -> anyhow::Result<()> {
                 pair.0
             );
         }
+
+        // FX: GmoFx — H1 candles for Donchian/Squeeze strategies.
+        // Mirrors the bitFlyer H1 warmup above. Without this, Donchian/Squeeze
+        // on GmoFx would wait ~55 hours for H1 candles to accumulate after restart.
+        for pair in &fx_pairs_for_warmup {
+            let h1_candles = load_warmup_history(
+                &pool,
+                ExchangeTy::GmoFx.as_str(),
+                &pair.0,
+                CRYPTO_H1_TIMEFRAME,
+                WARMUP_LIMIT,
+            )
+            .await;
+            if h1_candles.is_empty() {
+                continue;
+            }
+            let n = h1_candles.len();
+            let h1_events: Vec<PriceEvent> = h1_candles
+                .into_iter()
+                .map(|c| PriceEvent {
+                    pair: c.pair.clone(),
+                    exchange: ExchangeTy::GmoFx,
+                    timestamp: c.timestamp,
+                    candle: c,
+                    indicators: StdHashMap::new(),
+                })
+                .collect();
+            engine.warmup(&h1_events).await;
+            tracing::info!(
+                "strategy warmup: fed {n} gmo_fx {CRYPTO_H1_TIMEFRAME} candles for {}",
+                pair.0
+            );
+        }
     }
 
     // Collect actually registered strategy names for paper_account validation.
