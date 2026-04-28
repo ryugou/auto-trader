@@ -6,6 +6,7 @@ pub mod gmo_fx;
 pub mod indicators;
 pub mod market_feed;
 pub mod monitor;
+pub mod null_exchange_api;
 pub mod oanda;
 pub mod oanda_private;
 pub mod price_store;

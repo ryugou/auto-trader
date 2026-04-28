@@ -923,7 +923,9 @@ async fn main() -> anyhow::Result<()> {
                 };
             for owned in open_trades {
                 let trade = owned.trade;
-                if trade.exchange != Exchange::BitflyerCfd || trade.pair != event.pair {
+                // Match by exchange + pair so GmoFx trades are monitored against
+                // GmoFx price events, and BitflyerCfd trades against BitflyerCfd events.
+                if trade.exchange != event.exchange || trade.pair != event.pair {
                     continue;
                 }
                 let account_id = trade.account_id;
@@ -979,20 +981,32 @@ async fn main() -> anyhow::Result<()> {
                     exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
-                    let Some(api) = crypto_monitor_exchange_apis.get(&trade.exchange) else {
-                        tracing::warn!(
-                            "no ExchangeApi registered for exchange {:?}; skipping close for trade {}",
-                            trade.exchange,
-                            trade.id
-                        );
-                        continue;
-                    };
+                    // Live accounts require a real ExchangeApi. Paper/dry_run accounts fill
+                    // from PriceStore and never call API methods, so NullExchangeApi is safe
+                    // when no real implementation exists yet (e.g. GMO Coin FX).
+                    let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
+                        match crypto_monitor_exchange_apis.get(&trade.exchange) {
+                            Some(a) => a.clone(),
+                            None => {
+                                if !dry_run {
+                                    tracing::warn!(
+                                        "no ExchangeApi registered for exchange {:?}; skipping close for live trade {}",
+                                        trade.exchange,
+                                        trade.id
+                                    );
+                                    continue;
+                                }
+                                std::sync::Arc::new(
+                                    auto_trader_market::null_exchange_api::NullExchangeApi,
+                                )
+                            }
+                        };
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
                         trade.exchange,
                         account_id,
                         account_name,
-                        api.clone(),
+                        api,
                         crypto_monitor_price_store.clone(),
                         crypto_monitor_notifier.clone(),
                         crypto_monitor_position_sizer.clone(),
@@ -1093,17 +1107,22 @@ async fn main() -> anyhow::Result<()> {
                                     },
                                 )
                                 .await;
-                            // Forward to FX position monitor (FX events only)
+                            // Forward to FX position monitor drain (legacy channel; kept so
+                            // senders don't block — actual FX monitor is not yet implemented).
                             if event.exchange == auto_trader_core::types::Exchange::Oanda
                                 && price_monitor_tx.send(event.clone()).await.is_err()
                             {
                                 tracing::warn!("FX position monitor channel closed");
                             }
-                            // Forward to the single crypto position monitor (crypto events only)
-                            if event.exchange == auto_trader_core::types::Exchange::BitflyerCfd
+                            // Forward to the unified position monitor (crypto + GmoFx).
+                            // The monitor filters by trade.exchange == event.exchange so
+                            // BitflyerCfd and GmoFx trades are each checked against the
+                            // correct price feed.
+                            if (event.exchange == auto_trader_core::types::Exchange::BitflyerCfd
+                                || event.exchange == auto_trader_core::types::Exchange::GmoFx)
                                 && crypto_price_tx.send(event.clone()).await.is_err()
                             {
-                                tracing::warn!("crypto position monitor channel closed");
+                                tracing::warn!("position monitor channel closed");
                             }
 
                             // Build per-strategy open-position view from the
@@ -1223,14 +1242,24 @@ async fn main() -> anyhow::Result<()> {
             // close paths. A position opened when enabled=true must remain closable
             // even after the operator toggles enabled=false for safety reasons.
             let dry_run = account_type == "paper" || exit_live_forces_dry_run;
-            let Some(api) = exit_exchange_apis.get(&trade.exchange) else {
-                tracing::warn!(
-                    "no ExchangeApi registered for exchange {:?}; skipping exit for trade {}",
-                    trade.exchange,
-                    exit.trade_id
-                );
-                continue;
-            };
+            // Live accounts require a real ExchangeApi. Paper/dry_run accounts fill
+            // from PriceStore and never call API methods, so a NullExchangeApi stub
+            // is safe when no real implementation exists yet (e.g. GMO Coin FX).
+            let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
+                match exit_exchange_apis.get(&trade.exchange) {
+                    Some(a) => a.clone(),
+                    None => {
+                        if !dry_run {
+                            tracing::warn!(
+                                "no ExchangeApi registered for exchange {:?}; skipping exit for live trade {}",
+                                trade.exchange,
+                                exit.trade_id
+                            );
+                            continue;
+                        }
+                        std::sync::Arc::new(auto_trader_market::null_exchange_api::NullExchangeApi)
+                    }
+                };
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
@@ -1342,17 +1371,6 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                // Registry lookup — unregistered exchanges are skipped (warn + continue),
-                // giving equivalent behavior to the old BitflyerCfd-only gate.
-                let Some(api) = executor_exchange_apis.get(&exchange) else {
-                    tracing::warn!(
-                        "no ExchangeApi registered for exchange {:?}; skipping account {} ({})",
-                        exchange,
-                        pac.name,
-                        pac.id
-                    );
-                    continue;
-                };
                 // [live].enabled=false なら live 口座の signal を拒否し、発注経路に入れない。
                 // 起動時 gate と belt-and-suspenders。runtime に REST で live 行が
                 // 追加された場合も発注を防ぐ。
@@ -1365,6 +1383,32 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
+                // Registry lookup — live accounts require a real ExchangeApi.
+                // Paper/dry_run accounts fill from PriceStore and never call
+                // API methods, so a NullExchangeApi stub is safe to use when
+                // no real implementation exists yet (e.g. GMO Coin FX).
+                let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
+                    match executor_exchange_apis.get(&exchange) {
+                        Some(a) => a.clone(),
+                        None => {
+                            if !dry_run {
+                                tracing::warn!(
+                                    "no ExchangeApi registered for exchange {:?}; skipping live account {} ({})",
+                                    exchange,
+                                    pac.name,
+                                    pac.id
+                                );
+                                continue;
+                            }
+                            // dry_run: use a stub that errors on any call.
+                            // Trader must not call it — if it does, the error
+                            // surfaces immediately rather than silently using
+                            // the wrong exchange's API.
+                            std::sync::Arc::new(
+                                auto_trader_market::null_exchange_api::NullExchangeApi,
+                            )
+                        }
+                    };
 
                 // Freshness gate: reject stale-tick signals at entry.
                 let last_tick_age = executor_price_store
