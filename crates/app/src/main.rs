@@ -1576,9 +1576,8 @@ async fn main() -> anyhow::Result<()> {
                 );
             } else if !dispatched {
                 tracing::debug!(
-                    "signal from '{}' matched strategy on account(s) but pair {} not available on any of their exchanges",
-                    signal.strategy_name,
-                    signal.pair.0
+                    "signal from '{}' matched strategy on account(s) but no account passed pre-dispatch gates",
+                    signal.strategy_name
                 );
             }
         }
