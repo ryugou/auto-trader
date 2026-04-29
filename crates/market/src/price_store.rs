@@ -128,6 +128,17 @@ impl PriceStore {
         Some(age)
     }
 
+    /// Return the age (in seconds) of the tick for a specific (exchange, pair).
+    /// Unlike `last_tick_age` this does NOT search across all exchanges, so it
+    /// cannot be contaminated by a tick from a different exchange that happens
+    /// to share the same pair name.
+    pub async fn last_tick_age_for(&self, key: &FeedKey) -> Option<u64> {
+        let guard = self.latest.read().await;
+        let tick = guard.get(key)?;
+        let age = (chrono::Utc::now() - tick.ts).num_seconds().max(0) as u64;
+        Some(age)
+    }
+
     /// Return the mid price for the given pair from the most recent tick that
     /// carries both bid and ask. Falls back to `price` (LTP) when bid/ask are
     /// absent. Returns `None` when no tick has been observed for the pair.
@@ -336,6 +347,39 @@ mod tests {
         let pair = Pair::new("UNKNOWN_PAIR");
         let age = store.last_tick_age(&pair).await;
         assert!(age.is_none(), "expected None for unknown pair");
+    }
+
+    #[tokio::test]
+    async fn last_tick_age_for_is_exchange_specific() {
+        // Two exchanges with the same pair name — last_tick_age_for must
+        // return the age for the requested exchange only, not cross-exchange.
+        let store = PriceStore::new(vec![]);
+        let bf = key(Exchange::BitflyerCfd, "FX_BTC_JPY");
+        let gmo = key(Exchange::GmoFx, "FX_BTC_JPY");
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::seconds(120);
+        store.update(bf.clone(), tick(11_500_000, now)).await;
+        store.update(gmo.clone(), tick(11_500_000, old)).await;
+
+        let bf_age = store.last_tick_age_for(&bf).await.expect("bf present");
+        let gmo_age = store.last_tick_age_for(&gmo).await.expect("gmo present");
+
+        // BitflyerCfd should be fresher than GmoFx, and GmoFx should remain
+        // substantially older, proving the lookup is exchange-specific and
+        // not contaminated by the other exchange's tick.
+        assert!(bf_age < gmo_age, "bf age {bf_age} should be less than gmo age {gmo_age}");
+        assert!(
+            gmo_age >= bf_age + 100,
+            "gmo age {gmo_age} should be at least 100s older than bf age {bf_age}"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_tick_age_for_returns_none_for_missing_key() {
+        let store = PriceStore::new(vec![]);
+        let k = key(Exchange::GmoFx, "USD_JPY");
+        let age = store.last_tick_age_for(&k).await;
+        assert!(age.is_none());
     }
 
     #[tokio::test]

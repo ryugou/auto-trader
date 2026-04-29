@@ -21,7 +21,7 @@ use auto_trader_market::oanda_private::OandaPrivateApi;
 use auto_trader_notify::Notifier;
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -821,6 +821,19 @@ async fn main() -> anyhow::Result<()> {
     // it). Note: the engine task does NOT write into the store
     // anymore, because it only sees M5-aggregated PriceEvents which
     // are too coarse for the 60s freshness threshold.
+    // Build a lookup from exchange → set of pair names so the signal
+    // executor can verify that a signal's pair actually belongs to the
+    // account's exchange before dispatching. Without this, a BitflyerCfd
+    // FX_BTC_JPY signal would match a GmoFx account running the same
+    // strategy name, then fail with "no price available".
+    let exchange_pairs: Arc<HashMap<Exchange, HashSet<String>>> = {
+        let mut map: HashMap<Exchange, HashSet<String>> = HashMap::new();
+        for fk in &expected_feeds {
+            map.entry(fk.exchange).or_default().insert(fk.pair.0.clone());
+        }
+        Arc::new(map)
+    };
+
     let price_store = crate::price_store::PriceStore::new(expected_feeds);
 
     // Spawn all market feeds via the unified MarketFeed registry.
@@ -1351,6 +1364,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_exchange_apis = exchange_apis.clone();
     let executor_price_store = price_store.clone();
     let executor_notifier = notifier.clone();
+    let executor_exchange_pairs = Arc::clone(&exchange_pairs);
     let executor_position_sizer = shared_position_sizer.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
@@ -1370,11 +1384,13 @@ async fn main() -> anyhow::Result<()> {
             };
 
             // Dispatch signal to all accounts bound to this strategy (any exchange).
-            let mut matched = false;
+            let mut matched_strategy = false;
+            let mut dispatched = false;
             for pac in &db_accounts {
                 if pac.strategy != signal.strategy_name {
                     continue;
                 }
+                matched_strategy = true;
                 let exchange = match exchange_from_str(&pac.exchange) {
                     Some(e) => e,
                     None => {
@@ -1387,6 +1403,22 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+                // Guard: signal.pair must belong to this account's exchange.
+                // Without this, a BitflyerCfd FX_BTC_JPY signal would match
+                // a GmoFx account running the same strategy, then fail with
+                // "no price available for FX_BTC_JPY".
+                if !executor_exchange_pairs
+                    .get(&exchange)
+                    .is_some_and(|pairs| pairs.contains(&signal.pair.0))
+                {
+                    tracing::debug!(
+                        "skipping signal: pair {} not available on exchange {:?} for account {}",
+                        signal.pair.0,
+                        exchange,
+                        pac.name
+                    );
+                    continue;
+                }
                 // [live].enabled=false なら live 口座の signal を拒否し、発注経路に入れない。
                 // 起動時 gate と belt-and-suspenders。runtime に REST で live 行が
                 // 追加された場合も発注を防ぐ。
@@ -1427,8 +1459,11 @@ async fn main() -> anyhow::Result<()> {
                     };
 
                 // Freshness gate: reject stale-tick signals at entry.
+                // Use exchange-aware lookup so a fresh tick on a different
+                // exchange cannot mask staleness on this account's exchange.
+                let feed_key = crate::price_store::FeedKey::new(exchange, signal.pair.clone());
                 let last_tick_age = executor_price_store
-                    .last_tick_age(&signal.pair)
+                    .last_tick_age_for(&feed_key)
                     .await
                     .unwrap_or(u64::MAX);
                 match eval_price_freshness(executor_price_freshness_secs, last_tick_age) {
@@ -1455,7 +1490,7 @@ async fn main() -> anyhow::Result<()> {
                     dry_run,
                 );
                 let name = pac.name.clone();
-                matched = true;
+                dispatched = true;
                 let positions = trader.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
                     p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
@@ -1534,9 +1569,14 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::error!("execute error for account {}: {e}", name),
                 }
             }
-            if !matched {
+            if !matched_strategy {
                 tracing::warn!(
-                    "crypto signal from '{}' had no matching trading account",
+                    "signal from '{}' had no matching trading account",
+                    signal.strategy_name
+                );
+            } else if !dispatched {
+                tracing::debug!(
+                    "signal from '{}' matched strategy on account(s) but no account passed pre-dispatch gates",
                     signal.strategy_name
                 );
             }
