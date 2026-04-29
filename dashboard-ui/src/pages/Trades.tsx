@@ -36,7 +36,7 @@ type ExchangeGroupKey = 'crypto' | 'fx' | 'other'
 // still renders somewhere instead of being silently dropped.
 function exchangeGroup(exchange: string): ExchangeGroupKey {
   if (exchange.startsWith('bitflyer')) return 'crypto'
-  if (exchange === 'oanda') return 'fx'
+  if (exchange === 'oanda' || exchange === 'gmo_fx') return 'fx'
   return 'other'
 }
 
