@@ -82,7 +82,7 @@ params = { bb_period = 20, bb_stddev = 2.5, rsi_period = 14, atr_period = 14 }
 name = "donchian_trend_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY"]
 # 標準 (medium risk).
 params = { entry_channel = 20, exit_channel = 10, atr_period = 14, atr_baseline_bars = 20 }
 
