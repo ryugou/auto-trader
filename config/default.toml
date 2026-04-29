@@ -74,7 +74,7 @@ params = { holding_days_max = 14 }
 name = "bb_mean_revert_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY"]
 # 慎重 (low risk).
 params = { bb_period = 20, bb_stddev = 2.5, rsi_period = 14, atr_period = 14 }
 
@@ -90,7 +90,7 @@ params = { entry_channel = 20, exit_channel = 10, atr_period = 14, atr_baseline_
 name = "donchian_trend_evolve_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY"]
 # Evolve: Vegapunk 学習ループで週次パラメータ自動更新。
 # 実行時パラメータは DB (strategy_params テーブル) から読む。
 params = { entry_channel = 20, exit_channel = 10, atr_baseline_bars = 20 }
@@ -99,7 +99,7 @@ params = { entry_channel = 20, exit_channel = 10, atr_baseline_bars = 20 }
 name = "squeeze_momentum_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY"]
 # 攻め (high risk).
 params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 21, squeeze_bars = 6 }
 
