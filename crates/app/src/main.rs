@@ -1384,11 +1384,13 @@ async fn main() -> anyhow::Result<()> {
             };
 
             // Dispatch signal to all accounts bound to this strategy (any exchange).
-            let mut matched = false;
+            let mut matched_strategy = false;
+            let mut dispatched = false;
             for pac in &db_accounts {
                 if pac.strategy != signal.strategy_name {
                     continue;
                 }
+                matched_strategy = true;
                 let exchange = match exchange_from_str(&pac.exchange) {
                     Some(e) => e,
                     None => {
@@ -1488,7 +1490,7 @@ async fn main() -> anyhow::Result<()> {
                     dry_run,
                 );
                 let name = pac.name.clone();
-                matched = true;
+                dispatched = true;
                 let positions = trader.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
                     p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
@@ -1567,10 +1569,16 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::error!("execute error for account {}: {e}", name),
                 }
             }
-            if !matched {
+            if !matched_strategy {
                 tracing::warn!(
-                    "crypto signal from '{}' had no matching trading account",
+                    "signal from '{}' had no matching trading account",
                     signal.strategy_name
+                );
+            } else if !dispatched {
+                tracing::debug!(
+                    "signal from '{}' matched strategy on account(s) but pair {} not available on any of their exchanges",
+                    signal.strategy_name,
+                    signal.pair.0
                 );
             }
         }
