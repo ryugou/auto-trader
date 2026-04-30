@@ -656,10 +656,7 @@ pub async fn get_trade_events(
     .fetch_all(pool)
     .await?;
 
-    let direction = match trade.direction {
-        Direction::Long => "long",
-        Direction::Short => "short",
-    };
+    let direction = trade.direction.as_str();
 
     let margin_lock_amount = event_rows
         .iter()
@@ -839,39 +836,13 @@ impl TryFrom<TradeRow> for Trade {
     type Error = anyhow::Error;
 
     fn try_from(r: TradeRow) -> anyhow::Result<Self> {
-        let exchange = match r.exchange.as_str() {
-            "oanda" => Exchange::Oanda,
-            "bitflyer_cfd" => Exchange::BitflyerCfd,
-            "gmo_fx" => Exchange::GmoFx,
-            other => anyhow::bail!("unknown exchange: {other}"),
-        };
-        let direction = match r.direction.as_str() {
-            "long" => Direction::Long,
-            "short" => Direction::Short,
-            other => anyhow::bail!("unknown direction: {other}"),
-        };
-        let status = match r.status.as_str() {
-            "open" => TradeStatus::Open,
-            "closing" => TradeStatus::Closing,
-            "closed" => TradeStatus::Closed,
-            other => anyhow::bail!("unknown status: {other}"),
-        };
+        let exchange: Exchange = r.exchange.parse()?;
+        let direction: Direction = r.direction.parse()?;
+        let status: TradeStatus = r.status.parse()?;
         let exit_reason = r
             .exit_reason
             .as_deref()
-            .map(|s| match s {
-                "tp_hit" => Ok(ExitReason::TpHit),
-                "sl_hit" => Ok(ExitReason::SlHit),
-                "manual" => Ok(ExitReason::Manual),
-                "signal_reverse" => Ok(ExitReason::SignalReverse),
-                "strategy_mean_reached" => Ok(ExitReason::StrategyMeanReached),
-                "strategy_trailing_channel" => Ok(ExitReason::StrategyTrailingChannel),
-                "strategy_trailing_ma" => Ok(ExitReason::StrategyTrailingMa),
-                "strategy_indicator_reversal" => Ok(ExitReason::StrategyIndicatorReversal),
-                "strategy_time_limit" => Ok(ExitReason::StrategyTimeLimit),
-                "reconciled" => Ok(ExitReason::Reconciled),
-                other => Err(anyhow::anyhow!("unknown exit_reason: {other}")),
-            })
+            .map(|s| s.parse::<ExitReason>())
             .transpose()?;
         Ok(Trade {
             id: r.id,

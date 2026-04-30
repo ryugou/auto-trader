@@ -66,12 +66,7 @@ impl TryFrom<CandleRow> for Candle {
     type Error = anyhow::Error;
 
     fn try_from(r: CandleRow) -> anyhow::Result<Self> {
-        let exchange = match r.exchange.as_str() {
-            "oanda" => Exchange::Oanda,
-            "bitflyer_cfd" => Exchange::BitflyerCfd,
-            "gmo_fx" => Exchange::GmoFx,
-            other => anyhow::bail!("unknown exchange: {other}"),
-        };
+        let exchange: Exchange = r.exchange.parse()?;
         Ok(Candle {
             pair: Pair::new(&r.pair),
             exchange,

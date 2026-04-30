@@ -43,14 +43,14 @@ impl std::fmt::Display for Exchange {
 }
 
 impl std::str::FromStr for Exchange {
-    type Err = String;
+    type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> anyhow::Result<Self> {
         match s {
             "oanda" => Ok(Exchange::Oanda),
             "bitflyer_cfd" => Ok(Exchange::BitflyerCfd),
             "gmo_fx" => Ok(Exchange::GmoFx),
-            other => Err(format!(
+            other => anyhow::bail!(
                 "unknown exchange '{}' (known: {})",
                 other,
                 [Exchange::Oanda, Exchange::BitflyerCfd, Exchange::GmoFx]
@@ -58,7 +58,7 @@ impl std::str::FromStr for Exchange {
                     .map(|e| e.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            )),
+            ),
         }
     }
 }
@@ -82,6 +82,17 @@ impl Direction {
 impl std::fmt::Display for Direction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Direction {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "long" => Ok(Direction::Long),
+            "short" => Ok(Direction::Short),
+            other => anyhow::bail!("unknown direction: {other}"),
+        }
     }
 }
 
@@ -112,6 +123,18 @@ impl TradeStatus {
 impl std::fmt::Display for TradeStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TradeStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "open" => Ok(TradeStatus::Open),
+            "closing" => Ok(TradeStatus::Closing),
+            "closed" => Ok(TradeStatus::Closed),
+            other => anyhow::bail!("unknown trade status: {other}"),
+        }
     }
 }
 
@@ -155,6 +178,25 @@ impl ExitReason {
             ExitReason::StrategyIndicatorReversal => "strategy_indicator_reversal",
             ExitReason::StrategyTimeLimit => "strategy_time_limit",
             ExitReason::Reconciled => "reconciled",
+        }
+    }
+}
+
+impl std::str::FromStr for ExitReason {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "tp_hit" => Ok(ExitReason::TpHit),
+            "sl_hit" => Ok(ExitReason::SlHit),
+            "manual" => Ok(ExitReason::Manual),
+            "signal_reverse" => Ok(ExitReason::SignalReverse),
+            "strategy_mean_reached" => Ok(ExitReason::StrategyMeanReached),
+            "strategy_trailing_channel" => Ok(ExitReason::StrategyTrailingChannel),
+            "strategy_trailing_ma" => Ok(ExitReason::StrategyTrailingMa),
+            "strategy_indicator_reversal" => Ok(ExitReason::StrategyIndicatorReversal),
+            "strategy_time_limit" => Ok(ExitReason::StrategyTimeLimit),
+            "reconciled" => Ok(ExitReason::Reconciled),
+            other => anyhow::bail!("unknown exit_reason: {other}"),
         }
     }
 }
