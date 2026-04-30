@@ -1607,21 +1607,19 @@ async fn main() -> anyhow::Result<()> {
                         // Upsert daily summary
                         let date = exit_at.date_naive();
                         let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
-                        // account_type is carried on the event from the executor/monitor
-                        // that emitted it — no extra DB round-trip required.
                         let account_id = t.account_id;
-                        let account_type = trade_event.account_type.clone();
-                        // mode is now derived from account_type ("paper" → "paper", "live" → "live")
-                        let mode_str = account_type.as_deref().unwrap_or("paper");
+                        let account_type = trade_event
+                            .account_type
+                            .as_deref()
+                            .unwrap_or("paper");
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool,
                             date,
                             &t.strategy_name,
                             &t.pair.0,
-                            mode_str,
+                            account_type,
                             t.exchange.as_str(),
                             Some(account_id),
-                            account_type.as_deref(),
                             1,
                             win,
                             pnl_amount,

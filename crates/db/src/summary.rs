@@ -55,19 +55,19 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
             }
         }
 
-        let mode_str: &str = account_type.as_str();
+        let account_type_str: &str = account_type;
 
         // Try to update existing row first.
         let result = sqlx::query(
             "UPDATE daily_summary SET max_drawdown = $1
-             WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND mode = $5
+             WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND account_type = $5
                AND exchange = $6 AND account_id = $7",
         )
         .bind(max_dd)
         .bind(date)
         .bind(strategy.as_str())
         .bind(pair.as_str())
-        .bind(mode_str)
+        .bind(account_type_str)
         .bind(exchange.as_str())
         .bind(*account_id)
         .execute(pool)
@@ -83,7 +83,7 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
                 },
             );
             sqlx::query(
-                r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
+                r#"INSERT INTO daily_summary (date, strategy_name, pair, account_type, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
                    SET max_drawdown = $10"#,
@@ -91,7 +91,7 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
             .bind(date)
             .bind(strategy.as_str())
             .bind(pair.as_str())
-            .bind(mode_str)
+            .bind(account_type_str)
             .bind(exchange.as_str())
             .bind(*account_id)
             .bind(total_trades as i32)
@@ -112,59 +112,47 @@ pub async fn upsert_daily_summary(
     date: NaiveDate,
     strategy_name: &str,
     pair: &str,
-    mode: &str,
+    account_type: &str,
     exchange: &str,
     account_id: Option<Uuid>,
-    account_type: Option<&str>,
     trade_count_delta: i32,
     win_count_delta: i32,
     pnl_delta: Decimal,
 ) -> anyhow::Result<()> {
     if let Some(aid) = account_id {
-        // account_id is NOT NULL path — use main UNIQUE constraint.
         sqlx::query(
-            r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_id, account_type, trade_count, win_count, total_pnl)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            r#"INSERT INTO daily_summary (date, strategy_name, pair, account_type, exchange, account_id, trade_count, win_count, total_pnl)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
-               SET trade_count = daily_summary.trade_count + $8,
-                   win_count = daily_summary.win_count + $9,
-                   total_pnl = daily_summary.total_pnl + $10,
-                   account_type = COALESCE(EXCLUDED.account_type, daily_summary.account_type)"#,
+               SET trade_count = daily_summary.trade_count + $7,
+                   win_count = daily_summary.win_count + $8,
+                   total_pnl = daily_summary.total_pnl + $9"#,
         )
         .bind(date)
         .bind(strategy_name)
         .bind(pair)
-        .bind(mode)
+        .bind(account_type)
         .bind(exchange)
         .bind(aid)
-        .bind(account_type)
         .bind(trade_count_delta)
         .bind(win_count_delta)
         .bind(pnl_delta)
         .execute(pool)
         .await?;
     } else {
-        // account_id IS NULL path — `daily_summary_no_account_unique` is a
-        // partial unique INDEX, not a UNIQUE CONSTRAINT, so
-        // `ON CONFLICT ON CONSTRAINT <name>` would fail at runtime
-        // (Postgres only accepts constraints there). Use the column-list
-        // inference form with the matching WHERE predicate instead — Postgres
-        // matches it to the same partial index.
         sqlx::query(
-            r#"INSERT INTO daily_summary (date, strategy_name, pair, mode, exchange, account_type, trade_count, win_count, total_pnl)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT (date, strategy_name, pair, mode, exchange) WHERE account_id IS NULL DO UPDATE
-               SET trade_count = daily_summary.trade_count + $7,
-                   win_count = daily_summary.win_count + $8,
-                   total_pnl = daily_summary.total_pnl + $9,
-                   account_type = COALESCE(EXCLUDED.account_type, daily_summary.account_type)"#,
+            r#"INSERT INTO daily_summary (date, strategy_name, pair, account_type, exchange, trade_count, win_count, total_pnl)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (date, strategy_name, pair, account_type, exchange) WHERE account_id IS NULL DO UPDATE
+               SET trade_count = daily_summary.trade_count + $6,
+                   win_count = daily_summary.win_count + $7,
+                   total_pnl = daily_summary.total_pnl + $8"#,
         )
         .bind(date)
         .bind(strategy_name)
         .bind(pair)
-        .bind(mode)
-        .bind(exchange)
         .bind(account_type)
+        .bind(exchange)
         .bind(trade_count_delta)
         .bind(win_count_delta)
         .bind(pnl_delta)
