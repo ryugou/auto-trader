@@ -382,6 +382,77 @@ pub async fn get_evaluated_balance(
     Ok(row)
 }
 
+/// Evaluate all trading accounts' balances in a single query (no N+1).
+///
+/// Returns a map of `account_id → EvaluatedBalance` so callers can look up
+/// each account's unrealized PnL and evaluated balance without per-account
+/// round-trips.
+pub async fn get_all_evaluated_balances(
+    pool: &PgPool,
+) -> anyhow::Result<std::collections::HashMap<Uuid, EvaluatedBalance>> {
+    let rows: Vec<(Uuid, Decimal, Decimal, Decimal)> = sqlx::query_as(
+        r#"WITH latest_prices AS (
+               SELECT DISTINCT ON (pair, exchange) pair, exchange, close
+               FROM price_candles
+               ORDER BY pair, exchange, timestamp DESC
+           ),
+           open_pnl AS (
+               SELECT
+                   t.account_id,
+                   SUM(
+                       TRUNC(
+                           CASE WHEN t.direction = 'long'
+                               THEN (COALESCE(lp.close, t.entry_price) - t.entry_price)
+                                    * t.quantity
+                               ELSE (t.entry_price - COALESCE(lp.close, t.entry_price))
+                                    * t.quantity
+                           END
+                       )
+                   ) AS unrealized_pnl
+               FROM trades t
+               LEFT JOIN latest_prices lp
+                   ON lp.pair = t.pair AND lp.exchange = t.exchange
+               WHERE t.status = 'open'
+               GROUP BY t.account_id
+           ),
+           locked AS (
+               SELECT
+                   t.account_id,
+                   SUM(TRUNC(t.quantity * t.entry_price / t.leverage)) AS locked_margin
+               FROM trades t
+               WHERE t.status = 'open' AND t.leverage > 0
+               GROUP BY t.account_id
+           )
+           SELECT
+               ta.id,
+               ta.current_balance,
+               COALESCE(op.unrealized_pnl, 0) AS unrealized_pnl,
+               ta.current_balance
+                   + COALESCE(lm.locked_margin, 0)
+                   + COALESCE(op.unrealized_pnl, 0) AS evaluated_balance
+           FROM trading_accounts ta
+           LEFT JOIN open_pnl op ON op.account_id = ta.id
+           LEFT JOIN locked    lm ON lm.account_id = ta.id"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let map = rows
+        .into_iter()
+        .map(|(id, current_balance, unrealized_pnl, evaluated_balance)| {
+            (
+                id,
+                EvaluatedBalance {
+                    current_balance,
+                    unrealized_pnl,
+                    evaluated_balance,
+                },
+            )
+        })
+        .collect();
+    Ok(map)
+}
+
 /// Daily balance history reconstructed from initial_balance and account_events.
 pub async fn get_balance_history(
     pool: &PgPool,

@@ -270,6 +270,38 @@ async fn force_close_db_only(
     let pnl = pnl.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
 
     trades::close_trade_reconciled(pool, trade.id, exit_price, pnl, ExitReason::Reconciled).await?;
+
+    // Update daily_summary so the reconciled close is reflected in
+    // aggregated stats — the normal close path goes through the trade
+    // recorder task which is not running during startup reconciliation.
+    let exit_date = chrono::Utc::now().date_naive();
+    let win = if pnl > Decimal::ZERO { 1 } else { 0 };
+    // Look up account_type for the daily_summary key.
+    let account_type: String = sqlx::query_scalar(
+        "SELECT account_type FROM trading_accounts WHERE id = $1",
+    )
+    .bind(trade.account_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_else(|| "paper".to_string());
+
+    if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
+        pool,
+        exit_date,
+        &trade.strategy_name,
+        &trade.pair.0,
+        &account_type,
+        trade.exchange.as_str(),
+        Some(trade.account_id),
+        1,
+        win,
+        pnl,
+    )
+    .await
+    {
+        tracing::warn!("startup reconcile: failed to update daily_summary for trade {}: {e}", trade.id);
+    }
+
     Ok(())
 }
 
