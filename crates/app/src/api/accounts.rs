@@ -95,6 +95,9 @@ pub async fn create(
     State(state): State<AppState>,
     mut req: Json<CreateTradingAccount>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Early validation for user-friendly 400 errors. DB CHECK constraint
+    // also enforces this, but would surface as a less clear 500 / constraint
+    // error. API validates for UX; DB validates for integrity.
     if req.account_type != "paper" && req.account_type != "live" {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
