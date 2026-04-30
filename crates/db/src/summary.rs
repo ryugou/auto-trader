@@ -170,8 +170,11 @@ pub async fn upsert_daily_summary(
 /// window by 9 hours and produce incorrect results.
 ///
 /// This is useful when trade records have been retroactively modified or
-/// deleted and the incremental summary has drifted. The function runs inside
-/// a transaction so a failure mid-way does not leave the summary empty.
+/// deleted and the incremental summary has drifted. The DELETE + INSERT
+/// runs inside a transaction so a failure mid-way does not leave the
+/// summary empty. The subsequent max-drawdown recalculation runs outside
+/// the transaction — if it fails, rows exist with `max_drawdown = 0` and
+/// the function can be safely re-called to retry.
 ///
 /// 1. Deletes all existing `daily_summary` rows for `date`.
 /// 2. Re-aggregates from `trades` (joined with `trading_accounts` for

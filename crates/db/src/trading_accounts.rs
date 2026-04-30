@@ -294,6 +294,11 @@ pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
 /// This is useful when the cached `current_balance` column may have drifted
 /// due to bugs, manual DB edits, or replayed events, and you want to rebuild
 /// it from scratch.
+///
+/// **Precondition:** the account should have no open or closing trades when
+/// this is called. Open-trade margin locks and accrued fees (e.g. overnight
+/// fees) are not included in the aggregation — only closed-trade PnL and
+/// fees are summed.
 pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
     // 1. Fetch initial_balance
     let (initial_balance,): (Decimal,) = sqlx::query_as(
@@ -325,23 +330,41 @@ pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Res
     Ok(new_balance)
 }
 
-/// Recalculate `current_balance` for **all** trading accounts.
+/// Recalculate `current_balance` for **all** trading accounts in a single
+/// set-based SQL statement (no N+1 round-trips).
 ///
-/// Iterates every account and calls [`recalculate_balance`] for each.
 /// This is the "full rebuild" variant — useful after migrations or bulk
 /// data corrections when you want to ensure every account's cached balance
 /// matches the trades ledger.
+///
+/// **Precondition:** accounts should have no open or closing trades (see
+/// [`recalculate_balance`] for details).
 pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid, Decimal)>> {
-    let ids: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM trading_accounts ORDER BY created_at ASC")
-            .fetch_all(pool)
-            .await?;
-
-    let mut results = Vec::with_capacity(ids.len());
-    for (id,) in ids {
-        let new_balance = recalculate_balance(pool, id).await?;
-        results.push((id, new_balance));
-    }
+    let results: Vec<(Uuid, Decimal)> = sqlx::query_as(
+        r#"WITH recalculated AS (
+               SELECT
+                   ta.id,
+                   ta.initial_balance
+                       + COALESCE(SUM(t.pnl_amount), 0)
+                       - COALESCE(SUM(t.fees), 0) AS new_balance
+               FROM trading_accounts ta
+               LEFT JOIN trades t
+                 ON t.account_id = ta.id
+                AND t.status = 'closed'
+               GROUP BY ta.id, ta.initial_balance
+           ),
+           updated AS (
+               UPDATE trading_accounts ta
+                  SET current_balance = r.new_balance
+                 FROM recalculated r
+                WHERE ta.id = r.id
+               RETURNING ta.id, ta.current_balance
+           )
+           SELECT id, current_balance FROM updated
+           ORDER BY id"#,
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(results)
 }
 
