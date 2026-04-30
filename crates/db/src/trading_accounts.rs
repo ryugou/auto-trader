@@ -300,6 +300,20 @@ pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
 /// fees) are not included in the aggregation — only closed-trade PnL and
 /// fees are summed.
 pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
+    // 0. Enforce precondition: no open/closing trades.
+    let (active_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trades WHERE account_id = $1 AND status IN ('open', 'closing')",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await?;
+    if active_count > 0 {
+        anyhow::bail!(
+            "cannot recalculate balance for account {account_id}: \
+             {active_count} open/closing trade(s) exist"
+        );
+    }
+
     // 1. Fetch initial_balance
     let (initial_balance,): (Decimal,) = sqlx::query_as(
         "SELECT initial_balance FROM trading_accounts WHERE id = $1",
@@ -351,6 +365,11 @@ pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid
                LEFT JOIN trades t
                  ON t.account_id = ta.id
                 AND t.status = 'closed'
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM trades t2
+                   WHERE t2.account_id = ta.id
+                     AND t2.status IN ('open', 'closing')
+               )
                GROUP BY ta.id, ta.initial_balance
            ),
            updated AS (
