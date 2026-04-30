@@ -7,6 +7,4 @@
 *.swo
 dashboard-ui/node_modules/
 dashboard-ui/dist/
-graphify-out/manifest.json
-graphify-out/cost.json
-graphify-out/cache/
+graphify-out/
