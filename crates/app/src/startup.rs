@@ -74,11 +74,9 @@ pub async fn register_strategies(
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
-            // Crypto strategies (2026-04 experiment).
-            // The strategy implementations carry their own parameter
-            // constants — config params are accepted for forward
-            // compatibility but currently not consumed (the values are
-            // baked in at the source for now).
+            // Strategies with hardcoded Rust const parameters.
+            // Tuning requires changing the const in the strategy source
+            // and rebuilding. See config/default.toml SoT header.
             name if name.starts_with("bb_mean_revert") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
                 engine.add_strategy(

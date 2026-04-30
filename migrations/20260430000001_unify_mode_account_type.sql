@@ -13,9 +13,9 @@ ALTER TABLE daily_summary DROP COLUMN IF EXISTS account_type;
 -- 2) Rename mode → account_type to match trading_accounts terminology.
 ALTER TABLE daily_summary RENAME COLUMN mode TO account_type;
 
--- 3) Recreate constraints referencing the renamed column.
---    The unique constraint and partial index reference "mode" — they
---    are automatically updated by RENAME COLUMN in PostgreSQL, so no
---    manual recreation is needed. Verify with a no-op assertion.
+-- Note: PostgreSQL RENAME COLUMN automatically updates constraint and
+-- index definitions that reference the old column name. No manual
+-- recreation of daily_summary_unique_key or daily_summary_no_account_unique
+-- is needed.
 
 COMMIT;

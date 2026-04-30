@@ -165,8 +165,13 @@ pub async fn upsert_daily_summary(
 /// Regenerate the `daily_summary` cache for the given date from the `trades`
 /// source of truth.
 ///
+/// **`date` must be a UTC date** (e.g. `exit_at.date_naive()` where `exit_at`
+/// is a `DateTime<Utc>`). Passing a JST-local date will shift the aggregation
+/// window by 9 hours and produce incorrect results.
+///
 /// This is useful when trade records have been retroactively modified or
-/// deleted and the incremental summary has drifted. The function:
+/// deleted and the incremental summary has drifted. The function runs inside
+/// a transaction so a failure mid-way does not leave the summary empty.
 ///
 /// 1. Deletes all existing `daily_summary` rows for `date`.
 /// 2. Re-aggregates from `trades` (joined with `trading_accounts` for
@@ -176,10 +181,12 @@ pub async fn upsert_daily_summary(
 /// 4. Calls [`update_daily_max_drawdown`] to recalculate the correct
 ///    max-drawdown values.
 pub async fn rebuild_daily_summary(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
     // 1. Delete existing rows for this date.
     sqlx::query("DELETE FROM daily_summary WHERE date = $1")
         .bind(date)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // 2. Re-insert aggregated rows from trades.
@@ -206,10 +213,12 @@ pub async fn rebuild_daily_summary(pool: &PgPool, date: NaiveDate) -> anyhow::Re
            GROUP BY t.strategy_name, t.pair, ta.account_type, t.exchange, t.account_id"#,
     )
     .bind(date)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    // 3. Recalculate max drawdown.
+    tx.commit().await?;
+
+    // 3. Recalculate max drawdown (uses its own queries against pool).
     update_daily_max_drawdown(pool, date).await?;
 
     Ok(())
