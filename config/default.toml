@@ -58,7 +58,7 @@ pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
 
 # === Crypto strategies (2026-04 experiment) ===
-# Each runs on its own dedicated 30,000 JPY paper account so the
+# Each runs on its own dedicated 30,000 JPY trading account so the
 # experiment is "find what works" — accounts are isolated, blow-ups are
 # acceptable, iteration loop fast. See migrations/20260407000005 for the
 # full algorithm descriptions.
@@ -103,13 +103,13 @@ pairs = ["FX_BTC_JPY", "USD_JPY"]
 # 攻め (high risk).
 params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 21, squeeze_bars = 6 }
 
-# Paper accounts are managed in the database (paper_accounts table).
+# Trading accounts are managed in the database (trading_accounts table).
 # Initial accounts are seeded by migration. Use the REST API to manage:
-#   GET    /api/paper-accounts
-#   POST   /api/paper-accounts
-#   GET    /api/paper-accounts/{id}
-#   PUT    /api/paper-accounts/{id}
-#   DELETE /api/paper-accounts/{id}
+#   GET    /api/trading-accounts
+#   POST   /api/trading-accounts
+#   GET    /api/trading-accounts/{id}
+#   PUT    /api/trading-accounts/{id}
+#   DELETE /api/trading-accounts/{id}
 
 # === Risk ===
 # 全アカウント共通のガードレール。

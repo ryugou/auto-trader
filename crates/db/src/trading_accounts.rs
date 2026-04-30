@@ -1,6 +1,6 @@
 //! Trading account DB access.
 //!
-//! Unified account row replacing the old `paper_accounts` table.
+//! Unified trading account row (replaces the old `paper_accounts` table).
 //! Backed by the `trading_accounts` table from migration 20260415000001.
 
 use auto_trader_core::types::Exchange;
@@ -283,6 +283,66 @@ pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Recalculate `current_balance` for a single account from the event source
+/// of truth (the `trades` table).
+///
+/// Formula: `current_balance = initial_balance + SUM(pnl_amount) - SUM(fees)`
+/// where only **closed** trades are considered.
+///
+/// This is useful when the cached `current_balance` column may have drifted
+/// due to bugs, manual DB edits, or replayed events, and you want to rebuild
+/// it from scratch.
+pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
+    // 1. Fetch initial_balance
+    let (initial_balance,): (Decimal,) = sqlx::query_as(
+        "SELECT initial_balance FROM trading_accounts WHERE id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("trading account {account_id} not found"))?;
+
+    // 2. Aggregate closed trades
+    let (total_pnl, total_fees): (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+        "SELECT SUM(pnl_amount), SUM(fees) FROM trades \
+         WHERE account_id = $1 AND status = 'closed'",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await?;
+
+    let total_pnl = total_pnl.unwrap_or(Decimal::ZERO);
+    let total_fees = total_fees.unwrap_or(Decimal::ZERO);
+
+    // 3. Calculate new balance
+    let new_balance = initial_balance + total_pnl - total_fees;
+
+    // 4. Persist
+    update_balance(pool, account_id, new_balance).await?;
+
+    Ok(new_balance)
+}
+
+/// Recalculate `current_balance` for **all** trading accounts.
+///
+/// Iterates every account and calls [`recalculate_balance`] for each.
+/// This is the "full rebuild" variant — useful after migrations or bulk
+/// data corrections when you want to ensure every account's cached balance
+/// matches the trades ledger.
+pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid, Decimal)>> {
+    let ids: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM trading_accounts ORDER BY created_at ASC")
+            .fetch_all(pool)
+            .await?;
+
+    let mut results = Vec::with_capacity(ids.len());
+    for (id,) in ids {
+        let new_balance = recalculate_balance(pool, id).await?;
+        results.push((id, new_balance));
+    }
+    Ok(results)
 }
 
 #[cfg(test)]

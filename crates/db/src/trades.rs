@@ -2,7 +2,7 @@
 //!
 //! All functions operate against the `trades` schema defined in
 //! `migrations/20260415000001_unified_rewrite.sql` — `account_id` rather
-//! than the legacy `paper_account_id`, `quantity` is NOT NULL, and there
+//! than the legacy `paper_account_id` column, `quantity` is NOT NULL, and there
 //! is no `mode` / `child_order_*` / `pnl_pips` column.
 
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};

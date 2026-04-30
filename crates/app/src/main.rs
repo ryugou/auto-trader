@@ -624,7 +624,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Collect actually registered strategy names for paper_account validation.
+    // Collect actually registered strategy names for trading_account validation.
     // Held as owned Strings so we can freely move it into async tasks.
     let registered_strategies: Vec<String> = engine
         .registered_names()
@@ -632,13 +632,13 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.to_string())
         .collect();
 
-    // Paper accounts live in the database and are the source of truth. We do
+    // Trading accounts live in the database and are the source of truth. We do
     // NOT take a startup snapshot — every task (executor, position monitor,
     // overnight fees) re-reads the current account list from the DB so that
     // additions/updates/deletions via the REST API are picked up immediately.
     //
     // Note: FX (OANDA) paper trading is currently disabled at the executor
-    // level. If you want FX paper trading, create an FX paper_account in the
+    // level. If you want FX paper trading, create an FX trading_account in the
     // database — the same pipeline will pick it up automatically once the
     // executor gate is relaxed.
     //
@@ -938,7 +938,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Task: Crypto position monitor — single task, DB-driven.
     //
-    // Rather than holding per-account PaperTrader instances, we re-read the
+    // Rather than holding per-account Trader instances, we re-read the
     // open-trade list from the DB on every price tick. This makes the monitor
     // automatically track account additions/removals done via the REST API.
     let (crypto_price_tx, mut crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
@@ -1225,7 +1225,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Task: Strategy-driven exit executor. Pulls ExitSignals from the
-    // engine task and force-closes the referenced trades via PaperTrader.
+    // engine task and force-closes the referenced trades via UnifiedTrader.
     // The fixed SL/TP path in the crypto position monitor still runs
     // independently — these two paths are complementary.
     //
@@ -1583,17 +1583,17 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Task: Trade recorder — handles side effects after PaperTrader has already
+    // Task: Trade recorder — handles side effects after UnifiedTrader has already
     // persisted the trade to the DB. Responsibilities:
     //   - Upsert daily_summary on close
     //   - Fire-and-forget Vegapunk ingestion on close
-    // Note: trade INSERT/UPDATE and balance changes are owned by PaperTrader.
+    // Note: trade INSERT/UPDATE and balance changes are owned by UnifiedTrader.
     let recorder_pool = pool.clone();
     let recorder_handle = tokio::spawn(async move {
         while let Some(trade_event) = trade_rx.recv().await {
             match trade_event.action {
                 TradeAction::Opened => {
-                    // Nothing to record: PaperTrader already inserted the trade.
+                    // Nothing to record: UnifiedTrader already inserted the trade.
                 }
                 TradeAction::Closed { .. } => {
                     let t = &trade_event.trade;
