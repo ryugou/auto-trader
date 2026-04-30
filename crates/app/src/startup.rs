@@ -91,19 +91,33 @@ pub async fn register_strategies(
             name if name.starts_with("donchian_trend_evolve") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
                 let params: serde_json::Value =
-                    sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
+                    match sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
                         "SELECT params FROM strategy_params WHERE strategy_name = $1",
                     )
                     .bind(&sc.name)
                     .fetch_optional(pool)
                     .await
-                    .unwrap_or(None)
-                    .map(|j| j.0)
-                    .unwrap_or_else(|| {
-                        serde_json::json!({
-                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
-                        })
-                    });
+                    {
+                        Ok(Some(j)) => j.0,
+                        Ok(None) => {
+                            tracing::warn!(
+                                "no strategy_params row for '{}', using defaults",
+                                sc.name
+                            );
+                            serde_json::json!({
+                                "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
+                            })
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to load strategy_params for '{}': {e}, using defaults",
+                                sc.name
+                            );
+                            serde_json::json!({
+                                "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
+                            })
+                        }
+                    };
                 engine.add_strategy(
                     Box::new(
                         auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(

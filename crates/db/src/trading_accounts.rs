@@ -351,8 +351,9 @@ pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Res
 /// data corrections when you want to ensure every account's cached balance
 /// matches the trades ledger.
 ///
-/// **Precondition:** accounts should have no open or closing trades (see
-/// [`recalculate_balance`] for details).
+/// Accounts with open or closing trades are **silently skipped** (not
+/// updated) to avoid corrupting their balance. The returned vec only
+/// contains accounts that were actually recalculated.
 pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid, Decimal)>> {
     let results: Vec<(Uuid, Decimal)> = sqlx::query_as(
         r#"WITH recalculated AS (
