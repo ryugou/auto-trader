@@ -56,17 +56,20 @@ pub async fn list(
         .await
         .map_err(ApiError::from)?;
 
-    let mut enriched = Vec::with_capacity(accounts.len());
-    for account in accounts {
-        let eval = dashboard::get_evaluated_balance(&state.pool, account.id)
-            .await
-            .map_err(ApiError::from)?;
-        enriched.push(AccountWithBalance::new(
-            account,
-            eval.unrealized_pnl,
-            eval.evaluated_balance,
-        ));
-    }
+    // Single query for all account balances (no N+1).
+    let balances = dashboard::get_all_evaluated_balances(&state.pool)
+        .await
+        .map_err(ApiError::from)?;
+
+    let enriched = accounts
+        .into_iter()
+        .map(|account| {
+            let eval = balances.get(&account.id);
+            let unrealized_pnl = eval.map_or(Decimal::ZERO, |e| e.unrealized_pnl);
+            let evaluated_balance = eval.map_or(account.current_balance, |e| e.evaluated_balance);
+            AccountWithBalance::new(account, unrealized_pnl, evaluated_balance)
+        })
+        .collect();
     Ok(Json(enriched))
 }
 
