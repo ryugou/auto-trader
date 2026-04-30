@@ -1,6 +1,6 @@
 //! Trading account DB access.
 //!
-//! Unified account row replacing the old `paper_accounts` table.
+//! Unified trading account row (replaces the old `paper_accounts` table).
 //! Backed by the `trading_accounts` table from migration 20260415000001.
 
 use auto_trader_core::types::Exchange;
@@ -283,6 +283,109 @@ pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Recalculate `current_balance` for a single account from the event source
+/// of truth (the `trades` table).
+///
+/// Formula: `current_balance = initial_balance + SUM(pnl_amount) - SUM(fees)`
+/// where only **closed** trades are considered.
+///
+/// This is useful when the cached `current_balance` column may have drifted
+/// due to bugs, manual DB edits, or replayed events, and you want to rebuild
+/// it from scratch.
+///
+/// **Precondition:** the account should have no open or closing trades when
+/// this is called. Open-trade margin locks and accrued fees (e.g. overnight
+/// fees) are not included in the aggregation — only closed-trade PnL and
+/// fees are summed.
+pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
+    // 0. Enforce precondition: no open/closing trades.
+    let (active_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trades WHERE account_id = $1 AND status IN ('open', 'closing')",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await?;
+    if active_count > 0 {
+        anyhow::bail!(
+            "cannot recalculate balance for account {account_id}: \
+             {active_count} open/closing trade(s) exist"
+        );
+    }
+
+    // 1. Fetch initial_balance
+    let (initial_balance,): (Decimal,) = sqlx::query_as(
+        "SELECT initial_balance FROM trading_accounts WHERE id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("trading account {account_id} not found"))?;
+
+    // 2. Aggregate closed trades
+    let (total_pnl, total_fees): (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+        "SELECT SUM(pnl_amount), SUM(fees) FROM trades \
+         WHERE account_id = $1 AND status = 'closed'",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await?;
+
+    let total_pnl = total_pnl.unwrap_or(Decimal::ZERO);
+    let total_fees = total_fees.unwrap_or(Decimal::ZERO);
+
+    // 3. Calculate new balance
+    let new_balance = initial_balance + total_pnl - total_fees;
+
+    // 4. Persist
+    update_balance(pool, account_id, new_balance).await?;
+
+    Ok(new_balance)
+}
+
+/// Recalculate `current_balance` for **all** trading accounts in a single
+/// set-based SQL statement (no N+1 round-trips).
+///
+/// This is the "full rebuild" variant — useful after migrations or bulk
+/// data corrections when you want to ensure every account's cached balance
+/// matches the trades ledger.
+///
+/// Accounts with open or closing trades are **silently skipped** (not
+/// updated) to avoid corrupting their balance. The returned vec only
+/// contains accounts that were actually recalculated.
+pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid, Decimal)>> {
+    let results: Vec<(Uuid, Decimal)> = sqlx::query_as(
+        r#"WITH recalculated AS (
+               SELECT
+                   ta.id,
+                   ta.initial_balance
+                       + COALESCE(SUM(t.pnl_amount), 0)
+                       - COALESCE(SUM(t.fees), 0) AS new_balance
+               FROM trading_accounts ta
+               LEFT JOIN trades t
+                 ON t.account_id = ta.id
+                AND t.status = 'closed'
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM trades t2
+                   WHERE t2.account_id = ta.id
+                     AND t2.status IN ('open', 'closing')
+               )
+               GROUP BY ta.id, ta.initial_balance
+           ),
+           updated AS (
+               UPDATE trading_accounts ta
+                  SET current_balance = r.new_balance
+                 FROM recalculated r
+                WHERE ta.id = r.id
+               RETURNING ta.id, ta.current_balance
+           )
+           SELECT id, current_balance FROM updated
+           ORDER BY id"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(results)
 }
 
 #[cfg(test)]

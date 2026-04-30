@@ -57,59 +57,54 @@ mode = "paper"
 pairs = ["USD_JPY", "EUR_USD"]
 params = { holding_days_max = 14 }
 
-# === Crypto strategies (2026-04 experiment) ===
-# Each runs on its own dedicated 30,000 JPY paper account so the
-# experiment is "find what works" — accounts are isolated, blow-ups are
-# acceptable, iteration loop fast. See migrations/20260407000005 for the
-# full algorithm descriptions.
+# === Strategy registration ===
+# Each [[strategies]] entry registers a strategy with the engine.
+# `pairs` controls which price events the strategy processes.
+# `mode` controls the engine slot (paper/disabled).
 #
-# NOTE on `params`: the new crypto strategies bake their tunables in as
-# `const` values inside the Rust source for now. The values listed below
-# document the intended tuning for each profile but are NOT consumed at
-# runtime — main.rs constructs the strategy structs without forwarding
-# `sc.params`. Wiring this through is a follow-up task once we know
-# which parameters actually need adjustment from experiment results.
+# Parameter source of truth (SoT):
+#   - bb_mean_revert_v1, donchian_trend_v1, squeeze_momentum_v1:
+#     Rust const in crates/strategy/src/*.rs (hardcoded, tuned experimentally)
+#   - donchian_trend_evolve_v1:
+#     DB strategy_params table (updated weekly by vegapunk batch)
+#   - swing_llm_v1:
+#     TOML params below (holding_days_max consumed at registration)
+#
+# Do NOT add `params` to strategies that use Rust const — it creates a
+# false impression that TOML values are consumed. If you need to tune,
+# change the const in the Rust source and rebuild.
 
 [[strategies]]
 name = "bb_mean_revert_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY", "USD_JPY"]
-# 慎重 (low risk).
-params = { bb_period = 20, bb_stddev = 2.5, rsi_period = 14, atr_period = 14 }
 
 [[strategies]]
 name = "donchian_trend_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY", "USD_JPY"]
-# 標準 (medium risk).
-params = { entry_channel = 20, exit_channel = 10, atr_period = 14, atr_baseline_bars = 20 }
 
 [[strategies]]
 name = "donchian_trend_evolve_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY", "USD_JPY"]
-# Evolve: Vegapunk 学習ループで週次パラメータ自動更新。
-# 実行時パラメータは DB (strategy_params テーブル) から読む。
-params = { entry_channel = 20, exit_channel = 10, atr_baseline_bars = 20 }
 
 [[strategies]]
 name = "squeeze_momentum_v1"
 enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY", "USD_JPY"]
-# 攻め (high risk).
-params = { bb_period = 20, kc_period = 20, atr_period = 14, ema_trail_period = 21, squeeze_bars = 6 }
 
-# Paper accounts are managed in the database (paper_accounts table).
+# Trading accounts are managed in the database (trading_accounts table).
 # Initial accounts are seeded by migration. Use the REST API to manage:
-#   GET    /api/paper-accounts
-#   POST   /api/paper-accounts
-#   GET    /api/paper-accounts/{id}
-#   PUT    /api/paper-accounts/{id}
-#   DELETE /api/paper-accounts/{id}
+#   GET    /api/trading-accounts
+#   POST   /api/trading-accounts
+#   GET    /api/trading-accounts/{id}
+#   PUT    /api/trading-accounts/{id}
+#   DELETE /api/trading-accounts/{id}
 
 # === Risk ===
 # 全アカウント共通のガードレール。

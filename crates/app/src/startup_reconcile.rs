@@ -24,17 +24,14 @@ pub async fn reconcile_live_accounts_at_startup(
     price_store: Arc<PriceStore>,
 ) -> anyhow::Result<()> {
     for account in accounts.iter().filter(|a| a.account_type == "live") {
-        let exchange = match resolve_exchange_enum(&account.exchange) {
-            Ok(e) => e,
-            Err(e) => {
-                anyhow::bail!(
-                    "startup reconcile: live account '{}' has unknown exchange '{}': {e}; \
-                     cannot reconcile — refusing to start",
-                    account.name,
-                    account.exchange
-                );
-            }
-        };
+        let exchange: auto_trader_core::types::Exchange = account.exchange.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "startup reconcile: live account '{}' has unknown exchange '{}': {e}; \
+                 cannot reconcile — refusing to start",
+                account.name,
+                account.exchange
+            )
+        })?;
 
         let Some(api) = apis.get(&exchange) else {
             anyhow::bail!(
@@ -276,15 +273,6 @@ async fn force_close_db_only(
     Ok(())
 }
 
-fn resolve_exchange_enum(s: &str) -> anyhow::Result<auto_trader_core::types::Exchange> {
-    match s {
-        "bitflyer_cfd" => Ok(auto_trader_core::types::Exchange::BitflyerCfd),
-        "oanda" => Ok(auto_trader_core::types::Exchange::Oanda),
-        "gmo_fx" => Ok(auto_trader_core::types::Exchange::GmoFx),
-        other => anyhow::bail!("unknown exchange: {}", other),
-    }
-}
-
 fn matches_direction(side: &str, direction: &Direction) -> Option<bool> {
     match side.trim().to_ascii_uppercase().as_str() {
         "BUY" => Some(*direction == Direction::Long),
@@ -319,15 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_exchange_enum_known() {
-        assert!(resolve_exchange_enum("bitflyer_cfd").is_ok());
-        assert!(resolve_exchange_enum("oanda").is_ok());
-        assert!(resolve_exchange_enum("gmo_fx").is_ok());
+    fn exchange_from_str_known() {
+        assert!("bitflyer_cfd".parse::<auto_trader_core::types::Exchange>().is_ok());
+        assert!("oanda".parse::<auto_trader_core::types::Exchange>().is_ok());
+        assert!("gmo_fx".parse::<auto_trader_core::types::Exchange>().is_ok());
     }
 
     #[test]
-    fn resolve_exchange_enum_unknown() {
-        assert!(resolve_exchange_enum("unknown_exchange").is_err());
+    fn exchange_from_str_unknown() {
+        assert!("unknown_exchange".parse::<auto_trader_core::types::Exchange>().is_err());
     }
 }
 
