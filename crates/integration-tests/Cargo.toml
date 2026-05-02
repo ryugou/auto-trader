@@ -1,0 +1,49 @@
+[package]
+name = "auto-trader-integration-tests"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+auto-trader-core = { workspace = true }
+auto-trader-db = { workspace = true }
+auto-trader-market = { workspace = true }
+auto-trader-strategy = { workspace = true }
+auto-trader-executor = { workspace = true }
+auto-trader-vegapunk = { workspace = true }
+auto-trader-notify = { workspace = true }
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+sqlx = { workspace = true }
+
+rust_decimal = { workspace = true }
+rust_decimal_macros = "1"
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+wiremock = { workspace = true }
+reqwest = { workspace = true }
+
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+tonic = { workspace = true }
+prost = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+csv = { workspace = true }
+
+anyhow = { workspace = true }
+
+[features]
+external-api = []
