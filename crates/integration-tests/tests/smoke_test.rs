@@ -276,6 +276,93 @@ async fn mock_gemini_invalid_response() {
     assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
 }
 
+// ── MockVegapunk ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mock_vegapunk_tracks_calls() {
+    use auto_trader_integration_tests::mocks::vegapunk::{MockVegapunkBuilder, SearchResult};
+    use std::sync::atomic::Ordering;
+
+    let mock = MockVegapunkBuilder::new()
+        .with_search_results(vec![SearchResult {
+            text: "BTC correlates with risk-off sentiment".to_string(),
+            score: 0.92,
+        }])
+        .build();
+
+    // ingest_raw
+    let ingest = mock
+        .ingest_raw("test data", "trading_log", "btc", "2026-04-29T00:00:00Z")
+        .await
+        .unwrap();
+    assert_eq!(ingest.chunk_count, 1);
+
+    // search
+    let results = mock.search("BTC sentiment", "local", 5).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].score > 0.9);
+
+    // feedback
+    mock.feedback("search-001", 4, "helpful").await.unwrap();
+
+    // merge
+    mock.merge().await.unwrap();
+
+    // Verify counters
+    assert_eq!(mock.counters.ingest_raw.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.counters.search.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.counters.feedback.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.counters.merge.load(Ordering::SeqCst), 1);
+
+    // Verify captured arguments
+    let ingest_calls = mock.ingest_raw_calls();
+    assert_eq!(ingest_calls.len(), 1);
+    assert_eq!(ingest_calls[0].text, "test data");
+    assert_eq!(ingest_calls[0].source_type, "trading_log");
+
+    let search_calls = mock.search_calls();
+    assert_eq!(search_calls[0].query, "BTC sentiment");
+    assert_eq!(search_calls[0].mode, "local");
+    assert_eq!(search_calls[0].top_k, 5);
+
+    let feedback_calls = mock.feedback_calls();
+    assert_eq!(feedback_calls[0].search_id, "search-001");
+    assert_eq!(feedback_calls[0].rating, 4);
+}
+
+#[tokio::test]
+async fn mock_vegapunk_failure_injection() {
+    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkBuilder;
+    use std::sync::atomic::Ordering;
+
+    let mock = MockVegapunkBuilder::new()
+        .with_failures("search", 2)
+        .build();
+
+    // First 2 calls fail
+    assert!(mock.search("q", "local", 3).await.is_err());
+    assert!(mock.search("q", "local", 3).await.is_err());
+    // Third succeeds
+    assert!(mock.search("q", "local", 3).await.is_ok());
+
+    // Counter tracks all calls (including failures)
+    assert_eq!(mock.counters.search.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn mock_vegapunk_global_fail_switch() {
+    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunk;
+    use std::sync::atomic::Ordering;
+
+    let mock = MockVegapunk::new();
+    mock.should_fail.store(true, Ordering::SeqCst);
+
+    assert!(mock.ingest_raw("x", "y", "z", "t").await.is_err());
+    assert!(mock.search("q", "local", 1).await.is_err());
+    assert!(mock.feedback("id", 1, "bad").await.is_err());
+    assert!(mock.merge().await.is_err());
+}
+
 // ── MockBitflyerWs ─────────────────────────────────────────────────────────
 
 #[tokio::test]
