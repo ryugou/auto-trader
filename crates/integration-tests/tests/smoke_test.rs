@@ -137,3 +137,141 @@ async fn mock_exchange_api_fails_then_succeeds() {
     // Third succeeds
     assert!(mock.get_positions("X").await.is_ok());
 }
+
+// ── MockGmoFxServer ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mock_gmo_fx_server_normal_ticker() {
+    use auto_trader_integration_tests::mocks::gmo_fx_server::MockGmoFxServer;
+
+    let mock = MockGmoFxServer::start().await;
+    mock.normal_ticker(&["USD_JPY", "EUR_JPY"]).await;
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .get(format!("{}/public/v1/ticker", mock.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["status"], 0);
+    let data = resp["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["symbol"], "USD_JPY");
+    assert_eq!(data[0]["status"], "OPEN");
+    assert_eq!(data[1]["symbol"], "EUR_JPY");
+}
+
+#[tokio::test]
+async fn mock_gmo_fx_server_maintenance() {
+    use auto_trader_integration_tests::mocks::gmo_fx_server::MockGmoFxServer;
+
+    let mock = MockGmoFxServer::start().await;
+    mock.maintenance().await;
+
+    let resp: serde_json::Value = reqwest::get(format!("{}/public/v1/ticker", mock.url()))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["status"], 5);
+}
+
+// ── MockSlackWebhook ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mock_slack_webhook_captures_body() {
+    use auto_trader_integration_tests::mocks::slack_webhook::MockSlackWebhook;
+
+    let (mock, url) = MockSlackWebhook::start().await;
+
+    let client = reqwest::Client::new();
+    client
+        .post(&url)
+        .body(r#"{"text":"hello"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let bodies = mock.captured_bodies();
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].contains("hello"));
+}
+
+#[tokio::test]
+async fn mock_slack_webhook_error_response() {
+    use auto_trader_integration_tests::mocks::slack_webhook::MockSlackWebhook;
+
+    let (mock, url) = MockSlackWebhook::start().await;
+    mock.with_error_response(500).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .body(r#"{"text":"fail"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 500);
+}
+
+// ── MockGemini ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mock_gemini_parameter_proposal() {
+    use auto_trader_integration_tests::mocks::gemini::MockGemini;
+
+    let mock = MockGemini::start().await;
+    let proposal_json = r#"{"params":{"entry_channel":20,"exit_channel":10,"atr_baseline_bars":50},"rationale":"test","expected_effect":"none"}"#;
+    mock.parameter_proposal(proposal_json).await;
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .post(format!(
+            "{}/v1beta/models/gemini-flash:generateContent",
+            mock.url()
+        ))
+        .json(&serde_json::json!({"contents": [{"parts": [{"text": "test"}]}]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let text = resp["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["params"]["entry_channel"], 20);
+    assert_eq!(parsed["rationale"], "test");
+}
+
+#[tokio::test]
+async fn mock_gemini_invalid_response() {
+    use auto_trader_integration_tests::mocks::gemini::MockGemini;
+
+    let mock = MockGemini::start().await;
+    mock.invalid_response().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/v1beta/models/gemini-flash:generateContent",
+            mock.url()
+        ))
+        .json(&serde_json::json!({"contents": []}))
+        .send()
+        .await
+        .unwrap();
+
+    let body = resp.text().await.unwrap();
+    // The body is intentionally malformed — not parseable as Gemini response
+    assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
+}
