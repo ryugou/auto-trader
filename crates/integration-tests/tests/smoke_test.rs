@@ -472,3 +472,138 @@ async fn mock_bitflyer_ws_invalid_message() {
         );
     }
 }
+
+// ── Full Integration Smoke Test ────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn full_integration_smoke_test(pool: sqlx::PgPool) {
+    use auto_trader_integration_tests::helpers::failure_output::{self, TracingCapture};
+    use auto_trader_integration_tests::mocks::exchange_api::MockExchangeApiBuilder;
+    use auto_trader_integration_tests::mocks::gemini::MockGemini;
+    use auto_trader_integration_tests::mocks::gmo_fx_server::MockGmoFxServer;
+    use auto_trader_integration_tests::mocks::slack_webhook::MockSlackWebhook;
+    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkBuilder;
+    use auto_trader_market::exchange_api::ExchangeApi;
+    use std::path::PathBuf;
+    use tracing_subscriber::prelude::*;
+
+    // 1. Seed accounts
+    let accounts = db::seed_standard_accounts(&pool).await;
+    assert_ne!(
+        accounts.bitflyer_cfd_account_id,
+        accounts.gmo_fx_account_id
+    );
+
+    // 2. Load fixtures
+    let fixture_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/smoke_test.csv");
+    let count =
+        fixture_loader::load_price_candles(&pool, "gmo_fx", "USD_JPY", "M5", &fixture_path)
+            .await
+            .unwrap();
+    assert_eq!(count, 3);
+
+    // 3. Verify DB state via snapshot
+    let snapshot =
+        db::snapshot_tables(&pool, &["trading_accounts", "price_candles"]).await;
+    assert!(
+        snapshot.contains("test_bitflyer_cfd"),
+        "snapshot must contain bitflyer account: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("test_gmo_fx"),
+        "snapshot must contain gmo_fx account: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("USD_JPY"),
+        "snapshot must contain USD_JPY candles: {snapshot}"
+    );
+
+    // 4. Create and use MockExchangeApi
+    let mock_exchange = MockExchangeApiBuilder::new()
+        .with_get_positions_response(vec![])
+        .build();
+    let positions = mock_exchange.get_positions("FX_BTC_JPY").await.unwrap();
+    assert!(positions.is_empty());
+
+    // 5. Start and use MockGmoFxServer
+    let mock_gmo = MockGmoFxServer::start().await;
+    mock_gmo.normal_ticker(&["USD_JPY"]).await;
+    let gmo_resp = reqwest::get(format!("{}/public/v1/ticker", mock_gmo.url()))
+        .await
+        .unwrap();
+    assert_eq!(gmo_resp.status(), 200);
+
+    // 6. Start and use MockSlackWebhook
+    let (mock_slack, slack_url) = MockSlackWebhook::start().await;
+    let client = reqwest::Client::new();
+    client
+        .post(&slack_url)
+        .body(r#"{"text":"smoke"}"#)
+        .send()
+        .await
+        .unwrap();
+    let bodies = mock_slack.captured_bodies();
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].contains("smoke"));
+
+    // 7. Start and use MockGemini
+    let mock_gemini = MockGemini::start().await;
+    mock_gemini
+        .parameter_proposal(r#"{"entry_channel":20,"exit_channel":10}"#)
+        .await;
+    let gemini_resp: serde_json::Value = client
+        .post(format!(
+            "{}/v1beta/models/gemini-flash:generateContent",
+            mock_gemini.url()
+        ))
+        .json(&serde_json::json!({"contents": [{"parts": [{"text": "test"}]}]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let text = gemini_resp["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["entry_channel"], 20);
+
+    // 8. Create and use MockVegapunk
+    let mock_vegapunk = MockVegapunkBuilder::new().build();
+    let ingest = mock_vegapunk
+        .ingest_raw("test data", "trading_log", "btc", "2026-04-29T00:00:00Z")
+        .await
+        .unwrap();
+    assert_eq!(ingest.chunk_count, 1);
+
+    // 9. Verify tracing capture
+    let (layer, buffer) = TracingCapture::new();
+    let _guard = tracing_subscriber::registry().with(layer).set_default();
+    tracing::info!("smoke test complete");
+    let logs = buffer.lock().unwrap();
+    assert!(
+        logs.iter().any(|l| l.contains("smoke test complete")),
+        "tracing capture must record log line"
+    );
+    drop(logs);
+
+    // 10. Verify failure output format
+    let logs_snapshot = buffer.lock().unwrap();
+    let report = failure_output::format_failure(
+        "smoke_test::full_integration",
+        "fixtures/smoke_test.csv",
+        "everything works",
+        "it did",
+        &logs_snapshot,
+        &snapshot,
+    );
+    drop(logs_snapshot);
+
+    assert!(report.contains("[FAIL]"));
+    assert!(report.contains("smoke_test::full_integration"));
+    assert!(report.contains("=== application log ==="));
+    assert!(report.contains("=== db state ==="));
+    assert!(report.contains("smoke test complete"));
+}
