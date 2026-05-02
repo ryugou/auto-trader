@@ -145,6 +145,10 @@ impl MarketFeed for GmoFxFeed {
                 } else {
                     tracing::warn!("GMO FX ticker non-zero status: {}", ticker.status);
                 }
+                // Mark all pairs as market closed so health shows the correct status.
+                for (_, fk) in pair_map.values() {
+                    price_store.mark_market_closed(fk.clone()).await;
+                }
                 continue;
             }
 
@@ -153,8 +157,12 @@ impl MarketFeed for GmoFxFeed {
                     continue;
                 }
                 if item.status != "OPEN" {
-                    // Market closed (weekend / holiday) — flush any in-progress candle
-                    // so it doesn't linger until next market open (could be days for weekend).
+                    // Market closed (weekend / holiday) — mark in PriceStore so health
+                    // endpoint shows "market_closed" instead of "missing" or "stale".
+                    let (_pair, feed_key) = &pair_map[&item.symbol];
+                    price_store.mark_market_closed(feed_key.clone()).await;
+                    // Flush any in-progress candle so it doesn't linger until next
+                    // market open (could be days for weekend).
                     let now = chrono::Utc::now();
                     if let Some(builder) = builders.get_mut(&item.symbol)
                         && let Some(candle) = builder.try_complete(now, None, None)
