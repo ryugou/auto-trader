@@ -275,3 +275,113 @@ async fn mock_gemini_invalid_response() {
     // The body is intentionally malformed — not parseable as Gemini response
     assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
 }
+
+// ── MockBitflyerWs ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mock_bitflyer_ws_sends_ticks() {
+    use auto_trader_integration_tests::mocks::bitflyer_ws::{MockBitflyerWs, TickData};
+    use futures_util::StreamExt;
+
+    let ticks = vec![
+        TickData::new(11_000_000, 10_999_000, 11_001_000),
+        TickData::new(11_050_000, 11_049_000, 11_051_000)
+            .with_timestamp("2026-04-28T00:00:01.000"),
+        TickData::new(11_100_000, 11_099_000, 11_101_000)
+            .with_timestamp("2026-04-28T00:00:02.000"),
+    ];
+
+    let mock = MockBitflyerWs::normal_ticks("FX_BTC_JPY", ticks).await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(mock.url())
+        .await
+        .expect("failed to connect to mock ws");
+    let (_write, mut read) = ws.split();
+
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), read.next())
+            .await
+            .expect("timeout waiting for ws message")
+            .expect("stream ended unexpectedly")
+            .expect("ws error");
+
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed["jsonrpc"], "2.0");
+            assert_eq!(parsed["method"], "channelMessage");
+            assert_eq!(
+                parsed["params"]["channel"],
+                "lightning_ticker_FX_BTC_JPY"
+            );
+            let ltp = parsed["params"]["message"]["ltp"].as_i64().unwrap();
+            received.push(ltp);
+        }
+    }
+
+    assert_eq!(received, vec![11_000_000, 11_050_000, 11_100_000]);
+}
+
+#[tokio::test]
+async fn mock_bitflyer_ws_disconnect_after() {
+    use auto_trader_integration_tests::mocks::bitflyer_ws::{MockBitflyerWs, TickData};
+    use futures_util::StreamExt;
+
+    let ticks = vec![
+        TickData::new(11_000_000, 10_999_000, 11_001_000),
+        TickData::new(11_050_000, 11_049_000, 11_051_000),
+        TickData::new(11_100_000, 11_099_000, 11_101_000),
+    ];
+
+    let mock = MockBitflyerWs::disconnect_after("FX_BTC_JPY", ticks, 2).await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(mock.url())
+        .await
+        .expect("failed to connect");
+    let (_write, mut read) = ws.split();
+
+    let mut count = 0;
+    while let Some(result) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), read.next())
+            .await
+            .ok()
+            .flatten()
+    {
+        match result {
+            Ok(tokio_tungstenite::tungstenite::Message::Text(_)) => count += 1,
+            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(count, 2, "should receive exactly 2 ticks before disconnect");
+}
+
+#[tokio::test]
+async fn mock_bitflyer_ws_invalid_message() {
+    use auto_trader_integration_tests::mocks::bitflyer_ws::MockBitflyerWs;
+    use futures_util::StreamExt;
+
+    let mock = MockBitflyerWs::invalid_message().await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(mock.url())
+        .await
+        .expect("failed to connect");
+    let (_write, mut read) = ws.split();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), read.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("ws error");
+
+    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+        // Must not be valid JSON-RPC ticker
+        let parsed = serde_json::from_str::<serde_json::Value>(&text);
+        assert!(
+            parsed.is_err(),
+            "invalid_message scenario should send non-JSON data"
+        );
+    }
+}
