@@ -12,8 +12,9 @@ function formatAgeMinutes(secs: number | null): string {
 }
 
 function describe(f: MarketFeedHealth): string {
-  const detail = f.status === 'missing' ? 'tick 未受信' : formatAgeMinutes(f.last_tick_age_secs)
-  return `${f.exchange} / ${f.pair} (${detail})`
+  if (f.status === 'missing') return `${f.exchange} / ${f.pair} (tick 未受信)`
+  if (f.status === 'market_closed') return `${f.exchange} / ${f.pair} (市場休場)`
+  return `${f.exchange} / ${f.pair} (${formatAgeMinutes(f.last_tick_age_secs)})`
 }
 
 export default function MarketFeedHealthBanner() {
@@ -50,25 +51,37 @@ export default function MarketFeedHealthBanner() {
 
   if (isLoading || !data) return null
 
-  const degraded = data.feeds.filter((f) => f.status !== 'healthy')
-  if (degraded.length === 0) return null
+  const errors = data.feeds.filter((f) => f.status === 'missing' || f.status === 'stale')
+  const closed = data.feeds.filter((f) => f.status === 'market_closed')
 
   return (
-    <div
-      role="alert"
-      className="bg-red-700 text-white px-4 py-2 text-sm font-semibold border-b border-red-900"
-    >
-      <div className="max-w-7xl mx-auto flex flex-col gap-1">
-        <div className="flex items-center gap-2">
-          <span aria-hidden>⚠️</span>
-          <span>市場フィード異常</span>
-        </div>
-        {degraded.map((f) => (
-          <div key={`${f.exchange}:${f.pair}`} className="text-xs font-normal pl-6">
-            {describe(f)}
+    <>
+      {errors.length > 0 && (
+        <div
+          role="alert"
+          className="bg-red-700 text-white px-4 py-2 text-sm font-semibold border-b border-red-900"
+        >
+          <div className="max-w-7xl mx-auto flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <span aria-hidden>⚠️</span>
+              <span>市場フィード異常</span>
+            </div>
+            {errors.map((f) => (
+              <div key={`${f.exchange}:${f.pair}`} className="text-xs font-normal pl-6">
+                {describe(f)}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-    </div>
+        </div>
+      )}
+      {closed.length > 0 && (
+        <div className="bg-gray-600 text-gray-200 px-4 py-1.5 text-xs border-b border-gray-700">
+          <div className="max-w-7xl mx-auto flex items-center gap-2">
+            <span aria-hidden>🌙</span>
+            <span>{closed.map((f) => `${f.exchange} / ${f.pair}`).join(', ')} — 市場休場中</span>
+          </div>
+        </div>
+      )}
+    </>
   )
 }

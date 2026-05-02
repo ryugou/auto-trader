@@ -205,7 +205,7 @@ export interface MarketPricesResponse {
   prices: MarketPrice[]
 }
 
-export type MarketFeedStatus = 'healthy' | 'stale' | 'missing'
+export type MarketFeedStatus = 'healthy' | 'stale' | 'missing' | 'market_closed'
 
 export interface MarketFeedHealth {
   exchange: string
