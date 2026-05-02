@@ -15,7 +15,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
@@ -76,10 +76,8 @@ pub fn router(state: AppState) -> Router {
                 .fallback(ServeFile::new("dashboard-ui/dist/index.html")),
         )
         .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+            // Permissive CORS for same-host dashboard (network_mode: host).
+            CorsLayer::permissive(),
         )
 }
 
