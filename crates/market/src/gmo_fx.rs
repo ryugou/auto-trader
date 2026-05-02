@@ -26,6 +26,7 @@ const BASE_URL: &str = "https://forex-api.coin.z.com/public";
 #[derive(Debug, Deserialize)]
 struct TickerResponse {
     status: i32,
+    #[serde(default)]
     data: Vec<TickerData>,
 }
 
@@ -138,7 +139,12 @@ impl MarketFeed for GmoFxFeed {
             };
 
             if ticker.status != 0 {
-                tracing::warn!("GMO FX ticker non-zero status: {}", ticker.status);
+                // status=5 is maintenance — log at debug to avoid spam.
+                if ticker.status == 5 {
+                    tracing::debug!("GMO FX: maintenance (status=5), waiting");
+                } else {
+                    tracing::warn!("GMO FX ticker non-zero status: {}", ticker.status);
+                }
                 continue;
             }
 
