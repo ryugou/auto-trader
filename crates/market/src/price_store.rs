@@ -14,7 +14,7 @@ use auto_trader_core::types::{Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -48,6 +48,8 @@ pub enum FeedStatus {
     Healthy,
     Stale,
     Missing,
+    /// Feed is connected and polling, but the market is closed (weekend/holiday).
+    MarketClosed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +67,9 @@ pub const STALE_THRESHOLD_SECS: i64 = 60;
 pub struct PriceStore {
     latest: RwLock<HashMap<FeedKey, LatestTick>>,
     expected: Vec<FeedKey>,
+    /// Feeds where the market is confirmed closed (weekend/holiday).
+    /// Distinct from "missing" (never connected) and "stale" (connected but lagging).
+    market_closed: RwLock<HashSet<FeedKey>>,
 }
 
 impl PriceStore {
@@ -72,6 +77,7 @@ impl PriceStore {
         Arc::new(Self {
             latest: RwLock::new(HashMap::new()),
             expected,
+            market_closed: RwLock::new(HashSet::new()),
         })
     }
 
@@ -84,6 +90,8 @@ impl PriceStore {
     /// after a fresh tick would overwrite the fresh timestamp with
     /// a 5-minute-old one, briefly making the feed look stale.
     pub async fn update(&self, key: FeedKey, tick: LatestTick) {
+        // A live tick means the market is open — clear any closed flag.
+        self.market_closed.write().await.remove(&key);
         let mut guard = self.latest.write().await;
         match guard.get(&key) {
             Some(existing) if existing.ts >= tick.ts => {
@@ -94,6 +102,13 @@ impl PriceStore {
                 guard.insert(key, tick);
             }
         }
+    }
+
+    /// Mark a feed as having its market closed (weekend/holiday).
+    /// The feed is connected and polling, but no ticks will arrive until
+    /// the market reopens. Cleared automatically when `update` receives a tick.
+    pub async fn mark_market_closed(&self, key: FeedKey) {
+        self.market_closed.write().await.insert(key);
     }
 
     #[cfg(test)]
@@ -166,21 +181,21 @@ impl PriceStore {
     /// reference "now" timestamp into a vec of `FeedHealth`.
     pub async fn health_at(&self, now: DateTime<Utc>) -> Vec<FeedHealth> {
         let guard = self.latest.read().await;
+        let closed = self.market_closed.read().await;
         self.expected
             .iter()
             .map(|key| {
                 let observed = guard.get(key);
+                let is_closed = closed.contains(key);
                 let (status, age) = match observed {
+                    None if is_closed => (FeedStatus::MarketClosed, None),
                     None => (FeedStatus::Missing, None),
                     Some(tick) => {
-                        // Clamp to 0 so an upstream clock skew that
-                        // produces a future-dated tick does not get
-                        // reported as a negative age (and does not
-                        // accidentally look healthy just because the
-                        // negative is less than the 60s threshold).
                         let raw_age = (now - tick.ts).num_seconds();
                         let age_secs = raw_age.max(0);
-                        let status = if age_secs <= STALE_THRESHOLD_SECS {
+                        let status = if is_closed {
+                            FeedStatus::MarketClosed
+                        } else if age_secs <= STALE_THRESHOLD_SECS {
                             FeedStatus::Healthy
                         } else {
                             FeedStatus::Stale
@@ -380,6 +395,52 @@ mod tests {
         let k = key(Exchange::GmoFx, "USD_JPY");
         let age = store.last_tick_age_for(&k).await;
         assert!(age.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_market_closed_when_marked() {
+        let k = key(Exchange::GmoFx, "USD_JPY");
+        let store = PriceStore::new(vec![k.clone()]);
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+
+        // Initially missing.
+        let report = store.health_at(now).await;
+        assert_eq!(report[0].status, FeedStatus::Missing);
+
+        // Mark market closed.
+        store.mark_market_closed(k.clone()).await;
+        let report = store.health_at(now).await;
+        assert_eq!(report[0].status, FeedStatus::MarketClosed);
+    }
+
+    #[tokio::test]
+    async fn health_market_closed_cleared_on_tick() {
+        let k = key(Exchange::GmoFx, "USD_JPY");
+        let store = PriceStore::new(vec![k.clone()]);
+        let now = Utc.with_ymd_and_hms(2026, 5, 4, 9, 0, 0).unwrap();
+
+        // Mark closed, then receive a tick (market reopened).
+        store.mark_market_closed(k.clone()).await;
+        store.update(k.clone(), tick(160_000, now)).await;
+        let report = store.health_at(now).await;
+        assert_eq!(report[0].status, FeedStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn health_market_closed_with_stale_tick() {
+        // Had a tick before market close, now marked closed.
+        let k = key(Exchange::GmoFx, "USD_JPY");
+        let store = PriceStore::new(vec![k.clone()]);
+        let old = Utc.with_ymd_and_hms(2026, 5, 1, 20, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+
+        store.update(k.clone(), tick(160_000, old)).await;
+        store.mark_market_closed(k.clone()).await;
+        let report = store.health_at(now).await;
+        // Should be MarketClosed, not Stale.
+        assert_eq!(report[0].status, FeedStatus::MarketClosed);
+        // But last_tick_age_secs should still reflect the old tick.
+        assert!(report[0].last_tick_age_secs.is_some());
     }
 
     #[tokio::test]
