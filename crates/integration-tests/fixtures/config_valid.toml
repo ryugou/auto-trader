@@ -1,0 +1,52 @@
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "test-schema"
+
+[database]
+url = "postgresql://test:test@localhost:5432/test"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+fx = ["USD_JPY"]
+crypto = ["FX_BTC_JPY"]
+
+[bitflyer]
+ws_url = "wss://ws.lightstream.bitflyer.com/json-rpc"
+api_url = "https://api.bitflyer.com"
+
+[pair_config.USD_JPY]
+price_unit = 0.001
+min_order_size = 1
+
+[pair_config.FX_BTC_JPY]
+price_unit = 1
+min_order_size = 0.001
+
+[position_sizing]
+method = "risk_based"
+risk_rate = 0.02
+
+[gemini]
+model = "gemini-2.5-flash"
+api_url = "https://generativelanguage.googleapis.com"
+
+[[strategies]]
+name = "bb_mean_revert_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY", "USD_JPY"]
+
+[[strategies]]
+name = "donchian_trend_v1"
+enabled = true
+mode = "paper"
+pairs = ["FX_BTC_JPY"]
+
+[risk]
+price_freshness_secs = 60
+
+[live]
+enabled = false
+dry_run = true
