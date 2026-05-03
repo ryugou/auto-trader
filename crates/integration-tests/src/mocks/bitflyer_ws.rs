@@ -1,4 +1,4 @@
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -138,8 +138,13 @@ impl MockBitflyerWs {
                                 }
                                 tokio::time::sleep(interval).await;
                             }
-                            // Keep connection open — client decides when to close.
-                            let _ = futures_util::future::pending::<()>().await;
+                            // Wait for client disconnect instead of pending forever
+                            loop {
+                                match ws.next().await {
+                                    Some(Ok(_)) => continue,
+                                    _ => break,
+                                }
+                            }
                         }
                         Scenario::DisconnectAfter {
                             pair,
@@ -164,7 +169,13 @@ impl MockBitflyerWs {
                             let _ = ws
                                 .send(Message::Text("this is not valid json {{{{".to_string()))
                                 .await;
-                            let _ = futures_util::future::pending::<()>().await;
+                            // Wait for client disconnect instead of pending forever
+                            loop {
+                                match ws.next().await {
+                                    Some(Ok(_)) => continue,
+                                    _ => break,
+                                }
+                            }
                         }
                     }
                 });

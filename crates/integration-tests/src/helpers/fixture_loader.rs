@@ -45,7 +45,8 @@ pub async fn load_price_candles(
             result.with_context(|| format!("CSV 行のパースに失敗: {}", csv_path.display()))?;
 
         let ts = DateTime::parse_from_rfc3339(&row.timestamp)
-            .with_context(|| format!("タイムスタンプのパースに失敗: {}", row.timestamp))?;
+            .with_context(|| format!("タイムスタンプのパースに失敗: {}", row.timestamp))?
+            .with_timezone(&chrono::Utc);
 
         sqlx::query(
             r#"

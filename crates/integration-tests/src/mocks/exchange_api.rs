@@ -163,7 +163,7 @@ impl MockExchangeApiBuilder {
     pub fn new() -> Self {
         Self {
             send_child_order_resp: SendChildOrderResponse {
-                child_order_acceptance_id: String::new(),
+                child_order_acceptance_id: "mock-order-001".to_string(),
             },
             get_child_orders_resp: vec![],
             get_executions_resp: vec![],
