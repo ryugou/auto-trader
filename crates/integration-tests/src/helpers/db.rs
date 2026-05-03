@@ -12,9 +12,18 @@ pub struct StandardAccounts {
 /// 指定テーブルの全行を JSON 文字列としてダンプする。
 /// テスト失敗時の診断ログに使う想定。
 pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
+    const ALLOWED_TABLES: &[&str] = &[
+        "trading_accounts", "trades", "price_candles", "daily_summary",
+        "strategies", "strategy_params", "notifications", "account_events",
+        "macro_events",
+    ];
+
     let mut out = String::new();
     for table in tables {
-        // テーブル名はテストコードからのみ渡される前提（ユーザー入力ではない）。
+        assert!(
+            ALLOWED_TABLES.contains(table),
+            "snapshot_tables: table name '{table}' is not in the allowlist"
+        );
         let query = format!(
             "SELECT json_agg(t) FROM (SELECT * FROM {table}) t",
         );

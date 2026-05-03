@@ -22,6 +22,7 @@ impl MockGmoFxServer {
 
     /// Mount a ticker response with status=0, OPEN symbols.
     pub async fn normal_ticker(&self, pairs: &[&str]) {
+        self.server.reset().await;
         let data: Vec<serde_json::Value> = pairs
             .iter()
             .map(|symbol| {
@@ -49,6 +50,7 @@ impl MockGmoFxServer {
 
     /// Mount a maintenance response (status=5).
     pub async fn maintenance(&self) {
+        self.server.reset().await;
         let body = serde_json::json!({
             "status": 5,
             "messages": [{
@@ -66,6 +68,7 @@ impl MockGmoFxServer {
 
     /// Mount a response where all pairs have status="CLOSE".
     pub async fn market_closed(&self, pairs: &[&str]) {
+        self.server.reset().await;
         let data: Vec<serde_json::Value> = pairs
             .iter()
             .map(|symbol| {
@@ -93,6 +96,7 @@ impl MockGmoFxServer {
 
     /// Mount an HTTP error response.
     pub async fn http_error(&self, code: u16) {
+        self.server.reset().await;
         Mock::given(method("GET"))
             .and(path("/public/v1/ticker"))
             .respond_with(ResponseTemplate::new(code))

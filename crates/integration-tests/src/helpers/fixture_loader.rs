@@ -13,7 +13,7 @@ struct CandleRow {
     high: Decimal,
     low: Decimal,
     close: Decimal,
-    volume: i32,
+    volume: i64,
     /// CSV に含まれるが DB カラムには存在しないためスキップ。
     #[allow(dead_code)]
     bid: Option<Decimal>,

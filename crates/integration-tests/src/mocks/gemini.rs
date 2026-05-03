@@ -27,6 +27,7 @@ impl MockGemini {
     /// `candidates[0].content.parts[0].text` field (i.e. a serialized
     /// `GeminiProposal`).
     pub async fn parameter_proposal(&self, json: &str) {
+        self.server.reset().await;
         let body = gemini_response_wrapper(json);
 
         Mock::given(method("POST"))
@@ -41,6 +42,7 @@ impl MockGemini {
     /// `json` is the raw JSON text for the trade decision, e.g.
     /// `{"action":"long","confidence":0.8,"sl_pips":50,"tp_pips":100,"reason":"..."}`
     pub async fn swing_signal(&self, json: &str) {
+        self.server.reset().await;
         let body = gemini_response_wrapper(json);
 
         Mock::given(method("POST"))
@@ -52,6 +54,7 @@ impl MockGemini {
 
     /// Mount a response that returns malformed JSON (not valid Gemini structure).
     pub async fn invalid_response(&self) {
+        self.server.reset().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/v1beta/models/.+:generateContent"))
             .respond_with(
@@ -63,6 +66,7 @@ impl MockGemini {
 
     /// Mount a response that delays long enough to trigger a client timeout.
     pub async fn timeout(&self) {
+        self.server.reset().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/v1beta/models/.+:generateContent"))
             .respond_with(
