@@ -11,6 +11,7 @@ members = [
     "crates/vegapunk-client",
     "crates/backtest",
     "crates/notify",
+    "crates/integration-tests",
 ]
 
 [workspace.package]
@@ -62,3 +63,4 @@ urlencoding = "2"
 
 # test helpers (reserved for PR 2+)
 wiremock = "0.6"
+csv = "1"
