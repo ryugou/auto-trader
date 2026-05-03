@@ -1,11 +1,11 @@
-mod api;
 mod enriched_ingest;
-mod price_store;
 mod regime;
-mod startup;
 mod startup_reconcile;
 mod weekly_batch;
 mod wilson;
+
+use auto_trader::api;
+use auto_trader::price_store;
 
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
     // shows up as a stale alarm. Populated inside each monitor's
     // setup block so it naturally tracks whatever feeds this
     // process actually launches.
-    let mut expected_feeds: Vec<crate::price_store::FeedKey> = Vec::new();
+    let mut expected_feeds: Vec<price_store::FeedKey> = Vec::new();
 
     // Channels — price は position_monitor にも配信するため 2 本
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
                     // Register this monitor's pairs as expected feeds now that
                     // we've confirmed FX monitor will actually start.
                     for p in &fx_pairs {
-                        expected_feeds.push(crate::price_store::FeedKey::new(
+                        expected_feeds.push(price_store::FeedKey::new(
                             auto_trader_core::types::Exchange::Oanda,
                             p.clone(),
                         ));
@@ -244,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Strategy engine
     let mut engine = StrategyEngine::new(signal_tx);
-    startup::register_strategies(
+    auto_trader::startup::register_strategies(
         &mut engine,
         &config.strategies,
         &pool,
@@ -646,7 +646,7 @@ async fn main() -> anyhow::Result<()> {
             // Register crypto pairs as expected feeds before
             // BitflyerMonitor takes ownership.
             for p in &crypto_pairs {
-                expected_feeds.push(crate::price_store::FeedKey::new(
+                expected_feeds.push(price_store::FeedKey::new(
                     auto_trader_core::types::Exchange::BitflyerCfd,
                     p.clone(),
                 ));
@@ -680,7 +680,7 @@ async fn main() -> anyhow::Result<()> {
         };
         if !gmo_fx_pairs.is_empty() {
             for p in &gmo_fx_pairs {
-                expected_feeds.push(crate::price_store::FeedKey::new(
+                expected_feeds.push(price_store::FeedKey::new(
                     auto_trader_core::types::Exchange::GmoFx,
                     p.clone(),
                 ));
@@ -714,7 +714,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(map)
     };
 
-    let price_store = crate::price_store::PriceStore::new(expected_feeds);
+    let price_store = price_store::PriceStore::new(expected_feeds);
 
     // Spawn all market feeds via the unified MarketFeed registry.
     // Each feed manages its own connection lifecycle; price_store and
@@ -1016,11 +1016,11 @@ async fn main() -> anyhow::Result<()> {
                             // wins.
                             price_store_for_engine
                                 .update(
-                                    crate::price_store::FeedKey::new(
+                                    price_store::FeedKey::new(
                                         event.exchange,
                                         event.pair.clone(),
                                     ),
-                                    crate::price_store::LatestTick {
+                                    price_store::LatestTick {
                                         price: event.candle.close,
                                         best_bid: event.candle.best_bid,
                                         best_ask: event.candle.best_ask,
@@ -1341,7 +1341,7 @@ async fn main() -> anyhow::Result<()> {
                 // Freshness gate: reject stale-tick signals at entry.
                 // Use exchange-aware lookup so a fresh tick on a different
                 // exchange cannot mask staleness on this account's exchange.
-                let feed_key = crate::price_store::FeedKey::new(exchange, signal.pair.clone());
+                let feed_key = price_store::FeedKey::new(exchange, signal.pair.clone());
                 let last_tick_age = executor_price_store
                     .last_tick_age_for(&feed_key)
                     .await

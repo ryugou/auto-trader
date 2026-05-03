@@ -1,0 +1,13 @@
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "test-schema"
+
+[database]
+url = "postgresql://test:test@localhost:5432/test"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+fx = []
+crypto = []

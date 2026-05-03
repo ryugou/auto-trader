@@ -139,12 +139,7 @@ impl MockBitflyerWs {
                                 tokio::time::sleep(interval).await;
                             }
                             // Wait for client disconnect instead of pending forever
-                            loop {
-                                match ws.next().await {
-                                    Some(Ok(_)) => continue,
-                                    _ => break,
-                                }
-                            }
+                            while let Some(Ok(_)) = ws.next().await {}
                         }
                         Scenario::DisconnectAfter {
                             pair,
@@ -170,12 +165,7 @@ impl MockBitflyerWs {
                                 .send(Message::Text("this is not valid json {{{{".to_string()))
                                 .await;
                             // Wait for client disconnect instead of pending forever
-                            loop {
-                                match ws.next().await {
-                                    Some(Ok(_)) => continue,
-                                    _ => break,
-                                }
-                            }
+                            while let Some(Ok(_)) = ws.next().await {}
                         }
                     }
                 });

@@ -1,0 +1,9 @@
+# 必須フィールド vegapunk が missing → デシリアライズエラー
+[database]
+url = "postgresql://test:test@localhost:5432/test"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+fx = ["USD_JPY"]
