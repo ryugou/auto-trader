@@ -119,14 +119,23 @@ pub fn format_failure(
         .args(["diff", "HEAD~1", "HEAD"])
         .output()
     {
-        Ok(output) => {
+        Ok(output) if output.status.success() => {
             let diff = String::from_utf8_lossy(&output.stdout);
             for line in diff.lines() {
                 let _ = writeln!(out, "  {line}");
             }
         }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = writeln!(
+                out,
+                "  (git diff unavailable: exit code {}, stderr: {})",
+                output.status,
+                stderr.trim()
+            );
+        }
         Err(e) => {
-            let _ = writeln!(out, "  (git diff failed: {e})");
+            let _ = writeln!(out, "  (git diff unavailable: {e})");
         }
     }
 

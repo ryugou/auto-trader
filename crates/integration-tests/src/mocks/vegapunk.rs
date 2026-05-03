@@ -175,14 +175,26 @@ impl MockVegapunk {
         if global.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("MockVegapunk: global failure enabled"));
         }
-        let remaining = per_method.load(Ordering::SeqCst);
-        if remaining > 0 {
-            per_method.fetch_sub(1, Ordering::SeqCst);
-            return Err(anyhow::anyhow!(
-                "MockVegapunk: injected failure ({remaining} remaining)"
-            ));
+        loop {
+            let current = per_method.load(Ordering::SeqCst);
+            if current == 0 {
+                return Ok(());
+            }
+            match per_method.compare_exchange(
+                current,
+                current - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Err(anyhow::anyhow!(
+                        "MockVegapunk: injected failure ({} remaining)",
+                        current - 1
+                    ));
+                }
+                Err(_) => continue, // retry
+            }
         }
-        Ok(())
     }
 
     // -- public API (mirrors VegapunkClient) --

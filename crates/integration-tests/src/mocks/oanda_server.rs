@@ -1,4 +1,4 @@
-//! Wiremock-based mock for the OANDA REST API (candles + pricing).
+//! Wiremock-based mock for the OANDA REST API (candles endpoint mock).
 
 use std::time::Duration;
 use wiremock::matchers::{method, path_regex};
@@ -21,9 +21,15 @@ impl MockOandaServer {
         self.server.uri()
     }
 
+    /// Remove all previously mounted routes.
+    pub async fn reset(&self) {
+        self.server.reset().await;
+    }
+
     /// Mount a candles response for any instrument.
     /// `candles_json` is the raw JSON array value for `"candles"`.
     pub async fn normal_candles(&self, candles_json: serde_json::Value) {
+        self.reset().await;
         let body = serde_json::json!({
             "candles": candles_json,
         });
@@ -37,6 +43,7 @@ impl MockOandaServer {
 
     /// Mount an HTTP error response on the candles endpoint.
     pub async fn http_error(&self, code: u16) {
+        self.reset().await;
         Mock::given(method("GET"))
             .and(path_regex(r"/v3/accounts/.+/instruments/.+/candles"))
             .respond_with(ResponseTemplate::new(code))
@@ -46,6 +53,7 @@ impl MockOandaServer {
 
     /// Mount a delayed response that exceeds a typical client timeout.
     pub async fn timeout(&self) {
+        self.reset().await;
         Mock::given(method("GET"))
             .and(path_regex(r"/v3/accounts/.+/instruments/.+/candles"))
             .respond_with(

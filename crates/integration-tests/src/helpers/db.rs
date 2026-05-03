@@ -37,8 +37,8 @@ pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
 /// 既に存在する場合は何もしない。
 async fn ensure_strategy(pool: &PgPool, name: &str) {
     sqlx::query(
-        r#"INSERT INTO strategies (name, display_name, category, risk_level)
-           VALUES ($1, $1, 'test', 'low')
+        r#"INSERT INTO strategies (name, display_name, category, risk_level, description, default_params)
+           VALUES ($1, $1, 'test', 'low', 'test strategy', '{}'::jsonb)
            ON CONFLICT (name) DO NOTHING"#,
     )
     .bind(name)

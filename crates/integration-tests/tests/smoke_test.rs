@@ -138,6 +138,36 @@ async fn mock_exchange_api_fails_then_succeeds() {
     assert!(mock.get_positions("X").await.is_ok());
 }
 
+// ── MockOandaServer ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mock_oanda_server_normal_candles() {
+    use auto_trader_integration_tests::mocks::oanda_server::MockOandaServer;
+
+    let mock = MockOandaServer::start().await;
+    mock.normal_candles(serde_json::json!([
+        {"complete": true, "volume": 100, "time": "2026-04-29T00:00:00Z",
+         "mid": {"o": "150.000", "h": "150.500", "l": "149.500", "c": "150.200"}}
+    ]))
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/v3/accounts/test-acc/instruments/USD_JPY/candles",
+            mock.url()
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let candles = body["candles"].as_array().unwrap();
+    assert_eq!(candles.len(), 1);
+    assert_eq!(candles[0]["complete"], true);
+}
+
 // ── MockGmoFxServer ─────────────────────────────────────────────────────────
 
 #[tokio::test]
