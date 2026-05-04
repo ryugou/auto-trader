@@ -219,6 +219,7 @@ dependencies = [
  "auto-trader-core",
  "auto-trader-db",
  "auto-trader-executor",
+ "auto-trader-macro-analyst",
  "auto-trader-market",
  "auto-trader-notify",
  "auto-trader-strategy",

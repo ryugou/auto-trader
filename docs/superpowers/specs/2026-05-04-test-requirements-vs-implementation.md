@@ -223,8 +223,8 @@
 | 3.53 | サイジング正常 | ✅ | `position_sizer_normal` |
 | 3.54 | 残高不足 | ✅ | `position_sizer_insufficient_balance` |
 | 3.55 | min_lot 未満 | ✅ | `position_sizer_below_min_lot` |
-| 3.56 | warmup M5/H1/ゼロ | ❌ | 未実装（Phase 1 参照） |
-| 3.57 | キャンドル境界 | ❌ | 未実装 |
+| 3.56 | warmup M5/H1/ゼロ | ✅ | `warmup_m5_populates_strategy_history`, `warmup_h1_filtered_by_m5_strategy`, `warmup_zero_events_gives_no_signal` (Phase 1) |
+| 3.57 | キャンドル境界 | ✅ | `candle_boundary_m5`, `candle_boundary_h1` |
 
 ### fill パス検証
 
@@ -234,19 +234,19 @@
 | 3.59 | fill_open Short → bid | ✅ | `fill_open_short_uses_bid_price` |
 | 3.60 | fill_close Long → bid | ✅ | `fill_close_long_uses_bid_price` |
 | 3.61 | fill_close Short → ask | ✅ | `fill_close_short_uses_ask_price` |
-| 3.62 | fill_open Live | ❌ | 未実装 |
-| 3.63 | fill_close Live | ❌ | 未実装 |
+| 3.62 | fill_open Live | ✅ | `fill_open_live_calls_exchange_api` |
+| 3.63 | fill_close Live | ✅ | `fill_close_live_calls_exchange_api` |
 
 ### 実行系ガード・分岐
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
 | 3.64 | exchange-pair ガード | ✅ | `exchange_pair_guard_rejects_cross_exchange` |
-| 3.65 | live gate | ❌ | 未実装 |
+| 3.65 | live gate | ✅ | `live_gate_rejects_when_live_disabled`, `live_gate_passes_when_live_enabled`, `live_gate_passes_for_paper_regardless` |
 | 3.66 | ポジション重複拒否 | ✅ | `position_dedup_detects_existing_open_trade` |
-| 3.67 | マッチなし | ❌ | 未実装 |
-| 3.68 | マルチアカウント | ❌ | 未実装 |
-| 3.69 | Live/Paper 分岐 | ❌ | 未実装 |
+| 3.67 | マッチなし | ✅ | `match_none_no_panic_when_strategy_not_found` |
+| 3.68 | マルチアカウント | ✅ | `multi_account_dispatches_to_correct_exchange` |
+| 3.69 | Live/Paper 分岐 | ✅ | `live_paper_split_dry_run_uses_price_store`, `live_paper_split_live_uses_exchange_api` |
 | 3.70 | NullExchangeApi | ✅ | `null_exchange_api_returns_error_on_all_methods` |
 
 ### クローズフロー
@@ -254,20 +254,20 @@
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
 | 3.71 | CAS ロック取得 | ✅ | `cas_lock_rejects_closing_trade` |
-| 3.72 | Phase 2 失敗 → ロック解除 | ❌ | 未実装 |
-| 3.73 | Phase 3 失敗 → 通知 | ❌ | 未実装 |
+| 3.72 | Phase 2 失敗 → ロック解除 | ✅ | `phase2_failure_releases_lock` |
+| 3.73 | Phase 3 失敗 → 通知 | ✅ | `close_position_creates_notification` |
 | 3.74 | Trade status 遷移 | ✅ | `closed_trade_cannot_be_closed_again` |
 
 ### startup reconcile
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.75 | noop | ❌ | 未実装（既存 unit test でカバー） |
-| 3.76 | orphan → 強制クローズ | ❌ | 未実装（既存 unit test でカバー） |
-| 3.77 | stale closing → open に戻す | ❌ | 未実装（既存 unit test でカバー） |
-| 3.78 | phase3 incomplete → closed | ❌ | 未実装（既存 unit test でカバー） |
-| 3.79 | API リトライ exhaustion | ❌ | 未実装（既存 unit test でカバー） |
-| 3.80 | API エラー | ❌ | 未実装 |
+| 3.75 | noop | ✅ | `reconcile_noop_consistent_open` |
+| 3.76 | orphan → 強制クローズ | ✅ | `reconcile_orphan_force_closes` |
+| 3.77 | stale closing → open に戻す | ✅ | `reconcile_stale_closing_resets_to_open` |
+| 3.78 | phase3 incomplete → closed | ✅ | `reconcile_phase3_incomplete_force_closes` |
+| 3.79 | API リトライ exhaustion | ✅ | `reconcile_api_retry_exhaustion` |
+| 3.80 | API エラー | ✅ | `reconcile_api_immediate_error` |
 
 ### データ整合性
 
@@ -275,9 +275,9 @@
 |---|------|------|-----------|
 | 3.81 | 残高整合性 | ✅ | `balance_after_trade` |
 | 3.82 | 日次集計整合性 | ✅ | `daily_summary_accuracy` |
-| 3.83 | daily batch backfill | ❌ | 未実装 |
-| 3.84 | account_events 記録 | ❌ | 未実装 |
-| 3.85 | entry_indicators / regime | ❌ | 未実装 |
+| 3.83 | daily batch backfill | ✅ | `daily_batch_backfill` |
+| 3.84 | account_events 記録 | ✅ | `account_events_margin_lock_release` |
+| 3.85 | entry_indicators / regime | ✅ | `entry_indicators_jsonb_stored` |
 | 3.86 | candle upsert 重複排除 | ✅ | `candle_upsert_dedup`, `candle_upsert_updates_values` |
 | 3.87 | JPY 小数点切り捨て | ✅ | `jpy_truncation_on_pnl` |
 | 3.88 | Dashboard total count | ✅ | `trades_list_total_count_accuracy` |
@@ -286,10 +286,10 @@
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.89 | Oanda → price_monitor_tx | ❌ | 未実装 |
-| 3.90 | BitflyerCfd → crypto_price_tx | ❌ | 未実装 |
-| 3.91 | GmoFx → crypto_price_tx | ❌ | 未実装 |
-| 3.92 | channel closed → graceful stop | ❌ | 未実装 |
+| 3.89 | Oanda → price_monitor_tx | ✅ | `oanda_event_routes_to_fx_channel` |
+| 3.90 | BitflyerCfd → crypto_price_tx | ✅ | `bitflyer_event_routes_to_crypto_channel` |
+| 3.91 | GmoFx → crypto_price_tx | ✅ | `gmo_fx_event_routes_to_crypto_channel` |
+| 3.92 | channel closed → graceful stop | ✅ | `channel_closed_is_detected_gracefully` |
 
 ### PriceStore
 
@@ -301,7 +301,7 @@
 | 3.96 | last_tick_age_for | ✅ | 既存 unit test |
 | 3.97 | latest_bid_ask | ✅ | `price_store_with_bid_ask` (Phase 2 misc) |
 | 3.98 | health_at | ✅ | 既存 unit test (6テスト) |
-| 3.99 | mid | ❌ | 未実装 |
+| 3.99 | mid | ✅ | `price_store_mid_with_bid_ask`, `price_store_mid_fallback_to_ltp`, `price_store_mid_returns_none_for_unknown` |
 
 ### 通知フォーマット
 
@@ -316,27 +316,27 @@
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.104 | 週次バッチ | ❌ | 未実装 |
-| 3.105 | 日次バッチ backfill | ❌ | 未実装 |
-| 3.106 | オーバーナイト手数料 | ❌ | 未実装 |
-| 3.107 | マクロアナリスト | ❌ | 未実装 |
-| 3.108 | enriched_ingest フォーマット | ❌ | 未実装 |
-| 3.109 | macro broadcast Lagged | ❌ | 未実装 |
-| 3.110 | macro broadcast Closed | ❌ | 未実装 |
+| 3.104 | 週次バッチ | ✅ | `weekly_batch_updates_strategy_params` |
+| 3.105 | 日次バッチ backfill | ✅ | `daily_batch_backfill_creates_summary` |
+| 3.106 | オーバーナイト手数料 | ✅ | `overnight_fee_job_applies_to_paper_bitflyer_trades` |
+| 3.107 | マクロアナリスト | ✅ | `macro_analyst_produces_update` |
+| 3.108 | enriched_ingest フォーマット | ✅ | `enriched_ingest_format_trade_open`, `enriched_ingest_format_trade_close` |
+| 3.109 | macro broadcast Lagged | ✅ | `macro_broadcast_lagged_on_overflow` |
+| 3.110 | macro broadcast Closed | ✅ | `macro_broadcast_closed_on_sender_drop` |
 
 ### シャットダウン
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.111 | 全タスク drain | ❌ | 未実装 |
-| 3.112 | timeout 内完了 | ❌ | 未実装 |
-| 3.113 | open ポジション保持 | ❌ | 未実装 |
+| 3.111 | 全タスク drain | ✅ | `all_tasks_drain_on_channel_close` |
+| 3.112 | timeout 内完了 | ✅ | `all_tasks_complete_within_timeout` |
+| 3.113 | open ポジション保持 | ✅ | `open_positions_preserved_after_shutdown` |
 
 ### DB 接続プール
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.114 | プール枯渇 | ❌ | 未実装 |
+| 3.114 | プール枯渇 | ✅ | `pool_exhaustion_timeout` |
 
 ## Phase 4: 外部 API 検証
 
@@ -346,10 +346,10 @@
 | 4.2 | GMO FX メンテナンス応答 | ✅ | `ticker_fetch_and_parse` (status=5 分岐) |
 | 4.3 | GMO FX market CLOSED | ✅ | `market_status_detection` |
 | 4.4 | BitFlyer WS 接続 + tick 受信 | ✅ | `ws_connection_and_tick_receive` |
-| 4.5 | BitFlyer WS 切断 + 再接続 | ❌ | 未実装 |
+| 4.5 | BitFlyer WS 切断 + 再接続 | ✅ | `ws_disconnect_and_reconnect` |
 | 4.6 | CandleBuilder 期間境界（実 tick） | ✅ | `candle_builder_with_real_tick` |
 | 4.7 | OANDA REST polling | ✅ | `oanda_rest_polling` |
-| 4.8 | Vegapunk ingest/search/feedback | ⚠️ | `vegapunk_connection_and_search` (search のみ。ingest/feedback 未実装) |
+| 4.8 | Vegapunk ingest/search/feedback | ✅ | `vegapunk_connection_and_search`, `vegapunk_ingest_raw`, `vegapunk_feedback` |
 | 4.9 | 週次バッチ（実 Gemini） | ⚠️ | `gemini_api_connection` (疎通確認のみ。パラメータ提案テスト未実装) |
 
 ## モック
@@ -384,18 +384,15 @@
 |---------|--------|----------|----------|---------|---------|
 | Phase 1 | 17 | 16 | 0 | 1 | 94% |
 | Phase 2 | 68 | 68 | 0 | 0 | 100% |
-| Phase 3 | 114 | 71 | 41 | 0 | 62% |
-| Phase 4 | 9 | 6 | 1 | 2 | 67% |
+| Phase 3 | 114 | 114 | 0 | 0 | 100% |
+| Phase 4 | 9 | 8 | 0 | 1 | 89% |
 | モック | 7 | 7 | 0 | 0 | 100% |
 | 失敗出力 | 7 | 7 | 0 | 0 | 100% |
-| **合計** | **222** | **175** | **42** | **3** | **79%** |
+| **合計** | **222** | **220** | **0** | **2** | **99%** |
 
 ## 未実装の重要カテゴリ（優先度順）
 
-1. **実行系ガード** (3.65, 3.67-3.69): live gate、マルチアカウント等
-2. **クローズフロー** (3.72-3.73): Phase 2/3 失敗時のロールバック・通知
-3. **周辺ジョブ** (3.104-3.110): 週次バッチ、マクロアナリスト等
-4. **シャットダウン** (3.111-3.113): 全て未実装
-5. **fill Live** (3.62-3.63): 実 exchange API モックが必要
-6. **Price event ルーティング** (3.89-3.92): channel 統合テスト
-7. **startup reconcile** (3.75-3.80): 既存 unit test でカバー済みだが統合テストなし
+全カテゴリ実装済み。残り 2 件の ⚠️ は部分カバー:
+
+- **1.11** 戦略登録（全 5 戦略）: swing_llm は Gemini/Vegapunk 依存のため 4 戦略でテスト
+- **4.9** 週次バッチ（実 Gemini）: 疎通確認のみ。パラメータ提案テストは実 API 依存
