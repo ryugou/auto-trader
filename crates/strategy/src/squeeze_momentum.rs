@@ -25,9 +25,8 @@
 //! without over-sizing the risk.
 //!
 //! ## Position sizing
-//! `allocation_pct = min(1% / stop_loss_pct, 50%)`. With 2× account leverage
-//! actual risk = `1% × 2 = 2%` of account per trade; caps at 50% to prevent
-//! over-exposure.
+//! `allocation_pct = 1.0` (full-bet). PositionSizer enforces the
+//! no-liquidation constraint.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! Chandelier Exit (ATR-based trailing stop) replaces the old EMA(21)
@@ -84,14 +83,12 @@ const SQUEEZE_BARS: usize = 3;
 /// `len < needed + 2` guard even though SL is now ATR-based).
 const SWING_LOOKBACK: usize = 5;
 /// ATR multiplier for stop-loss. 2.5× ATR is wide enough to survive
-/// post-squeeze whipsaws without over-extending the risk budget.
+/// post-squeeze whipsaws without over-extending risk.
 const ATR_MULT: Decimal = dec!(2.5);
 /// Maximum stop-loss as a fraction of entry price.
 const SL_CAP: Decimal = dec!(0.05);
-/// Target risk per trade as an *unleveraged* fraction of account balance.
-/// Target per-trade risk budget. The leverage-aware risk cap is enforced
-// Allocation is always 100% — PositionSizer enforces no-liquidation constraint.
-/// Maximum allocation per trade.
+/// Allocation per trade: 1.0 (full-bet). PositionSizer enforces the
+/// no-liquidation constraint.
 const ALLOCATION_CAP: Decimal = dec!(1.00);
 const TIME_LIMIT_HOURS: i64 = 48;
 const HISTORY_LEN: usize = 200;

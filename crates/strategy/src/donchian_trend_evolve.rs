@@ -10,9 +10,10 @@
 //! produces equivalent behaviour.
 //!
 //! Stop-loss and position sizing are ATR-based (same as `donchian_trend_v1`):
-//! hardcoded multiplier 3.0 and cap 5% for the SL, capped 2% risk per trade
-//! for allocation. These are not exposed as evolvable params because changing
-//! them independently of the channel parameters creates hard-to-interpret
+//! hardcoded multiplier 3.0 and cap 5% for the SL; allocation is 1.0
+//! (full-bet) with PositionSizer enforcing the no-liquidation constraint.
+//! These are not exposed as evolvable params because changing them
+//! independently of the channel parameters creates hard-to-interpret
 //! interactions; the LLM evolution targets channel shape first.
 
 use auto_trader_core::event::PriceEvent;
@@ -31,10 +32,8 @@ const ATR_PERIOD: usize = 14;
 const ATR_MULT: Decimal = dec!(3.0);
 /// Maximum stop-loss fraction — same as baseline.
 const SL_CAP: Decimal = dec!(0.05);
-/// Target risk per trade as an *unleveraged* fraction of account balance.
-/// Target per-trade risk budget. The leverage-aware risk cap is enforced
-// Allocation is always 100% — PositionSizer enforces no-liquidation constraint.
-/// Maximum allocation per trade.
+/// Allocation per trade: 1.0 (full-bet). PositionSizer enforces the
+/// no-liquidation constraint.
 const ALLOCATION_CAP: Decimal = dec!(1.00);
 /// This strategy uses 1H candles, same as baseline donchian_trend_v1.
 const TIMEFRAME: &str = "H1";

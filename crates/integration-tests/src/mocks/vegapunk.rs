@@ -1,3 +1,6 @@
+// TODO(Phase 4): Introduce a VegapunkApi trait to replace direct VegapunkClient usage,
+// enabling proper mock injection in production code paths.
+
 //! Call-tracking mock for the Vegapunk GraphRAG client.
 //!
 //! The real [`VegapunkClient`] uses tonic gRPC stubs generated with

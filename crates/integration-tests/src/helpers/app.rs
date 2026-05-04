@@ -71,8 +71,13 @@ pub async fn spawn_test_app_with_price_store(
             .expect("server error");
     });
 
-    // Give the server a moment to start accepting connections.
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    // Wait for the server to start accepting connections (TCP retry loop).
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 
     TestApp {
         url,

@@ -69,6 +69,10 @@ pub struct PriceStore {
     expected: Vec<FeedKey>,
     /// Feeds where the market is confirmed closed (weekend/holiday).
     /// Distinct from "missing" (never connected) and "stale" (connected but lagging).
+    ///
+    /// Lock ordering: always acquire `market_closed` before `latest` to prevent
+    /// potential deadlock. health_at() acquires in reverse order (read-only) which
+    /// is safe but should be unified in future refactoring.
     market_closed: RwLock<HashSet<FeedKey>>,
 }
 
