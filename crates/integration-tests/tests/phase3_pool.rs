@@ -22,7 +22,7 @@ async fn pool_exhaustion_timeout(pool: sqlx::PgPool) {
     // sqlx::test may create a temporary database on the same server.
     // Use the DATABASE_URL env var as the base, replacing only the db name.
     let base_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://auto-trader:auto-trader@localhost:15432/auto_trader".to_string());
+        .expect("DATABASE_URL must be set for pool exhaustion test");
 
     // Replace the database name in the URL
     let constrained_url = if let Some(last_slash) = base_url.rfind('/') {
