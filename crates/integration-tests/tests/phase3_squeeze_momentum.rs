@@ -396,6 +396,11 @@ async fn squeeze_short_chandelier_exit() {
 
 /// During the first DELAY_BARS=3 bars after entry, the Chandelier exit
 /// must NOT fire even if the stop level is breached.
+///
+/// Key: set the close price ABOVE entry + SL distance so the 1R check
+/// passes. This isolates the delay phase as the sole suppression reason.
+/// (Previously close=140 was below entry, so 1R also suppressed — making
+/// the test unable to distinguish delay suppression from 1R suppression.)
 #[tokio::test]
 async fn squeeze_delay_phase_suppression() {
     let mut strategy = new_strategy();
@@ -414,34 +419,37 @@ async fn squeeze_delay_phase_suppression() {
         .unwrap()
         .with_timezone(&Utc);
 
-    // Position entered at the breakout bar.
+    // Position: entry=151.500, SL=150.000 → sl_distance=1.500.
+    // We'll set close=153.500 so unrealized=2.0 > 1.5 → 1R IS reached.
     let pos = make_position(
         "squeeze_momentum_v1", PAIR, Direction::Long,
         dec!(151.500), dec!(150.000), entry_ts,
     );
 
     // Feed only 2 bars after entry (within DELAY_BARS=3).
-    // Even though price drops dramatically, the delay phase should suppress exit.
+    // Price is high enough that 1R passes, but delay phase should still suppress.
     for i in 1..=2 {
         let ts = entry_ts + Duration::hours(i);
         let _ = strategy.on_price(&make_h1_event(
             PAIR,
-            dec!(152.000),
-            dec!(152.500),
-            dec!(151.500),
+            dec!(153.500),
+            dec!(154.000),
+            dec!(153.000),
             ts,
         )).await;
     }
 
-    // This event is bar 3 after entry (bars_held=2 < DELAY_BARS=3 → still in delay).
-    let drop_ts = entry_ts + Duration::hours(3);
-    let drop = make_h1_event(PAIR, dec!(140.000), dec!(140.100), dec!(139.900), drop_ts);
-    let _ = strategy.on_price(&drop).await;
+    // Bar 3 after entry (bars_held=2 < DELAY_BARS=3 → still in delay).
+    // Close=153.500 → unrealized=2.0 > sl_distance=1.5 → 1R passes.
+    // Only delay phase should suppress the exit.
+    let bar3_ts = entry_ts + Duration::hours(3);
+    let bar3 = make_h1_event(PAIR, dec!(153.500), dec!(154.000), dec!(153.000), bar3_ts);
+    let _ = strategy.on_price(&bar3).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &drop).await;
+    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &bar3).await;
     assert_eq!(
         exits.len(), 0,
-        "delay phase (bars_held < 3) should suppress Chandelier exit"
+        "delay phase (bars_held < 3) should suppress Chandelier exit even when 1R is reached"
     );
 }
 
