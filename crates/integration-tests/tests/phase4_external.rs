@@ -288,6 +288,37 @@ mod bitflyer_ws {
         println!("BitFlyer WS: received tick — ltp={ltp}, bid={best_bid}, ask={best_ask}");
         println!("BitFlyer WS: successfully received 1 tick");
     }
+
+    /// 4.5: Connect, receive tick, disconnect, reconnect, receive another tick.
+    #[tokio::test]
+    async fn ws_disconnect_and_reconnect() {
+        // First connection + tick
+        let tick1 = match connect_bitflyer_and_receive_tick().await {
+            Some(m) => m,
+            None => {
+                println!("BitFlyer WS: first connection returned None — SKIPPED");
+                return;
+            }
+        };
+        let ltp1 = tick1["ltp"].as_f64().expect("ltp must be numeric");
+        assert!(ltp1 > 0.0, "first tick ltp must be positive");
+        println!("BitFlyer WS reconnect: tick1 ltp={ltp1}");
+
+        // The first connection is dropped here (disconnect).
+        // Now reconnect and receive another tick.
+        let tick2 = match connect_bitflyer_and_receive_tick().await {
+            Some(m) => m,
+            None => {
+                println!("BitFlyer WS: reconnection returned None — SKIPPED (market may be inactive)");
+                return;
+            }
+        };
+        let ltp2 = tick2["ltp"].as_f64().expect("ltp must be numeric");
+        assert!(ltp2 > 0.0, "second tick ltp must be positive");
+        println!("BitFlyer WS reconnect: tick2 ltp={ltp2}");
+
+        println!("BitFlyer WS: disconnect + reconnect succeeded");
+    }
 }
 
 // ─── CandleBuilder with real tick ──────────────────────────────────────────
@@ -424,6 +455,130 @@ mod vegapunk {
             }
             Err(_) => {
                 panic!("Vegapunk: search timed out after 15s despite successful connection");
+            }
+        }
+    }
+
+    /// Helper: connect to Vegapunk, returning None if unavailable or unauthenticated.
+    async fn connect_vegapunk() -> Option<auto_trader_vegapunk::client::VegapunkClient> {
+        let endpoint = std::env::var("VEGAPUNK_ENDPOINT")
+            .unwrap_or_else(|_| "http://vegapunk.local:6840".to_string());
+        let token = match std::env::var("VEGAPUNK_AUTH_TOKEN") {
+            Ok(t) if !t.is_empty() => Some(t),
+            _ => {
+                println!("Vegapunk: VEGAPUNK_AUTH_TOKEN not set — SKIPPED");
+                return None;
+            }
+        };
+
+        let connect_result = tokio::time::timeout(
+            Duration::from_secs(10),
+            auto_trader_vegapunk::client::VegapunkClient::connect(
+                &endpoint,
+                "fx-trading-test",
+                token.as_deref(),
+            ),
+        )
+        .await;
+
+        match connect_result {
+            Ok(Ok(client)) => {
+                println!("Vegapunk: connected to {endpoint}");
+                Some(client)
+            }
+            Ok(Err(e)) => {
+                println!("Vegapunk: connection failed ({e}) — SKIPPED");
+                None
+            }
+            Err(_) => {
+                println!("Vegapunk: connection timed out — SKIPPED");
+                None
+            }
+        }
+    }
+
+    /// 4.8 partial: Vegapunk ingest_raw — ingest text and verify success.
+    #[tokio::test]
+    async fn vegapunk_ingest_raw() {
+        let mut client = match connect_vegapunk().await {
+            Some(c) => c,
+            None => return,
+        };
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.ingest_raw(
+                "integration test: USD/JPY trending up on strong NFP data",
+                "test_event",
+                "integration-test",
+                &timestamp,
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(response)) => {
+                println!("Vegapunk ingest: success (response: {:?})", response);
+            }
+            Ok(Err(e)) => {
+                panic!("Vegapunk ingest failed: {e}");
+            }
+            Err(_) => {
+                panic!("Vegapunk ingest timed out after 15s");
+            }
+        }
+    }
+
+    /// 4.8 partial: Vegapunk feedback — search then submit feedback.
+    #[tokio::test]
+    async fn vegapunk_feedback() {
+        let mut client = match connect_vegapunk().await {
+            Some(c) => c,
+            None => return,
+        };
+
+        // First do a search to get a search_id
+        let search_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.search("USD/JPY trend analysis", "local", 3),
+        )
+        .await;
+
+        let search_id = match search_result {
+            Ok(Ok(response)) => {
+                println!(
+                    "Vegapunk feedback: search returned {} results (search_id={})",
+                    response.results.len(),
+                    response.search_id
+                );
+                response.search_id
+            }
+            Ok(Err(e)) => {
+                println!("Vegapunk feedback: search failed ({e}) — SKIPPED");
+                return;
+            }
+            Err(_) => {
+                panic!("Vegapunk feedback: search timed out");
+            }
+        };
+
+        // Submit feedback on the search
+        let feedback_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.feedback(&search_id, 4, "integration test feedback"),
+        )
+        .await;
+
+        match feedback_result {
+            Ok(Ok(())) => {
+                println!("Vegapunk feedback: submitted successfully for search_id={search_id}");
+            }
+            Ok(Err(e)) => {
+                panic!("Vegapunk feedback failed: {e}");
+            }
+            Err(_) => {
+                panic!("Vegapunk feedback timed out after 15s");
             }
         }
     }
