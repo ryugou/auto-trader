@@ -1,0 +1,24 @@
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "test-schema"
+
+[database]
+url = "postgresql://test:test@localhost:5432/test"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+fx = ["USD_JPY"]
+
+[[strategies]]
+name = "bb_mean_revert_v1"
+enabled = false
+mode = "paper"
+pairs = ["USD_JPY"]
+
+[[strategies]]
+name = "donchian_trend_v1"
+enabled = false
+mode = "paper"
+pairs = ["USD_JPY"]

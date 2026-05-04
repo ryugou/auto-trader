@@ -8,6 +8,7 @@ publish = false
 doctest = false
 
 [dependencies]
+auto-trader = { path = "../app" }
 auto-trader-core = { workspace = true }
 auto-trader-db = { workspace = true }
 auto-trader-market = { workspace = true }
@@ -16,6 +17,7 @@ auto-trader-executor = { workspace = true }
 auto-trader-vegapunk = { workspace = true }
 auto-trader-notify = { workspace = true }
 
+axum = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
@@ -44,6 +46,7 @@ tracing-subscriber = { workspace = true }
 csv = { workspace = true }
 
 anyhow = { workspace = true }
+toml = { workspace = true }
 
 [features]
 external-api = []
