@@ -116,12 +116,14 @@ pub async fn create(
     // the DB CHECK constraint surface as 500).
     let exchange_normalized = req.exchange.trim().to_ascii_lowercase();
     if exchange_normalized.parse::<Exchange>().is_err() {
+        let known = [Exchange::Oanda, Exchange::BitflyerCfd, Exchange::GmoFx]
+            .iter()
+            .map(|e| e.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            format!(
-                "unknown exchange '{}' (known: oanda, bitflyer_cfd, gmo_fx)",
-                req.exchange
-            ),
+            format!("unknown exchange '{}' (known: {known})", req.exchange),
         ));
     }
     if !strategies::strategy_exists(&state.pool, &req.strategy)

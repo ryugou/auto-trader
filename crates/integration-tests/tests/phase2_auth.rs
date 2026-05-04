@@ -4,10 +4,15 @@
 //! env vars (API_TOKEN) which would interfere with parallel test execution.
 
 use auto_trader_integration_tests::helpers::app;
-use std::sync::Mutex;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
 /// Serialises env-var mutations across tests (process-wide state).
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
+/// Uses `tokio::sync::Mutex` so the lock is held safely across `.await` points.
+fn env_mutex() -> &'static Mutex<()> {
+    static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    MUTEX.get_or_init(|| Mutex::new(()))
+}
 
 /// RAII guard that removes `API_TOKEN` on drop — ensures cleanup even on panic.
 struct EnvGuard;
@@ -20,7 +25,7 @@ impl Drop for EnvGuard {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn auth_no_token_configured_allows_all(pool: sqlx::PgPool) {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_mutex().lock().await;
     unsafe { std::env::remove_var("API_TOKEN") };
     let app = app::spawn_test_app(pool).await;
     let client = app.client();
@@ -36,7 +41,7 @@ async fn auth_no_token_configured_allows_all(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn auth_valid_token(pool: sqlx::PgPool) {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_mutex().lock().await;
     unsafe { std::env::set_var("API_TOKEN", "test-secret-token") };
     let _env_guard = EnvGuard;
     let app = app::spawn_test_app(pool).await;
@@ -54,7 +59,7 @@ async fn auth_valid_token(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn auth_missing_token_returns_401(pool: sqlx::PgPool) {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_mutex().lock().await;
     unsafe { std::env::set_var("API_TOKEN", "test-secret-token") };
     let _env_guard = EnvGuard;
     let app = app::spawn_test_app(pool).await;
@@ -71,7 +76,7 @@ async fn auth_missing_token_returns_401(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn auth_invalid_token_returns_401(pool: sqlx::PgPool) {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_mutex().lock().await;
     unsafe { std::env::set_var("API_TOKEN", "test-secret-token") };
     let _env_guard = EnvGuard;
     let app = app::spawn_test_app(pool).await;
@@ -89,7 +94,7 @@ async fn auth_invalid_token_returns_401(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn auth_invalid_format_returns_401(pool: sqlx::PgPool) {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_mutex().lock().await;
     unsafe { std::env::set_var("API_TOKEN", "test-secret-token") };
     let _env_guard = EnvGuard;
     let app = app::spawn_test_app(pool).await;
