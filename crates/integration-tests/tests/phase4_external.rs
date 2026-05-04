@@ -397,7 +397,9 @@ mod vegapunk {
             }
         };
 
-        // Try a search — even an empty result is fine
+        // Try a search — even an empty result is fine.
+        // Unauthenticated errors when VEGAPUNK_AUTH_TOKEN is unset are
+        // expected (gRPC connect succeeds without auth, but RPCs require it).
         let search_result = tokio::time::timeout(
             Duration::from_secs(15),
             client.search("test query", "local", 5),
@@ -411,9 +413,13 @@ mod vegapunk {
                     response.results.len(),
                     response.search_id
                 );
-                // Response is valid — even if empty, the parse succeeded
             }
             Ok(Err(e)) => {
+                let msg = e.to_string();
+                if msg.contains("Unauthenticated") && token.is_none() {
+                    println!("Vegapunk: search returned Unauthenticated (VEGAPUNK_AUTH_TOKEN not set) — SKIPPED");
+                    return;
+                }
                 panic!("Vegapunk: search failed after successful connection ({e})");
             }
             Err(_) => {
