@@ -3,3 +3,4 @@ pub mod db;
 pub mod failure_output;
 pub mod fixture_loader;
 pub mod seed;
+pub mod trade_flow;
