@@ -66,7 +66,8 @@ const SL_CAP: Decimal = dec!(0.03);
 /// Target per-trade risk budget. The leverage-aware risk cap is enforced
 /// by PositionSizer (which knows the actual account leverage), so this
 /// value does not need manual adjustment when leverage changes.
-const TARGET_RISK_PCT: Decimal = dec!(0.01);
+// Allocation is always 100% — PositionSizer enforces the no-liquidation
+// constraint via max_alloc = (1 - maintenance_margin) / (leverage × SL%).
 /// Maximum allocation per trade. Prevents full account deployment when
 /// ATR SL is very small.
 const ALLOCATION_CAP: Decimal = dec!(1.00);
@@ -147,8 +148,7 @@ impl Strategy for BbMeanRevertV1 {
         if stop_loss_pct <= Decimal::ZERO {
             return None; // ATR=0, no volatility to trade
         }
-        // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
-        let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
+        let allocation_pct = ALLOCATION_CAP;
 
         // Previous bar's low/high for the lower-low / higher-high
         // capitulation confirmation.
