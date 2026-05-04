@@ -171,127 +171,119 @@ mod gmo_fx {
     }
 }
 
-// ─── BitFlyer WebSocket ────────────────────────────────────────────────────
+// ─── BitFlyer WebSocket helper ─────────────────────────────────────────────
 
-mod bitflyer_ws {
-    use super::*;
+const BITFLYER_WS_URL: &str = "wss://ws.lightstream.bitflyer.com/json-rpc";
+const BITFLYER_CHANNEL: &str = "lightning_ticker_FX_BTC_JPY";
+
+/// Connect to BitFlyer WS, subscribe to the ticker channel, and return the
+/// first `channelMessage` tick as a JSON value. Returns `None` if the
+/// connection or receive fails (network issue / market inactive).
+async fn connect_bitflyer_and_receive_tick() -> Option<serde_json::Value> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
-    const WS_URL: &str = "wss://ws.lightstream.bitflyer.com/json-rpc";
-    const CHANNEL: &str = "lightning_ticker_FX_BTC_JPY";
+    let ws_result =
+        tokio::time::timeout(Duration::from_secs(10), connect_async(BITFLYER_WS_URL)).await;
 
-    #[tokio::test]
-    async fn ws_connection_and_tick_receive() {
-        // Attempt to connect — skip if network issues
-        let ws_result = tokio::time::timeout(Duration::from_secs(10), connect_async(WS_URL)).await;
+    let (ws, _) = match ws_result {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
+            println!("BitFlyer WS: connection failed ({e}) — SKIPPED (network issue)");
+            return None;
+        }
+        Err(_) => {
+            println!("BitFlyer WS: connection timed out — SKIPPED (network issue)");
+            return None;
+        }
+    };
 
-        let (ws, _) = match ws_result {
-            Ok(Ok(conn)) => conn,
-            Ok(Err(e)) => {
-                println!("BitFlyer WS: connection failed ({e}) — SKIPPED (network issue)");
-                return;
+    let (mut write, mut read) = ws.split();
+
+    let subscribe = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "subscribe",
+        "params": { "channel": BITFLYER_CHANNEL }
+    });
+    write
+        .send(Message::Text(subscribe.to_string()))
+        .await
+        .expect("failed to send subscribe message");
+
+    println!("BitFlyer WS: connected and subscribed to {BITFLYER_CHANNEL}");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            println!("BitFlyer WS: no tick received within 30s — SKIPPED (market may be inactive)");
+            return None;
+        }
+
+        let msg = match tokio::time::timeout_at(deadline, read.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(e))) => {
+                println!("BitFlyer WS: read error ({e}) — SKIPPED");
+                return None;
+            }
+            Ok(None) => {
+                println!("BitFlyer WS: stream ended unexpectedly — SKIPPED");
+                return None;
             }
             Err(_) => {
-                println!("BitFlyer WS: connection timed out — SKIPPED (network issue)");
-                return;
+                println!("BitFlyer WS: no tick received within 30s — SKIPPED (market may be inactive)");
+                return None;
             }
         };
 
-        let (mut write, mut read) = ws.split();
+        let Message::Text(text) = msg else {
+            continue;
+        };
 
-        // Subscribe to the ticker channel
-        let subscribe = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "subscribe",
-            "params": { "channel": CHANNEL }
-        });
-        write
-            .send(Message::Text(subscribe.to_string()))
-            .await
-            .expect("failed to send subscribe message");
+        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
-        println!("BitFlyer WS: connected and subscribed to {CHANNEL}");
-
-        // Wait for at least 1 tick (timeout 30s)
-        let mut tick_count = 0;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-
-        while tokio::time::Instant::now() < deadline && tick_count < 1 {
-            let msg =
-                match tokio::time::timeout_at(deadline, read.next()).await {
-                    Ok(Some(Ok(msg))) => msg,
-                    Ok(Some(Err(e))) => {
-                        println!("BitFlyer WS: read error ({e}) — SKIPPED");
-                        return;
-                    }
-                    Ok(None) => {
-                        println!("BitFlyer WS: stream ended unexpectedly — SKIPPED");
-                        return;
-                    }
-                    Err(_) => {
-                        println!(
-                            "BitFlyer WS: no tick received within 30s — SKIPPED (market may be inactive)"
-                        );
-                        return;
-                    }
-                };
-
-            let Message::Text(text) = msg else {
-                continue;
-            };
-
-            let parsed: serde_json::Value = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Skip non-channelMessage (e.g. subscription confirmations)
-            if parsed.get("method").and_then(|m| m.as_str()) != Some("channelMessage") {
-                continue;
-            }
-
-            let params = parsed
-                .get("params")
-                .expect("channelMessage must have params");
-            let message = params
-                .get("message")
-                .expect("params must have message");
-
-            // Verify required fields
-            assert!(
-                message.get("ltp").is_some(),
-                "BitFlyer tick must contain 'ltp'"
-            );
-            assert!(
-                message.get("best_bid").is_some(),
-                "BitFlyer tick must contain 'best_bid'"
-            );
-            assert!(
-                message.get("best_ask").is_some(),
-                "BitFlyer tick must contain 'best_ask'"
-            );
-
-            let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
-            let best_bid = message["best_bid"].as_f64().expect("best_bid must be numeric");
-            let best_ask = message["best_ask"].as_f64().expect("best_ask must be numeric");
-
-            assert!(ltp > 0.0, "ltp must be positive, got {ltp}");
-            assert!(best_bid > 0.0, "best_bid must be positive, got {best_bid}");
-            assert!(best_ask > 0.0, "best_ask must be positive, got {best_ask}");
-
-            println!(
-                "BitFlyer WS: received tick — ltp={ltp}, bid={best_bid}, ask={best_ask}"
-            );
-            tick_count += 1;
+        if parsed.get("method").and_then(|m| m.as_str()) != Some("channelMessage") {
+            continue;
         }
 
-        assert!(
-            tick_count >= 1,
-            "BitFlyer WS: expected at least 1 tick, got {tick_count}"
-        );
-        println!("BitFlyer WS: successfully received {tick_count} tick(s)");
+        let params = parsed.get("params").expect("channelMessage must have params");
+        let message = params.get("message").expect("params must have message").clone();
+
+        return Some(message);
+    }
+}
+
+// ─── BitFlyer WebSocket ────────────────────────────────────────────────────
+
+mod bitflyer_ws {
+    use super::*;
+
+    #[tokio::test]
+    async fn ws_connection_and_tick_receive() {
+        let message = match connect_bitflyer_and_receive_tick().await {
+            Some(m) => m,
+            None => return, // skipped — logged inside helper
+        };
+
+        // Verify required fields
+        assert!(message.get("ltp").is_some(), "BitFlyer tick must contain 'ltp'");
+        assert!(message.get("best_bid").is_some(), "BitFlyer tick must contain 'best_bid'");
+        assert!(message.get("best_ask").is_some(), "BitFlyer tick must contain 'best_ask'");
+
+        let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
+        let best_bid = message["best_bid"].as_f64().expect("best_bid must be numeric");
+        let best_ask = message["best_ask"].as_f64().expect("best_ask must be numeric");
+
+        assert!(ltp > 0.0, "ltp must be positive, got {ltp}");
+        assert!(best_bid > 0.0, "best_bid must be positive, got {best_bid}");
+        assert!(best_ask > 0.0, "best_ask must be positive, got {best_ask}");
+
+        println!("BitFlyer WS: received tick — ltp={ltp}, bid={best_bid}, ask={best_ask}");
+        println!("BitFlyer WS: successfully received 1 tick");
     }
 }
 
@@ -301,128 +293,64 @@ mod candle_builder_real_tick {
     use super::*;
     use auto_trader_core::types::{Exchange, Pair};
     use auto_trader_market::candle_builder::CandleBuilder;
-    use futures_util::{SinkExt, StreamExt};
     use rust_decimal::Decimal;
     use std::str::FromStr;
-    use tokio_tungstenite::connect_async;
-    use tokio_tungstenite::tungstenite::Message;
-
-    const WS_URL: &str = "wss://ws.lightstream.bitflyer.com/json-rpc";
-    const CHANNEL: &str = "lightning_ticker_FX_BTC_JPY";
 
     #[tokio::test]
     async fn candle_builder_with_real_tick() {
-        // Connect to BitFlyer WS
-        let ws_result = tokio::time::timeout(Duration::from_secs(10), connect_async(WS_URL)).await;
-
-        let (ws, _) = match ws_result {
-            Ok(Ok(conn)) => conn,
-            Ok(Err(e)) => {
-                println!(
-                    "CandleBuilder real tick: BitFlyer WS connection failed ({e}) — SKIPPED"
-                );
-                return;
-            }
-            Err(_) => {
-                println!("CandleBuilder real tick: BitFlyer WS timed out — SKIPPED");
-                return;
-            }
+        let message = match connect_bitflyer_and_receive_tick().await {
+            Some(m) => m,
+            None => return, // skipped — logged inside helper
         };
 
-        let (mut write, mut read) = ws.split();
+        let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
+        let best_bid = message["best_bid"].as_f64().expect("best_bid must be numeric");
+        let best_ask = message["best_ask"].as_f64().expect("best_ask must be numeric");
+        let volume = message["volume"].as_f64().unwrap_or(0.0);
+        let timestamp_str = message["timestamp"]
+            .as_str()
+            .expect("timestamp must be a string");
+        let ts = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+            .expect("timestamp must be RFC3339")
+            .with_timezone(&chrono::Utc);
 
-        let subscribe = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "subscribe",
-            "params": { "channel": CHANNEL }
-        });
-        write
-            .send(Message::Text(subscribe.to_string()))
-            .await
-            .expect("failed to send subscribe message");
+        let price = Decimal::from_str(&ltp.to_string()).unwrap();
+        let size = Decimal::from_str(&volume.to_string()).unwrap();
+        let bid = Some(Decimal::from_str(&best_bid.to_string()).unwrap());
+        let ask = Some(Decimal::from_str(&best_ask.to_string()).unwrap());
 
-        // Get one real tick
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut builder =
             CandleBuilder::new(Pair::new("FX_BTC_JPY"), Exchange::BitflyerCfd, "M5".to_string());
-        let mut fed = false;
 
-        while tokio::time::Instant::now() < deadline && !fed {
-            let msg = match tokio::time::timeout_at(deadline, read.next()).await {
-                Ok(Some(Ok(msg))) => msg,
-                Ok(Some(Err(e))) => {
-                    println!("CandleBuilder real tick: WS error ({e}) — SKIPPED");
-                    return;
-                }
-                Ok(None) | Err(_) => {
-                    println!("CandleBuilder real tick: no tick received — SKIPPED");
-                    return;
-                }
-            };
+        // Feed into CandleBuilder — it won't emit a candle (same M5 period)
+        // but internal state should be populated
+        let _candle = builder.on_tick(price, size, ts, bid, ask);
 
-            let Message::Text(text) = msg else {
-                continue;
-            };
+        // Verify internal state via try_complete with a far-future timestamp
+        // that forces the candle to complete
+        let far_future = ts + chrono::Duration::minutes(10);
+        let candle = builder.try_complete(far_future, bid, ask);
 
-            let parsed: serde_json::Value = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+        assert!(
+            candle.is_some(),
+            "CandleBuilder should produce a candle when try_complete is called past period end"
+        );
 
-            if parsed.get("method").and_then(|m| m.as_str()) != Some("channelMessage") {
-                continue;
-            }
+        let c = candle.unwrap();
+        assert_eq!(c.pair.0, "FX_BTC_JPY");
+        assert_eq!(c.exchange, Exchange::BitflyerCfd);
+        assert_eq!(c.timeframe, "M5");
+        assert!(c.open > Decimal::ZERO, "open must be positive: {}", c.open);
+        assert!(c.high >= c.open, "high must be >= open");
+        assert!(c.low <= c.open, "low must be <= open");
+        assert!(c.close > Decimal::ZERO, "close must be positive");
+        assert!(c.best_bid.is_some(), "best_bid should be set from real tick");
+        assert!(c.best_ask.is_some(), "best_ask should be set from real tick");
 
-            let message = &parsed["params"]["message"];
-            let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
-            let best_bid = message["best_bid"].as_f64().expect("best_bid must be numeric");
-            let best_ask = message["best_ask"].as_f64().expect("best_ask must be numeric");
-            let volume = message["volume"].as_f64().unwrap_or(0.0);
-            let timestamp_str = message["timestamp"]
-                .as_str()
-                .expect("timestamp must be a string");
-            let ts = chrono::DateTime::parse_from_rfc3339(timestamp_str)
-                .expect("timestamp must be RFC3339")
-                .with_timezone(&chrono::Utc);
-
-            let price = Decimal::from_str(&ltp.to_string()).unwrap();
-            let size = Decimal::from_str(&volume.to_string()).unwrap();
-            let bid = Some(Decimal::from_str(&best_bid.to_string()).unwrap());
-            let ask = Some(Decimal::from_str(&best_ask.to_string()).unwrap());
-
-            // Feed into CandleBuilder — it won't emit a candle (same M5 period)
-            // but internal state should be populated
-            let _candle = builder.on_tick(price, size, ts, bid, ask);
-
-            // Verify internal state via try_complete with a far-future timestamp
-            // that forces the candle to complete
-            let far_future = ts + chrono::Duration::minutes(10);
-            let candle = builder.try_complete(far_future, bid, ask);
-
-            assert!(
-                candle.is_some(),
-                "CandleBuilder should produce a candle when try_complete is called past period end"
-            );
-
-            let c = candle.unwrap();
-            assert_eq!(c.pair.0, "FX_BTC_JPY");
-            assert_eq!(c.exchange, Exchange::BitflyerCfd);
-            assert_eq!(c.timeframe, "M5");
-            assert!(c.open > Decimal::ZERO, "open must be positive: {}", c.open);
-            assert!(c.high >= c.open, "high must be >= open");
-            assert!(c.low <= c.open, "low must be <= open");
-            assert!(c.close > Decimal::ZERO, "close must be positive");
-            assert!(c.best_bid.is_some(), "best_bid should be set from real tick");
-            assert!(c.best_ask.is_some(), "best_ask should be set from real tick");
-
-            println!(
-                "CandleBuilder: built candle from real tick — O={} H={} L={} C={} bid={:?} ask={:?}",
-                c.open, c.high, c.low, c.close, c.best_bid, c.best_ask
-            );
-            fed = true;
-        }
-
-        assert!(fed, "CandleBuilder real tick: did not receive any tick to feed");
+        println!(
+            "CandleBuilder: built candle from real tick — O={} H={} L={} C={} bid={:?} ask={:?}",
+            c.open, c.high, c.low, c.close, c.best_bid, c.best_ask
+        );
     }
 }
 
@@ -434,11 +362,12 @@ mod vegapunk {
     #[tokio::test]
     async fn vegapunk_connection_and_search() {
         let endpoint = "http://vegapunk.local:6840";
+        let token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
 
         // Try to connect — Vegapunk may not be running
         let connect_result = tokio::time::timeout(
             Duration::from_secs(10),
-            auto_trader_vegapunk::client::VegapunkClient::connect(endpoint, "auto_trader", None),
+            auto_trader_vegapunk::client::VegapunkClient::connect(endpoint, "auto_trader", token.as_deref()),
         )
         .await;
 
@@ -538,9 +467,7 @@ mod oanda {
                     );
                 }
             }
-            Ok(Err(e)) => {
-                println!("OANDA: candle fetch failed ({e}) — API key may be invalid or market closed");
-            }
+            Ok(Err(e)) => panic!("OANDA candle fetch failed despite valid credentials: {e}"),
             Err(_) => {
                 println!("OANDA: request timed out after 30s");
             }
@@ -576,6 +503,9 @@ mod gemini {
         match resp {
             Ok(r) => {
                 println!("Gemini: API responded with HTTP {}", r.status());
+                // 429 (rate limit) is acceptable — proves the API endpoint is reachable
+                // and our credentials are valid. The actual generation test is in
+                // Phase 3 with MockGemini.
                 assert!(
                     r.status().is_success() || r.status().as_u16() == 429,
                     "Gemini: unexpected status {}",
