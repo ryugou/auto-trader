@@ -490,5 +490,28 @@ async fn market_prices_snapshot(pool: sqlx::PgPool) {
     assert_eq!(prices[0]["pair"], "USD_JPY");
 }
 
+// ── PUT /api/notifications/:id (mark read) ─────────────────────────────
+
+/// 2.59: 存在しない通知 ID に対する PUT → 405。
+/// API ルーターに PUT /notifications/:id ルートが存在しない。
+/// `/api/notifications/{uuid}` は SPA fallback (ServeDir) にフォールバックし、
+/// ServeDir は GET のみサポートするため PUT に対して 405 Method Not Allowed を返す。
+#[sqlx::test(migrations = "../../migrations")]
+async fn notification_mark_read_nonexistent_id(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+    let fake_id = uuid::Uuid::new_v4();
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/notifications/{fake_id}")))
+        .send()
+        .await
+        .unwrap();
+
+    // No PUT /notifications/:id route exists. The request falls through to
+    // the SPA fallback (ServeDir), which only supports GET → 405.
+    assert_eq!(resp.status().as_u16(), 405);
+}
+
 // Auth tests are in tests/phase2_auth.rs (separate binary to avoid
 // env var interference with parallel tests).

@@ -378,6 +378,27 @@ async fn dashboard_hourly_winrate(pool: sqlx::PgPool) {
     assert_eq!(h10.unwrap()["win_count"], 1);
 }
 
+// ── GET /api/dashboard/pnl-history (bad date) ───────────────────────────
+
+/// 2.50: 不正な日付フォーマットで pnl-history を呼ぶ。
+/// dashboard の parse_date は .ok() で静かに None に変換するため 200 が返る。
+/// (notifications の parse_opt_date とは異なり、400 にはならない)
+#[sqlx::test(migrations = "../../migrations")]
+async fn dashboard_pnl_history_bad_date_returns_200(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    let resp = client
+        .get(app.endpoint("/api/dashboard/pnl-history?from=not-a-date"))
+        .send()
+        .await
+        .unwrap();
+
+    // Dashboard silently ignores invalid dates (parse_date returns None via .ok())
+    // so the response is 200 with unfiltered data.
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_hourly_winrate_empty(pool: sqlx::PgPool) {
     let app = app::spawn_test_app(pool).await;
