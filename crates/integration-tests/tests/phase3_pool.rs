@@ -24,11 +24,20 @@ async fn pool_exhaustion_timeout(pool: sqlx::PgPool) {
     let base_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set for pool exhaustion test");
 
-    // Replace the database name in the URL
-    let constrained_url = if let Some(last_slash) = base_url.rfind('/') {
-        format!("{}/{}", &base_url[..last_slash], db_name)
-    } else {
-        format!("{}/{}", base_url, db_name)
+    // Replace the database name in the URL, preserving query parameters.
+    let constrained_url = {
+        let (base, query) = base_url.split_once('?')
+            .map(|(b, q)| (b, Some(q)))
+            .unwrap_or((&base_url, None));
+        let replaced = if let Some(last_slash) = base.rfind('/') {
+            format!("{}/{}", &base[..last_slash], db_name)
+        } else {
+            format!("{}/{}", base, db_name)
+        };
+        match query {
+            Some(q) => format!("{}?{}", replaced, q),
+            None => replaced,
+        }
     };
 
     let constrained_pool = sqlx::postgres::PgPoolOptions::new()
