@@ -39,6 +39,7 @@ futures-util = { workspace = true }
 
 tonic = { workspace = true }
 prost = { workspace = true }
+tokio-stream = "0.1"
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

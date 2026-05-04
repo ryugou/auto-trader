@@ -8,6 +8,7 @@
 use crate::proto::graph_rag_engine_server::{GraphRagEngine, GraphRagEngineServer};
 use crate::proto::*;
 use std::net::SocketAddr;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 /// Mock Vegapunk gRPC server. Call [`start`] to launch on a random port.
@@ -24,23 +25,23 @@ impl MockVegapunkGrpc {
         };
 
         // Bind to port 0 to get a random available port.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        // Use tokio TcpListener and serve_with_incoming to avoid
+        // the TOCTOU race of bind-drop-rebind.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
             .expect("bind mock vegapunk grpc");
         let addr = listener.local_addr().unwrap();
-        // We need the addr before spawning.
-        drop(listener);
+        let incoming = TcpListenerStream::new(listener);
 
-        let serve_addr = addr;
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(GraphRagEngineServer::new(svc))
-                .serve(serve_addr)
+                .serve_with_incoming(incoming)
                 .await
                 .ok();
         });
 
-        // Small delay to let the server bind.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // No sleep needed — listener is already bound and accepting.
 
         Self { addr }
     }
