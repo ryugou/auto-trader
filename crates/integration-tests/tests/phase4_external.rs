@@ -367,13 +367,14 @@ mod vegapunk {
 
     #[tokio::test]
     async fn vegapunk_connection_and_search() {
-        let endpoint = "http://vegapunk.local:6840";
+        let endpoint = std::env::var("VEGAPUNK_ENDPOINT")
+            .unwrap_or_else(|_| "http://vegapunk.local:6840".to_string());
         let token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
 
         // Try to connect — Vegapunk may not be running
         let connect_result = tokio::time::timeout(
             Duration::from_secs(10),
-            auto_trader_vegapunk::client::VegapunkClient::connect(endpoint, "fx-trading", token.as_deref()),
+            auto_trader_vegapunk::client::VegapunkClient::connect(&endpoint, "fx-trading", token.as_deref()),
         )
         .await;
 
@@ -440,7 +441,7 @@ mod oanda {
         let account_id = match std::env::var("OANDA_ACCOUNT_ID") {
             Ok(id) if !id.is_empty() => id,
             _ => {
-                println!("OANDA: OANDA_ACCOUNT_ID not set — SKIPPED");
+                println!("SKIPPED: OANDA_ACCOUNT_ID not set");
                 return;
             }
         };
@@ -462,6 +463,7 @@ mod oanda {
 
         match candles_result {
             Ok(Ok(candles)) => {
+                assert!(!candles.is_empty(), "OANDA returned zero candles — expected at least 1 for recent M5");
                 println!("OANDA: fetched {} candles for USD_JPY M5", candles.len());
                 for c in &candles {
                     assert!(c.open > rust_decimal::Decimal::ZERO);
