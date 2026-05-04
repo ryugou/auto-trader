@@ -69,6 +69,8 @@ pub struct PriceStore {
     expected: Vec<FeedKey>,
     /// Feeds where the market is confirmed closed (weekend/holiday).
     /// Distinct from "missing" (never connected) and "stale" (connected but lagging).
+    ///
+    /// Lock ordering: market_closed first, then latest — same order as update().
     market_closed: RwLock<HashSet<FeedKey>>,
 }
 
@@ -180,8 +182,9 @@ impl PriceStore {
     /// Roll the expected list against the current observed map and a
     /// reference "now" timestamp into a vec of `FeedHealth`.
     pub async fn health_at(&self, now: DateTime<Utc>) -> Vec<FeedHealth> {
-        let guard = self.latest.read().await;
+        // Acquire in same order as update(): market_closed first, then latest.
         let closed = self.market_closed.read().await;
+        let guard = self.latest.read().await;
         self.expected
             .iter()
             .map(|key| {

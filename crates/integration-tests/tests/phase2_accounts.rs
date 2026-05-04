@@ -148,12 +148,7 @@ async fn create_account_duplicate_name(pool: sqlx::PgPool) {
         .send()
         .await
         .unwrap();
-    // If a unique constraint exists, expect 409; otherwise 201 is fine.
-    assert!(
-        resp.status().as_u16() == 201 || resp.status().as_u16() == 409,
-        "expected 201 or 409, got {}",
-        resp.status().as_u16()
-    );
+    assert_eq!(resp.status().as_u16(), 201);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -177,12 +172,7 @@ async fn create_account_invalid_exchange(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    // Unknown exchange -> 400 or 500 depending on DB CHECK constraint.
-    assert!(
-        resp.status().as_u16() == 400 || resp.status().as_u16() == 500,
-        "expected 400 or 500 for unknown exchange, got {}",
-        resp.status().as_u16()
-    );
+    assert_eq!(resp.status().as_u16(), 400);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -277,11 +267,7 @@ async fn create_live_account_duplicate_exchange(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    // Should fail -- either 409 or 500 depending on error path.
-    assert!(
-        resp.status().is_client_error() || resp.status().is_server_error(),
-        "duplicate live account should fail"
-    );
+    assert_eq!(resp.status().as_u16(), 409);
 }
 
 // ── GET /api/trading-accounts ────────────────────────────────────────────

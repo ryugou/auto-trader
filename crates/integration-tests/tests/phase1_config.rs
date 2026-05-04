@@ -29,7 +29,7 @@ fn config_valid_loads_successfully() {
 
 #[test]
 fn config_missing_vegapunk_fails() {
-    let result = AppConfig::load(&fixture_path("config_unknown_exchange.toml"));
+    let result = AppConfig::load(&fixture_path("config_missing_vegapunk.toml"));
     assert!(
         result.is_err(),
         "config without vegapunk section should fail to parse"

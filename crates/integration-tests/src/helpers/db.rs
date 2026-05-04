@@ -24,6 +24,7 @@ pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
             ALLOWED_TABLES.contains(table),
             "snapshot_tables: table name '{table}' is not in the allowlist"
         );
+        // SAFETY: table name is validated against ALLOWED_TABLES above; no user input.
         let query = format!(
             "SELECT json_agg(t) FROM (SELECT * FROM {table}) t",
         );

@@ -1,4 +1,5 @@
 use super::{ApiError, AppState};
+use auto_trader_core::types::Exchange;
 use auto_trader_db::dashboard;
 use auto_trader_db::strategies;
 use auto_trader_db::trading_accounts::{
@@ -111,6 +112,12 @@ pub async fn create(
     if let Err(msg) = validate_initial_balance(&req.currency, req.initial_balance) {
         return Err(ApiError(StatusCode::BAD_REQUEST, msg));
     }
+    // Validate exchange is a known enum value (returns 400 instead of letting
+    // the DB CHECK constraint surface as 500).
+    let exchange_normalized = req.exchange.trim().to_ascii_lowercase();
+    if let Err(e) = exchange_normalized.parse::<Exchange>() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string()));
+    }
     if !strategies::strategy_exists(&state.pool, &req.strategy)
         .await
         .map_err(ApiError::from)?
@@ -122,6 +129,26 @@ pub async fn create(
                 req.strategy
             ),
         ));
+    }
+    // Duplicate live account per exchange: the DB partial unique index is
+    // the real guard, but pre-check here for a friendly 409.
+    if req.account_type == "live" {
+        let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM trading_accounts WHERE exchange = $1 AND account_type = 'live' LIMIT 1",
+        )
+        .bind(&exchange_normalized)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+        if existing.is_some() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "live account for exchange '{}' already exists; only 1 live account per exchange is supported",
+                    exchange_normalized
+                ),
+            ));
+        }
     }
     trading_accounts::create_account(&state.pool, &req)
         .await
