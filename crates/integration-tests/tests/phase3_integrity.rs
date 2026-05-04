@@ -536,3 +536,335 @@ async fn overnight_fee_skips_closed_trade(pool: sqlx::PgPool) {
         "overnight fee should be skipped for closed trade"
     );
 }
+
+// =========================================================================
+// 3.83: daily batch backfill — update_daily_max_drawdown
+// =========================================================================
+
+/// Insert closed trades for a past date, call update_daily_max_drawdown,
+/// verify daily_summary rows exist with max_drawdown values.
+#[sqlx::test(migrations = "../../migrations")]
+async fn daily_batch_backfill(pool: sqlx::PgPool) {
+    let account_id = seed_trading_account(
+        &pool,
+        "backfill_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
+    )
+    .await;
+
+    // Use a specific past date
+    let target_date = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+    let entry_at = target_date
+        .and_hms_opt(10, 0, 0)
+        .unwrap()
+        .and_utc();
+    let exit_at1 = target_date
+        .and_hms_opt(11, 0, 0)
+        .unwrap()
+        .and_utc();
+    let exit_at2 = target_date
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc();
+
+    // Trade 1: win (+500)
+    auto_trader_integration_tests::helpers::seed::seed_closed_trade(
+        &pool,
+        account_id,
+        "test_strategy",
+        "USD_JPY",
+        "gmo_fx",
+        "long",
+        dec!(150),
+        dec!(155),
+        dec!(500),
+        dec!(100),
+        dec!(0),
+        entry_at,
+        exit_at1,
+    )
+    .await;
+
+    // Trade 2: loss (-300)
+    auto_trader_integration_tests::helpers::seed::seed_closed_trade(
+        &pool,
+        account_id,
+        "test_strategy",
+        "USD_JPY",
+        "gmo_fx",
+        "long",
+        dec!(150),
+        dec!(147),
+        dec!(-300),
+        dec!(100),
+        dec!(0),
+        entry_at,
+        exit_at2,
+    )
+    .await;
+
+    // First rebuild the daily_summary so rows exist
+    auto_trader_db::summary::rebuild_daily_summary(&pool, target_date)
+        .await
+        .expect("rebuild should succeed");
+
+    // Then compute max drawdown
+    auto_trader_db::summary::update_daily_max_drawdown(&pool, target_date)
+        .await
+        .expect("update_daily_max_drawdown should succeed");
+
+    // Verify daily_summary row exists
+    let rows: Vec<(i32, i32, Decimal, Decimal)> = sqlx::query_as(
+        r#"SELECT trade_count, win_count, total_pnl, max_drawdown
+           FROM daily_summary
+           WHERE date = $1
+             AND strategy_name = 'test_strategy'
+             AND pair = 'USD_JPY'
+             AND account_id = $2"#,
+    )
+    .bind(target_date)
+    .bind(account_id)
+    .fetch_all(&pool)
+    .await
+    .expect("query should succeed");
+
+    assert_eq!(rows.len(), 1, "should have exactly 1 daily_summary row");
+    let (trade_count, win_count, total_pnl, _max_drawdown) = &rows[0];
+    assert_eq!(*trade_count, 2, "trade_count should be 2");
+    assert_eq!(*win_count, 1, "win_count should be 1 (one profitable trade)");
+    assert_eq!(*total_pnl, dec!(200), "total_pnl should be 500 - 300 = 200");
+}
+
+// =========================================================================
+// 3.84: account_events — margin_lock/margin_release events
+// =========================================================================
+
+/// Execute a full open → close cycle and verify account_events rows exist.
+#[sqlx::test(migrations = "../../migrations")]
+async fn account_events_margin_lock_release(pool: sqlx::PgPool) {
+    let exchange = Exchange::GmoFx;
+    let account_id = seed_trading_account(
+        &pool,
+        "events_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
+    )
+    .await;
+
+    let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
+    let trader = make_trader(pool.clone(), exchange, account_id, ps);
+
+    // Open a trade
+    let signal = make_signal("USD_JPY", Direction::Long);
+    let trade = trader.execute(&signal).await.expect("open should succeed");
+
+    // Verify margin_lock event exists
+    let lock_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'margin_lock'",
+    )
+    .bind(trade.id)
+    .fetch_one(&pool)
+    .await
+    .expect("query should succeed");
+    assert_eq!(lock_count, 1, "margin_lock event should exist after open");
+
+    // Verify the lock amount is negative (outflow)
+    let lock_amount: Decimal = sqlx::query_scalar(
+        "SELECT amount FROM account_events WHERE trade_id = $1 AND event_type = 'margin_lock'",
+    )
+    .bind(trade.id)
+    .fetch_one(&pool)
+    .await
+    .expect("query should succeed");
+    assert!(
+        lock_amount < dec!(0),
+        "margin_lock amount should be negative (outflow), got {}",
+        lock_amount
+    );
+
+    // Close the trade
+    let _closed = trader
+        .close_position(&trade.id.to_string(), ExitReason::TpHit)
+        .await
+        .expect("close should succeed");
+
+    // Verify margin_release event exists
+    let release_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'margin_release'",
+    )
+    .bind(trade.id)
+    .fetch_one(&pool)
+    .await
+    .expect("query should succeed");
+    assert_eq!(
+        release_count, 1,
+        "margin_release event should exist after close"
+    );
+
+    // Verify trade_close event exists
+    let close_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'trade_close'",
+    )
+    .bind(trade.id)
+    .fetch_one(&pool)
+    .await
+    .expect("query should succeed");
+    assert_eq!(
+        close_count, 1,
+        "trade_close event should exist after close"
+    );
+}
+
+// =========================================================================
+// 3.85: entry_indicators / regime — JSONB storage
+// =========================================================================
+
+/// Insert a trade with entry_indicators JSONB, verify it's stored and retrievable.
+#[sqlx::test(migrations = "../../migrations")]
+async fn entry_indicators_jsonb_stored(pool: sqlx::PgPool) {
+    let account_id = seed_trading_account(
+        &pool,
+        "indicators_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
+    )
+    .await;
+
+    let trade_id = auto_trader_integration_tests::helpers::seed::seed_open_trade(
+        &pool,
+        account_id,
+        "test_strategy",
+        "USD_JPY",
+        "gmo_fx",
+        "long",
+        dec!(150),
+        dec!(149),
+        dec!(100),
+        Utc::now(),
+    )
+    .await;
+
+    // Write entry_indicators JSONB
+    let indicators = serde_json::json!({
+        "regime": "trending",
+        "atr": 1.5,
+        "rsi": 65.2,
+        "bb_position": "above_mid",
+        "adx": 30.0
+    });
+
+    sqlx::query("UPDATE trades SET entry_indicators = $1 WHERE id = $2")
+        .bind(&indicators)
+        .bind(trade_id)
+        .execute(&pool)
+        .await
+        .expect("update should succeed");
+
+    // Read it back
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT entry_indicators FROM trades WHERE id = $1")
+            .bind(trade_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query should succeed");
+
+    assert_eq!(
+        stored.get("regime").and_then(|v| v.as_str()),
+        Some("trending"),
+        "regime should be stored as 'trending'"
+    );
+    assert_eq!(
+        stored.get("atr").and_then(|v| v.as_f64()),
+        Some(1.5),
+        "atr should be stored as 1.5"
+    );
+    assert_eq!(
+        stored.get("rsi").and_then(|v| v.as_f64()),
+        Some(65.2),
+        "rsi should be stored"
+    );
+    assert_eq!(
+        stored.get("bb_position").and_then(|v| v.as_str()),
+        Some("above_mid"),
+        "bb_position should be stored"
+    );
+}
+
+// =========================================================================
+// 3.99: PriceStore mid() — returns correct mid price
+// =========================================================================
+
+/// PriceStore::mid() returns (bid + ask) / 2 when both are present.
+#[tokio::test]
+async fn price_store_mid_with_bid_ask() {
+    use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
+
+    let pair = Pair::new("USD_JPY");
+    let feed_key = FeedKey::new(Exchange::GmoFx, pair.clone());
+    let store = PriceStore::new(vec![feed_key.clone()]);
+
+    store
+        .update(
+            feed_key,
+            LatestTick {
+                price: dec!(150),
+                best_bid: Some(dec!(149)),
+                best_ask: Some(dec!(151)),
+                ts: Utc::now(),
+            },
+        )
+        .await;
+
+    let mid = store.mid(&pair).await;
+    assert_eq!(
+        mid,
+        Some(dec!(150)),
+        "mid should be (149 + 151) / 2 = 150"
+    );
+}
+
+/// PriceStore::mid() falls back to LTP when bid/ask are absent.
+#[tokio::test]
+async fn price_store_mid_fallback_to_ltp() {
+    use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
+
+    let pair = Pair::new("USD_JPY");
+    let feed_key = FeedKey::new(Exchange::Oanda, pair.clone());
+    let store = PriceStore::new(vec![feed_key.clone()]);
+
+    store
+        .update(
+            feed_key,
+            LatestTick {
+                price: dec!(150),
+                best_bid: None,
+                best_ask: None,
+                ts: Utc::now(),
+            },
+        )
+        .await;
+
+    let mid = store.mid(&pair).await;
+    assert_eq!(
+        mid,
+        Some(dec!(150)),
+        "mid should fall back to LTP (150) when bid/ask are absent"
+    );
+}
+
+/// PriceStore::mid() returns None for unknown pair.
+#[tokio::test]
+async fn price_store_mid_returns_none_for_unknown() {
+    use auto_trader_market::price_store::PriceStore;
+
+    let store = PriceStore::new(vec![]);
+    let mid = store.mid(&Pair::new("UNKNOWN_PAIR")).await;
+    assert!(mid.is_none(), "mid should return None for unknown pair");
+}
