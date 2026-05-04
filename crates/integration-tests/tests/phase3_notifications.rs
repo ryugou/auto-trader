@@ -53,7 +53,7 @@ fn order_filled_event_format() {
 async fn order_filled_noop_send() {
     let notifier = Notifier::new_disabled();
     let event = NotifyEvent::OrderFilled(OrderFilledEvent {
-        account_name: "テス��".into(),
+        account_name: "テスト".into(),
         exchange: Exchange::BitflyerCfd,
         trade_id: Uuid::new_v4(),
         pair: Pair::new("FX_BTC_JPY"),

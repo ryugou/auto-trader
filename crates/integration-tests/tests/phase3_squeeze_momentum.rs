@@ -191,7 +191,7 @@ async fn squeeze_long_entry_bitflyer() {
     assert_eq!(signal.unwrap().direction, Direction::Long);
 }
 
-// ─── Exit test helpers ────────────────────────────────────��──────────────
+// ─── Exit test helpers ───────────────────────────────────────────────────
 
 fn make_h1_event(pair: &str, close: Decimal, high: Decimal, low: Decimal, ts: DateTime<Utc>) -> PriceEvent {
     PriceEvent {
@@ -473,7 +473,7 @@ async fn squeeze_1r_not_reached_long() {
     );
 }
 
-// ─── 3.36: 1R not reached Short ��────────────────────────────────────────
+// ─── 3.36: 1R not reached Short ──────────────────────────────────────────
 
 /// Chandelier stop breached for Short but unrealized profit < SL distance.
 #[tokio::test]

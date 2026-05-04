@@ -492,9 +492,9 @@ async fn market_prices_snapshot(pool: sqlx::PgPool) {
 
 // ── PUT /api/notifications/:id (mark read) ─────────────────────────────
 
-/// 2.59: 存在しない通知 ID に対する PUT → 404 (or 405 — エンドポイント自体が未定義)。
-/// 現在の API ルーターには PUT /notifications/:id が存在しないため、
-/// リクエスト自体が 405 Method Not Allowed になる。
+/// 2.59: 存在しない通知 ID に対する PUT → 405。
+/// API ルーターに PUT /notifications/:id ルートが存在しないため
+/// 405 Method Not Allowed が返る。
 #[sqlx::test(migrations = "../../migrations")]
 async fn notification_mark_read_nonexistent_id(pool: sqlx::PgPool) {
     let app = app::spawn_test_app(pool).await;
@@ -507,12 +507,7 @@ async fn notification_mark_read_nonexistent_id(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    // No PUT /notifications/:id route → 404 (not found)
-    let status = resp.status().as_u16();
-    assert!(
-        status == 404 || status == 405,
-        "expected 404 or 405, got {status}"
-    );
+    assert_eq!(resp.status().as_u16(), 405);
 }
 
 // Auth tests are in tests/phase2_auth.rs (separate binary to avoid

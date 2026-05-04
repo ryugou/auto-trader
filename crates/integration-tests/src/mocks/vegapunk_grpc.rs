@@ -34,11 +34,11 @@ impl MockVegapunkGrpc {
         let incoming = TcpListenerStream::new(listener);
 
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(GraphRagEngineServer::new(svc))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
+            let server = tonic::transport::Server::builder()
+                .add_service(GraphRagEngineServer::new(svc));
+            if let Err(e) = server.serve_with_incoming(incoming).await {
+                eprintln!("MockVegapunkGrpc server error: {e}");
+            }
         });
 
         // No sleep needed — listener is already bound and accepting.
