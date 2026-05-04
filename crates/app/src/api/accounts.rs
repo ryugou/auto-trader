@@ -115,16 +115,8 @@ pub async fn create(
     // Validate exchange is a known enum value (returns 400 instead of letting
     // the DB CHECK constraint surface as 500).
     let exchange_normalized = req.exchange.trim().to_ascii_lowercase();
-    if exchange_normalized.parse::<Exchange>().is_err() {
-        let known = [Exchange::Oanda, Exchange::BitflyerCfd, Exchange::GmoFx]
-            .iter()
-            .map(|e| e.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            format!("unknown exchange '{}' (known: {known})", req.exchange),
-        ));
+    if let Err(e) = exchange_normalized.parse::<Exchange>() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string()));
     }
     if !strategies::strategy_exists(&state.pool, &req.strategy)
         .await
