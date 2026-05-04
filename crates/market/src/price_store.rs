@@ -70,9 +70,11 @@ pub struct PriceStore {
     /// Feeds where the market is confirmed closed (weekend/holiday).
     /// Distinct from "missing" (never connected) and "stale" (connected but lagging).
     ///
-    /// Lock ordering: always acquire `market_closed` before `latest` to prevent
-    /// potential deadlock. health_at() acquires in reverse order (read-only) which
-    /// is safe but should be unified in future refactoring.
+    /// Lock ordering note: update() acquires market_closed(write) then latest(write).
+    /// health_at() acquires latest(read) then market_closed(read). Read-read doesn't
+    /// deadlock with Tokio's RwLock, but write-write ordering differs. This is safe
+    /// because update() is the only write path for both locks. Consider unifying into
+    /// a single RwLock<(HashMap, HashSet)> if more write paths are added.
     market_closed: RwLock<HashSet<FeedKey>>,
 }
 

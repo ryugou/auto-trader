@@ -72,11 +72,16 @@ pub async fn spawn_test_app_with_price_store(
     });
 
     // Wait for the server to start accepting connections (TCP retry loop).
+    let mut connected = false;
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            connected = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    if !connected {
+        panic!("test app server did not start within 250ms at {}", addr);
     }
 
     TestApp {
