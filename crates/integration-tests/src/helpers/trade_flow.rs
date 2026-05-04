@@ -53,7 +53,7 @@ pub fn load_events_from_csv(
             high: row.high,
             low: row.low,
             close: row.close,
-            volume: Some(row.volume as u64),
+            volume: Some(u64::try_from(row.volume).expect("fixture volume must be non-negative")),
             best_bid: row.bid,
             best_ask: row.ask,
             timestamp: ts,

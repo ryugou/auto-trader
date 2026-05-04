@@ -119,6 +119,14 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
         )
         .await;
 
+    // Verify SL condition: for Long, current bid <= stop_loss
+    let current_bid = dec!(147);
+    assert!(
+        current_bid <= trade.stop_loss,
+        "SL Long condition: bid {current_bid} should be <= stop_loss {}",
+        trade.stop_loss
+    );
+
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::SlHit)
         .await
@@ -164,6 +172,14 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
             },
         )
         .await;
+
+    // Verify SL condition: for Short, current ask >= stop_loss
+    let current_ask = dec!(154);
+    assert!(
+        current_ask >= trade.stop_loss,
+        "SL Short condition: ask {current_ask} should be >= stop_loss {}",
+        trade.stop_loss
+    );
 
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::SlHit)
@@ -212,6 +228,14 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
         )
         .await;
 
+    // Verify TP condition: for Long, current bid >= take_profit
+    let current_bid = dec!(158);
+    let tp = trade.take_profit.expect("take_profit should be set");
+    assert!(
+        current_bid >= tp,
+        "TP Long condition: bid {current_bid} should be >= take_profit {tp}",
+    );
+
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::TpHit)
         .await
@@ -253,6 +277,14 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
             },
         )
         .await;
+
+    // Verify TP condition: for Short, current ask <= take_profit
+    let current_ask = dec!(143);
+    let tp = trade.take_profit.expect("take_profit should be set");
+    assert!(
+        current_ask <= tp,
+        "TP Short condition: ask {current_ask} should be <= take_profit {tp}",
+    );
 
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::TpHit)

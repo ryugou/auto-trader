@@ -234,9 +234,9 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
         .await
         .expect("close 2 should succeed");
 
-    // Rebuild daily summary for today
-    let today = Utc::now().date_naive();
-    auto_trader_db::summary::rebuild_daily_summary(&pool, today)
+    // Use the date from the last closed trade's exit_at to avoid UTC midnight flakiness
+    let date = closed2.exit_at.unwrap().date_naive();
+    auto_trader_db::summary::rebuild_daily_summary(&pool, date)
         .await
         .expect("rebuild should succeed");
 
@@ -249,7 +249,7 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
              AND pair = 'USD_JPY'
              AND account_id = $2"#,
     )
-    .bind(today)
+    .bind(date)
     .bind(account_id)
     .fetch_all(&pool)
     .await
