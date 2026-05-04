@@ -21,9 +21,9 @@
 | 1.5 | 設定バリデーション（disabled 戦略） | ✅ | `config_disabled_strategies_parse` |
 | 1.6 | 環境変数オーバーライド | ✅ | `config_risk_zero_freshness_fails_validation` |
 | 1.7 | DB 接続 + migration | ✅ | `db_helper_snapshot_returns_table_contents` (sqlx::test が migration 自動適用) |
-| 1.8 | warmup（M5） | ❌ | 未実装（戦略テストで間接的にカバー） |
-| 1.9 | warmup（H1） | ❌ | 未実装（戦略テストで間接的にカバー） |
-| 1.10 | warmup（ゼロ） | ❌ | 未実装（bb_history_insufficient が類似カバー） |
+| 1.8 | warmup（M5） | ✅ | `warmup_m5_populates_strategy_history` |
+| 1.9 | warmup（H1） | ✅ | `warmup_h1_filtered_by_m5_strategy` |
+| 1.10 | warmup（ゼロ） | ✅ | `warmup_zero_events_gives_no_signal` |
 | 1.11 | 戦略登録（全 5 戦略） | ⚠️ | `register_all_standard_strategies` (4戦略。swing_llm は Gemini/Vegapunk 依存で別テスト) |
 | 1.12 | 戦略登録（disabled） | ✅ | `register_disabled_strategies_skipped` |
 | 1.13 | 戦略登録（unknown 名） | ✅ | `register_unknown_strategy_skipped` |
@@ -44,7 +44,7 @@
 | 2.4 | POST 不正 account_type | ✅ | `create_account_invalid_account_type` |
 | 2.5 | POST 重複名 | ✅ | `create_account_duplicate_name` |
 | 2.6 | POST 不正 exchange | ✅ | `create_account_invalid_exchange` |
-| 2.7 | POST 不正 currency | ❌ | 未実装 |
+| 2.7 | POST 不正 currency | ✅ | `create_account_invalid_currency_low_balance` |
 | 2.8 | POST 存在しない strategy | ✅ | `create_account_nonexistent_strategy` |
 | 2.9 | POST 同一 exchange で live 重複 | ✅ | `create_live_account_duplicate_exchange` |
 | 2.10 | POST 残高不足 | ✅ | `create_account_insufficient_balance` |
@@ -107,7 +107,7 @@
 | 2.47 | GET pair-stats | ✅ | `dashboard_pair_stats` |
 | 2.48 | GET hourly-winrate | ✅ | `dashboard_hourly_winrate` |
 | 2.49 | GET hourly-winrate (空) | ✅ | `dashboard_hourly_winrate_empty` |
-| 2.50 | GET pnl-history 不正日付 | ❌ | 未実装 |
+| 2.50 | GET pnl-history 不正日付 | ✅ | `dashboard_pnl_history_bad_date_returns_200` |
 
 ### notifications
 
@@ -121,7 +121,7 @@
 | 2.56 | GET ページネーション | ✅ | `notifications_pagination` |
 | 2.57 | PUT 既読マーク | ✅ | `notifications_mark_all_read` |
 | 2.58 | 未読カウント | ✅ | `notifications_unread_count` |
-| 2.59 | PUT 存在しない ID | ❌ | 未実装 |
+| 2.59 | PUT 存在しない ID | ✅ | `notification_mark_read_nonexistent_id` |
 
 ### health / market / auth
 
@@ -145,13 +145,13 @@
 |---|------|------|-----------|
 | 3.1 | Long エントリー | ✅ | `bb_long_entry` |
 | 3.2 | Short エントリー | ✅ | `bb_short_entry` |
-| 3.3 | Long midline エグジット | ❌ | 未実装 |
-| 3.4 | Short midline エグジット | ❌ | 未実装 |
-| 3.5 | Long midline 未到達 | ❌ | 未実装 |
-| 3.6 | Short midline 未到達 | ❌ | 未実装 |
+| 3.3 | Long midline エグジット | ✅ | `bb_long_midline_exit` |
+| 3.4 | Short midline エグジット | ✅ | `bb_short_midline_exit` |
+| 3.5 | Long midline 未到達 | ✅ | `bb_long_midline_not_reached` |
+| 3.6 | Short midline 未到達 | ✅ | `bb_short_midline_not_reached` |
 | 3.7 | 非発火 | ✅ | `bb_no_signal` |
-| 3.8 | 1R 未到達 Long | ❌ | 未実装 |
-| 3.9 | 1R 未到達 Short | ❌ | 未実装 |
+| 3.8 | 1R 未到達 Long | ✅ | `bb_1r_not_reached_long` |
+| 3.9 | 1R 未到達 Short | ✅ | `bb_1r_not_reached_short` |
 | 3.10 | ATR ゼロ | ✅ | `bb_atr_zero` |
 | 3.11 | 履歴不足 | ✅ | `bb_history_insufficient` |
 | 3.12 | fill bid/ask | ✅ | `fill_open_long_uses_ask_price`, `fill_open_short_uses_bid_price` |
@@ -163,13 +163,13 @@
 |---|------|------|-----------|
 | 3.14 | Long ブレイクアウト | ✅ | `donchian_long_breakout` |
 | 3.15 | Short ブレイクアウト | ✅ | `donchian_short_breakout` |
-| 3.16 | Long trailing エグジット | ❌ | 未実装 |
-| 3.17 | Short trailing エグジット | ❌ | 未実装 |
-| 3.18 | Long trailing 未ブレイク | ❌ | 未実装 |
-| 3.19 | Short trailing 未ブレイク | ❌ | 未実装 |
+| 3.16 | Long trailing エグジット | ✅ | `donchian_long_trailing_exit` |
+| 3.17 | Short trailing エグジット | ✅ | `donchian_short_trailing_exit` |
+| 3.18 | Long trailing 未ブレイク | ✅ | `donchian_long_trailing_no_break` |
+| 3.19 | Short trailing 未ブレイク | ✅ | `donchian_short_trailing_no_break` |
 | 3.20 | 非発火 | ✅ | `donchian_no_signal` |
-| 3.21 | 1R 未到達 Long | ❌ | 未実装 |
-| 3.22 | 1R 未到達 Short | ❌ | 未実装 |
+| 3.21 | 1R 未到達 Long | ✅ | `donchian_1r_not_reached_long` |
+| 3.22 | 1R 未到達 Short | ✅ | `donchian_1r_not_reached_short` |
 | 3.23 | ATR ゼロ | ✅ | `donchian_atr_zero` |
 | 3.24 | 履歴不足 | ✅ | `donchian_history_insufficient` |
 | 3.25 | BitflyerCfd パラメタライズ | ✅ | `donchian_long_breakout_bitflyer` |
@@ -178,9 +178,9 @@
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.26 | カスタムパラメータ | ❌ | 未実装 |
-| 3.27 | デフォルトフォールバック | ❌ | 未実装 |
-| 3.28 | 不正パラメータ | ❌ | 未実装 |
+| 3.26 | カスタムパラメータ | ✅ | `donchian_evolve_custom_params` |
+| 3.27 | デフォルトフォールバック | ✅ | `donchian_evolve_default_fallback` |
+| 3.28 | 不正パラメータ | ✅ | `donchian_evolve_invalid_params_clamp` |
 
 ### Squeeze Momentum
 
@@ -188,12 +188,12 @@
 |---|------|------|-----------|
 | 3.29 | Long エントリー | ✅ | `squeeze_long_entry` |
 | 3.30 | Short エントリー | ✅ | `squeeze_short_entry` |
-| 3.31 | Long Chandelier エグジット | ❌ | 未実装 |
-| 3.32 | Short Chandelier エグジット | ❌ | 未実装 |
-| 3.33 | delay phase 抑制 | ❌ | 未実装 |
+| 3.31 | Long Chandelier エグジット | ✅ | `squeeze_long_chandelier_exit` |
+| 3.32 | Short Chandelier エグジット | ✅ | `squeeze_short_chandelier_exit` |
+| 3.33 | delay phase 抑制 | ✅ | `squeeze_delay_phase_suppression` |
 | 3.34 | 非発火 | ✅ | `squeeze_no_signal` |
-| 3.35 | 1R 未到達 Long | ❌ | 未実装 |
-| 3.36 | 1R 未到達 Short | ❌ | 未実装 |
+| 3.35 | 1R 未到達 Long | ✅ | `squeeze_1r_not_reached_long` |
+| 3.36 | 1R 未到達 Short | ✅ | `squeeze_1r_not_reached_short` |
 | 3.37 | ATR ゼロ | ✅ | `squeeze_atr_zero` |
 | 3.38 | 履歴不足 | ✅ | `squeeze_history_insufficient` |
 | 3.39 | BitflyerCfd パラメタライズ | ✅ | `squeeze_long_entry_bitflyer` |
@@ -202,10 +202,10 @@
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.40 | Long エントリー | ❌ | 未実装 |
-| 3.41 | Short エントリー | ❌ | 未実装 |
-| 3.42 | no_trade | ❌ | 未実装 |
-| 3.43 | 不正レスポンス | ❌ | 未実装 |
+| 3.40 | Long エントリー | ✅ | `swing_llm_long_entry` |
+| 3.41 | Short エントリー | ✅ | `swing_llm_short_entry` |
+| 3.42 | no_trade | ✅ | `swing_llm_no_trade` |
+| 3.43 | 不正レスポンス | ✅ | `swing_llm_invalid_response` |
 
 ### 共通シナリオ
 
@@ -216,10 +216,10 @@
 | 3.46 | TP ヒット Long | ✅ | `tp_hit_long` |
 | 3.47 | TP ヒット Short | ✅ | `tp_hit_short` |
 | 3.48 | タイムリミット | ✅ | `time_limit_closes_expired_trade` |
-| 3.49 | 同時クローズ競合 | ❌ | 未実装 |
+| 3.49 | 同時クローズ競合 | ✅ | `concurrent_close_only_one_succeeds` |
 | 3.50 | 鮮度ゲート拒否 | ✅ | `freshness_gate_reject` |
-| 3.51 | オーバーナイト手数料 | ❌ | 未実装 |
-| 3.52 | オーバーナイト手数料ゼロ | ❌ | 未実装 |
+| 3.51 | オーバーナイト手数料 | ✅ | `overnight_fee_applied_to_open_trade` |
+| 3.52 | オーバーナイト手数料ゼロ | ✅ | `overnight_fee_skips_closed_trade` |
 | 3.53 | サイジング正常 | ✅ | `position_sizer_normal` |
 | 3.54 | 残高不足 | ✅ | `position_sizer_insufficient_balance` |
 | 3.55 | min_lot 未満 | ✅ | `position_sizer_below_min_lot` |
@@ -241,22 +241,22 @@
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.64 | exchange-pair ガード | ❌ | 未実装 |
+| 3.64 | exchange-pair ガード | ✅ | `exchange_pair_guard_rejects_cross_exchange` |
 | 3.65 | live gate | ❌ | 未実装 |
-| 3.66 | ポジション重複拒否 | ❌ | 未実装 |
+| 3.66 | ポジション重複拒否 | ✅ | `position_dedup_detects_existing_open_trade` |
 | 3.67 | マッチなし | ❌ | 未実装 |
 | 3.68 | マルチアカウント | ❌ | 未実装 |
 | 3.69 | Live/Paper 分岐 | ❌ | 未実装 |
-| 3.70 | NullExchangeApi | ❌ | 未実装 |
+| 3.70 | NullExchangeApi | ✅ | `null_exchange_api_returns_error_on_all_methods` |
 
 ### クローズフロー
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.71 | CAS ロック取得 | ❌ | 未実装 |
+| 3.71 | CAS ロック取得 | ✅ | `cas_lock_rejects_closing_trade` |
 | 3.72 | Phase 2 失敗 → ロック解除 | ❌ | 未実装 |
 | 3.73 | Phase 3 失敗 → 通知 | ❌ | 未実装 |
-| 3.74 | Trade status 遷移 | ❌ | 未実装 |
+| 3.74 | Trade status 遷移 | ✅ | `closed_trade_cannot_be_closed_again` |
 
 ### startup reconcile
 
@@ -278,8 +278,8 @@
 | 3.83 | daily batch backfill | ❌ | 未実装 |
 | 3.84 | account_events 記録 | ❌ | 未実装 |
 | 3.85 | entry_indicators / regime | ❌ | 未実装 |
-| 3.86 | candle upsert 重複排除 | ❌ | 未実装 |
-| 3.87 | JPY 小数点切り捨て | ❌ | 未実装 |
+| 3.86 | candle upsert 重複排除 | ✅ | `candle_upsert_dedup`, `candle_upsert_updates_values` |
+| 3.87 | JPY 小数点切り捨て | ✅ | `jpy_truncation_on_pnl` |
 | 3.88 | Dashboard total count | ✅ | `trades_list_total_count_accuracy` |
 
 ### Price event ルーティング
@@ -307,9 +307,9 @@
 
 | # | 要件 | 状態 | 実装テスト |
 |---|------|------|-----------|
-| 3.100 | OrderFilled | ❌ | 未実装 |
-| 3.101 | OrderFailed | ❌ | 未実装 |
-| 3.102 | PositionClosed | ❌ | 未実装 |
+| 3.100 | OrderFilled | ✅ | `order_filled_noop_send` |
+| 3.101 | OrderFailed | ✅ | `order_failed_noop_send` |
+| 3.102 | PositionClosed | ✅ | `position_closed_noop_send` |
 | 3.103 | Slack 送信エラー | ✅ | `mock_slack_webhook_error_response` |
 
 ### 周辺ジョブ
@@ -382,21 +382,20 @@
 
 | カテゴリ | 要件数 | ✅ 実装済 | ❌ 未実装 | ⚠️ 部分 | カバー率 |
 |---------|--------|----------|----------|---------|---------|
-| Phase 1 | 17 | 13 | 3 | 1 | 76% |
-| Phase 2 | 68 | 65 | 3 | 0 | 96% |
-| Phase 3 | 114 | 34 | 78 | 0 | 30% |
+| Phase 1 | 17 | 16 | 0 | 1 | 94% |
+| Phase 2 | 68 | 68 | 0 | 0 | 100% |
+| Phase 3 | 114 | 71 | 41 | 0 | 62% |
 | Phase 4 | 9 | 6 | 1 | 2 | 67% |
 | モック | 7 | 7 | 0 | 0 | 100% |
 | 失敗出力 | 7 | 7 | 0 | 0 | 100% |
-| **合計** | **222** | **132** | **85** | **3** | **59%** |
+| **合計** | **222** | **175** | **42** | **3** | **79%** |
 
 ## 未実装の重要カテゴリ（優先度順）
 
-1. **戦略エグジット系** (3.3-3.6, 3.16-3.19, 3.31-3.33, 3.35-3.36): on_open_positions のテストが全てない
-2. **1R ガード** (3.8-3.9, 3.21-3.22, 3.35-3.36): エグジット抑制テストがない
-3. **実行系ガード** (3.64-3.70): exchange-pair ガード、live gate、マルチアカウント等
-4. **クローズフロー** (3.71-3.74): CAS ロック、ロールバック、status 遷移
-5. **SwingLLM** (3.40-3.43): 全て未実装
-6. **Donchian Evolve** (3.26-3.28): 全て未実装
-7. **周辺ジョブ** (3.104-3.110): 週次バッチ、マクロアナリスト等
-8. **シャットダウン** (3.111-3.113): 全て未実装
+1. **実行系ガード** (3.65, 3.67-3.69): live gate、マルチアカウント等
+2. **クローズフロー** (3.72-3.73): Phase 2/3 失敗時のロールバック・通知
+3. **周辺ジョブ** (3.104-3.110): 週次バッチ、マクロアナリスト等
+4. **シャットダウン** (3.111-3.113): 全て未実装
+5. **fill Live** (3.62-3.63): 実 exchange API モックが必要
+6. **Price event ルーティング** (3.89-3.92): channel 統合テスト
+7. **startup reconcile** (3.75-3.80): 既存 unit test でカバー済みだが統合テストなし
