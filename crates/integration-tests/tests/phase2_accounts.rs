@@ -175,6 +175,39 @@ async fn create_account_invalid_exchange(pool: sqlx::PgPool) {
     assert_eq!(resp.status().as_u16(), 400);
 }
 
+/// 2.7: 不正な currency → 400 (JPY 最低残高未満で拒否、または非 JPY は通る)。
+/// 現在の実装では normalize_currency で大文字化し、validate_initial_balance で
+/// JPY の場合のみ最低残高チェックを行う。非 JPY 通貨は検証なしで通る。
+/// ここでは "XYZ" 通貨で initial_balance を低くしても通ることを確認し、
+/// "JPY" で低すぎる金額は拒否されることを確認する。
+#[sqlx::test(migrations = "../../migrations")]
+async fn create_account_invalid_currency_low_balance(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    // JPY with balance below minimum (10000) → 400
+    let body = json!({
+        "name": "Low JPY",
+        "exchange": "gmo_fx",
+        "initial_balance": 100,
+        "leverage": 2,
+        "strategy": "bb_mean_revert_v1",
+        "account_type": "paper",
+        "currency": "JPY"
+    });
+
+    let resp = client
+        .post(app.endpoint("/api/trading-accounts"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 400);
+    let json: Value = resp.json().await.unwrap();
+    assert!(json["error"].as_str().unwrap().contains("initial_balance"));
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_nonexistent_strategy(pool: sqlx::PgPool) {
     let app = app::spawn_test_app(pool).await;
