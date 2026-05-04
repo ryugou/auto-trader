@@ -154,7 +154,7 @@ mod gmo_fx {
                     println!("GMO FX {}: CLOSE (market closed — normal for weekends/holidays)", item.symbol);
                 }
                 other => {
-                    println!("GMO FX {}: unknown status '{}' — logged for review", item.symbol, other);
+                    panic!("GMO FX {}: unknown status '{}' — expected OPEN or CLOSE", item.symbol, other);
                 }
             }
         }
@@ -266,7 +266,10 @@ mod bitflyer_ws {
     async fn ws_connection_and_tick_receive() {
         let message = match connect_bitflyer_and_receive_tick().await {
             Some(m) => m,
-            None => return, // skipped — logged inside helper
+            None => {
+                println!("BitFlyer WS: tick receive returned None — SKIPPED");
+                return;
+            }
         };
 
         // Verify required fields
@@ -300,7 +303,10 @@ mod candle_builder_real_tick {
     async fn candle_builder_with_real_tick() {
         let message = match connect_bitflyer_and_receive_tick().await {
             Some(m) => m,
-            None => return, // skipped — logged inside helper
+            None => {
+                println!("BitFlyer WS: tick receive returned None — SKIPPED");
+                return;
+            }
         };
 
         let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
@@ -367,7 +373,7 @@ mod vegapunk {
         // Try to connect — Vegapunk may not be running
         let connect_result = tokio::time::timeout(
             Duration::from_secs(10),
-            auto_trader_vegapunk::client::VegapunkClient::connect(endpoint, "auto_trader", token.as_deref()),
+            auto_trader_vegapunk::client::VegapunkClient::connect(endpoint, "fx-trading", token.as_deref()),
         )
         .await;
 
@@ -407,11 +413,10 @@ mod vegapunk {
                 // Response is valid — even if empty, the parse succeeded
             }
             Ok(Err(e)) => {
-                // Search failed but connection worked — still informative
-                println!("Vegapunk: search returned error ({e}) — connection works, query failed");
+                panic!("Vegapunk: search failed after successful connection ({e})");
             }
             Err(_) => {
-                println!("Vegapunk: search timed out after 15s");
+                panic!("Vegapunk: search timed out after 15s despite successful connection");
             }
         }
     }
@@ -469,7 +474,7 @@ mod oanda {
             }
             Ok(Err(e)) => panic!("OANDA candle fetch failed despite valid credentials: {e}"),
             Err(_) => {
-                println!("OANDA: request timed out after 30s");
+                panic!("OANDA: request timed out after 30s despite valid credentials");
             }
         }
     }
@@ -513,7 +518,7 @@ mod gemini {
                 );
             }
             Err(e) => {
-                println!("Gemini: request failed ({e}) — API key may be invalid");
+                panic!("Gemini: request failed with GEMINI_API_KEY set ({e}) — transport error");
             }
         }
     }
