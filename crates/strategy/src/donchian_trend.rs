@@ -21,9 +21,8 @@
 //! range and provides breathing room for normal trend retraces.
 //!
 //! ## Position sizing
-//! `allocation_pct = min(1% / stop_loss_pct, 50%)`. With 2× account leverage
-//! actual risk = `1% × 2 = 2%` of account per trade; caps at 50% to prevent
-//! over-exposure.
+//! `allocation_pct = 1.0` (full-bet). PositionSizer enforces the no-liquidation
+//! constraint: `max_alloc = (1 - maintenance_margin) / (leverage × SL%)`.
 //!
 //! ## Take profit (dynamic, via `on_open_positions`)
 //! - **Long** closes when current close < prior 10-bar low.
@@ -58,8 +57,6 @@ const ATR_BASELINE_BARS: usize = 20;
 const ATR_MULT: Decimal = dec!(3.0);
 /// Maximum stop-loss as a fraction of entry price.
 const SL_CAP: Decimal = dec!(0.05);
-/// Target risk per trade as an *unleveraged* fraction of account balance.
-/// Target per-trade risk budget. The leverage-aware risk cap is enforced
 // Allocation is always 100% — PositionSizer enforces no-liquidation constraint.
 /// Maximum allocation per trade.
 const ALLOCATION_CAP: Decimal = dec!(1.00);
