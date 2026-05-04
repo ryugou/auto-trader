@@ -48,5 +48,8 @@ csv = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 
+[build-dependencies]
+tonic-build = { workspace = true }
+
 [features]
 external-api = []
