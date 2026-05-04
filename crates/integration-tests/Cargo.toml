@@ -16,6 +16,7 @@ auto-trader-strategy = { workspace = true }
 auto-trader-executor = { workspace = true }
 auto-trader-vegapunk = { workspace = true }
 auto-trader-notify = { workspace = true }
+auto-trader-macro-analyst = { workspace = true }
 
 axum = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
