@@ -60,9 +60,7 @@ const ATR_MULT: Decimal = dec!(3.0);
 const SL_CAP: Decimal = dec!(0.05);
 /// Target risk per trade as an *unleveraged* fraction of account balance.
 /// Target per-trade risk budget. The leverage-aware risk cap is enforced
-/// by PositionSizer (which knows the actual account leverage), so this
-/// value does not need manual adjustment when leverage changes.
-const TARGET_RISK_PCT: Decimal = dec!(0.01);
+// Allocation is always 100% — PositionSizer enforces no-liquidation constraint.
 /// Maximum allocation per trade.
 const ALLOCATION_CAP: Decimal = dec!(1.00);
 const HISTORY_LEN: usize = 200;
@@ -190,8 +188,7 @@ impl Strategy for DonchianTrendV1 {
         if stop_loss_pct <= Decimal::ZERO {
             return None; // ATR=0, no volatility to trade
         }
-        // Risk-linked allocation: risk at most TARGET_RISK_PCT of account.
-        let allocation_pct = (TARGET_RISK_PCT / stop_loss_pct).min(ALLOCATION_CAP);
+        let allocation_pct = ALLOCATION_CAP;
 
         if entry > channel_high {
             return Some(Signal {
