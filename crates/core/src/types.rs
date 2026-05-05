@@ -222,13 +222,19 @@ pub struct Signal {
     /// requested allocation); the broker-aware no-liquidation cap is
     /// enforced downstream in `PositionSizer::calculate_quantity` using
     /// each exchange's `liquidation_margin_level` from
-    /// `[exchange_margin.<name>]` config. With leverage L, the actual
-    /// account risk at SL hit is `allocation_pct × stop_loss_pct × L`.
+    /// `[exchange_margin.<name>]` config.
+    ///
+    /// Effective allocation after the cap:
+    ///   `risk_alloc = min(allocation_pct, max_alloc)`,
+    ///   where `max_alloc = 1 / (Y + L × stop_loss_pct)`
+    ///   and `Y` is the broker's liquidation margin level threshold.
+    ///
+    /// Actual account risk at SL hit (the value to reason about, not
+    /// the unclamped `allocation_pct`):
+    ///   `risk_alloc × stop_loss_pct × L`.
     ///
     /// The sizer turns this into a quantity via
-    /// `floor((balance × leverage × min(allocation_pct, max_alloc) / price) / min_lot)`,
-    /// where `max_alloc = 1 / (Y + L × stop_loss_pct)` and `Y` is the
-    /// broker's liquidation margin level threshold.
+    /// `floor((balance × leverage × risk_alloc / price) / min_lot)`.
     #[serde(default = "default_allocation_pct")]
     pub allocation_pct: Decimal,
     /// Optional time-based fail-safe: position monitor will force-close
