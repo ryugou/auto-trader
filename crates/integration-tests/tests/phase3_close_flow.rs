@@ -170,12 +170,16 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
     // Open and close a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::TpHit)
         .await
         .expect("close should succeed");
     assert_eq!(closed.status, TradeStatus::Closed);
+    assert_eq!(closed.quantity, dec!(12735), "close should not mutate quantity");
 
     // Try to close again — should fail
     let result = trader
@@ -212,6 +216,8 @@ async fn concurrent_close_only_one_succeeds(pool: sqlx::PgPool) {
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader1.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
     let trade_id = trade.id.to_string();
 
     // Spawn two concurrent close calls
@@ -289,6 +295,8 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
 
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = open_trader.execute(&signal).await.expect("open should succeed");
+    // qty: dry_run open — 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
     let trade_id = trade.id;
 
     // Now create a trader with a FAILING API (dry_run=false) for the close attempt
@@ -355,6 +363,8 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // Verify 'trade_opened' notification was created
     let open_notif_count: i64 = sqlx::query_scalar(
@@ -426,6 +436,8 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
 
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // Wait briefly for fire-and-forget notification to be sent
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

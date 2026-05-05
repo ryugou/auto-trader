@@ -231,6 +231,10 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
 
     assert_eq!(trade.status, TradeStatus::Open);
     assert_eq!(trade.direction, Direction::Long);
+    // qty: live path — fill_open returns the aggregated execution size from MockExchangeApi.
+    //      Mock Execution.size = 6622 (the sizer-computed quantity is overridden by
+    //      whatever the exchange reports). One execution → trade.quantity == 6622.
+    assert_eq!(trade.quantity, dec!(6622), "live fill should adopt exchange-reported size (mock=6622)");
 }
 
 // =========================================================================
@@ -289,6 +293,8 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: live path — Mock Execution.size = 6622 → trade.quantity == 6622.
+    assert_eq!(trade.quantity, dec!(6622), "live fill adopts exchange-reported size (mock=6622)");
 
     // Reset counters to track close-only calls
     counters.send_child_order.store(0, Ordering::SeqCst);
@@ -476,6 +482,9 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
 
     // Verify: PriceStore was used (Long → ask price = 151)
     assert_eq!(trade.entry_price, dec!(151));
+    // qty: dry_run — balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151, min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // Verify: Exchange API was NOT called
     assert_eq!(
@@ -554,4 +563,6 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
     );
 
     assert_eq!(trade.status, TradeStatus::Open);
+    // qty: live path — Mock Execution.size = 6622 → trade.quantity == 6622.
+    assert_eq!(trade.quantity, dec!(6622), "live fill adopts exchange-reported size (mock=6622)");
 }

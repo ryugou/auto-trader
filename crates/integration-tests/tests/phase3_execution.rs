@@ -168,6 +168,10 @@ async fn fill_open_long_uses_ask_price(pool: sqlx::PgPool) {
     assert_eq!(trade.entry_price, dec!(151), "Long should fill at ask price");
     assert_eq!(trade.direction, Direction::Long);
     assert_eq!(trade.status, TradeStatus::Open);
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151, min_lot=1
+    //      max_alloc = 1/(1.00 + 2×0.02) = 1/1.04
+    //      raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → floor → 12735
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 }
 
 /// fill_open Short → bid price (150) で約定。
@@ -194,6 +198,9 @@ async fn fill_open_short_uses_bid_price(pool: sqlx::PgPool) {
 
     assert_eq!(trade.entry_price, dec!(150), "Short should fill at bid price");
     assert_eq!(trade.direction, Direction::Short);
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=150, min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 150 ≈ 12820.51 → floor → 12820
+    assert_eq!(trade.quantity, dec!(12820), "sizer: 1M × 2 × (1/1.04) / 150 → 12820");
 }
 
 /// fill_close Long → bid price (150) で決済。
@@ -218,6 +225,8 @@ async fn fill_close_long_uses_bid_price(pool: sqlx::PgPool) {
     // まず Long ポジションを開く
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long fills at ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "open qty preserved through close");
 
     // クローズ
     let closed = trader
@@ -232,6 +241,8 @@ async fn fill_close_long_uses_bid_price(pool: sqlx::PgPool) {
     );
     assert_eq!(closed.status, TradeStatus::Closed);
     assert!(closed.exit_reason == Some(ExitReason::SlHit));
+    // qty unchanged after close
+    assert_eq!(closed.quantity, dec!(12735), "close should not mutate quantity");
 }
 
 /// fill_close Short → ask price (151) で決済。
@@ -256,6 +267,8 @@ async fn fill_close_short_uses_ask_price(pool: sqlx::PgPool) {
     // まず Short ポジションを開く
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
+    // qty: 1M × 2 × (1/1.04) / 150 → 12820 (Short fills at bid=150)
+    assert_eq!(trade.quantity, dec!(12820), "open qty preserved through close");
 
     // クローズ
     let closed = trader
@@ -270,6 +283,7 @@ async fn fill_close_short_uses_ask_price(pool: sqlx::PgPool) {
     );
     assert_eq!(closed.status, TradeStatus::Closed);
     assert!(closed.exit_reason == Some(ExitReason::TpHit));
+    assert_eq!(closed.quantity, dec!(12820), "close should not mutate quantity");
 }
 
 // =========================================================================

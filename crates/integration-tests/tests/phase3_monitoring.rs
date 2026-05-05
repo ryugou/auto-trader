@@ -103,6 +103,9 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     assert_eq!(trade.entry_price, dec!(151));
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // SL = 151 * (1 - 0.02) = 147.98
     // 価格が SL を下回った: bid=147, ask=148
@@ -158,6 +161,9 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     assert_eq!(trade.entry_price, dec!(150));
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=150 (Short@bid), min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 150 ≈ 12820.51 → 12820
+    assert_eq!(trade.quantity, dec!(12820), "sizer: 1M × 2 × (1/1.04) / 150 → 12820");
 
     // SL = 150 * (1 + 0.02) = 153
     // 価格が SL を上回った: bid=153, ask=154
@@ -214,6 +220,8 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
 
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // 価格上昇: bid=158, ask=159
     let feed_key = FeedKey::new(exchange, Pair::new("USD_JPY"));
@@ -264,6 +272,8 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
 
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 150 → 12820 (Short@bid=150)
+    assert_eq!(trade.quantity, dec!(12820), "sizer: 1M × 2 × (1/1.04) / 150 → 12820");
 
     // 価格下落: bid=142, ask=143
     let feed_key = FeedKey::new(exchange, Pair::new("USD_JPY"));
@@ -328,6 +338,8 @@ async fn time_limit_closes_expired_trade(pool: sqlx::PgPool) {
         max_hold_until: Some(Utc::now() - Duration::hours(1)),
     };
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
     // max_hold_until は過去 → position monitor が StrategyTimeLimit で close を発行
     assert!(trade.max_hold_until.is_some());
     let max_hold = trade.max_hold_until.unwrap();

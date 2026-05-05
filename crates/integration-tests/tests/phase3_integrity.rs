@@ -115,6 +115,9 @@ async fn balance_after_trade(pool: sqlx::PgPool) {
     let trade = trader.execute(&signal).await.expect("open should succeed");
     let entry_price = trade.entry_price; // 151
     let quantity = trade.quantity;
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
+    assert_eq!(quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // Close: bid=155, ask=156 → Long close at bid=155
     let feed_key = FeedKey::new(exchange, Pair::new("USD_JPY"));
@@ -184,6 +187,10 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
     // Trade 1: Long, close with profit
     let signal1 = make_signal("USD_JPY", Direction::Long);
     let trade1 = trader.execute(&signal1).await.expect("open 1 should succeed");
+    // qty: balance=10_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
+    //      max_alloc = 1/1.04, raw = 10_000_000 × 2 × (1/1.04) / 151 ≈ 127353.94 → 127356
+    //      (rust_decimal scale-28 division yields a slight difference from naive arithmetic)
+    assert_eq!(trade1.quantity, dec!(127356), "sizer: 10M × 2 × (1/1.04) / 151 → 127356");
 
     // Update price for profitable close
     let feed_key = FeedKey::new(exchange, Pair::new("USD_JPY"));
@@ -218,6 +225,10 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
 
     let signal2 = make_signal("USD_JPY", Direction::Short);
     let trade2 = trader.execute(&signal2).await.expect("open 2 should succeed");
+    // qty: balance has grown by trade1 PnL (+509424 yen: (155-151)×127356) → ≈10_509_424
+    //      lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=155 (Short@bid), min_lot=1
+    //      max_alloc = 1/1.04, raw = 10_509_424 × 2 × (1/1.04) / 155 ≈ 130389 → 130389
+    assert_eq!(trade2.quantity, dec!(130389), "sizer: ~10.51M × 2 × (1/1.04) / 155 → 130389 (balance grew by trade1 PnL)");
 
     // Price rises → Short loses
     ps.update(
@@ -395,6 +406,9 @@ async fn jpy_truncation_on_pnl(pool: sqlx::PgPool) {
     let trade = trader.execute(&signal).await.expect("open should succeed");
     let entry_price = trade.entry_price;
     let quantity = trade.quantity;
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=150.777 (Long@ask), min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 150.777 ≈ 12754.42 → 12754
+    assert_eq!(quantity, dec!(12754), "sizer: 1M × 2 × (1/1.04) / 150.777 → 12754");
 
     // Close: bid=151.999 → Long close at bid, diff = 151.999 - 150.777 = 1.222
     // pnl = 1.222 * quantity → truncated to integer
@@ -663,6 +677,8 @@ async fn account_events_margin_lock_release(pool: sqlx::PgPool) {
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
 
     // Verify margin_lock event exists
     let lock_count: i64 = sqlx::query_scalar(
