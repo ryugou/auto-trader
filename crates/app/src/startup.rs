@@ -60,15 +60,17 @@ pub fn resolve_exchange_liquidation_levels(
             }
         }
     }
-    let missing: Vec<_> = required
+    let mut missing: Vec<&str> = required
         .iter()
         .filter(|ex| !map.contains_key(*ex))
+        .map(|ex| ex.as_str())
         .collect();
+    missing.sort();
     if !missing.is_empty() {
         anyhow::bail!(
-            "config: [exchange_margin.<name>] missing for active accounts: {:?}. \
-             Add `liquidation_margin_level` for each.",
-            missing
+            "config: [exchange_margin.<name>] missing for active accounts: {}. \
+             Add `[exchange_margin.<name>] liquidation_margin_level = <value>` for each.",
+            missing.join(", ")
         );
     }
     // Fail-closed: a non-positive `liquidation_margin_level` would let the

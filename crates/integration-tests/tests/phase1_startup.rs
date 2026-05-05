@@ -205,8 +205,8 @@ liquidation_margin_level = 0.50
         "error must mention exchange_margin section, got: {msg}"
     );
     assert!(
-        msg.contains("GmoFx"),
-        "error must mention the missing exchange (GmoFx), got: {msg}"
+        msg.contains("gmo_fx"),
+        "error must mention the missing exchange as its TOML key (gmo_fx), got: {msg}"
     );
 }
 
