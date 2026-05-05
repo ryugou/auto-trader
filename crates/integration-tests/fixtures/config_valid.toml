@@ -24,6 +24,20 @@ min_order_size = 1
 price_unit = 1
 min_order_size = 0.001
 
+[exchange_margin.bitflyer_cfd]
+# bitFlyer Crypto CFD: 維持率 50% 未満で即時ロスカット (公式)
+# https://bitflyer.com/ja-jp/faq/7-23
+liquidation_margin_level = 0.50
+
+[exchange_margin.gmo_fx]
+# GMOコイン外国為替FX: 維持率 100% 未満でロスカット (公式)
+# https://support.coin.z.com/hc/ja/articles/17884183390105
+liquidation_margin_level = 1.00
+
+[exchange_margin.oanda]
+# OANDA Japan FX: 維持率 100% 未満でロスカット (公式)
+liquidation_margin_level = 1.00
+
 [position_sizing]
 method = "risk_based"
 risk_rate = 0.02

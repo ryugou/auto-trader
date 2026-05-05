@@ -115,8 +115,45 @@ pub async fn create(
     // Validate exchange is a known enum value (returns 400 instead of letting
     // the DB CHECK constraint surface as 500).
     let exchange_normalized = req.exchange.trim().to_ascii_lowercase();
-    if let Err(e) = exchange_normalized.parse::<Exchange>() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string()));
+    let exchange_enum: Exchange = match exchange_normalized.parse::<Exchange>() {
+        Ok(e) => e,
+        Err(e) => return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string())),
+    };
+    // Defense in depth: reject creation on exchanges that have no
+    // [exchange_margin.<name>] entry, or whose entry is non-positive.
+    //
+    // The startup gate (`resolve_exchange_liquidation_levels`) only enforces
+    // `Y > 0` for exchanges that already have an active account; entries on
+    // unused exchanges are tolerated so a stale TOML cannot brick boot. That
+    // tolerance opens a footgun if we don't re-check here: an operator could
+    // create the *first* account on an exchange whose Y is 0/negative, the
+    // create would succeed, and PositionSizer would then return None on
+    // every signal — surfacing as a misleading "balance too small" error.
+    // Validate the value strictly positive at create time to fail loudly.
+    match state.exchange_liquidation_levels.get(&exchange_enum) {
+        None => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "exchange '{}' has no [exchange_margin.{}] entry in config; \
+                     add `liquidation_margin_level` and restart the service before \
+                     creating accounts on this exchange",
+                    exchange_normalized, exchange_normalized
+                ),
+            ));
+        }
+        Some(y) if *y <= Decimal::ZERO => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "exchange '{}' has [exchange_margin.{}].liquidation_margin_level = {}, \
+                     which must be > 0; fix the value in config and restart the service \
+                     before creating accounts on this exchange",
+                    exchange_normalized, exchange_normalized, y
+                ),
+            ));
+        }
+        Some(_) => {}
     }
     if !strategies::strategy_exists(&state.pool, &req.strategy)
         .await

@@ -209,6 +209,7 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         false, // dry_run=false → live path
     )
     .with_poll_timeout(Duration::from_secs(5));
@@ -280,6 +281,7 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         false, // dry_run=false
     )
     .with_poll_timeout(Duration::from_secs(5));
@@ -465,6 +467,7 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         true, // dry_run=true → paper path
     );
 
@@ -532,6 +535,7 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         false, // dry_run=false → live path
     )
     .with_poll_timeout(Duration::from_secs(5));

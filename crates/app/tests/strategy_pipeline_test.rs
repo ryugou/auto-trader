@@ -132,8 +132,9 @@ fn flat_then_trend_tf(
 /// could not place trades on the 30k JPY paper account because the
 /// old risk-based sizer rejected the strategy's signal. The fix moved
 /// to pure capacity sizing — this test verifies the strategy's signal
-/// (now with `stop_loss_pct` and `allocation_pct = 0.6`) sizes
-/// to a non-zero quantity on the live account profile.
+/// (now with `stop_loss_pct` and `allocation_pct = ALLOCATION_CAP = 1.0`,
+/// capped per-broker by `PositionSizer` via `liquidation_margin_level`)
+/// sizes to a non-zero quantity on the live account profile.
 #[tokio::test]
 async fn donchian_signal_passes_sizer_on_30k_account() {
     let mut strat = DonchianTrendV1::new("donchian_trend_v1".to_string(), vec![Pair::new(PAIR)]);
@@ -164,6 +165,7 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
         LEVERAGE,
         signal.allocation_pct,
         signal.stop_loss_pct,
+        dec!(0.50),
     );
     assert!(
         qty.is_some(),
@@ -216,6 +218,7 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         LEVERAGE,
         signal.allocation_pct,
         signal.stop_loss_pct,
+        dec!(0.50),
     );
     assert!(
         qty.is_some(),
@@ -262,6 +265,7 @@ async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
         LEVERAGE,
         signal.allocation_pct,
         signal.stop_loss_pct,
+        dec!(0.50),
     );
     assert!(
         qty.is_some(),
@@ -284,6 +288,7 @@ async fn sizer_handles_degenerate_inputs_without_panic() {
         LEVERAGE,
         dec!(0.5),
         dec!(0.02),
+        dec!(0.50),
     );
     assert_eq!(qty, None);
 }

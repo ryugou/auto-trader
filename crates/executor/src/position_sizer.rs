@@ -4,21 +4,26 @@ use std::collections::HashMap;
 
 /// Position sizer: converts Signal.allocation_pct → concrete quantity.
 ///
-/// Sizing strategy: **full-bet within no-liquidation constraint**.
-/// The maximum position size is capped so that a SL hit does NOT
-/// exceed the account balance, with a maintenance-margin buffer to
-/// ensure the SL fires before the exchange's forced liquidation.
+/// Sizing strategy: **invest the maximum amount that keeps the post-SL
+/// margin level at or above the broker's liquidation threshold**.
 ///
-///   max_alloc = (1 - MAINTENANCE_MARGIN_RATE) / (leverage × stop_loss_pct)
+///   max_alloc = 1 / (Y + leverage × stop_loss_pct)
 ///   risk_alloc = min(max_alloc, allocation_pct)
 ///
-/// Example: leverage=2, SL=1.5%, maintenance=50%
-///   max_alloc = 0.5 / (2 × 0.015) = 16.67 → capped by allocation_pct (1.0)
-///   → uses full balance (allocation = 1.0)
+/// `Y` is the broker's liquidation margin level threshold supplied by the
+/// caller (resolved per-exchange from `[exchange_margin.<name>]` config).
+/// At `risk_alloc = max_alloc`, an idealised fill at the SL price closes the
+/// position with margin level exactly Y. Real-world slippage, weekend gaps,
+/// or SL-trigger latency can push the realised loss past the SL price and
+/// drop margin level below Y; this sizer does not include a buffer for those
+/// cases. If post-SL slippage tolerance is required, callers should size
+/// against a tighter Y (or a separate buffered threshold).
 ///
-/// This means the account is "all-in" on every trade, but the SL
-/// always fires before liquidation. Risk per trade = SL% × leverage
-/// of the full balance.
+/// Example: bitflyer_cfd (Y=0.5, lev=2), SL=2%
+///   max_alloc = 1 / (0.5 + 0.04) = 1.85 → capped at allocation_pct (1.0)
+///
+/// Example: gmo_fx (Y=1.0, lev=10), SL=2%
+///   max_alloc = 1 / (1.0 + 0.2) = 0.833 → 83.3% of balance as margin
 pub struct PositionSizer {
     min_order_sizes: HashMap<Pair, Decimal>,
 }
@@ -29,16 +34,26 @@ impl PositionSizer {
     }
 
     /// Compute the trade quantity. Returns None when the result would
-    /// be below the per-pair `min_order_size` — the account is
-    /// structurally too small to express even one minimum lot at this
-    /// price under the requested allocation.
+    /// be below the per-pair `min_order_size`, when any input is non-positive,
+    /// or when `liquidation_margin_level` is non-positive (configuration bug).
     ///
     /// `allocation_pct` must be in (0, 1]. Values outside that range
     /// are treated as bugs and rejected (returns None) — the sizer
     /// does not silently clamp.
     ///
+    /// `allocation_pct` is the **fraction of leveraged capacity** to deploy,
+    /// i.e. (margin used / equity), so the resulting trade notional is
+    /// `balance × leverage × allocation_pct`. Setting `allocation_pct = 1.0`
+    /// requests "use my full balance as margin" (subject to the post-SL
+    /// liquidation cap below).
+    ///
     /// `stop_loss_pct` is the stop-loss distance as a fraction of fill price
     /// (e.g., 0.005 = 0.5% distance).
+    ///
+    /// `liquidation_margin_level` is the broker's margin-call threshold as
+    /// a decimal (e.g., 0.50 for bitFlyer Crypto CFD's 50%, 1.00 for GMO
+    /// 外国為替FX's 100%).
+    #[allow(clippy::too_many_arguments)]
     pub fn calculate_quantity(
         &self,
         pair: &Pair,
@@ -47,31 +62,22 @@ impl PositionSizer {
         leverage: Decimal,
         allocation_pct: Decimal,
         stop_loss_pct: Decimal,
+        liquidation_margin_level: Decimal,
     ) -> Option<Decimal> {
-        // bitFlyer CFD maintenance margin rate = 50%. The position must
-        // be sized so that a SL hit leaves enough equity above this
-        // threshold — i.e., the SL fires before forced liquidation.
-        let maintenance_margin_rate = Decimal::new(5, 1); // 0.50
-
         if balance <= Decimal::ZERO
             || entry_price <= Decimal::ZERO
             || leverage <= Decimal::ZERO
             || allocation_pct <= Decimal::ZERO
             || allocation_pct > Decimal::ONE
             || stop_loss_pct <= Decimal::ZERO
+            || liquidation_margin_level <= Decimal::ZERO
         {
             return None;
         }
 
-        // Max allocation so SL fires before liquidation:
-        //   SL loss = balance × leverage × alloc × stop_loss_pct
-        //   Must be ≤ balance × (1 - maintenance_margin_rate)
-        //   → alloc ≤ (1 - maintenance_margin_rate) / (leverage × stop_loss_pct)
-        //
-        // For typical values (leverage=2, SL=1.5%, maint=50%):
-        //   max_alloc = 0.5 / 0.03 = 16.67 → capped at allocation_pct (1.0)
-        //   → full-bet, SL loss = 3% of balance (well within margin)
-        let max_alloc = (Decimal::ONE - maintenance_margin_rate) / (leverage * stop_loss_pct);
+        // SL ヒット時の維持率 = (1 - L × a × s) / a ≥ Y を解いて
+        //   a ≤ 1 / (Y + L × s)
+        let max_alloc = Decimal::ONE / (liquidation_margin_level + leverage * stop_loss_pct);
         let risk_alloc = max_alloc.min(allocation_pct);
 
         // Mechanical sizing: apply leverage and risk-adjusted allocation, divide by price.
@@ -84,9 +90,6 @@ impl PositionSizer {
             .unwrap_or(Decimal::ZERO);
 
         if min_size > Decimal::ZERO {
-            // Truncate to a multiple of min_lot so the broker accepts
-            // the size. Anything below min_lot means the account is
-            // too small to participate at all.
             let truncated = (raw_qty / min_size).floor() * min_size;
             if truncated < min_size {
                 return None;
@@ -112,107 +115,164 @@ mod tests {
         PositionSizer::new(min_sizes)
     }
 
-    #[test]
-    fn full_allocation_with_risk_limiting() {
-        // 100k balance × 2x lev × SL=1% → risk_alloc = min(2% / (2×1%), 1.0) = 1.0
-        // 100k × 2 × 1.0 / 10M = 0.02 BTC
-        // Actual risk = 100k × 2 × 1.0 × 1% = 2k (2% of balance)
-        let qty = btc_sizer().calculate_quantity(
-            &Pair::new("FX_BTC_JPY"),
-            dec!(100000),
-            dec!(10000000),
-            dec!(2),
-            dec!(1.0),
-            dec!(0.01),
-        );
-        assert_eq!(qty, Some(dec!(0.02)));
+    fn fx_sizer() -> PositionSizer {
+        let mut min_sizes = HashMap::new();
+        min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
+        PositionSizer::new(min_sizes)
     }
 
+    /// gmo_fx (Y=1.0) lev=10, SL=2%, balance=30,000円: max_alloc = 1/(1.0+0.2) = 0.8333...
+    /// position_value = 30,000 × 10 / 1.2 / 157 = 250,000 / 157 = 1592.356... → 1592 (min_lot=1).
     #[test]
-    fn risk_adjustment_caps_high_leverage() {
-        // 100k balance × 10x lev × SL=2% → risk_alloc = min(0.5 / (10×2%), 1.0) = min(2.5, 1.0) = 1.0
-        // 100k × 10 × 1.0 / 10M = 0.1 BTC
-        // Actual risk = 100k × 10 × 1.0 × 2% = 20k (20% of balance, but SL fires before liquidation)
-        let qty = btc_sizer().calculate_quantity(
-            &Pair::new("FX_BTC_JPY"),
-            dec!(100000),
-            dec!(10000000),
+    fn gmo_fx_loose_sl_caps_at_alloc_below_one() {
+        let qty = fx_sizer().calculate_quantity(
+            &Pair::new("USD_JPY"),
+            dec!(30000),
+            dec!(157),
             dec!(10),
             dec!(1.0),
             dec!(0.02),
+            dec!(1.00),
         );
-        assert_eq!(qty, Some(dec!(0.1)));
+        assert_eq!(qty, Some(dec!(1592)));
     }
 
+    /// gmo_fx (Y=1.0) lev=10, SL=0.5%: max_alloc = 1/(1.0+0.05) ≈ 0.952.
+    /// 30,000 × 10 × 0.952 / 157 = 1819 USD → 1819.
     #[test]
-    fn half_allocation_with_moderate_leverage() {
-        // 100k × 2x × SL=1% → risk_alloc = min(2% / (2×1%), 0.5) = min(1.0, 0.5) = 0.5
-        // 100k × 2 × 0.5 / 10M = 0.01 BTC
-        // Actual risk = 100k × 2 × 0.5 × 1% = 1k (1% of balance)
-        let qty = btc_sizer().calculate_quantity(
-            &Pair::new("FX_BTC_JPY"),
-            dec!(100000),
-            dec!(10000000),
-            dec!(2),
-            dec!(0.5),
-            dec!(0.01),
+    fn gmo_fx_tight_sl_higher_allocation() {
+        let qty = fx_sizer().calculate_quantity(
+            &Pair::new("USD_JPY"),
+            dec!(30000),
+            dec!(157),
+            dec!(10),
+            dec!(1.0),
+            dec!(0.005),
+            dec!(1.00),
         );
-        assert_eq!(qty, Some(dec!(0.01)));
+        assert_eq!(qty, Some(dec!(1819)));
     }
 
+    /// bitflyer_cfd (Y=0.5) lev=2, SL=2%: max_alloc = 1/(0.5+0.04) ≈ 1.85 → cap at allocation_pct=1.0.
+    /// 30,000 × 2 × 1.0 / 12,500,000 = 0.0048 → truncated to 0.004 (multiple of min_lot=0.001).
     #[test]
-    fn truncates_to_min_lot_multiple() {
-        // 30k × 2x × SL=2% → risk_alloc = min(0.5 / (2×2%), 0.9) = min(12.5, 0.9) = 0.9
-        // 30k × 2 × 0.9 / 11M ≈ 0.004909 → truncated to 0.004 BTC
+    fn bitflyer_cfd_typical_sl_uses_full_allocation() {
         let qty = btc_sizer().calculate_quantity(
             &Pair::new("FX_BTC_JPY"),
             dec!(30000),
-            dec!(11000000),
+            dec!(12500000),
             dec!(2),
-            dec!(0.9),
+            dec!(1.0),
             dec!(0.02),
+            dec!(0.50),
         );
         assert_eq!(qty, Some(dec!(0.004)));
     }
 
+    /// At lev=10, SL=10%, Y=1.0: max_alloc = 1/(1.0+1.0) = 0.5 → forces under-allocation.
+    /// 30,000 × 10 × 0.5 / 157 = 955 USD.
     #[test]
-    fn rejects_when_account_too_small_for_one_min_lot() {
-        // 5k × 2x × SL=2% → risk_alloc = min(2% / (2×2%), 0.9) = 0.5
-        // 5k × 2 × 0.5 / 11M ≈ 0.000454 → below 0.001 min lot → reject
-        let qty = btc_sizer().calculate_quantity(
-            &Pair::new("FX_BTC_JPY"),
-            dec!(5000),
-            dec!(11000000),
-            dec!(2),
-            dec!(0.9),
-            dec!(0.02),
+    fn lc_constraint_binds_at_high_leverage_and_wide_sl() {
+        let qty = fx_sizer().calculate_quantity(
+            &Pair::new("USD_JPY"),
+            dec!(30000),
+            dec!(157),
+            dec!(10),
+            dec!(1.0),
+            dec!(0.10),
+            dec!(1.00),
         );
-        assert_eq!(qty, None);
+        assert_eq!(qty, Some(dec!(955)));
     }
 
+    /// Caller-supplied allocation_pct dominates when smaller than the LC cap.
+    /// bitflyer_cfd, alloc=0.5 → 30,000 × 2 × 0.5 / 12,500,000 = 0.0024 → 0.002.
+    #[test]
+    fn allocation_pct_dominates_when_smaller_than_max_alloc() {
+        let qty = btc_sizer().calculate_quantity(
+            &Pair::new("FX_BTC_JPY"),
+            dec!(30000),
+            dec!(12500000),
+            dec!(2),
+            dec!(0.5),
+            dec!(0.02),
+            dec!(0.50),
+        );
+        assert_eq!(qty, Some(dec!(0.002)));
+    }
+
+    /// liquidation_margin_level <= 0 is treated as a configuration bug.
+    #[test]
+    fn rejects_zero_or_negative_liquidation_margin_level() {
+        let s = fx_sizer();
+        let p = Pair::new("USD_JPY");
+        assert_eq!(
+            s.calculate_quantity(
+                &p,
+                dec!(30000),
+                dec!(157),
+                dec!(10),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(0)
+            ),
+            None
+        );
+        assert_eq!(
+            s.calculate_quantity(
+                &p,
+                dec!(30000),
+                dec!(157),
+                dec!(10),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(-0.5)
+            ),
+            None
+        );
+    }
+
+    /// Existing input validations preserved.
     #[test]
     fn rejects_zero_or_negative_inputs() {
-        let s = btc_sizer();
-        let p = Pair::new("FX_BTC_JPY");
+        let s = fx_sizer();
+        let p = Pair::new("USD_JPY");
         // zero balance
         assert_eq!(
-            s.calculate_quantity(&p, dec!(0), dec!(10000000), dec!(2), dec!(0.5), dec!(0.01)),
+            s.calculate_quantity(
+                &p,
+                dec!(0),
+                dec!(157),
+                dec!(10),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(1.00)
+            ),
             None
         );
         // zero price
         assert_eq!(
-            s.calculate_quantity(&p, dec!(100000), dec!(0), dec!(2), dec!(0.5), dec!(0.01)),
+            s.calculate_quantity(
+                &p,
+                dec!(30000),
+                dec!(0),
+                dec!(10),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(1.00)
+            ),
             None
         );
         // zero leverage
         assert_eq!(
             s.calculate_quantity(
                 &p,
-                dec!(100000),
-                dec!(10000000),
+                dec!(30000),
+                dec!(157),
                 dec!(0),
-                dec!(0.5),
-                dec!(0.01)
+                dec!(1.0),
+                dec!(0.02),
+                dec!(1.00)
             ),
             None
         );
@@ -220,23 +280,25 @@ mod tests {
         assert_eq!(
             s.calculate_quantity(
                 &p,
-                dec!(100000),
-                dec!(10000000),
-                dec!(2),
+                dec!(30000),
+                dec!(157),
+                dec!(10),
                 dec!(0),
-                dec!(0.01)
+                dec!(0.02),
+                dec!(1.00)
             ),
             None
         );
-        // > 100% allocation rejected (it's a bug — caller should clamp)
+        // > 100% allocation rejected
         assert_eq!(
             s.calculate_quantity(
                 &p,
-                dec!(100000),
-                dec!(10000000),
-                dec!(2),
+                dec!(30000),
+                dec!(157),
+                dec!(10),
                 dec!(1.5),
-                dec!(0.01)
+                dec!(0.02),
+                dec!(1.00)
             ),
             None
         );
@@ -244,32 +306,78 @@ mod tests {
         assert_eq!(
             s.calculate_quantity(
                 &p,
-                dec!(100000),
-                dec!(10000000),
-                dec!(2),
-                dec!(0.5),
-                dec!(0)
+                dec!(30000),
+                dec!(157),
+                dec!(10),
+                dec!(1.0),
+                dec!(0),
+                dec!(1.00)
             ),
             None
         );
     }
 
+    /// Truncation to min_lot still rejects when result < one lot.
     #[test]
-    fn the_30k_donchian_case_with_proper_risk_limiting() {
-        // The original bug: 30k account, BTC ~11M, donchian fires, SL=2%
-        // With 100% allocation cap and 2x leverage:
-        //   risk_alloc = min(0.5 / (2×2%), 1.0) = min(12.5, 1.0) = 1.0
-        //   qty = 30000 × 2 × 1.0 / 11042347 ≈ 0.005430
-        //   truncated to 0.005 BTC
-        // Actual risk = 30k × 2 × 1.0 × 2% = 1200 JPY (4% of balance, but SL fires before liquidation)
+    fn rejects_when_account_too_small_for_one_min_lot() {
+        // bitflyer_cfd, balance=5,000円 with BTC ~12.5M and lev=2: full alloc
+        // qty = 5000 × 2 × 1.0 / 12,500,000 = 0.0008 → below 0.001 min lot
         let qty = btc_sizer().calculate_quantity(
             &Pair::new("FX_BTC_JPY"),
-            dec!(30000),
-            dec!(11042347),
+            dec!(5000),
+            dec!(12500000),
             dec!(2),
             dec!(1.0),
             dec!(0.02),
+            dec!(0.50),
         );
-        assert_eq!(qty, Some(dec!(0.005)));
+        assert_eq!(qty, None);
+    }
+
+    /// Property: applying max_alloc places the post-SL margin level at exactly Y
+    /// when LC is the binding constraint, or strictly above Y when the
+    /// allocation_pct cap (a = 1.0) is binding (so liquidation is not at risk).
+    ///   margin_level = (1 - L × a × s) / a; with a = 1 / (Y + L × s), this equals Y.
+    ///   With a = 1.0 instead, margin_level = 1 - L × s, which must be ≥ Y.
+    #[test]
+    fn post_sl_margin_level_equals_threshold_invariant() {
+        let cases = [
+            // LC-binding cases: a_unbounded < 1
+            (dec!(10), dec!(0.005), dec!(1.00)),
+            (dec!(10), dec!(0.02), dec!(1.00)),
+            (dec!(10), dec!(0.10), dec!(1.00)),
+            (dec!(2), dec!(0.05), dec!(0.50)),
+            // Cap-binding case: a_unbounded ≥ 1, so the caller-side cap of 1.0 binds.
+            // bitflyer_cfd lev=2, sl=2%, y=0.5 → 1/(0.5+0.04)=1.85 ≥ 1 → cap binds.
+            (dec!(2), dec!(0.02), dec!(0.50)),
+        ];
+        let mut saw_lc_binding = false;
+        let mut saw_cap_binding = false;
+        for (lev, sl, y) in cases {
+            // a = 1 / (Y + L × s), bounded by 1.0 caller-side.
+            let a_unbounded = Decimal::ONE / (y + lev * sl);
+            if a_unbounded < Decimal::ONE {
+                saw_lc_binding = true;
+                let ml = (Decimal::ONE - lev * a_unbounded * sl) / a_unbounded;
+                let diff = (ml - y).abs();
+                assert!(
+                    diff < dec!(0.0001),
+                    "LC-binding: lev={lev}, sl={sl}, y={y}: margin level {ml} != threshold (diff={diff})"
+                );
+            } else {
+                // Cap-binding branch: a clamps to 1.0; verify post-SL margin
+                // level lies at or above Y (with 1 bp slack for Decimal
+                // rounding) — i.e. liquidation is comfortably avoided.
+                saw_cap_binding = true;
+                let a = Decimal::ONE;
+                let ml = (Decimal::ONE - lev * a * sl) / a;
+                assert!(
+                    ml + dec!(0.0001) >= y,
+                    "cap-binding: lev={lev}, sl={sl}, y={y}: margin level {ml} < threshold (slack 1bp)"
+                );
+            }
+        }
+        assert!(saw_lc_binding, "test must cover the LC-binding branch");
+        assert!(saw_cap_binding, "test must cover the cap-binding branch");
     }
 }

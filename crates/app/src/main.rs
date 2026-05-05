@@ -592,6 +592,15 @@ async fn main() -> anyhow::Result<()> {
     let pair_configs: Arc<HashMap<String, auto_trader_core::config::PairConfig>> =
         Arc::new(config.pair_config.clone());
 
+    // Per-exchange liquidation margin levels — required for any active account.
+    // Fail-closed: if config lacks an entry for an exchange used by an active
+    // account, abort startup before any trading task spawns.
+    let exchange_liquidation_levels: Arc<HashMap<auto_trader_core::types::Exchange, Decimal>> =
+        Arc::new(auto_trader::startup::resolve_exchange_liquidation_levels(
+            &db_accounts,
+            &config,
+        )?);
+
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
     // signal dispatch) was wasting per-iteration allocations + hashing.
@@ -828,6 +837,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_price_store = price_store.clone();
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
+    let crypto_monitor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
@@ -922,6 +932,14 @@ async fn main() -> anyhow::Result<()> {
                                 )
                             }
                         };
+                    let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
+                        &crypto_monitor_exchange_liquidation_levels,
+                        trade.exchange,
+                        || format!("close trade {}", trade.id),
+                    ) {
+                        Some(y) => y,
+                        None => continue,
+                    };
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
                         trade.exchange,
@@ -931,6 +949,7 @@ async fn main() -> anyhow::Result<()> {
                         crypto_monitor_price_store.clone(),
                         crypto_monitor_notifier.clone(),
                         crypto_monitor_position_sizer.clone(),
+                        liquidation_margin_level,
                         dry_run,
                     );
                     match trader.close_position(&trade.id.to_string(), reason).await {
@@ -1120,6 +1139,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_price_store = price_store.clone();
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
+    let exit_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let exit_live_forces_dry_run = live_forces_dry_run;
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
@@ -1181,6 +1201,14 @@ async fn main() -> anyhow::Result<()> {
                         std::sync::Arc::new(auto_trader_market::null_exchange_api::NullExchangeApi)
                     }
                 };
+            let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
+                &exit_exchange_liquidation_levels,
+                trade.exchange,
+                || format!("strategy exit on trade {}", trade.id),
+            ) {
+                Some(y) => y,
+                None => continue,
+            };
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
                 trade.exchange,
@@ -1190,6 +1218,7 @@ async fn main() -> anyhow::Result<()> {
                 exit_price_store.clone(),
                 exit_notifier.clone(),
                 exit_position_sizer.clone(),
+                liquidation_margin_level,
                 dry_run,
             );
             // Map the strategy-specific reason onto the ExitReason enum
@@ -1246,6 +1275,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_notifier = notifier.clone();
     let executor_exchange_pairs = Arc::clone(&exchange_pairs);
     let executor_position_sizer = shared_position_sizer.clone();
+    let executor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
@@ -1358,6 +1388,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
+                let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
+                    &executor_exchange_liquidation_levels,
+                    exchange,
+                    || format!("signal for account {} (id={})", pac.name, pac.id),
+                ) {
+                    Some(y) => y,
+                    None => continue,
+                };
                 let trader = UnifiedTrader::new(
                     executor_pool.clone(),
                     exchange,
@@ -1367,6 +1405,7 @@ async fn main() -> anyhow::Result<()> {
                     executor_price_store.clone(),
                     executor_notifier.clone(),
                     executor_position_sizer.clone(),
+                    liquidation_margin_level,
                     dry_run,
                 );
                 let name = pac.name.clone();
@@ -1808,6 +1847,7 @@ async fn main() -> anyhow::Result<()> {
     let api_state = api::AppState {
         pool: pool.clone(),
         price_store: price_store.clone(),
+        exchange_liquidation_levels: exchange_liquidation_levels.clone(),
     };
     let api_handle = tokio::spawn(async move {
         let app = api::router(api_state);

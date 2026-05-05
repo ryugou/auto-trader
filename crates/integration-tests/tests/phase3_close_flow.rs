@@ -55,6 +55,8 @@ fn make_trader(
     let api = MockExchangeApiBuilder::new().build();
     let notifier = Arc::new(Notifier::new_disabled());
 
+    // All call sites for `make_trader` in this file pass `Exchange::GmoFx`, so the
+    // hardcoded `dec!(1.00)` matches the production `[exchange_margin.gmo_fx]` value.
     Trader::new(
         pool,
         exchange,
@@ -64,6 +66,7 @@ fn make_trader(
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         true,
     )
 }
@@ -280,6 +283,7 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
         ps.clone(),
         notifier.clone(),
         sizer.clone(),
+        dec!(1.00),
         true, // dry_run to open easily
     );
 
@@ -301,6 +305,7 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
         ps,
         notifier,
         sizer,
+        dec!(1.00),
         false, // dry_run=false → live path that calls send_child_order
     )
     .with_poll_timeout(Duration::from_millis(100));
@@ -415,6 +420,7 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
         ps,
         notifier,
         sizer,
+        dec!(1.00),
         true, // dry_run
     );
 

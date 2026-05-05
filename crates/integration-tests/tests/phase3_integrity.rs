@@ -62,6 +62,7 @@ fn make_trader(
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         true,
     )
 }

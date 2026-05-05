@@ -117,6 +117,7 @@ fn build_live_trader(
         price_store,
         notifier,
         position_sizer,
+        dec!(0.50),
         false, // dry_run = false → live mode
     )
 }
@@ -144,6 +145,7 @@ fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceSt
         price_store,
         notifier,
         position_sizer,
+        dec!(0.50),
         true, // dry_run = true
     )
 }

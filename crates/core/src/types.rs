@@ -218,14 +218,25 @@ pub struct Signal {
     /// Fraction of leveraged account capacity the strategy wants to
     /// commit to this trade. Must be in (0, 1].
     ///
-    /// Strategies compute this as `min(TARGET_RISK_PCT / stop_loss_pct, CAP)`
-    /// to limit per-trade risk. With leverage L, the actual account risk at
-    /// SL hit is `allocation_pct × stop_loss_pct × L`. For example,
-    /// TARGET_RISK_PCT=1%, SL=2%, leverage=2 → allocation=50%, actual
-    /// risk = 50% × 2% × 2 = 2%.
+    /// Strategies pick their own value: bb_mean_revert / donchian_trend /
+    /// donchian_trend_evolve / squeeze_momentum currently emit
+    /// `ALLOCATION_CAP = 1.0` (full requested allocation); swing_llm emits
+    /// `0.5`. Whatever the strategy requests, `PositionSizer::calculate_quantity`
+    /// applies an additional broker-driven cap downstream using each
+    /// exchange's `liquidation_margin_level` from `[exchange_margin.<name>]`
+    /// config — `risk_alloc` is the smaller of the two.
+    ///
+    /// Effective allocation after the cap:
+    ///   `risk_alloc = min(allocation_pct, max_alloc)`,
+    ///   where `max_alloc = 1 / (Y + L × stop_loss_pct)`
+    ///   and `Y` is the broker's liquidation margin level threshold.
+    ///
+    /// Actual account risk at SL hit (the value to reason about, not
+    /// the unclamped `allocation_pct`):
+    ///   `risk_alloc × stop_loss_pct × L`.
     ///
     /// The sizer turns this into a quantity via
-    /// `floor((balance × leverage × allocation_pct / price) / min_lot)`.
+    /// `floor((balance × leverage × risk_alloc / price) / min_lot)`.
     #[serde(default = "default_allocation_pct")]
     pub allocation_pct: Decimal,
     /// Optional time-based fail-safe: position monitor will force-close

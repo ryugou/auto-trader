@@ -65,6 +65,9 @@ pub struct Trader {
     /// holds an `Arc::clone` instead of reconstructing the inner
     /// HashMap on every signal/SL/TP check.
     position_sizer: Arc<PositionSizer>,
+    /// Broker liquidation threshold (証拠金維持率の下限). Resolved from
+    /// `[exchange_margin.<exchange>]` at startup and held per-Trader.
+    liquidation_margin_level: Decimal,
     dry_run: bool,
     /// Timeout passed to `poll_executions` for both open and close fills.
     /// Defaults to 5 s in production; can be shortened in tests via
@@ -136,6 +139,7 @@ impl Trader {
         price_store: Arc<PriceStore>,
         notifier: Arc<Notifier>,
         position_sizer: Arc<PositionSizer>,
+        liquidation_margin_level: Decimal,
         dry_run: bool,
     ) -> Self {
         Self {
@@ -147,6 +151,7 @@ impl Trader {
             price_store,
             notifier,
             position_sizer,
+            liquidation_margin_level,
             dry_run,
             poll_timeout: Duration::from_secs(5),
         }
@@ -684,6 +689,7 @@ impl OrderExecutor for Trader {
                 leverage,
                 signal.allocation_pct,
                 signal.stop_loss_pct,
+                self.liquidation_margin_level,
             )
             .ok_or_else(|| {
                 anyhow::anyhow!(

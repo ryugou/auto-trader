@@ -28,8 +28,8 @@ fn btc_sizer() -> PositionSizer {
     PositionSizer::new(min_sizes)
 }
 
-/// PositionSizer 正常: balance=100000, entry=15M, leverage=2, allocation=1.0, SL=2%
-/// max_alloc = (1 - 0.5) / (2 × 0.02) = 12.5 → capped to allocation=1.0
+/// PositionSizer 正常: balance=100000, entry=15M, leverage=2, allocation=1.0, SL=2%, Y=0.5
+/// max_alloc = 1 / (0.5 + 2 × 0.02) = 1.85 → capped to allocation=1.0
 /// qty = 100000 × 2 × 1.0 / 15000000 ≈ 0.013333 → truncated to 0.013
 #[test]
 fn position_sizer_normal() {
@@ -40,6 +40,7 @@ fn position_sizer_normal() {
         dec!(2),
         dec!(1.0),
         dec!(0.02),
+        dec!(0.50),
     );
     assert_eq!(qty, Some(dec!(0.013)));
 }
@@ -54,6 +55,7 @@ fn position_sizer_insufficient_balance() {
         dec!(2),
         dec!(1.0),
         dec!(0.02),
+        dec!(0.50),
     );
     assert_eq!(qty, None, "balance=1000 should be below min_lot for BTC at 15M");
 }
@@ -68,6 +70,7 @@ fn position_sizer_below_min_lot() {
         dec!(2),
         dec!(1.0),
         dec!(0.02),
+        dec!(0.50),
     );
     assert_eq!(qty, None, "tiny balance should not reach min_lot");
 }
@@ -135,6 +138,7 @@ async fn make_dry_run_trader(
         price_store,
         notifier,
         sizer,
+        dec!(1.00),
         true, // dry_run
     )
 }

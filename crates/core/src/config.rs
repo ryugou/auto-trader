@@ -27,6 +27,13 @@ pub struct AppConfig {
     pub live: Option<LiveConfig>,
     #[serde(default)]
     pub risk: Option<RiskConfig>,
+    /// Per-exchange margin settings (TOML key `[exchange_margin.<exchange>]`).
+    /// Each entry's `liquidation_margin_level` is the broker's margin-call
+    /// threshold expressed as a decimal (e.g., 0.50 for bitFlyer Crypto CFD,
+    /// 1.00 for GMOコイン外国為替FX). PositionSizer caps allocation so the
+    /// post-SL margin level does not fall below this threshold.
+    #[serde(default)]
+    pub exchange_margin: HashMap<String, ExchangeMarginConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -124,6 +131,11 @@ impl std::fmt::Debug for BitflyerConfig {
 pub struct PairConfig {
     pub price_unit: Decimal,
     pub min_order_size: Decimal,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExchangeMarginConfig {
+    pub liquidation_margin_level: Decimal,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -435,5 +447,60 @@ api_secret = "LEAKED"
             bf.api_secret.is_none(),
             "api_secret must only come from env"
         );
+    }
+
+    #[test]
+    fn parses_exchange_margin_section() {
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = ["USD_JPY"]
+crypto = ["FX_BTC_JPY"]
+
+[exchange_margin.bitflyer_cfd]
+liquidation_margin_level = 0.50
+
+[exchange_margin.gmo_fx]
+liquidation_margin_level = 1.00
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config
+                .exchange_margin
+                .get("bitflyer_cfd")
+                .map(|c| c.liquidation_margin_level),
+            Some(rust_decimal_macros::dec!(0.50))
+        );
+        assert_eq!(
+            config
+                .exchange_margin
+                .get("gmo_fx")
+                .map(|c| c.liquidation_margin_level),
+            Some(rust_decimal_macros::dec!(1.00))
+        );
+    }
+
+    #[test]
+    fn exchange_margin_defaults_to_empty_when_missing() {
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.exchange_margin.is_empty());
     }
 }
