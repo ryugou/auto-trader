@@ -218,11 +218,13 @@ pub struct Signal {
     /// Fraction of leveraged account capacity the strategy wants to
     /// commit to this trade. Must be in (0, 1].
     ///
-    /// All in-tree strategies emit `ALLOCATION_CAP = 1.0` here (full
-    /// requested allocation); the broker-aware no-liquidation cap is
-    /// enforced downstream in `PositionSizer::calculate_quantity` using
-    /// each exchange's `liquidation_margin_level` from
-    /// `[exchange_margin.<name>]` config.
+    /// Strategies pick their own value: bb_mean_revert / donchian_trend /
+    /// donchian_trend_evolve / squeeze_momentum currently emit
+    /// `ALLOCATION_CAP = 1.0` (full requested allocation); swing_llm emits
+    /// `0.5`. Whatever the strategy requests, `PositionSizer::calculate_quantity`
+    /// applies an additional broker-driven cap downstream using each
+    /// exchange's `liquidation_margin_level` from `[exchange_margin.<name>]`
+    /// config — `risk_alloc` is the smaller of the two.
     ///
     /// Effective allocation after the cap:
     ///   `risk_alloc = min(allocation_pct, max_alloc)`,
