@@ -1416,11 +1416,13 @@ async fn main() -> anyhow::Result<()> {
                     Some(y) => y,
                     None => {
                         tracing::error!(
-                            "exchange_liquidation_levels missing entry for {:?} on signal for {} \
-                             — skipping; this indicates a runtime account was created without \
-                             an [exchange_margin] entry, which the API should now reject",
+                            "exchange_liquidation_levels missing entry for {:?} on signal for \
+                             account {} (id={}) — skipping; this indicates a runtime account \
+                             was created without an [exchange_margin] entry, which the API \
+                             should now reject",
                             exchange,
-                            pac.name
+                            pac.name,
+                            pac.id
                         );
                         continue;
                     }
