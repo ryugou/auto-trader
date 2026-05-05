@@ -218,14 +218,17 @@ pub struct Signal {
     /// Fraction of leveraged account capacity the strategy wants to
     /// commit to this trade. Must be in (0, 1].
     ///
-    /// Strategies compute this as `min(TARGET_RISK_PCT / stop_loss_pct, CAP)`
-    /// to limit per-trade risk. With leverage L, the actual account risk at
-    /// SL hit is `allocation_pct × stop_loss_pct × L`. For example,
-    /// TARGET_RISK_PCT=1%, SL=2%, leverage=2 → allocation=50%, actual
-    /// risk = 50% × 2% × 2 = 2%.
+    /// All in-tree strategies emit `ALLOCATION_CAP = 1.0` here (full
+    /// requested allocation); the broker-aware no-liquidation cap is
+    /// enforced downstream in `PositionSizer::calculate_quantity` using
+    /// each exchange's `liquidation_margin_level` from
+    /// `[exchange_margin.<name>]` config. With leverage L, the actual
+    /// account risk at SL hit is `allocation_pct × stop_loss_pct × L`.
     ///
     /// The sizer turns this into a quantity via
-    /// `floor((balance × leverage × allocation_pct / price) / min_lot)`.
+    /// `floor((balance × leverage × min(allocation_pct, max_alloc) / price) / min_lot)`,
+    /// where `max_alloc = 1 / (Y + L × stop_loss_pct)` and `Y` is the
+    /// broker's liquidation margin level threshold.
     #[serde(default = "default_allocation_pct")]
     pub allocation_pct: Decimal,
     /// Optional time-based fail-safe: position monitor will force-close
