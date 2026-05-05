@@ -1,5 +1,6 @@
 use auto_trader_core::config::{AppConfig, GeminiConfig, StrategyConfig};
 use auto_trader_core::types::{Exchange, Pair};
+use auto_trader_db::trading_accounts::TradingAccount;
 use auto_trader_strategy::engine::StrategyEngine;
 use auto_trader_vegapunk::client::VegapunkClient;
 use rust_decimal::Decimal;
@@ -29,13 +30,12 @@ use std::collections::{HashMap, HashSet};
 ///   signal/exit/close instead of panicking when an entry is missing for an
 ///   in-flight trade. Together these prevent the position sizer from
 ///   running without a valid `liquidation_margin_level`.
-pub async fn resolve_exchange_liquidation_levels(
-    pool: &PgPool,
+pub fn resolve_exchange_liquidation_levels(
+    accounts: &[TradingAccount],
     config: &AppConfig,
 ) -> anyhow::Result<HashMap<Exchange, Decimal>> {
-    let active_accounts = auto_trader_db::trading_accounts::list_all(pool).await?;
     let mut required: HashSet<Exchange> = HashSet::new();
-    for acct in &active_accounts {
+    for acct in accounts {
         match acct.exchange.parse::<Exchange>() {
             Ok(ex) => {
                 required.insert(ex);

@@ -196,7 +196,7 @@ liquidation_margin_level = 0.50
     )
     .unwrap();
 
-    let result = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+    let result = { let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap(); auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config) };
     let err = result
         .expect_err("expected fail-closed startup error when [exchange_margin.gmo_fx] missing");
     let msg = format!("{err:#}");
@@ -231,7 +231,7 @@ liquidation_margin_level = 0.50
     )
     .unwrap();
 
-    let result = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+    let result = { let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap(); auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config) };
     let err = result
         .expect_err("expected error when config has [exchange_margin.banana] (not an Exchange)");
     let msg = format!("{err:#}");
@@ -269,7 +269,7 @@ liquidation_margin_level = 1.00
     .unwrap();
 
     let result =
-        auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+        { let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap(); auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config) };
     let err = result.expect_err(
         "expected error when liquidation_margin_level is not positive on a required exchange",
     );
@@ -317,8 +317,8 @@ liquidation_margin_level = 0
     )
     .unwrap();
 
-    let map = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config)
-        .await
+    let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap();
+    let map = auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
         .expect("unused exchange with bad value should not block startup");
     // bitflyer_cfd is in the parsed map but unused — value sanity is the
     // operator's problem to fix later.
@@ -369,8 +369,8 @@ liquidation_margin_level = 1.00
     )
     .unwrap();
 
-    let map = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config)
-        .await
+    let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap();
+    let map = auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
         .expect("resolver must succeed when all entries present");
     assert_eq!(
         map.get(&auto_trader_core::types::Exchange::BitflyerCfd),

@@ -596,7 +596,10 @@ async fn main() -> anyhow::Result<()> {
     // Fail-closed: if config lacks an entry for an exchange used by an active
     // account, abort startup before any trading task spawns.
     let exchange_liquidation_levels: Arc<HashMap<auto_trader_core::types::Exchange, Decimal>> =
-        Arc::new(auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await?);
+        Arc::new(auto_trader::startup::resolve_exchange_liquidation_levels(
+            &db_accounts,
+            &config,
+        )?);
 
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
