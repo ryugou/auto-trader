@@ -39,6 +39,12 @@ impl PositionSizer {
     /// are treated as bugs and rejected (returns None) — the sizer
     /// does not silently clamp.
     ///
+    /// `allocation_pct` is the **fraction of leveraged capacity** to deploy,
+    /// i.e. (margin used / equity), so the resulting trade notional is
+    /// `balance × leverage × allocation_pct`. Setting `allocation_pct = 1.0`
+    /// requests "use my full balance as margin" (subject to the post-SL
+    /// liquidation cap below).
+    ///
     /// `stop_loss_pct` is the stop-loss distance as a fraction of fill price
     /// (e.g., 0.005 = 0.5% distance).
     ///
@@ -326,32 +332,50 @@ mod tests {
         assert_eq!(qty, None);
     }
 
-    /// Property: applying max_alloc places the post-SL margin level exactly at Y.
+    /// Property: applying max_alloc places the post-SL margin level at exactly Y
+    /// when LC is the binding constraint, or strictly above Y when the
+    /// allocation_pct cap (a = 1.0) is binding (so liquidation is not at risk).
     ///   margin_level = (1 - L × a × s) / a; with a = 1 / (Y + L × s), this equals Y.
+    ///   With a = 1.0 instead, margin_level = 1 - L × s, which must be ≥ Y.
     #[test]
     fn post_sl_margin_level_equals_threshold_invariant() {
         let cases = [
+            // LC-binding cases: a_unbounded < 1
             (dec!(10), dec!(0.005), dec!(1.00)),
             (dec!(10), dec!(0.02), dec!(1.00)),
             (dec!(10), dec!(0.10), dec!(1.00)),
-            (dec!(2), dec!(0.02), dec!(0.50)),
             (dec!(2), dec!(0.05), dec!(0.50)),
+            // Cap-binding case: a_unbounded ≥ 1, so the caller-side cap of 1.0 binds.
+            // bitflyer_cfd lev=2, sl=2%, y=0.5 → 1/(0.5+0.04)=1.85 ≥ 1 → cap binds.
+            (dec!(2), dec!(0.02), dec!(0.50)),
         ];
+        let mut saw_lc_binding = false;
+        let mut saw_cap_binding = false;
         for (lev, sl, y) in cases {
             // a = 1 / (Y + L × s), bounded by 1.0 caller-side.
             let a_unbounded = Decimal::ONE / (y + lev * sl);
-            // Skip cases where the cap is the binding constraint (no LC pressure).
-            if a_unbounded >= Decimal::ONE {
-                continue;
+            if a_unbounded < Decimal::ONE {
+                saw_lc_binding = true;
+                let ml = (Decimal::ONE - lev * a_unbounded * sl) / a_unbounded;
+                let diff = (ml - y).abs();
+                assert!(
+                    diff < dec!(0.0001),
+                    "LC-binding: lev={lev}, sl={sl}, y={y}: margin level {ml} != threshold (diff={diff})"
+                );
+            } else {
+                // Cap-binding branch: a clamps to 1.0; verify post-SL margin
+                // level lies at or above Y (with 1 bp slack for Decimal
+                // rounding) — i.e. liquidation is comfortably avoided.
+                saw_cap_binding = true;
+                let a = Decimal::ONE;
+                let ml = (Decimal::ONE - lev * a * sl) / a;
+                assert!(
+                    ml + dec!(0.0001) >= y,
+                    "cap-binding: lev={lev}, sl={sl}, y={y}: margin level {ml} < threshold (slack 1bp)"
+                );
             }
-            // post-SL margin level
-            let ml = (Decimal::ONE - lev * a_unbounded * sl) / a_unbounded;
-            // Allow 1 bp tolerance for Decimal rounding.
-            let diff = (ml - y).abs();
-            assert!(
-                diff < dec!(0.0001),
-                "lev={lev}, sl={sl}, y={y}: margin level {ml} != threshold (diff={diff})"
-            );
         }
+        assert!(saw_lc_binding, "test must cover the LC-binding branch");
+        assert!(saw_cap_binding, "test must cover the cap-binding branch");
     }
 }
