@@ -176,8 +176,10 @@ async fn create_account_invalid_exchange(pool: sqlx::PgPool) {
 }
 
 /// Defense in depth: an exchange that has no [exchange_margin.<name>] entry
-/// must be rejected at the API layer so worker tasks (signal/exit/close)
-/// never look up a missing entry and panic.
+/// must be rejected at the API layer. Worker tasks (signal/exit/close) now
+/// log+skip on a miss via `startup::liquidation_level_or_log`, but failing
+/// the create here surfaces the configuration gap immediately instead of
+/// silently dropping every signal/exit on the new account at runtime.
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_rejected_when_exchange_missing_from_margin_config(pool: sqlx::PgPool) {
     use auto_trader_core::types::Exchange;
