@@ -20,7 +20,7 @@
 | `crates/executor/src/position_sizer.rs` | Sizing formula | **Modify** — drop hardcoded 0.50, add `liquidation_margin_level: Decimal` arg, apply `1/(Y + L×s)` |
 | `crates/executor/src/trader.rs` | Trader executor | **Modify** — add `liquidation_margin_level: Decimal` field + extra `Trader::new` arg, pass through to sizer |
 | `crates/app/src/main.rs` | Startup wiring | **Modify** — build `HashMap<Exchange, Decimal>` from config, fail at startup if any active account's exchange is missing, pass per-account value to each `UnifiedTrader::new` |
-| `config/default.toml` | Default config | **Modify** — add `[exchange_margin.bitflyer_cfd]` and `[exchange_margin.gmo_fx]` |
+| `config/default.toml` | Default config | **Modify** — add `[exchange_margin.bitflyer_cfd]`, `[exchange_margin.gmo_fx]`, and `[exchange_margin.oanda]` (placeholder for the unused-but-still-present `Exchange::Oanda` variant; mirrored into the test fixture for the same reason) |
 | `crates/executor/tests/trader_test.rs` | Trader unit tests | **Modify** — pass new arg |
 | `crates/integration-tests/tests/phase3_close_flow.rs` | Integration tests | **Modify** — pass new arg (3 sites) |
 | `crates/integration-tests/tests/phase3_execution.rs` | Integration tests | **Modify** — pass new arg |

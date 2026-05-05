@@ -115,7 +115,26 @@ where
     F: FnOnce() -> String,
 {
     match map.get(&exchange).copied() {
-        Some(y) => Some(y),
+        Some(y) if y > Decimal::ZERO => Some(y),
+        Some(y) => {
+            // Resolver tolerates non-positive entries on *unused* exchanges
+            // so a stale TOML cannot brick startup, and the create-account
+            // API rejects when an account is added against such an entry.
+            // If a row still reaches here (e.g. created via direct SQL,
+            // bypassing the API), treat the bad value as missing rather
+            // than passing it to PositionSizer — which would surface as a
+            // confusing "balance too small" error.
+            tracing::error!(
+                "exchange_liquidation_levels for {:?} is non-positive ({}) ({}) — skipping; \
+                 fix the value in `[exchange_margin.{}]` and restart, or recreate the \
+                 account via the API which validates this constraint",
+                exchange,
+                y,
+                context(),
+                exchange.as_str()
+            );
+            None
+        }
         None => {
             tracing::error!(
                 "exchange_liquidation_levels missing entry for {:?} ({}) — skipping; \

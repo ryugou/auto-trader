@@ -102,13 +102,15 @@ liquidation_margin_level = 0.50  # 維持率 50% 未満で即時ロスカット 
 
 [exchange_margin.gmo_fx]
 liquidation_margin_level = 1.00  # 維持率 100% 未満でロスカット (公式)
+
+[exchange_margin.oanda]
+liquidation_margin_level = 1.00  # placeholder — OANDA 公式 LC = 100%
 ```
 
 値の出典:
 - bitflyer_cfd: bitFlyer Crypto CFD 公式 FAQ — 維持率 50% で即時ロスカット。
 - gmo_fx: GMOコイン外国為替FX 公式サポート — 維持率 100% 未満でロスカット (必要証拠金 = 取引金額 × 4%、追証 125%、ロスカット 100%)。
-
-OANDA は使用しないため設定対象外。
+- oanda: 現時点で OANDA accounts は運用していないため active 利用なし。`Exchange::Oanda` enum と `[oanda]` 既存 config セクションが残置されているため、`[exchange_margin.oanda]` も placeholder として用意し fail-closed gate を一貫させる。OANDA Japan 公式の LC ライン (維持率 100%) を参考値として置く。OANDA を実運用する場合は出典付きで再確認すること。
 
 ### Configuration の型 (`crates/core/src/config.rs`)
 
@@ -180,7 +182,7 @@ pub fn calculate_quantity(
 - **既存 open positions のリサイズ**: 5/1 から open のまま放置されている `通常`/`vegapunk連動` のトレード (qty=0.002) は本スペック対象外。新規発火するシグナルから新ロジックが適用される。既存トレードを直したい場合はユーザー操作で手動クローズする。
 - **ロスカット閾値の動的取得**: 取引業者 API から閾値を引いてくる仕組みは作らない。TOML の静的設定のみ。
 - **Slippage / gap 用の安全バッファ**: 数式上 `max_alloc` で SL ヒット時にちょうど Y にぴったり乗る。それ以上の余裕は積まない。必要が生じたら別スペックで `safety_buffer_margin_level` 等を追加する。
-- **OANDA**: 削除済み。再導入時は別スペック。
+- **OANDA の本格運用**: `Exchange::Oanda` 自体は enum / `[oanda]` セクションが既存で残置されているので、整合のため `[exchange_margin.oanda]` も placeholder として置く (fail-closed gate を一貫させる)。本番運用には公式 LC ラインを再確認する必要があり、それは別スペック。
 
 ## テスト計画 (TDD)
 
