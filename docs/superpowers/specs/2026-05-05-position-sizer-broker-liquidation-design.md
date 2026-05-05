@@ -4,7 +4,10 @@ Date: 2026-05-05
 
 ## 背景
 
-`crates/executor/src/position_sizer.rs` が `maintenance_margin_rate = 0.50` を関数内ローカル定数として持ち、**全 Exchange に対して 50% を一律適用**している。コメントは "bitFlyer CFD maintenance margin rate" としているが、実際には 50% は bitFlyer Crypto CFD のロスカット閾値ですらなく（公式は 50%）、より深刻なのは **gmo_fx (GMOコイン外国為替FX) のロスカット閾値 100% を全く反映していない**こと。
+`crates/executor/src/position_sizer.rs` が `maintenance_margin_rate = 0.50` を関数内ローカル定数として持ち、**全 Exchange に対して 50% を一律適用**している。コメントは "bitFlyer CFD maintenance margin rate" としているが、二重に問題がある:
+
+1. **値の根拠不明**: 0.50 は bitFlyer Crypto CFD 公式のロスカット維持率閾値 (50%) と数値こそ一致するが、後述の通り式の構造が実際の維持率ロスカット条件を表現していないため、bitFlyer の仕様を写したものとは言えない。
+2. **gmo_fx (GMOコイン外国為替FX) のロスカット閾値 100% を全く反映していない**。
 
 加えて式の構造そのものが正しくない:
 

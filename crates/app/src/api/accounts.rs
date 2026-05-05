@@ -121,8 +121,11 @@ pub async fn create(
     };
     // Defense in depth: reject creation on exchanges that have no
     // [exchange_margin.<name>] entry. Without this, the worker tasks
-    // (executor / monitor / exit) would later hit `expect()` on the
-    // liquidation map and panic when this account's signal/close fires.
+    // (executor / monitor / exit) would log an error and skip every
+    // signal/close on this account because PositionSizer cannot compute
+    // a quantity without `liquidation_margin_level`. Failing the create
+    // here surfaces the configuration gap to the operator immediately
+    // instead of silently dropping trades after the account is in use.
     if !state.exchange_liquidation_levels.contains_key(&exchange_enum) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
