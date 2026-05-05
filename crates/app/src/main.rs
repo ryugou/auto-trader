@@ -592,6 +592,54 @@ async fn main() -> anyhow::Result<()> {
     let pair_configs: Arc<HashMap<String, auto_trader_core::config::PairConfig>> =
         Arc::new(config.pair_config.clone());
 
+    // Per-exchange liquidation margin levels — required for any active account.
+    // Fail-closed: if config lacks an entry for an exchange used by an active
+    // account, abort startup before any trading task spawns.
+    let exchange_liquidation_levels: Arc<HashMap<auto_trader_core::types::Exchange, Decimal>> = {
+        let active_accounts = auto_trader_db::trading_accounts::list_all(&pool).await?;
+        let mut required: std::collections::HashSet<auto_trader_core::types::Exchange> =
+            std::collections::HashSet::new();
+        for acct in &active_accounts {
+            match acct.exchange.parse::<auto_trader_core::types::Exchange>() {
+                Ok(ex) => {
+                    required.insert(ex);
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "trading_accounts row {} has unrecognised exchange '{}': {e}",
+                        acct.id,
+                        acct.exchange
+                    );
+                }
+            }
+        }
+        let mut map: HashMap<auto_trader_core::types::Exchange, Decimal> = HashMap::new();
+        for (key, cfg) in config.exchange_margin.iter() {
+            match key.parse::<auto_trader_core::types::Exchange>() {
+                Ok(ex) => {
+                    map.insert(ex, cfg.liquidation_margin_level);
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "config: [exchange_margin.{key}] is not a recognised exchange: {e}"
+                    );
+                }
+            }
+        }
+        let missing: Vec<_> = required
+            .iter()
+            .filter(|ex| !map.contains_key(*ex))
+            .collect();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "config: [exchange_margin.<name>] missing for active accounts: {:?}. \
+                 Add `liquidation_margin_level` for each.",
+                missing
+            );
+        }
+        Arc::new(map)
+    };
+
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
     // signal dispatch) was wasting per-iteration allocations + hashing.
@@ -828,6 +876,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_price_store = price_store.clone();
     let crypto_monitor_notifier = notifier.clone();
     let crypto_monitor_position_sizer = shared_position_sizer.clone();
+    let crypto_monitor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
     let crypto_monitor_handle = tokio::spawn(async move {
         while let Some(event) = crypto_price_rx.recv().await {
@@ -931,6 +980,9 @@ async fn main() -> anyhow::Result<()> {
                         crypto_monitor_price_store.clone(),
                         crypto_monitor_notifier.clone(),
                         crypto_monitor_position_sizer.clone(),
+                        *crypto_monitor_exchange_liquidation_levels
+                            .get(&trade.exchange)
+                            .expect("exchange_liquidation_levels validated at startup"),
                         dry_run,
                     );
                     match trader.close_position(&trade.id.to_string(), reason).await {
@@ -1120,6 +1172,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_price_store = price_store.clone();
     let exit_notifier = notifier.clone();
     let exit_position_sizer = shared_position_sizer.clone();
+    let exit_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let exit_live_forces_dry_run = live_forces_dry_run;
     let exit_executor_handle = tokio::spawn(async move {
         while let Some(exit) = exit_rx.recv().await {
@@ -1190,6 +1243,9 @@ async fn main() -> anyhow::Result<()> {
                 exit_price_store.clone(),
                 exit_notifier.clone(),
                 exit_position_sizer.clone(),
+                *exit_exchange_liquidation_levels
+                    .get(&trade.exchange)
+                    .expect("exchange_liquidation_levels validated at startup"),
                 dry_run,
             );
             // Map the strategy-specific reason onto the ExitReason enum
@@ -1246,6 +1302,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_notifier = notifier.clone();
     let executor_exchange_pairs = Arc::clone(&exchange_pairs);
     let executor_position_sizer = shared_position_sizer.clone();
+    let executor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
@@ -1367,6 +1424,9 @@ async fn main() -> anyhow::Result<()> {
                     executor_price_store.clone(),
                     executor_notifier.clone(),
                     executor_position_sizer.clone(),
+                    *executor_exchange_liquidation_levels
+                        .get(&exchange)
+                        .expect("exchange_liquidation_levels validated at startup"),
                     dry_run,
                 );
                 let name = pac.name.clone();

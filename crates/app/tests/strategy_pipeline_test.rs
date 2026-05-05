@@ -164,6 +164,7 @@ async fn donchian_signal_passes_sizer_on_30k_account() {
         LEVERAGE,
         signal.allocation_pct,
         signal.stop_loss_pct,
+        dec!(0.50),
     );
     assert!(
         qty.is_some(),
@@ -216,6 +217,7 @@ async fn squeeze_signal_passes_sizer_on_30k_account() {
         LEVERAGE,
         signal.allocation_pct,
         signal.stop_loss_pct,
+        dec!(0.50),
     );
     assert!(
         qty.is_some(),
@@ -262,6 +264,7 @@ async fn bb_mean_revert_signal_passes_sizer_on_30k_account() {
         LEVERAGE,
         signal.allocation_pct,
         signal.stop_loss_pct,
+        dec!(0.50),
     );
     assert!(
         qty.is_some(),
@@ -284,6 +287,7 @@ async fn sizer_handles_degenerate_inputs_without_panic() {
         LEVERAGE,
         dec!(0.5),
         dec!(0.02),
+        dec!(0.50),
     );
     assert_eq!(qty, None);
 }
