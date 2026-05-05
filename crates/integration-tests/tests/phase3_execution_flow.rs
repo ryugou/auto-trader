@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, TradeStatus};
 use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_executor::trader::Trader;
