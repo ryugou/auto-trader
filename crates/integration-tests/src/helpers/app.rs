@@ -4,8 +4,11 @@
 //! ephemeral port and returns the base URL + a JoinHandle for cleanup.
 
 use auto_trader::api::{self, AppState};
+use auto_trader_core::types::Exchange;
 use auto_trader_market::price_store::PriceStore;
+use rust_decimal_macros::dec;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
@@ -37,6 +40,17 @@ impl Drop for TestApp {
     }
 }
 
+/// Default liquidation levels for tests — covers every Exchange variant so
+/// existing test fixtures (gmo_fx / bitflyer_cfd / oanda) all pass the
+/// `accounts::create` defense-in-depth check that rejects unknown exchanges.
+fn default_liquidation_levels() -> Arc<HashMap<Exchange, rust_decimal::Decimal>> {
+    let mut m = HashMap::new();
+    m.insert(Exchange::BitflyerCfd, dec!(0.50));
+    m.insert(Exchange::GmoFx, dec!(1.00));
+    m.insert(Exchange::Oanda, dec!(0.50));
+    Arc::new(m)
+}
+
 /// Start the API server in-process on an ephemeral port.
 ///
 /// The server uses the given DB pool and an empty PriceStore (no expected
@@ -52,9 +66,21 @@ pub async fn spawn_test_app_with_price_store(
     pool: PgPool,
     price_store: Arc<PriceStore>,
 ) -> TestApp {
+    spawn_test_app_with_levels(pool, price_store, default_liquidation_levels()).await
+}
+
+/// Start the API server with a custom liquidation-levels map. Used by tests
+/// that exercise the `accounts::create` validation against a constrained
+/// (e.g. single-exchange) config.
+pub async fn spawn_test_app_with_levels(
+    pool: PgPool,
+    price_store: Arc<PriceStore>,
+    exchange_liquidation_levels: Arc<HashMap<Exchange, rust_decimal::Decimal>>,
+) -> TestApp {
     let state = AppState {
         pool,
         price_store: price_store.clone(),
+        exchange_liquidation_levels,
     };
 
     let router = api::router(state);

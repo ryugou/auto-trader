@@ -241,6 +241,43 @@ liquidation_margin_level = 0.50
     );
 }
 
+/// liquidation_margin_level <= 0 in config → startup fails.
+#[sqlx::test(migrations = "../../migrations")]
+async fn resolve_exchange_liquidation_levels_rejects_non_positive_value(pool: sqlx::PgPool) {
+    let config: auto_trader_core::config::AppConfig = toml::from_str(
+        r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+[exchange_margin.bitflyer_cfd]
+liquidation_margin_level = 0
+"#,
+    )
+    .unwrap();
+
+    let result =
+        auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+    let err = result.expect_err(
+        "expected error when liquidation_margin_level is not positive",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("liquidation_margin_level"),
+        "error must mention liquidation_margin_level, got: {msg}"
+    );
+    assert!(
+        msg.contains("BitflyerCfd") || msg.contains("bitflyer_cfd"),
+        "error must mention the offending exchange, got: {msg}"
+    );
+}
+
 /// Happy path: all required exchanges present → resolver returns map.
 #[sqlx::test(migrations = "../../migrations")]
 async fn resolve_exchange_liquidation_levels_succeeds_when_all_present(pool: sqlx::PgPool) {

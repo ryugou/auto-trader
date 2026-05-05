@@ -45,6 +45,21 @@ pub async fn resolve_exchange_liquidation_levels(
             }
         }
     }
+    // Fail-closed: a non-positive `liquidation_margin_level` would let the
+    // PositionSizer silently return None at runtime ("account too small")
+    // because `1 / (Y + L*s)` with `Y <= 0` produces nonsense. Reject at
+    // startup so the operator gets a clear error instead of a silent stall.
+    for (ex, value) in map.iter() {
+        if *value <= Decimal::ZERO {
+            anyhow::bail!(
+                "config: [exchange_margin.{}] liquidation_margin_level must be > 0, got {} \
+                 (received non-positive value for exchange {:?})",
+                ex.as_str(),
+                value,
+                ex
+            );
+        }
+    }
     let missing: Vec<_> = required
         .iter()
         .filter(|ex| !map.contains_key(*ex))

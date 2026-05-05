@@ -22,6 +22,14 @@ use tower_http::services::{ServeDir, ServeFile};
 pub struct AppState {
     pub pool: sqlx::PgPool,
     pub price_store: std::sync::Arc<crate::price_store::PriceStore>,
+    /// Resolved liquidation thresholds per exchange — keys must match what
+    /// `startup::resolve_exchange_liquidation_levels` validated. The accounts
+    /// API rejects creation requests for exchanges missing from this map so
+    /// runtime account creation cannot panic worker tasks that look up
+    /// liquidation levels per signal/exit/close.
+    pub exchange_liquidation_levels: std::sync::Arc<
+        std::collections::HashMap<auto_trader_core::types::Exchange, rust_decimal::Decimal>,
+    >,
 }
 
 pub fn router(state: AppState) -> Router {

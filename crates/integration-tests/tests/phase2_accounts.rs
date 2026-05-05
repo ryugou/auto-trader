@@ -175,6 +175,52 @@ async fn create_account_invalid_exchange(pool: sqlx::PgPool) {
     assert_eq!(resp.status().as_u16(), 400);
 }
 
+/// Defense in depth: an exchange that has no [exchange_margin.<name>] entry
+/// must be rejected at the API layer so worker tasks (signal/exit/close)
+/// never look up a missing entry and panic.
+#[sqlx::test(migrations = "../../migrations")]
+async fn create_account_rejected_when_exchange_missing_from_margin_config(pool: sqlx::PgPool) {
+    use auto_trader_core::types::Exchange;
+    use auto_trader_market::price_store::PriceStore;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    // Levels map intentionally only contains bitflyer_cfd — gmo_fx is missing.
+    let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
+    levels.insert(Exchange::BitflyerCfd, dec!(0.50));
+    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let client = app.client();
+
+    let body = json!({
+        "name": "Missing Margin Config",
+        "exchange": "gmo_fx",
+        "initial_balance": 100000,
+        "leverage": 2,
+        "strategy": "bb_mean_revert_v1",
+        "account_type": "paper"
+    });
+
+    let resp = client
+        .post(app.endpoint("/api/trading-accounts"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 400);
+    let json: Value = resp.json().await.unwrap();
+    let error = json["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("exchange_margin"),
+        "error must reference [exchange_margin] section, got: {error}"
+    );
+    assert!(
+        error.contains("gmo_fx"),
+        "error must mention the offending exchange, got: {error}"
+    );
+}
+
 /// 2.7a: JPY 最低残高未満 → 400。
 /// validate_initial_balance は JPY の場合のみ最低残高チェックを行う。
 #[sqlx::test(migrations = "../../migrations")]
