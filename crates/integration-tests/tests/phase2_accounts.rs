@@ -221,6 +221,60 @@ async fn create_account_rejected_when_exchange_missing_from_margin_config(pool: 
     );
 }
 
+/// Defense in depth: even when the exchange is *present* in the levels map,
+/// a non-positive `liquidation_margin_level` must reject account creation.
+/// This catches the "first account on a previously-unused exchange whose
+/// config was left at 0/negative" footgun that the startup gate cannot.
+#[sqlx::test(migrations = "../../migrations")]
+async fn create_account_rejected_when_liquidation_margin_level_non_positive(
+    pool: sqlx::PgPool,
+) {
+    use auto_trader_core::types::Exchange;
+    use auto_trader_market::price_store::PriceStore;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    // Levels map contains gmo_fx but with a sentinel-bad value (0).
+    let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
+    levels.insert(Exchange::BitflyerCfd, dec!(0.50));
+    levels.insert(Exchange::GmoFx, dec!(0));
+    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let client = app.client();
+
+    let body = json!({
+        "name": "Bad Y For This Exchange",
+        "exchange": "gmo_fx",
+        "initial_balance": 100000,
+        "leverage": 10,
+        "strategy": "bb_mean_revert_v1",
+        "account_type": "paper"
+    });
+
+    let resp = client
+        .post(app.endpoint("/api/trading-accounts"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 400);
+    let json: Value = resp.json().await.unwrap();
+    let error = json["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("liquidation_margin_level"),
+        "error must reference liquidation_margin_level, got: {error}"
+    );
+    assert!(
+        error.contains("gmo_fx"),
+        "error must mention the offending exchange, got: {error}"
+    );
+    assert!(
+        error.contains("> 0") || error.contains("must be > 0"),
+        "error must explain the > 0 constraint, got: {error}"
+    );
+}
+
 /// 2.7a: JPY 最低残高未満 → 400。
 /// validate_initial_balance は JPY の場合のみ最低残高チェックを行う。
 #[sqlx::test(migrations = "../../migrations")]
