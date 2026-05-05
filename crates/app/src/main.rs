@@ -932,7 +932,7 @@ async fn main() -> anyhow::Result<()> {
                     let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
                         &crypto_monitor_exchange_liquidation_levels,
                         trade.exchange,
-                        &format!("close trade {}", trade.id),
+                        || format!("close trade {}", trade.id),
                     ) {
                         Some(y) => y,
                         None => continue,
@@ -1201,7 +1201,7 @@ async fn main() -> anyhow::Result<()> {
             let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
                 &exit_exchange_liquidation_levels,
                 trade.exchange,
-                &format!("strategy exit on trade {}", trade.id),
+                || format!("strategy exit on trade {}", trade.id),
             ) {
                 Some(y) => y,
                 None => continue,
@@ -1388,7 +1388,7 @@ async fn main() -> anyhow::Result<()> {
                 let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
                     &executor_exchange_liquidation_levels,
                     exchange,
-                    &format!("signal for account {} (id={})", pac.name, pac.id),
+                    || format!("signal for account {} (id={})", pac.name, pac.id),
                 ) {
                     Some(y) => y,
                     None => continue,

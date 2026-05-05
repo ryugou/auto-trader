@@ -52,21 +52,6 @@ pub async fn resolve_exchange_liquidation_levels(
             }
         }
     }
-    // Fail-closed: a non-positive `liquidation_margin_level` would let the
-    // PositionSizer silently return None at runtime ("account too small")
-    // because `1 / (Y + L*s)` with `Y <= 0` produces nonsense. Reject at
-    // startup so the operator gets a clear error instead of a silent stall.
-    for (ex, value) in map.iter() {
-        if *value <= Decimal::ZERO {
-            anyhow::bail!(
-                "config: [exchange_margin.{}] liquidation_margin_level must be > 0, got {} \
-                 (received non-positive value for exchange {:?})",
-                ex.as_str(),
-                value,
-                ex
-            );
-        }
-    }
     let missing: Vec<_> = required
         .iter()
         .filter(|ex| !map.contains_key(*ex))
@@ -77,6 +62,24 @@ pub async fn resolve_exchange_liquidation_levels(
              Add `liquidation_margin_level` for each.",
             missing
         );
+    }
+    // Fail-closed: a non-positive `liquidation_margin_level` would let the
+    // PositionSizer silently return None at runtime ("account too small")
+    // because `1 / (Y + L*s)` with `Y <= 0` produces nonsense. Validate only
+    // the entries actually used by an active account — entries for unused
+    // exchanges may sit at 0 / negative without breaking this run, and we
+    // don't want to crash startup over config a future operator left there.
+    for ex in &required {
+        let value = map.get(ex).expect("required entries are present after the missing check");
+        if *value <= Decimal::ZERO {
+            anyhow::bail!(
+                "config: [exchange_margin.{}] liquidation_margin_level must be > 0, got {} \
+                 (received non-positive value for exchange {:?})",
+                ex.as_str(),
+                value,
+                ex
+            );
+        }
     }
     Ok(map)
 }
@@ -91,14 +94,18 @@ pub async fn resolve_exchange_liquidation_levels(
 /// snuck in another way (e.g. direct SQL). Returning `None` lets the caller
 /// `continue` instead of panicking.
 ///
-/// `context` is rendered into the log so the operator can correlate the skip
-/// with a specific trade or signal — keep it terse but identifying (e.g.
-/// `"close trade {id}"`, `"signal for account {name} (id={id})"`).
-pub fn liquidation_level_or_log(
+/// `context` is rendered into the log only on the miss path so the operator
+/// can correlate the skip with a specific trade or signal. Pass a closure
+/// that builds a terse identifier (e.g. `|| format!("close trade {id}")`)
+/// — it runs at most once and only when the entry is missing.
+pub fn liquidation_level_or_log<F>(
     map: &HashMap<Exchange, Decimal>,
     exchange: Exchange,
-    context: &str,
-) -> Option<Decimal> {
+    context: F,
+) -> Option<Decimal>
+where
+    F: FnOnce() -> String,
+{
     match map.get(&exchange).copied() {
         Some(y) => Some(y),
         None => {
@@ -107,7 +114,7 @@ pub fn liquidation_level_or_log(
                  this indicates a runtime account was created without an [exchange_margin] \
                  entry, which the API should now reject",
                 exchange,
-                context
+                context()
             );
             None
         }

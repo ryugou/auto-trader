@@ -241,9 +241,64 @@ liquidation_margin_level = 0.50
     );
 }
 
-/// liquidation_margin_level <= 0 in config → startup fails.
+/// liquidation_margin_level <= 0 on a *required* exchange → startup fails.
 #[sqlx::test(migrations = "../../migrations")]
 async fn resolve_exchange_liquidation_levels_rejects_non_positive_value(pool: sqlx::PgPool) {
+    // Migrations seed 4 bitflyer_cfd + 1 gmo_fx account; both end up in
+    // `required`. Test the targeted case by giving the gmo_fx side a valid
+    // value and bitflyer_cfd a 0 — so we get past the missing-check and
+    // exercise the non-positive guard on bitflyer_cfd specifically.
+    let config: auto_trader_core::config::AppConfig = toml::from_str(
+        r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+[exchange_margin.bitflyer_cfd]
+liquidation_margin_level = 0
+[exchange_margin.gmo_fx]
+liquidation_margin_level = 1.00
+"#,
+    )
+    .unwrap();
+
+    let result =
+        auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+    let err = result.expect_err(
+        "expected error when liquidation_margin_level is not positive on a required exchange",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("liquidation_margin_level"),
+        "error must mention liquidation_margin_level, got: {msg}"
+    );
+    assert!(
+        msg.contains("BitflyerCfd") || msg.contains("bitflyer_cfd"),
+        "error must mention the offending exchange, got: {msg}"
+    );
+}
+
+/// liquidation_margin_level <= 0 on an *unused* exchange → startup succeeds.
+/// We deliberately don't crash startup for stale config on exchanges no
+/// active account uses; the operator can fix it on the next deploy.
+#[sqlx::test(migrations = "../../migrations")]
+async fn resolve_exchange_liquidation_levels_tolerates_non_positive_for_unused_exchange(
+    pool: sqlx::PgPool,
+) {
+    // Wipe the migration-seeded accounts so `required` is empty. With no
+    // active accounts, the bad bitflyer_cfd = 0 entry is unused config and
+    // must not block startup.
+    sqlx::query("DELETE FROM trading_accounts")
+        .execute(&pool)
+        .await
+        .expect("delete seeded accounts");
+
     let config: auto_trader_core::config::AppConfig = toml::from_str(
         r#"
 [vegapunk]
@@ -262,20 +317,12 @@ liquidation_margin_level = 0
     )
     .unwrap();
 
-    let result =
-        auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
-    let err = result.expect_err(
-        "expected error when liquidation_margin_level is not positive",
-    );
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("liquidation_margin_level"),
-        "error must mention liquidation_margin_level, got: {msg}"
-    );
-    assert!(
-        msg.contains("BitflyerCfd") || msg.contains("bitflyer_cfd"),
-        "error must mention the offending exchange, got: {msg}"
-    );
+    let map = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config)
+        .await
+        .expect("unused exchange with bad value should not block startup");
+    // bitflyer_cfd is in the parsed map but unused — value sanity is the
+    // operator's problem to fix later.
+    assert!(map.contains_key(&auto_trader_core::types::Exchange::BitflyerCfd));
 }
 
 /// Happy path: all required exchanges present → resolver returns map.
