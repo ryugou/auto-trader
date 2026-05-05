@@ -43,11 +43,14 @@ impl Drop for TestApp {
 /// Default liquidation levels for tests — covers every Exchange variant so
 /// existing test fixtures (gmo_fx / bitflyer_cfd / oanda) all pass the
 /// `accounts::create` defense-in-depth check that rejects unknown exchanges.
+///
+/// Values mirror `config/default.toml` so tests don't accidentally exercise
+/// a different sizing regime than production.
 fn default_liquidation_levels() -> Arc<HashMap<Exchange, rust_decimal::Decimal>> {
     let mut m = HashMap::new();
     m.insert(Exchange::BitflyerCfd, dec!(0.50));
     m.insert(Exchange::GmoFx, dec!(1.00));
-    m.insert(Exchange::Oanda, dec!(0.50));
+    m.insert(Exchange::Oanda, dec!(1.00));
     Arc::new(m)
 }
 

@@ -929,25 +929,13 @@ async fn main() -> anyhow::Result<()> {
                                 )
                             }
                         };
-                    // Defense in depth: never panic if the liquidation map is
-                    // missing an entry. The accounts API now rejects creation
-                    // for exchanges without [exchange_margin] config, but log
-                    // and skip rather than crash if anything slipped past.
-                    let liquidation_margin_level = match crypto_monitor_exchange_liquidation_levels
-                        .get(&trade.exchange)
-                        .copied()
-                    {
+                    let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
+                        &crypto_monitor_exchange_liquidation_levels,
+                        trade.exchange,
+                        &format!("close trade {}", trade.id),
+                    ) {
                         Some(y) => y,
-                        None => {
-                            tracing::error!(
-                                "exchange_liquidation_levels missing entry for {:?} on trade {} \
-                                 — skipping close; this indicates a runtime account was created \
-                                 without an [exchange_margin] entry, which the API should now reject",
-                                trade.exchange,
-                                trade.id
-                            );
-                            continue;
-                        }
+                        None => continue,
                     };
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
@@ -1210,23 +1198,13 @@ async fn main() -> anyhow::Result<()> {
                         std::sync::Arc::new(auto_trader_market::null_exchange_api::NullExchangeApi)
                     }
                 };
-            // Defense in depth: log + skip rather than panic if the
-            // liquidation map is missing an entry for this exchange.
-            let liquidation_margin_level = match exit_exchange_liquidation_levels
-                .get(&trade.exchange)
-                .copied()
-            {
+            let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
+                &exit_exchange_liquidation_levels,
+                trade.exchange,
+                &format!("strategy exit on trade {}", trade.id),
+            ) {
                 Some(y) => y,
-                None => {
-                    tracing::error!(
-                        "exchange_liquidation_levels missing entry for {:?} on trade {} \
-                         — skipping strategy exit; this indicates a runtime account was created \
-                         without an [exchange_margin] entry, which the API should now reject",
-                        trade.exchange,
-                        trade.id
-                    );
-                    continue;
-                }
+                None => continue,
             };
             let trader = UnifiedTrader::new(
                 exit_pool.clone(),
@@ -1407,25 +1385,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Defense in depth: log + skip rather than panic if the
-                // liquidation map is missing an entry for this exchange.
-                let liquidation_margin_level = match executor_exchange_liquidation_levels
-                    .get(&exchange)
-                    .copied()
-                {
+                let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
+                    &executor_exchange_liquidation_levels,
+                    exchange,
+                    &format!("signal for account {} (id={})", pac.name, pac.id),
+                ) {
                     Some(y) => y,
-                    None => {
-                        tracing::error!(
-                            "exchange_liquidation_levels missing entry for {:?} on signal for \
-                             account {} (id={}) — skipping; this indicates a runtime account \
-                             was created without an [exchange_margin] entry, which the API \
-                             should now reject",
-                            exchange,
-                            pac.name,
-                            pac.id
-                        );
-                        continue;
-                    }
+                    None => continue,
                 };
                 let trader = UnifiedTrader::new(
                     executor_pool.clone(),

@@ -12,10 +12,12 @@ use std::collections::HashMap;
 ///
 /// `Y` is the broker's liquidation margin level threshold supplied by the
 /// caller (resolved per-exchange from `[exchange_margin.<name>]` config).
-/// At `risk_alloc = max_alloc`, the SL hit point coincides with the
-/// liquidation line — i.e., a directly-hit SL closes at exactly margin
-/// level Y, so any move further than the SL is impossible because the SL
-/// fires first.
+/// At `risk_alloc = max_alloc`, an idealised fill at the SL price closes the
+/// position with margin level exactly Y. Real-world slippage, weekend gaps,
+/// or SL-trigger latency can push the realised loss past the SL price and
+/// drop margin level below Y; this sizer does not include a buffer for those
+/// cases. If post-SL slippage tolerance is required, callers should size
+/// against a tighter Y (or a separate buffered threshold).
 ///
 /// Example: bitflyer_cfd (Y=0.5, lev=2), SL=2%
 ///   max_alloc = 1 / (0.5 + 0.04) = 1.85 → capped at allocation_pct (1.0)

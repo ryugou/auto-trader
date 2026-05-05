@@ -10,10 +10,17 @@ use std::collections::{HashMap, HashSet};
 /// against active trading accounts.
 ///
 /// Returns `Err` if any active account's exchange lacks an
-/// `[exchange_margin.<name>]` entry, or if a config key fails to parse as
-/// `Exchange`. This is the fail-closed startup gate — running with an
-/// unresolved exchange would let the position sizer pick a default and
-/// silently miscompute position sizes for that broker.
+/// `[exchange_margin.<name>]` entry, if a config key fails to parse as
+/// `Exchange`, or if any `liquidation_margin_level` is not strictly positive.
+///
+/// This is the startup half of a defense-in-depth fail-closed design:
+/// - At startup: missing/invalid entries abort the process here, before any
+///   trading task spawns.
+/// - At runtime: the API rejects new account creation for exchanges absent
+///   from the resolved map (`accounts::create`), and the worker tasks
+///   log + skip the affected signal/exit/close instead of panicking when an
+///   entry is missing for an in-flight trade. Together these prevent the
+///   position sizer from running without a valid `liquidation_margin_level`.
 pub async fn resolve_exchange_liquidation_levels(
     pool: &PgPool,
     config: &AppConfig,
@@ -72,6 +79,39 @@ pub async fn resolve_exchange_liquidation_levels(
         );
     }
     Ok(map)
+}
+
+/// Look up `liquidation_margin_level` for `exchange` in the resolved map, or
+/// log a context-rich error and return `None`.
+///
+/// Worker tasks that need a sizing input call this on every iteration. The
+/// startup gate (`resolve_exchange_liquidation_levels`) validates the map
+/// against accounts at boot, and the create-account API rejects exchanges
+/// not present in the map, but this helper is the runtime fallback if a row
+/// snuck in another way (e.g. direct SQL). Returning `None` lets the caller
+/// `continue` instead of panicking.
+///
+/// `context` is rendered into the log so the operator can correlate the skip
+/// with a specific trade or signal — keep it terse but identifying (e.g.
+/// `"close trade {id}"`, `"signal for account {name} (id={id})"`).
+pub fn liquidation_level_or_log(
+    map: &HashMap<Exchange, Decimal>,
+    exchange: Exchange,
+    context: &str,
+) -> Option<Decimal> {
+    match map.get(&exchange).copied() {
+        Some(y) => Some(y),
+        None => {
+            tracing::error!(
+                "exchange_liquidation_levels missing entry for {:?} ({}) — skipping; \
+                 this indicates a runtime account was created without an [exchange_margin] \
+                 entry, which the API should now reject",
+                exchange,
+                context
+            );
+            None
+        }
+    }
 }
 
 /// Register all enabled strategies from config into the engine.
