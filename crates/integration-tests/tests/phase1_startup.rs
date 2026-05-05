@@ -158,6 +158,146 @@ async fn register_donchian_evolve_fallback_on_missing_params(pool: sqlx::PgPool)
     assert_eq!(engine.registered_names().len(), 1);
 }
 
+// ── Exchange margin fail-closed validation ────────────────────────────────
+
+/// Active gmo_fx account + missing [exchange_margin.gmo_fx] → startup fails.
+#[sqlx::test(migrations = "../../migrations")]
+async fn resolve_exchange_liquidation_levels_fails_when_active_exchange_missing(
+    pool: sqlx::PgPool,
+) {
+    use auto_trader_integration_tests::helpers::db;
+
+    db::seed_trading_account(
+        &pool,
+        "fx_safe",
+        "paper",
+        "gmo_fx",
+        "donchian_trend_v1",
+        30_000,
+    )
+    .await;
+
+    // Config with bitflyer_cfd entry but NO gmo_fx entry.
+    let config: auto_trader_core::config::AppConfig = toml::from_str(
+        r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = ["USD_JPY"]
+crypto = ["FX_BTC_JPY"]
+[exchange_margin.bitflyer_cfd]
+liquidation_margin_level = 0.50
+"#,
+    )
+    .unwrap();
+
+    let result = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+    let err = result
+        .expect_err("expected fail-closed startup error when [exchange_margin.gmo_fx] missing");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("exchange_margin"),
+        "error must mention exchange_margin section, got: {msg}"
+    );
+    assert!(
+        msg.contains("GmoFx"),
+        "error must mention the missing exchange (GmoFx), got: {msg}"
+    );
+}
+
+/// Config keys that don't parse as Exchange → startup fails with a useful error.
+#[sqlx::test(migrations = "../../migrations")]
+async fn resolve_exchange_liquidation_levels_rejects_unknown_exchange_key(pool: sqlx::PgPool) {
+    let config: auto_trader_core::config::AppConfig = toml::from_str(
+        r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+[exchange_margin.banana]
+liquidation_margin_level = 0.50
+"#,
+    )
+    .unwrap();
+
+    let result = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config).await;
+    let err = result
+        .expect_err("expected error when config has [exchange_margin.banana] (not an Exchange)");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("banana") && msg.contains("exchange_margin"),
+        "error must mention the bad key 'banana' under exchange_margin, got: {msg}"
+    );
+}
+
+/// Happy path: all required exchanges present → resolver returns map.
+#[sqlx::test(migrations = "../../migrations")]
+async fn resolve_exchange_liquidation_levels_succeeds_when_all_present(pool: sqlx::PgPool) {
+    use auto_trader_integration_tests::helpers::db;
+
+    db::seed_trading_account(
+        &pool,
+        "fx_safe",
+        "paper",
+        "gmo_fx",
+        "donchian_trend_v1",
+        30_000,
+    )
+    .await;
+    db::seed_trading_account(
+        &pool,
+        "crypto_safe",
+        "paper",
+        "bitflyer_cfd",
+        "bb_mean_revert_v1",
+        30_000,
+    )
+    .await;
+
+    let config: auto_trader_core::config::AppConfig = toml::from_str(
+        r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = ["USD_JPY"]
+crypto = ["FX_BTC_JPY"]
+[exchange_margin.bitflyer_cfd]
+liquidation_margin_level = 0.50
+[exchange_margin.gmo_fx]
+liquidation_margin_level = 1.00
+"#,
+    )
+    .unwrap();
+
+    let map = auto_trader::startup::resolve_exchange_liquidation_levels(&pool, &config)
+        .await
+        .expect("resolver must succeed when all entries present");
+    assert_eq!(
+        map.get(&auto_trader_core::types::Exchange::BitflyerCfd),
+        Some(&rust_decimal_macros::dec!(0.50)),
+    );
+    assert_eq!(
+        map.get(&auto_trader_core::types::Exchange::GmoFx),
+        Some(&rust_decimal_macros::dec!(1.00)),
+    );
+}
+
 // ── Notification Purge ───────────────────────────────────────────────────
 
 /// purge_old_read deletes read notifications older than 30 days.

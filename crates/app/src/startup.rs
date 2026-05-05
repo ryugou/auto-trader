@@ -1,8 +1,63 @@
-use auto_trader_core::config::{GeminiConfig, StrategyConfig};
-use auto_trader_core::types::Pair;
+use auto_trader_core::config::{AppConfig, GeminiConfig, StrategyConfig};
+use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_strategy::engine::StrategyEngine;
 use auto_trader_vegapunk::client::VegapunkClient;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
+
+/// Resolve broker liquidation thresholds per exchange from config, validated
+/// against active trading accounts.
+///
+/// Returns `Err` if any active account's exchange lacks an
+/// `[exchange_margin.<name>]` entry, or if a config key fails to parse as
+/// `Exchange`. This is the fail-closed startup gate — running with an
+/// unresolved exchange would let the position sizer pick a default and
+/// silently miscompute position sizes for that broker.
+pub async fn resolve_exchange_liquidation_levels(
+    pool: &PgPool,
+    config: &AppConfig,
+) -> anyhow::Result<HashMap<Exchange, Decimal>> {
+    let active_accounts = auto_trader_db::trading_accounts::list_all(pool).await?;
+    let mut required: HashSet<Exchange> = HashSet::new();
+    for acct in &active_accounts {
+        match acct.exchange.parse::<Exchange>() {
+            Ok(ex) => {
+                required.insert(ex);
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "trading_accounts row {} has unrecognised exchange '{}': {e}",
+                    acct.id,
+                    acct.exchange
+                );
+            }
+        }
+    }
+    let mut map: HashMap<Exchange, Decimal> = HashMap::new();
+    for (key, cfg) in config.exchange_margin.iter() {
+        match key.parse::<Exchange>() {
+            Ok(ex) => {
+                map.insert(ex, cfg.liquidation_margin_level);
+            }
+            Err(e) => {
+                anyhow::bail!("config: [exchange_margin.{key}] is not a recognised exchange: {e}");
+            }
+        }
+    }
+    let missing: Vec<_> = required
+        .iter()
+        .filter(|ex| !map.contains_key(*ex))
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "config: [exchange_margin.<name>] missing for active accounts: {:?}. \
+             Add `liquidation_margin_level` for each.",
+            missing
+        );
+    }
+    Ok(map)
+}
 
 /// Register all enabled strategies from config into the engine.
 ///
