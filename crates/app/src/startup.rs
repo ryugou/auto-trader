@@ -9,18 +9,26 @@ use std::collections::{HashMap, HashSet};
 /// Resolve broker liquidation thresholds per exchange from config, validated
 /// against active trading accounts.
 ///
-/// Returns `Err` if any active account's exchange lacks an
-/// `[exchange_margin.<name>]` entry, if a config key fails to parse as
-/// `Exchange`, or if any `liquidation_margin_level` is not strictly positive.
+/// Returns `Err` when:
+/// - a config key (`[exchange_margin.<name>]`) fails to parse as `Exchange`,
+/// - an active account's exchange has no matching config entry, or
+/// - an active account's exchange has a `liquidation_margin_level` that is
+///   not strictly positive.
+///
+/// Non-positive values on exchanges that have no active account are
+/// **tolerated** — a stale TOML left at 0 for an unused exchange should not
+/// brick startup. The `accounts::create` handler re-checks `> 0` when an
+/// account is later created on such an exchange (defense in depth).
 ///
 /// This is the startup half of a defense-in-depth fail-closed design:
-/// - At startup: missing/invalid entries abort the process here, before any
-///   trading task spawns.
+/// - At startup: missing/invalid entries for exchanges in use abort the
+///   process here, before any trading task spawns.
 /// - At runtime: the API rejects new account creation for exchanges absent
-///   from the resolved map (`accounts::create`), and the worker tasks
-///   log + skip the affected signal/exit/close instead of panicking when an
-///   entry is missing for an in-flight trade. Together these prevent the
-///   position sizer from running without a valid `liquidation_margin_level`.
+///   from the resolved map or with a non-positive value
+///   (`accounts::create`), and the worker tasks log + skip the affected
+///   signal/exit/close instead of panicking when an entry is missing for an
+///   in-flight trade. Together these prevent the position sizer from
+///   running without a valid `liquidation_margin_level`.
 pub async fn resolve_exchange_liquidation_levels(
     pool: &PgPool,
     config: &AppConfig,
