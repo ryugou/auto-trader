@@ -9,8 +9,9 @@ use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, TradeStatus};
 use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_executor::trader::Trader;
-use auto_trader_integration_tests::helpers::db::seed_trading_account;
+use auto_trader_integration_tests::helpers::db::{read_current_balance, seed_trading_account};
 use auto_trader_integration_tests::helpers::seed;
+use auto_trader_integration_tests::helpers::sizing_invariants;
 use auto_trader_integration_tests::mocks::exchange_api::MockExchangeApiBuilder;
 use auto_trader_integration_tests::mocks::slack_webhook::MockSlackWebhook;
 use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
@@ -167,12 +168,37 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps);
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     // Open and close a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
     assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::TpHit)
@@ -180,6 +206,23 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
         .expect("close should succeed");
     assert_eq!(closed.status, TradeStatus::Closed);
     assert_eq!(closed.quantity, dec!(12735), "close should not mutate quantity");
+    // Close-side enrichment. Long close at bid=150, entry was ask=151 → loss.
+    assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
+    let exit_price = closed.exit_price.expect("exit_price must be set");
+    assert_eq!(exit_price, dec!(150), "Long close fills at bid=150");
+    let expected_pnl = sizing_invariants::expected_pnl(
+        closed.entry_price,
+        exit_price,
+        closed.quantity,
+        closed.direction,
+    )
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    assert_eq!(closed.pnl_amount, Some(expected_pnl));
+    let balance_after_close = read_current_balance(&pool, account_id).await;
+    assert_eq!(
+        balance_after_close,
+        balance_before_open + expected_pnl - closed.fees,
+    );
 
     // Try to close again — should fail
     let result = trader
@@ -213,11 +256,36 @@ async fn concurrent_close_only_one_succeeds(pool: sqlx::PgPool) {
     let trader1 = make_trader(pool.clone(), exchange, account_id, ps.clone());
     let trader2 = make_trader(pool.clone(), exchange, account_id, ps);
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader1.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
     assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
     let trade_id = trade.id.to_string();
 
     // Spawn two concurrent close calls
@@ -293,10 +361,35 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
         true, // dry_run to open easily
     );
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = open_trader.execute(&signal).await.expect("open should succeed");
     // qty: dry_run open — 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
     assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
     let trade_id = trade.id;
 
     // Now create a trader with a FAILING API (dry_run=false) for the close attempt
@@ -360,11 +453,36 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps);
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
     assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     // Verify 'trade_opened' notification was created
     let open_notif_count: i64 = sqlx::query_scalar(
@@ -381,6 +499,23 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
         .close_position(&trade.id.to_string(), ExitReason::TpHit)
         .await
         .expect("close should succeed");
+    // Close-side enrichment.
+    assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
+    let exit_price = closed.exit_price.expect("exit_price must be set");
+    assert_eq!(exit_price, dec!(150), "Long close fills at bid=150");
+    let expected_pnl = sizing_invariants::expected_pnl(
+        closed.entry_price,
+        exit_price,
+        closed.quantity,
+        closed.direction,
+    )
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    assert_eq!(closed.pnl_amount, Some(expected_pnl));
+    let balance_after_close = read_current_balance(&pool, account_id).await;
+    assert_eq!(
+        balance_after_close,
+        balance_before_open + expected_pnl - closed.fees,
+    );
 
     // Verify 'trade_closed' notification was created
     let close_notif_count: i64 = sqlx::query_scalar(
@@ -434,18 +569,55 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
         true, // dry_run
     );
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
     assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     // Wait briefly for fire-and-forget notification to be sent
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let _closed = trader
+    let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::TpHit)
         .await
         .expect("close should succeed");
+    // Close-side enrichment.
+    assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
+    let exit_price = closed.exit_price.expect("exit_price must be set");
+    assert_eq!(exit_price, dec!(150), "Long close fills at bid=150");
+    let expected_pnl = sizing_invariants::expected_pnl(
+        closed.entry_price,
+        exit_price,
+        closed.quantity,
+        closed.direction,
+    )
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    assert_eq!(closed.pnl_amount, Some(expected_pnl));
 
     // Wait for fire-and-forget close notification
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
