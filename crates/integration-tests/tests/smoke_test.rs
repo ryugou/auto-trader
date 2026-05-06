@@ -612,28 +612,157 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
     let (layer, buffer) = TracingCapture::new();
     let _guard = tracing_subscriber::registry().with(layer).set_default();
     tracing::info!("smoke test complete");
-    let logs = buffer.lock().unwrap();
-    assert!(
-        logs.iter().any(|l| l.contains("smoke test complete")),
-        "tracing capture must record log line"
-    );
-    drop(logs);
+    {
+        let logs = buffer.lock().unwrap();
+        assert!(
+            logs.iter().any(|l| l.contains("smoke test complete")),
+            "tracing capture must record log line"
+        );
+    }
 
     // 10. Verify failure output format
-    let logs_snapshot = buffer.lock().unwrap();
-    let report = failure_output::format_failure(
-        "smoke_test::full_integration",
-        "fixtures/smoke_test.csv",
-        "everything works",
-        "it did",
-        &logs_snapshot,
-        &snapshot,
-    );
-    drop(logs_snapshot);
+    let report = {
+        let logs_snapshot = buffer.lock().unwrap();
+        failure_output::format_failure(
+            "smoke_test::full_integration",
+            "fixtures/smoke_test.csv",
+            "everything works",
+            "it did",
+            &logs_snapshot,
+            &snapshot,
+        )
+    };
 
     assert!(report.contains("[FAIL]"));
     assert!(report.contains("smoke_test::full_integration"));
     assert!(report.contains("=== application log ==="));
     assert!(report.contains("=== db state ==="));
     assert!(report.contains("smoke test complete"));
+
+    // 11. Real pipeline E2E: drive bb_mean_revert through one full cycle
+    //     (warmup → signal → execute → close → balance) on a freshly seeded
+    //     bitflyer_cfd account using PipelineHarness. This is what makes
+    //     this suite an honest "smoke" test — passing it means the chain
+    //     of strategy → trader → close → balance actually wires together.
+    {
+        use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, TradeStatus};
+        use auto_trader_integration_tests::helpers::pipeline::{
+            PipelineHarness, PipelineHarnessConfig,
+        };
+        use auto_trader_integration_tests::helpers::sizing_invariants;
+        use auto_trader_integration_tests::helpers::trade_flow::{
+            fixtures_dir, load_events_from_csv,
+        };
+        use auto_trader_strategy::bb_mean_revert::BbMeanRevertV1;
+        use rust_decimal::{Decimal, RoundingStrategy};
+        use rust_decimal_macros::dec;
+
+        let harness = PipelineHarness::new(
+            pool.clone(),
+            PipelineHarnessConfig {
+                account_name: "smoke_e2e_btc".to_string(),
+                exchange: Exchange::BitflyerCfd,
+                pair_str: "FX_BTC_JPY".to_string(),
+                strategy: "bb_mean_revert_v1".to_string(),
+                balance: 30_000,
+                liquidation_margin_level: dec!(0.50),
+                min_order_size: dec!(0.001),
+            },
+        )
+        .await;
+
+        let mut strategy = BbMeanRevertV1::new(
+            "bb_mean_revert_v1".to_string(),
+            vec![harness.pair.clone()],
+        );
+
+        // Reuse the same fixture as phase3_pipeline_e2e to avoid divergent
+        // hand-crafted candle generators in this smoke test.
+        let events = load_events_from_csv(
+            &fixtures_dir().join("bb_long_entry.csv"),
+            harness.exchange,
+            "FX_BTC_JPY",
+            "M5",
+        );
+        assert!(events.len() >= 2, "smoke fixture must have >= 2 candles");
+        let (warmup_events, trigger_events) = events.split_at(events.len() - 1);
+        let trigger_event = trigger_events[0].clone();
+
+        let entry_bid = trigger_event
+            .candle
+            .best_bid
+            .expect("smoke fixture trigger must carry bid");
+        let entry_ask = trigger_event
+            .candle
+            .best_ask
+            .expect("smoke fixture trigger must carry ask");
+        harness.set_market(entry_bid, entry_ask).await;
+
+        let warmup_candles: Vec<_> =
+            warmup_events.iter().map(|e| e.candle.clone()).collect();
+
+        let signal = harness
+            .drive_strategy(&mut strategy, &warmup_candles, &trigger_event.candle)
+            .await
+            .expect("smoke: bb_mean_revert should emit a Long signal");
+        assert_eq!(signal.direction, Direction::Long);
+
+        let balance_before = harness.current_balance().await;
+        let trade = harness.execute(&signal).await;
+        assert_eq!(trade.status, TradeStatus::Open);
+        assert_eq!(trade.direction, Direction::Long);
+        assert_eq!(trade.exchange, Exchange::BitflyerCfd);
+        assert_eq!(trade.pair, Pair::new("FX_BTC_JPY"));
+        // Long fills at ask.
+        assert_eq!(trade.entry_price, entry_ask);
+
+        // Sizing invariant: post-SL margin level must stay >= Y.
+        sizing_invariants::assert_post_sl_margin_level_at_least_y(
+            &trade,
+            balance_before,
+            dec!(0.50),
+        );
+
+        // Move market upward 1.5% so the close is clearly profitable but
+        // well within typical SL distance for bb_mean_revert.
+        let exit_move = dec!(0.015);
+        let exit_bid = entry_bid * (Decimal::ONE + exit_move);
+        let exit_ask = entry_ask * (Decimal::ONE + exit_move);
+        harness.set_market(exit_bid, exit_ask).await;
+
+        let closed = harness.close(trade.id, ExitReason::TpHit).await;
+        assert_eq!(closed.status, TradeStatus::Closed);
+        assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
+        // Long closes at bid.
+        assert_eq!(
+            closed.exit_price.expect("exit_price must be set"),
+            exit_bid,
+        );
+
+        let raw_pnl = sizing_invariants::expected_pnl(
+            trade.entry_price,
+            exit_bid,
+            trade.quantity,
+            Direction::Long,
+        );
+        let expected_pnl =
+            raw_pnl.round_dp_with_strategy(0, RoundingStrategy::ToZero);
+        assert_eq!(
+            closed.pnl_amount.expect("pnl_amount must be set"),
+            expected_pnl,
+            "pnl must equal truncated price_diff x qty",
+        );
+        assert!(
+            expected_pnl > Decimal::ZERO,
+            "Long upward close should profit, got {expected_pnl}",
+        );
+
+        // Balance flow: balance_after_close = balance_before + pnl.
+        let balance_after_close = harness.current_balance().await;
+        assert_eq!(
+            balance_after_close,
+            balance_before + expected_pnl,
+            "balance after close must reflect pnl exactly",
+        );
+    }
 }
