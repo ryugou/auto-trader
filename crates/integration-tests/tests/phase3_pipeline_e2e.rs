@@ -161,7 +161,8 @@ async fn run_pipeline_test<F>(
         scenario.y,
         entry_price,
         scenario.min_lot,
-    );
+    )
+    .expect("scenario should produce a sizeable order");
     assert_eq!(
         trade.quantity, expected_qty,
         "qty must match expected_quantity for {:?} {:?} sl_pct={}",
@@ -298,6 +299,13 @@ async fn run_pipeline_test<F>(
 
 /// Load the fixture, set the price store from the trigger candle's bid/ask,
 /// and return `(warmup_candles, trigger_candle)` ready for `drive_strategy`.
+///
+/// For BTC pairs, candle prices are scaled by ~75,000× so they live in the
+/// realistic BTC/JPY million-yen range instead of the ~150 fixture range
+/// (which is shaped for USD/JPY). All in-tree strategies are scale-invariant
+/// — they evaluate %-based bands, ATR-relative breakouts, etc. — so the
+/// scaled candles still trigger the same signals while exercising
+/// realistic min_lot / spread / magnitude paths.
 async fn prepare_candles(
     harness: &PipelineHarness,
     scenario: &Scenario,
@@ -305,13 +313,33 @@ async fn prepare_candles(
     Vec<auto_trader_core::types::Candle>,
     auto_trader_core::types::Candle,
 ) {
-    let events = load_events_from_csv(
+    let mut events = load_events_from_csv(
         &fixtures_dir().join(scenario.fixture),
         scenario.exchange,
         scenario.pair_str,
         scenario.timeframe,
     );
     assert!(events.len() >= 2, "fixture {} too short", scenario.fixture);
+
+    // Scale prices into realistic BTC/JPY range (millions of yen) when the
+    // scenario is the BTC pair. Strategies are scale-invariant so signal
+    // outcomes are preserved.
+    if scenario.pair_str == BTC_PAIR {
+        const BTC_SCALE: rust_decimal::Decimal = rust_decimal_macros::dec!(75_000);
+        for event in events.iter_mut() {
+            event.candle.open *= BTC_SCALE;
+            event.candle.high *= BTC_SCALE;
+            event.candle.low *= BTC_SCALE;
+            event.candle.close *= BTC_SCALE;
+            if let Some(bid) = event.candle.best_bid {
+                event.candle.best_bid = Some(bid * BTC_SCALE);
+            }
+            if let Some(ask) = event.candle.best_ask {
+                event.candle.best_ask = Some(ask * BTC_SCALE);
+            }
+        }
+    }
+
     let (warmup_events, trigger_events) = events.split_at(events.len() - 1);
     let trigger_event = trigger_events[0].clone();
 

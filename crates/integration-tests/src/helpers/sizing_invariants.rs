@@ -39,6 +39,12 @@ pub fn truncate_to_min_lot(raw_qty: Decimal, min_lot: Decimal) -> Decimal {
 }
 
 /// Full quantity computation matching `PositionSizer::calculate_quantity`.
+///
+/// Returns `None` when the truncated quantity would be below `min_lot` —
+/// matching production behavior where the sizer refuses to produce a
+/// sub-lot order. Tests that previously got a 0-or-below value silently
+/// will now see `None`, forcing them to handle the unsizeable case
+/// explicitly (or unwrap if they expect a successful sizing).
 #[allow(clippy::too_many_arguments)]
 pub fn expected_quantity(
     balance: Decimal,
@@ -48,7 +54,7 @@ pub fn expected_quantity(
     liquidation_margin_level: Decimal,
     entry_price: Decimal,
     min_lot: Decimal,
-) -> Decimal {
+) -> Option<Decimal> {
     let raw = compute_raw_quantity(
         balance,
         leverage,
@@ -57,7 +63,17 @@ pub fn expected_quantity(
         liquidation_margin_level,
         entry_price,
     );
-    truncate_to_min_lot(raw, min_lot)
+    if min_lot > Decimal::ZERO {
+        let truncated = truncate_to_min_lot(raw, min_lot);
+        if truncated < min_lot {
+            return None;
+        }
+        Some(truncated)
+    } else if raw > Decimal::ZERO {
+        Some(raw)
+    } else {
+        None
+    }
 }
 
 /// `SL = entry × (1 - sl_pct)` for Long, `entry × (1 + sl_pct)` for Short.
@@ -174,7 +190,7 @@ mod tests {
             dec!(12500000),
             dec!(0.001),
         );
-        assert_eq!(qty, dec!(0.004));
+        assert_eq!(qty, Some(dec!(0.004)));
     }
 
     /// gmo_fx: balance=30,000 JPY, lev=10, SL=2%, Y=1.0, USD/JPY=157, min_lot=1.
@@ -191,7 +207,24 @@ mod tests {
             dec!(157),
             dec!(1),
         );
-        assert_eq!(qty, dec!(1592));
+        assert_eq!(qty, Some(dec!(1592)));
+    }
+
+    /// raw < min_lot → None (matches PositionSizer::calculate_quantity).
+    #[test]
+    fn expected_quantity_returns_none_when_below_min_lot() {
+        // bitflyer_cfd, balance=10_000 JPY, lev=2, BTC=25M, min_lot=0.001.
+        // raw = 10_000 × 2 / 25_000_000 = 0.0008 < 0.001 → None.
+        let qty = expected_quantity(
+            dec!(10_000),
+            dec!(2),
+            dec!(1.0),
+            dec!(0.02),
+            dec!(0.50),
+            dec!(25_000_000),
+            dec!(0.001),
+        );
+        assert_eq!(qty, None);
     }
 
     #[test]

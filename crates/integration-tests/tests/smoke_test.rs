@@ -677,13 +677,29 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
         );
 
         // Reuse the same fixture as phase3_pipeline_e2e to avoid divergent
-        // hand-crafted candle generators in this smoke test.
-        let events = load_events_from_csv(
+        // hand-crafted candle generators in this smoke test. The fixture is
+        // shaped for USD/JPY (~150 range), so for FX_BTC_JPY we scale prices
+        // into the realistic millions-of-yen range (mirrors prepare_candles
+        // in phase3_pipeline_e2e). All in-tree strategies are scale-invariant.
+        const BTC_SCALE: Decimal = dec!(75_000);
+        let mut events = load_events_from_csv(
             &fixtures_dir().join("bb_long_entry.csv"),
             harness.exchange,
             "FX_BTC_JPY",
             "M5",
         );
+        for event in events.iter_mut() {
+            event.candle.open *= BTC_SCALE;
+            event.candle.high *= BTC_SCALE;
+            event.candle.low *= BTC_SCALE;
+            event.candle.close *= BTC_SCALE;
+            if let Some(bid) = event.candle.best_bid {
+                event.candle.best_bid = Some(bid * BTC_SCALE);
+            }
+            if let Some(ask) = event.candle.best_ask {
+                event.candle.best_ask = Some(ask * BTC_SCALE);
+            }
+        }
         assert!(events.len() >= 2, "smoke fixture must have >= 2 candles");
         let (warmup_events, trigger_events) = events.split_at(events.len() - 1);
         let trigger_event = trigger_events[0].clone();

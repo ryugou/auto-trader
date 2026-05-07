@@ -222,7 +222,8 @@ async fn min_lot_truncation_realistic_bitflyer(pool: sqlx::PgPool) {
         dec!(0.50),
         dec!(12_500_000),
         dec!(0.001),
-    );
+    )
+    .expect("expected sizing should succeed");
     assert_eq!(expected, dec!(0.004), "sanity check on expected_quantity");
     assert_eq!(
         trade.quantity,
@@ -295,7 +296,8 @@ async fn lc_constraint_binds_at_extreme_sl_gmo_fx(pool: sqlx::PgPool) {
         dec!(1.00),
         dec!(157),
         dec!(1),
-    );
+    )
+    .expect("expected sizing should succeed");
     assert_eq!(expected, dec!(636), "sanity check on expected_quantity");
     assert_eq!(
         trade.quantity,
@@ -366,7 +368,8 @@ async fn multiple_open_positions_share_balance_correctly(pool: sqlx::PgPool) {
         dec!(1.00),
         dec!(157),
         dec!(1),
-    );
+    )
+    .expect("trade 1 sizing should succeed");
     assert_eq!(expected_qty1, dec!(1592));
     assert_eq!(trade1.quantity, dec!(1592), "trade 1 qty");
 
@@ -406,7 +409,8 @@ async fn multiple_open_positions_share_balance_correctly(pool: sqlx::PgPool) {
         dec!(1.00),
         dec!(157),
         dec!(1),
-    );
+    )
+    .expect("trade 2 sizing should succeed");
     assert_eq!(expected_qty2, dec!(265), "sanity check on expected_quantity for trade 2");
     assert_eq!(
         trade2.quantity,

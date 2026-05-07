@@ -228,8 +228,7 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
     let signal1 = make_signal("USD_JPY", Direction::Long);
     let trade1 = trader.execute(&signal1).await.expect("open 1 should succeed");
     // qty: balance=10_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
-    //      max_alloc = 1/1.04, raw = 10_000_000 × 2 × (1/1.04) / 151 ≈ 127353.94 → 127356
-    //      (rust_decimal scale-28 division yields a slight difference from naive arithmetic)
+    //      max_alloc = 1/1.04, raw = 10_000_000 × 2 / 1.04 / 151 ≈ 127356.087 → 127356
     assert_eq!(trade1.quantity, dec!(127356), "sizer: 10M × 2 × (1/1.04) / 151 → 127356");
     // Open-side enrichment for trade 1.
     assert_eq!(
