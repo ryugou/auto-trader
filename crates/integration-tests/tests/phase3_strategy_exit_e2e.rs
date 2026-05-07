@@ -909,7 +909,9 @@ async fn sl_hit_close_persists_reason_and_market_bid(pool: PgPool) {
     let trade = harness.execute(&signal).await;
     let entry_price = trade.entry_price; // 150.005
     let qty = trade.quantity;
-    let sl = trade.stop_loss; // entry × (1 - 0.005) = 149.255
+    // entry × (1 - 0.005) = 150.005 × 0.995 = 149.254975 (no rounding;
+    // Trader::execute stores the SL price unrounded).
+    let sl = trade.stop_loss;
     assert!(sl < entry_price);
 
     // Move bid below SL — production's price monitor would fire here. We

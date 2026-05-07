@@ -1,15 +1,18 @@
 //! Phase 3: Signal-routing e2e tests (Plan Task 5).
 //!
 //! These tests drive the multi-account signal routing contract end-to-end:
-//! given a signal and a set of accounts (each with its own
-//! `(exchange, allowed_pairs, Trader)` binding), only the accounts whose
-//! exchange supports the signal's pair should produce a trade.
+//! given a signal and a set of accounts, only an account whose exchange
+//! owns the signal's pair AND whose strategy matches the signal's
+//! `strategy_name` should produce a trade.
 //!
-//! The routing rule is reproduced inline below (mirroring the
-//! `executor_exchange_pairs` filter in `crates/app/src/main.rs`'s signal
-//! executor task). This guarantees that the dispatch contract — "a signal
-//! lands on the trader whose exchange owns its pair, and nowhere else" —
-//! is exercised against real `Trader::execute` calls hitting the DB.
+//! The routing rules are reproduced inline below, mirroring the two gates
+//! in `crates/app/src/main.rs`'s signal executor task:
+//!   1. pair filter (`executor_exchange_pairs`) — pair must belong to the
+//!      account's exchange
+//!   2. strategy filter (`pac.strategy != signal.strategy_name`, main.rs:1300)
+//!
+//! This guarantees the dispatch contract is exercised against real
+//! `Trader::execute` calls hitting the DB.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,30 +35,37 @@ const BTC_PAIR: &str = "FX_BTC_JPY";
 const USD_PAIR: &str = "USD_JPY";
 
 /// One account in the routing fan-out: the trader plus the set of pairs
-/// its exchange is configured to handle (mirrors `executor_exchange_pairs`
-/// in `main.rs`).
+/// its exchange is configured to handle, plus the strategy that owns this
+/// account (mirrors the executor task gates in `main.rs`).
 struct RoutedAccount {
     name: String,
     account_id: Uuid,
     trader: Trader,
     allowed_pairs: Vec<Pair>,
+    /// Strategy bound to this account. The signal executor in main.rs
+    /// rejects signals whose `strategy_name` does not match `pac.strategy`
+    /// (see `crates/app/src/main.rs:1300`), so the routing test must
+    /// model it too — otherwise a "routes nowhere" result could falsely
+    /// pass when the pair matches but strategies don't.
+    strategy: String,
 }
 
-/// Reproduce the pair-filter routing from `main.rs`:
+/// Reproduce both routing gates from `main.rs`'s signal executor:
 ///
-/// ```ignore
-/// if !executor_exchange_pairs.get(&exchange).is_some_and(|pairs| pairs.contains(&signal.pair.0)) {
-///     continue;  // skip — this account's exchange does not own the signal's pair
-/// }
-/// trader.execute(signal).await?
-/// ```
+/// 1. exchange must own the signal's pair (`executor_exchange_pairs`)
+/// 2. account's strategy must match the signal's strategy_name
 ///
 /// Returns the trades that were actually opened, paired with the
 /// originating account name so callers can assert which side fired.
 async fn route_and_execute(signal: &Signal, accounts: &[RoutedAccount]) -> Vec<(String, Trade)> {
     let mut trades = Vec::new();
     for acc in accounts {
+        // Gate 1: pair filter (exchange supports this pair)
         if !acc.allowed_pairs.contains(&signal.pair) {
+            continue;
+        }
+        // Gate 2: strategy filter (account is bound to this strategy)
+        if acc.strategy != signal.strategy_name {
             continue;
         }
         match acc.trader.execute(signal).await {
@@ -160,12 +170,14 @@ async fn build_two_account_fanout(pool: PgPool) -> Vec<RoutedAccount> {
             account_id: bitflyer_account_id,
             trader: bitflyer_trader,
             allowed_pairs: vec![bitflyer_pair],
+            strategy: "bb_mean_revert_v1".to_string(),
         },
         RoutedAccount {
             name: "routing_gmo".to_string(),
             account_id: gmo_account_id,
             trader: gmo_trader,
             allowed_pairs: vec![gmo_pair],
+            strategy: "donchian_trend_v1".to_string(),
         },
     ]
 }
@@ -256,6 +268,28 @@ async fn signal_for_usdjpy_routes_to_gmofx_only(pool: PgPool) {
         0,
         "bitflyer account must have zero trades — pair filter must reject"
     );
+}
+
+// ─── 2b. Strategy mismatch routes nowhere even when pair matches ─────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn signal_for_btc_with_wrong_strategy_routes_nowhere(pool: PgPool) {
+    let accounts = build_two_account_fanout(pool.clone()).await;
+    let bitflyer_id = accounts[0].account_id;
+    let gmo_id = accounts[1].account_id;
+
+    // Pair matches bitflyer (FX_BTC_JPY), but strategy_name is the gmo_fx
+    // account's strategy. Production routing would reject on the strategy
+    // gate; the test must too.
+    let signal = make_signal(BTC_PAIR, Direction::Long, "donchian_trend_v1");
+    let trades = route_and_execute(&signal, &accounts).await;
+
+    assert!(
+        trades.is_empty(),
+        "pair-but-not-strategy match must produce zero trades, got {trades:?}"
+    );
+    assert_eq!(count_trades_for_account(&pool, bitflyer_id).await, 0);
+    assert_eq!(count_trades_for_account(&pool, gmo_id).await, 0);
 }
 
 // ─── 3. Unknown pair routes nowhere ──────────────────────────────────────
