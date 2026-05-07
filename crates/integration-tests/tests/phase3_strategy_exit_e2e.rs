@@ -369,15 +369,17 @@ async fn bb_mean_revert_long_mean_reached_closes_with_correct_pnl(pool: PgPool) 
         true, // Long, exit > entry → positive pnl
     );
 
-    // Ledger update: balance after close must reflect margin return + pnl.
-    // (Spot-check on the flagship case; the per-strategy pipeline matrix in
-    // `phase3_pipeline_e2e.rs` already exhaustively asserts these invariants.)
+    // Ledger update: balance after close must reflect margin return + pnl
+    // and any fees (matching the contract used in phase3_close_flow /
+    // phase3_pipeline_e2e). fees is asserted == 0 explicitly so a future
+    // non-zero fee model regression surfaces here.
+    assert_eq!(closed.fees, dec!(0), "paper trade fees must be 0");
     let balance_after_close = harness.current_balance().await;
     let pnl = closed.pnl_amount.expect("pnl_amount must be set");
     assert_eq!(
         balance_after_close,
-        balance_before_open + pnl,
-        "balance after close = balance before open + pnl"
+        balance_before_open + pnl - closed.fees,
+        "balance after close = balance before open + pnl - fees"
     );
     assert!(
         balance_after_close > balance_after_open,
