@@ -149,7 +149,7 @@ fn margin_level_at_price(
 /// margin_used = 0.004 × 12_500_000 / 2 = 25000,
 /// margin_level = (30000 - 1000)/25000 = 1.16, well above Y=0.5.
 #[sqlx::test(migrations = "../../migrations")]
-async fn post_sl_margin_level_at_y_bitflyer_cfd(pool: sqlx::PgPool) {
+async fn post_sl_margin_level_above_y_bitflyer_cfd_cap_binding(pool: sqlx::PgPool) {
     let account_id = seed_trading_account(
         &pool,
         "lc_safety_bitflyer",

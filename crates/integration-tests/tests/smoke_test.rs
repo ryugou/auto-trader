@@ -773,12 +773,16 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
             "Long upward close should profit, got {expected_pnl}",
         );
 
-        // Balance flow: balance_after_close = balance_before + pnl.
+        // Balance flow: balance_after_close = balance_before + pnl - fees
+        // (matching the ledger contract used in phase3_close_flow tests; fees
+        // is currently always 0 for paper trades but kept in the formula so
+        // the smoke test catches a future fee model regression).
+        assert_eq!(closed.fees, Decimal::ZERO, "paper trade fees must be 0");
         let balance_after_close = harness.current_balance().await;
         assert_eq!(
             balance_after_close,
-            balance_before + expected_pnl,
-            "balance after close must reflect pnl exactly",
+            balance_before + expected_pnl - closed.fees,
+            "balance after close must reflect pnl - fees exactly",
         );
     }
 }
