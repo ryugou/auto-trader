@@ -18,7 +18,8 @@ use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, TradeStatus};
 use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_executor::trader::Trader;
-use auto_trader_integration_tests::helpers::db::seed_trading_account;
+use auto_trader_integration_tests::helpers::db::{read_current_balance, seed_trading_account};
+use auto_trader_integration_tests::helpers::sizing_invariants;
 use auto_trader_integration_tests::mocks::exchange_api::MockExchangeApiBuilder;
 use auto_trader_market::bitflyer_private::{
     Execution, SendChildOrderResponse,
@@ -201,7 +202,7 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
     let notifier = Arc::new(Notifier::new_disabled());
 
     let trader = Trader::new(
-        pool,
+        pool.clone(),
         exchange,
         account_id,
         "live_fill_test".to_string(),
@@ -214,6 +215,7 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
     )
     .with_poll_timeout(Duration::from_secs(5));
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
 
@@ -231,6 +233,36 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
 
     assert_eq!(trade.status, TradeStatus::Open);
     assert_eq!(trade.direction, Direction::Long);
+    // qty: live path — fill_open returns the aggregated execution size from MockExchangeApi.
+    //      Mock Execution.size = 6622 (the sizer-computed quantity is overridden by
+    //      whatever the exchange reports). One execution → trade.quantity == 6622.
+    assert_eq!(trade.quantity, dec!(6622), "live fill should adopt exchange-reported size (mock=6622)");
+    // Enriched assertions (Task 7) — SL/TP are still computed from fill_price.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+        "stop_loss = fill × (1 - SL%) for Long (live path)"
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+        "take_profit = fill × (1 + TP%) for Long (live path)"
+    );
+    assert_eq!(trade.leverage, dec!(2), "leverage from seeded account");
+    assert_eq!(trade.fees, dec!(0), "no fees at trade open (live path)");
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 }
 
 // =========================================================================
@@ -286,9 +318,36 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
     )
     .with_poll_timeout(Duration::from_secs(5));
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
+    // qty: live path — Mock Execution.size = 6622 → trade.quantity == 6622.
+    assert_eq!(trade.quantity, dec!(6622), "live fill adopts exchange-reported size (mock=6622)");
+    // Open-side enrichment (live path).
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     // Reset counters to track close-only calls
     counters.send_child_order.store(0, Ordering::SeqCst);
@@ -314,6 +373,22 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
 
     assert_eq!(closed.status, TradeStatus::Closed);
     assert!(closed.exit_price.is_some());
+    // Close-side enrichment (live path). The mock returns Execution.price=151
+    // for both open and close — exit_price reflects that.
+    assert_eq!(closed.exit_reason, Some(ExitReason::SlHit));
+    let exit_price = closed.exit_price.expect("exit_price must be set");
+    let expected_pnl = sizing_invariants::expected_pnl(
+        closed.entry_price,
+        exit_price,
+        closed.quantity,
+        closed.direction,
+    )
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    assert_eq!(
+        closed.pnl_amount,
+        Some(expected_pnl),
+        "pnl_amount = TRUNC((exit - entry) × qty, 0) (live path)"
+    );
 }
 
 // =========================================================================
@@ -459,7 +534,7 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
     let notifier = Arc::new(Notifier::new_disabled());
 
     let trader = Trader::new(
-        pool,
+        pool.clone(),
         exchange,
         account_id,
         "paper_test".to_string(),
@@ -471,11 +546,39 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
         true, // dry_run=true → paper path
     );
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
 
     // Verify: PriceStore was used (Long → ask price = 151)
     assert_eq!(trade.entry_price, dec!(151));
+    // qty: dry_run — balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151, min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Enriched assertions (Task 7).
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     // Verify: Exchange API was NOT called
     assert_eq!(
@@ -527,7 +630,7 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
     let notifier = Arc::new(Notifier::new_disabled());
 
     let trader = Trader::new(
-        pool,
+        pool.clone(),
         exchange,
         account_id,
         "live_test".to_string(),
@@ -540,6 +643,7 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
     )
     .with_poll_timeout(Duration::from_secs(5));
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
 
@@ -554,4 +658,30 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
     );
 
     assert_eq!(trade.status, TradeStatus::Open);
+    // qty: live path — Mock Execution.size = 6622 → trade.quantity == 6622.
+    assert_eq!(trade.quantity, dec!(6622), "live fill adopts exchange-reported size (mock=6622)");
+    // Enriched assertions (Task 7) — live path SL/TP from fill_price.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 }

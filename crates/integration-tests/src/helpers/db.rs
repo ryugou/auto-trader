@@ -1,5 +1,6 @@
 //! DB テスト用ヘルパー — snapshot / seed 関数群。
 
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -86,6 +87,18 @@ pub async fn seed_trading_account(
     .expect("seed_trading_account: insert failed");
 
     id
+}
+
+/// 指定 account の `current_balance` を直接読む。
+///
+/// 残高更新を assert する flow テスト用の小さな共有ヘルパー。
+/// `Trader::execute` / `close_position` 前後で値を比較するときに使う。
+pub async fn read_current_balance(pool: &PgPool, account_id: Uuid) -> Decimal {
+    sqlx::query_scalar("SELECT current_balance FROM trading_accounts WHERE id = $1")
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .expect("read_current_balance: query failed")
 }
 
 /// BitflyerCfd + GmoFx の paper アカウントを seed する。

@@ -10,7 +10,8 @@ use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, Tra
 use auto_trader_executor::position_sizer::PositionSizer;
 use auto_trader_executor::risk_gate::{eval_price_freshness, GateDecision};
 use auto_trader_executor::trader::Trader;
-use auto_trader_integration_tests::helpers::db::seed_trading_account;
+use auto_trader_integration_tests::helpers::db::{read_current_balance, seed_trading_account};
+use auto_trader_integration_tests::helpers::sizing_invariants;
 use auto_trader_integration_tests::mocks::exchange_api::MockExchangeApiBuilder;
 use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
 use auto_trader_notify::Notifier;
@@ -160,14 +161,46 @@ async fn fill_open_long_uses_ask_price(pool: sqlx::PgPool) {
     .await;
 
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
-    let trader = make_dry_run_trader(pool, exchange, account_id, price_store).await;
+    let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
 
     assert_eq!(trade.entry_price, dec!(151), "Long should fill at ask price");
     assert_eq!(trade.direction, Direction::Long);
     assert_eq!(trade.status, TradeStatus::Open);
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151, min_lot=1
+    //      max_alloc = 1/(1.00 + 2×0.02) = 1/1.04
+    //      raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → floor → 12735
+    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    // Enriched assertions (Task 7).
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+        "stop_loss must equal entry × (1 - SL%) for Long"
+    );
+    let tp_pct = signal.take_profit_pct.expect("signal has TP");
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            tp_pct,
+        )),
+        "take_profit must equal entry × (1 + TP%) for Long"
+    );
+    assert_eq!(trade.leverage, dec!(2), "leverage from seeded account");
+    assert_eq!(trade.fees, dec!(0), "no fees at trade open");
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 }
 
 /// fill_open Short → bid price (150) で約定。
@@ -187,13 +220,44 @@ async fn fill_open_short_uses_bid_price(pool: sqlx::PgPool) {
     .await;
 
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
-    let trader = make_dry_run_trader(pool, exchange, account_id, price_store).await;
+    let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
 
     assert_eq!(trade.entry_price, dec!(150), "Short should fill at bid price");
     assert_eq!(trade.direction, Direction::Short);
+    // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=150, min_lot=1
+    //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 150 ≈ 12820.51 → floor → 12820
+    assert_eq!(trade.quantity, dec!(12820), "sizer: 1M × 2 × (1/1.04) / 150 → 12820");
+    // Enriched assertions (Task 7).
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+        "stop_loss must equal entry × (1 + SL%) for Short"
+    );
+    let tp_pct = signal.take_profit_pct.expect("signal has TP");
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            tp_pct,
+        )),
+        "take_profit must equal entry × (1 - TP%) for Short"
+    );
+    assert_eq!(trade.leverage, dec!(2), "leverage from seeded account");
+    assert_eq!(trade.fees, dec!(0), "no fees at trade open");
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 }
 
 /// fill_close Long → bid price (150) で決済。
@@ -215,9 +279,36 @@ async fn fill_close_long_uses_bid_price(pool: sqlx::PgPool) {
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
     let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     // まず Long ポジションを開く
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
+    // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long fills at ask=151)
+    assert_eq!(trade.quantity, dec!(12735), "open qty preserved through close");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     // クローズ
     let closed = trader
@@ -232,6 +323,29 @@ async fn fill_close_long_uses_bid_price(pool: sqlx::PgPool) {
     );
     assert_eq!(closed.status, TradeStatus::Closed);
     assert!(closed.exit_reason == Some(ExitReason::SlHit));
+    // qty unchanged after close
+    assert_eq!(closed.quantity, dec!(12735), "close should not mutate quantity");
+    // Close-side enrichment.
+    let exit_price = closed.exit_price.expect("exit_price must be set on Closed");
+    let expected_pnl = sizing_invariants::expected_pnl(
+        closed.entry_price,
+        exit_price,
+        closed.quantity,
+        closed.direction,
+    )
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    assert_eq!(
+        closed.pnl_amount,
+        Some(expected_pnl),
+        "pnl_amount = TRUNC((exit - entry) × qty, 0)"
+    );
+    // Balance reflects the realised PnL (margin already released).
+    let balance_after_close = read_current_balance(&pool, account_id).await;
+    assert_eq!(
+        balance_after_close,
+        balance_before_open + expected_pnl - closed.fees,
+        "balance = before_open + pnl - fees"
+    );
 }
 
 /// fill_close Short → ask price (151) で決済。
@@ -253,9 +367,36 @@ async fn fill_close_short_uses_ask_price(pool: sqlx::PgPool) {
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
     let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
+    let balance_before_open = read_current_balance(&pool, account_id).await;
     // まず Short ポジションを開く
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("execute should succeed");
+    // qty: 1M × 2 × (1/1.04) / 150 → 12820 (Short fills at bid=150)
+    assert_eq!(trade.quantity, dec!(12820), "open qty preserved through close");
+    // Open-side enrichment.
+    assert_eq!(
+        trade.stop_loss,
+        sizing_invariants::expected_stop_loss_price(
+            trade.entry_price,
+            signal.direction,
+            signal.stop_loss_pct,
+        ),
+    );
+    assert_eq!(
+        trade.take_profit,
+        Some(sizing_invariants::expected_take_profit_price(
+            trade.entry_price,
+            signal.direction,
+            signal.take_profit_pct.unwrap(),
+        )),
+    );
+    assert_eq!(trade.leverage, dec!(2));
+    assert_eq!(trade.fees, dec!(0));
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(
+        &trade,
+        balance_before_open,
+        dec!(1.00),
+    );
 
     // クローズ
     let closed = trader
@@ -270,6 +411,27 @@ async fn fill_close_short_uses_ask_price(pool: sqlx::PgPool) {
     );
     assert_eq!(closed.status, TradeStatus::Closed);
     assert!(closed.exit_reason == Some(ExitReason::TpHit));
+    assert_eq!(closed.quantity, dec!(12820), "close should not mutate quantity");
+    // Close-side enrichment.
+    let exit_price = closed.exit_price.expect("exit_price must be set on Closed");
+    let expected_pnl = sizing_invariants::expected_pnl(
+        closed.entry_price,
+        exit_price,
+        closed.quantity,
+        closed.direction,
+    )
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    assert_eq!(
+        closed.pnl_amount,
+        Some(expected_pnl),
+        "pnl_amount = TRUNC((entry - exit) × qty, 0) for Short"
+    );
+    let balance_after_close = read_current_balance(&pool, account_id).await;
+    assert_eq!(
+        balance_after_close,
+        balance_before_open + expected_pnl - closed.fees,
+        "balance = before_open + pnl - fees"
+    );
 }
 
 // =========================================================================
