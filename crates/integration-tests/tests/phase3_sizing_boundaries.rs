@@ -171,7 +171,8 @@ async fn account_too_small_rejects_signal(pool: sqlx::PgPool) {
         dec!(0.02),
         dec!(0.50),
         dec!(25_000_000),
-    );
+    )
+    .expect("positive inputs should produce a raw qty");
     assert_eq!(raw, dec!(0.0008), "raw qty must be below 0.001 min_lot");
 
     // Sanity: balance unchanged because no fill happened.
@@ -278,8 +279,8 @@ async fn lc_constraint_binds_at_extreme_sl_gmo_fx(pool: sqlx::PgPool) {
         .expect("execute should succeed");
 
     // Verify the LC cap is the one that bites here.
-    let max_alloc =
-        sizing_invariants::compute_max_alloc(dec!(10), dec!(0.20), dec!(1.00));
+    let max_alloc = sizing_invariants::compute_max_alloc(dec!(10), dec!(0.20), dec!(1.00))
+        .expect("max_alloc inputs are positive");
     assert!(
         max_alloc < dec!(1.0),
         "test setup invariant: max_alloc must be below alloc=1.0 \

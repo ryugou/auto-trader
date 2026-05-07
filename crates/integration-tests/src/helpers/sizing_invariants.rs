@@ -7,16 +7,50 @@ use auto_trader_core::types::{Direction, Trade};
 use rust_decimal::{Decimal, RoundingStrategy};
 
 /// `max_alloc = 1 / (Y + L × s)`
+/// Mirrors the input validation in `PositionSizer::calculate_quantity`:
+/// returns `None` if any input is non-positive or `allocation_pct > 1`.
+/// Helper consumers can rely on `Some` meaning "production would also have
+/// produced a positive raw quantity".
+fn validate_inputs(
+    balance: Decimal,
+    leverage: Decimal,
+    allocation_pct: Decimal,
+    stop_loss_pct: Decimal,
+    liquidation_margin_level: Decimal,
+    entry_price: Decimal,
+) -> Option<()> {
+    if balance <= Decimal::ZERO
+        || entry_price <= Decimal::ZERO
+        || leverage <= Decimal::ZERO
+        || allocation_pct <= Decimal::ZERO
+        || allocation_pct > Decimal::ONE
+        || stop_loss_pct <= Decimal::ZERO
+        || liquidation_margin_level <= Decimal::ZERO
+    {
+        return None;
+    }
+    Some(())
+}
+
+/// `max_alloc = 1 / (Y + L × s)`. Returns `None` for non-positive inputs
+/// (matching `PositionSizer::calculate_quantity`'s validation).
 pub fn compute_max_alloc(
     leverage: Decimal,
     stop_loss_pct: Decimal,
     liquidation_margin_level: Decimal,
-) -> Decimal {
-    Decimal::ONE / (liquidation_margin_level + leverage * stop_loss_pct)
+) -> Option<Decimal> {
+    if leverage <= Decimal::ZERO
+        || stop_loss_pct <= Decimal::ZERO
+        || liquidation_margin_level <= Decimal::ZERO
+    {
+        return None;
+    }
+    Some(Decimal::ONE / (liquidation_margin_level + leverage * stop_loss_pct))
 }
 
 /// Mirror of `PositionSizer::calculate_quantity` (without min_lot truncation).
-/// Returns the raw quantity before truncation.
+/// Returns `None` when any input is non-positive or `allocation_pct > 1`,
+/// matching production validation. Otherwise returns the raw quantity.
 pub fn compute_raw_quantity(
     balance: Decimal,
     leverage: Decimal,
@@ -24,10 +58,20 @@ pub fn compute_raw_quantity(
     stop_loss_pct: Decimal,
     liquidation_margin_level: Decimal,
     entry_price: Decimal,
-) -> Decimal {
-    let max_alloc = compute_max_alloc(leverage, stop_loss_pct, liquidation_margin_level);
+) -> Option<Decimal> {
+    validate_inputs(
+        balance,
+        leverage,
+        allocation_pct,
+        stop_loss_pct,
+        liquidation_margin_level,
+        entry_price,
+    )?;
+    let max_alloc =
+        compute_max_alloc(leverage, stop_loss_pct, liquidation_margin_level)
+            .expect("max_alloc inputs validated above");
     let risk_alloc = max_alloc.min(allocation_pct);
-    balance * leverage * risk_alloc / entry_price
+    Some(balance * leverage * risk_alloc / entry_price)
 }
 
 /// Apply min_lot truncation (floor to multiple of `min_lot`).
@@ -62,7 +106,7 @@ pub fn expected_quantity(
         stop_loss_pct,
         liquidation_margin_level,
         entry_price,
-    );
+    )?;
     if min_lot > Decimal::ZERO {
         let truncated = truncate_to_min_lot(raw, min_lot);
         if truncated < min_lot {
@@ -227,6 +271,37 @@ mod tests {
         assert_eq!(qty, None);
     }
 
+    /// Non-positive inputs → None (matches production validation).
+    #[test]
+    fn expected_quantity_rejects_non_positive_inputs() {
+        let p = |b, l, a, s, y, e| {
+            expected_quantity(b, l, a, s, y, e, dec!(0.001))
+        };
+        // zero balance / leverage / allocation / SL / Y / entry → None
+        assert_eq!(p(dec!(0), dec!(2), dec!(1.0), dec!(0.02), dec!(0.5), dec!(1)), None);
+        assert_eq!(p(dec!(30000), dec!(0), dec!(1.0), dec!(0.02), dec!(0.5), dec!(1)), None);
+        assert_eq!(p(dec!(30000), dec!(2), dec!(0), dec!(0.02), dec!(0.5), dec!(1)), None);
+        assert_eq!(p(dec!(30000), dec!(2), dec!(1.0), dec!(0), dec!(0.5), dec!(1)), None);
+        assert_eq!(p(dec!(30000), dec!(2), dec!(1.0), dec!(0.02), dec!(0), dec!(1)), None);
+        assert_eq!(p(dec!(30000), dec!(2), dec!(1.0), dec!(0.02), dec!(0.5), dec!(0)), None);
+        // allocation > 1 → None
+        assert_eq!(p(dec!(30000), dec!(2), dec!(1.5), dec!(0.02), dec!(0.5), dec!(1)), None);
+    }
+
+    /// `compute_max_alloc` rejects non-positive inputs (no division by zero).
+    #[test]
+    fn compute_max_alloc_rejects_non_positive_inputs() {
+        assert_eq!(compute_max_alloc(dec!(0), dec!(0.02), dec!(0.5)), None);
+        assert_eq!(compute_max_alloc(dec!(2), dec!(0), dec!(0.5)), None);
+        assert_eq!(compute_max_alloc(dec!(2), dec!(0.02), dec!(0)), None);
+        // negative
+        assert_eq!(compute_max_alloc(dec!(-1), dec!(0.02), dec!(0.5)), None);
+        // valid
+        let m = compute_max_alloc(dec!(2), dec!(0.02), dec!(0.5))
+            .expect("positive inputs");
+        assert!(m > Decimal::ZERO);
+    }
+
     #[test]
     fn expected_stop_loss_price_long_subtracts() {
         let sl = expected_stop_loss_price(dec!(100), Direction::Long, dec!(0.02));
@@ -319,8 +394,8 @@ mod tests {
         let sl_pct = dec!(0.02);
         let y = dec!(1.0);
         let entry = dec!(157);
-        let raw_qty =
-            compute_raw_quantity(balance, leverage, dec!(1.0), sl_pct, y, entry);
+        let raw_qty = compute_raw_quantity(balance, leverage, dec!(1.0), sl_pct, y, entry)
+            .expect("positive inputs should produce a raw qty");
         let sl = expected_stop_loss_price(entry, Direction::Long, sl_pct);
         let trade = make_trade(Direction::Long, entry, sl, raw_qty, leverage);
         assert_post_sl_margin_level_at_least_y(&trade, balance, y);

@@ -568,8 +568,8 @@ async fn bitflyer_cfd_max_alloc_capped_at_one_realistic(pool: sqlx::PgPool) {
     assert_eq!(trade.quantity, dec!(0.004));
 
     // Verify the cap (not LC) is binding.
-    let max_alloc =
-        sizing_invariants::compute_max_alloc(dec!(2), dec!(0.03), dec!(0.50));
+    let max_alloc = sizing_invariants::compute_max_alloc(dec!(2), dec!(0.03), dec!(0.50))
+        .expect("max_alloc inputs are positive");
     assert!(
         max_alloc > dec!(1.0),
         "test setup invariant: max_alloc must exceed alloc=1.0 to confirm \
