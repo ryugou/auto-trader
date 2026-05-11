@@ -12,6 +12,7 @@ auto-trader-executor = { workspace = true }
 auto-trader-notify = { workspace = true }
 auto-trader-vegapunk = { workspace = true }
 auto-trader-macro-analyst = { workspace = true }
+async-trait = { workspace = true }
 futures-util = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
