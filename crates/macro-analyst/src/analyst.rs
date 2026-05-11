@@ -1,16 +1,17 @@
 use crate::calendar::EconomicCalendar;
 use crate::news::NewsFetcher;
 use crate::summarizer::GeminiSummarizer;
+use auto_trader_core::knowledge::{KnowledgeStore, MarketEvent};
 use auto_trader_core::strategy::MacroUpdate;
-use auto_trader_vegapunk::client::VegapunkClient;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct MacroAnalyst {
     _calendar: EconomicCalendar,
     news: NewsFetcher,
     summarizer: GeminiSummarizer,
-    vegapunk: Option<VegapunkClient>,
+    knowledge: Option<Arc<dyn KnowledgeStore>>,
     pool: Option<PgPool>,
     seen_titles: std::collections::HashSet<String>,
 }
@@ -26,14 +27,14 @@ impl MacroAnalyst {
             _calendar: EconomicCalendar::new(),
             news: NewsFetcher::new(news_sources),
             summarizer: GeminiSummarizer::new(gemini_api_url, gemini_api_key, gemini_model),
-            vegapunk: None,
+            knowledge: None,
             pool: None,
             seen_titles: std::collections::HashSet::new(),
         }
     }
 
-    pub fn with_vegapunk(mut self, client: VegapunkClient) -> Self {
-        self.vegapunk = Some(client);
+    pub fn with_knowledge(mut self, store: Arc<dyn KnowledgeStore>) -> Self {
+        self.knowledge = Some(store);
         self
     }
 
@@ -66,13 +67,15 @@ impl MacroAnalyst {
                     }
                 };
 
-                if let Some(vp) = &mut self.vegapunk {
-                    let timestamp = chrono::Utc::now().to_rfc3339();
-                    if let Err(e) = vp
-                        .ingest_raw(&summary, "market_event", "macro-events", &timestamp)
-                        .await
-                    {
-                        tracing::warn!("vegapunk ingest failed: {e}");
+                if let Some(store) = &self.knowledge {
+                    let event = MarketEvent {
+                        summary: &summary,
+                        event_type: "news",
+                        impact: "medium",
+                        timestamp: chrono::Utc::now(),
+                    };
+                    if let Err(e) = store.record_market_event(&event).await {
+                        tracing::warn!("knowledge_store record_market_event failed: {e}");
                     }
                 }
 
