@@ -1,11 +1,12 @@
 use auto_trader_core::config::{AppConfig, GeminiConfig, StrategyConfig};
+use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::trading_accounts::TradingAccount;
 use auto_trader_strategy::engine::StrategyEngine;
-use auto_trader_vegapunk::client::VegapunkClient;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Resolve broker liquidation thresholds per exchange from config, validated
 /// against active trading accounts.
@@ -80,7 +81,9 @@ pub fn resolve_exchange_liquidation_levels(
     // exchanges may sit at 0 / negative without breaking this run, and we
     // don't want to crash startup over config a future operator left there.
     for ex in &required {
-        let value = map.get(ex).expect("required entries are present after the missing check");
+        let value = map
+            .get(ex)
+            .expect("required entries are present after the missing check");
         if *value <= Decimal::ZERO {
             anyhow::bail!(
                 "config: [exchange_margin.{}] liquidation_margin_level must be > 0, got {} \
@@ -160,8 +163,7 @@ pub async fn register_strategies(
     engine: &mut StrategyEngine,
     strategies: &[StrategyConfig],
     pool: &PgPool,
-    vegapunk_base: &Option<VegapunkClient>,
-    vegapunk_schema: &str,
+    knowledge: &Option<Arc<dyn KnowledgeStore>>,
     gemini_config: Option<&GeminiConfig>,
 ) {
     for sc in strategies {
@@ -195,13 +197,13 @@ pub async fn register_strategies(
                     }
                 };
 
-                // Clone from shared Vegapunk channel (no new TCP connection)
-                let vp_client = match vegapunk_base {
-                    Some(base) => {
-                        VegapunkClient::clone_from_channel(base, vegapunk_schema)
-                    }
+                let store = match knowledge {
+                    Some(s) => Arc::clone(s),
                     None => {
-                        tracing::warn!("vegapunk unavailable, skipping strategy: {}", sc.name);
+                        tracing::warn!(
+                            "knowledge_store unavailable, skipping strategy: {}",
+                            sc.name
+                        );
                         continue;
                     }
                 };
@@ -211,7 +213,7 @@ pub async fn register_strategies(
                         sc.name.clone(),
                         pairs,
                         holding_days_max,
-                        vp_client,
+                        store,
                         gemini.api_url.clone(),
                         gemini_api_key,
                         gemini.model.clone(),
@@ -236,34 +238,33 @@ pub async fn register_strategies(
             }
             name if name.starts_with("donchian_trend_evolve") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                let params: serde_json::Value =
-                    match sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
-                        "SELECT params FROM strategy_params WHERE strategy_name = $1",
-                    )
-                    .bind(&sc.name)
-                    .fetch_optional(pool)
-                    .await
-                    {
-                        Ok(Some(j)) => j.0,
-                        Ok(None) => {
-                            tracing::warn!(
-                                "no strategy_params row for '{}', using defaults",
-                                sc.name
-                            );
-                            serde_json::json!({
-                                "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
-                            })
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "failed to load strategy_params for '{}': {e}, using defaults",
-                                sc.name
-                            );
-                            serde_json::json!({
-                                "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
-                            })
-                        }
-                    };
+                let params: serde_json::Value = match sqlx::query_scalar::<
+                    _,
+                    sqlx::types::Json<serde_json::Value>,
+                >(
+                    "SELECT params FROM strategy_params WHERE strategy_name = $1",
+                )
+                .bind(&sc.name)
+                .fetch_optional(pool)
+                .await
+                {
+                    Ok(Some(j)) => j.0,
+                    Ok(None) => {
+                        tracing::warn!("no strategy_params row for '{}', using defaults", sc.name);
+                        serde_json::json!({
+                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to load strategy_params for '{}': {e}, using defaults",
+                            sc.name
+                        );
+                        serde_json::json!({
+                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
+                        })
+                    }
+                };
                 engine.add_strategy(
                     Box::new(
                         auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(
