@@ -168,27 +168,19 @@ pub fn compute_feedback_rating(trade: &Trade) -> i32 {
         Some(ExitReason::TpHit)
         | Some(ExitReason::StrategyTrailingChannel)
         | Some(ExitReason::StrategyMeanReached)
-        | Some(ExitReason::StrategyTrailingMa) => {
-            if is_profit {
-                5
-            } else {
-                3
-            }
+        | Some(ExitReason::StrategyTrailingMa)
+            if is_profit =>
+        {
+            5
         }
-        Some(ExitReason::StrategyTimeLimit) => {
-            if is_profit {
-                4
-            } else {
-                3
-            }
-        }
-        Some(ExitReason::SlHit) => {
-            if is_profit {
-                3
-            } else {
-                2
-            }
-        }
+        Some(ExitReason::TpHit)
+        | Some(ExitReason::StrategyTrailingChannel)
+        | Some(ExitReason::StrategyMeanReached)
+        | Some(ExitReason::StrategyTrailingMa) => 3,
+        Some(ExitReason::StrategyTimeLimit) if is_profit => 4,
+        Some(ExitReason::StrategyTimeLimit) => 3,
+        Some(ExitReason::SlHit) if is_profit => 3,
+        Some(ExitReason::SlHit) => 2,
         _ => 3,
     }
 }

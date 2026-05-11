@@ -1,4 +1,3 @@
-mod enriched_ingest;
 mod regime;
 mod startup_reconcile;
 mod weekly_batch;
@@ -1588,7 +1587,7 @@ async fn main() -> anyhow::Result<()> {
 
                                 if let Some(sid) = search_id {
                                     let rating =
-                                        crate::enriched_ingest::compute_feedback_rating(&t);
+                                        auto_trader::enriched_ingest::compute_feedback_rating(&t);
                                     let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;
                                     let regime = entry_ind
                                         .as_ref()
