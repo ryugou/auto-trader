@@ -1,10 +1,10 @@
 use auto_trader_core::event::PriceEvent;
+use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::strategy::{MacroUpdate, Strategy};
 use auto_trader_core::types::{Direction, Pair, Signal};
-use auto_trader_vegapunk::client::VegapunkClient;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use std::sync::Arc;
 
 pub struct SwingLLMv1 {
     name: String,
@@ -12,7 +12,7 @@ pub struct SwingLLMv1 {
     /// Maximum holding days — currently used as LLM prompt context only.
     /// Enforcement via forced close is not implemented in Phase 0.
     holding_days_max: u32,
-    vegapunk: Mutex<VegapunkClient>,
+    knowledge: Arc<dyn KnowledgeStore>,
     gemini_client: reqwest::Client,
     gemini_api_url: String,
     gemini_api_key: String,
@@ -29,7 +29,7 @@ impl SwingLLMv1 {
         name: String,
         pairs: Vec<Pair>,
         holding_days_max: u32,
-        vegapunk: VegapunkClient,
+        knowledge: Arc<dyn KnowledgeStore>,
         gemini_api_url: String,
         gemini_api_key: String,
         gemini_model: String,
@@ -42,7 +42,7 @@ impl SwingLLMv1 {
             name,
             pairs,
             holding_days_max,
-            vegapunk: Mutex::new(vegapunk),
+            knowledge,
             gemini_client,
             gemini_api_url,
             gemini_api_key,
@@ -80,22 +80,14 @@ impl SwingLLMv1 {
         pair: &Pair,
         current_price: Decimal,
     ) -> anyhow::Result<Option<(Direction, Decimal, Decimal, Decimal, f64)>> {
-        // 1. Search Vegapunk for similar patterns
-        let query = format!(
-            "{}の現在の市場状況とトレード判断。価格: {}",
-            pair.0, current_price
-        );
-        let mut vp = self.vegapunk.lock().await;
-        let search_result = vp.search(&query, "local", 5).await?;
+        // 1. Search KnowledgeStore for similar patterns
+        let search_result = self
+            .knowledge
+            .search_similar_patterns(pair, current_price, 5)
+            .await?;
 
         // 2. Build context from search results
-        let context: Vec<String> = search_result
-            .results
-            .iter()
-            .filter_map(|r| r.text.clone())
-            .collect();
-
-        drop(vp); // release lock before making Gemini API call
+        let context: Vec<String> = search_result.hits.into_iter().map(|h| h.text).collect();
 
         // 3. Ask Gemini Flash for trade decision
         let macro_context = self.latest_macro.as_deref().unwrap_or("マクロ情報なし");
