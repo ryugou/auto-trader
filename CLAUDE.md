@@ -31,3 +31,19 @@
 - `protoc` が PATH 上 (macOS: `brew install protobuf`)
 - `DATABASE_URL` 未設定なら localhost:15432 の docker-compose Postgres を仮定し、必要なら自動起動する
 - 外部 API 接続を試したい場合は `VEGAPUNK_AUTH_TOKEN` / `OANDA_API_KEY` / `OANDA_ACCOUNT_ID` 等を env で渡す (未設定なら該当テストは SKIPPED)
+
+## 【強制】git hook セットアップ
+
+Clone 後に 1 回実行:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+これにより `core.hooksPath` が `.githooks/` に切り替わり、以下が hook で強制される:
+
+- `.githooks/pre-push`:
+  1. `main` / `master` への直 push をドキュメント以外で拒否
+  2. **ドキュメント以外の変更を含む push は `scripts/test-all.sh` が pass しなければ拒否**
+
+非常時のみの override: `git push --no-verify` (本来禁止。CI でも検出されるので使わない)。
