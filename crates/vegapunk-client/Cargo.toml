@@ -9,6 +9,8 @@ prost = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+auto-trader-core = { path = "../core" }
 
 [build-dependencies]
 tonic-build = { workspace = true }
