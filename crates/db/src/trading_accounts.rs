@@ -315,13 +315,12 @@ pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Res
     }
 
     // 1. Fetch initial_balance
-    let (initial_balance,): (Decimal,) = sqlx::query_as(
-        "SELECT initial_balance FROM trading_accounts WHERE id = $1",
-    )
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("trading account {account_id} not found"))?;
+    let (initial_balance,): (Decimal,) =
+        sqlx::query_as("SELECT initial_balance FROM trading_accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("trading account {account_id} not found"))?;
 
     // 2. Aggregate closed trades
     let (total_pnl, total_fees): (Option<Decimal>, Option<Decimal>) = sqlx::query_as(

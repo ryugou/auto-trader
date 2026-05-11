@@ -107,7 +107,13 @@ async fn build_two_account_fanout(pool: PgPool) -> Vec<RoutedAccount> {
     ]);
 
     // Realistic mids so sizing produces a positive quantity post-truncation.
-    seed_price(&price_store, Exchange::BitflyerCfd, &bitflyer_pair, dec!(15_000_000)).await;
+    seed_price(
+        &price_store,
+        Exchange::BitflyerCfd,
+        &bitflyer_pair,
+        dec!(15_000_000),
+    )
+    .await;
     seed_price(&price_store, Exchange::GmoFx, &gmo_pair, dec!(150)).await;
 
     let mut min_sizes: HashMap<Pair, Decimal> = HashMap::new();
@@ -220,7 +226,10 @@ async fn signal_for_btc_routes_to_bitflyer_only(pool: PgPool) {
         1,
         "exactly one account should fire for FX_BTC_JPY signal, got {trades:?}"
     );
-    assert_eq!(trades[0].0, "routing_bitflyer", "BTC signal must land on bitflyer_cfd");
+    assert_eq!(
+        trades[0].0, "routing_bitflyer",
+        "BTC signal must land on bitflyer_cfd"
+    );
     assert_eq!(trades[0].1.exchange, Exchange::BitflyerCfd);
     assert_eq!(trades[0].1.pair, Pair::new(BTC_PAIR));
     assert_eq!(trades[0].1.account_id, bitflyer_id);
@@ -253,7 +262,10 @@ async fn signal_for_usdjpy_routes_to_gmofx_only(pool: PgPool) {
         1,
         "exactly one account should fire for USD_JPY signal, got {trades:?}"
     );
-    assert_eq!(trades[0].0, "routing_gmo", "USD_JPY signal must land on gmo_fx");
+    assert_eq!(
+        trades[0].0, "routing_gmo",
+        "USD_JPY signal must land on gmo_fx"
+    );
     assert_eq!(trades[0].1.exchange, Exchange::GmoFx);
     assert_eq!(trades[0].1.pair, Pair::new(USD_PAIR));
     assert_eq!(trades[0].1.account_id, gmo_id);

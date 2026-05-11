@@ -8,9 +8,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{Strategy, StrategyExitReason};
-use auto_trader_core::types::{
-    Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus,
-};
+use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus};
 use auto_trader_integration_tests::helpers::trade_flow::{fixtures_dir, load_events_from_csv};
 use auto_trader_strategy::donchian_trend::DonchianTrendV1;
 use chrono::{DateTime, Utc};
@@ -23,10 +21,7 @@ const PAIR: &str = "USD_JPY";
 const TIMEFRAME: &str = "H1";
 
 fn new_strategy() -> DonchianTrendV1 {
-    DonchianTrendV1::new(
-        "donchian_trend_v1".to_string(),
-        vec![Pair::new(PAIR)],
-    )
+    DonchianTrendV1::new("donchian_trend_v1".to_string(), vec![Pair::new(PAIR)])
 }
 
 /// 20bar 高値ブレイク + ATR > baseline → Long シグナル。
@@ -136,10 +131,7 @@ async fn donchian_atr_zero() {
         }
     }
 
-    assert!(
-        !any_signal,
-        "expected no signal when ATR is zero"
-    );
+    assert!(!any_signal, "expected no signal when ATR is zero");
 }
 
 /// 55 本未満 → 履歴不足でシグナルなし。
@@ -193,7 +185,13 @@ async fn donchian_long_breakout_bitflyer() {
 
 // ─── Exit test helpers ───────────────────────────────────────────────────
 
-fn make_h1_event(pair: &str, close: Decimal, high: Decimal, low: Decimal, ts: DateTime<Utc>) -> PriceEvent {
+fn make_h1_event(
+    pair: &str,
+    close: Decimal,
+    high: Decimal,
+    low: Decimal,
+    ts: DateTime<Utc>,
+) -> PriceEvent {
     PriceEvent {
         pair: Pair::new(pair),
         exchange: Exchange::GmoFx,
@@ -259,7 +257,9 @@ async fn warmup_long_with_exit_channel() -> (DonchianTrendV1, Decimal) {
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let signal = strategy.on_price(&trigger[0]).await
+    let signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("donchian_long_breakout fixture must produce a Long signal");
     assert_eq!(signal.direction, Direction::Long);
     let entry_price = dec!(152.000);
@@ -271,13 +271,15 @@ async fn warmup_long_with_exit_channel() -> (DonchianTrendV1, Decimal) {
             .unwrap()
             .with_timezone(&Utc);
         let ts = base + chrono::Duration::hours(i as i64 - 1);
-        let _ = strategy.on_price(&make_h1_event(
-            PAIR,
-            dec!(153.500),
-            dec!(153.550),
-            dec!(153.450),
-            ts,
-        )).await;
+        let _ = strategy
+            .on_price(&make_h1_event(
+                PAIR,
+                dec!(153.500),
+                dec!(153.550),
+                dec!(153.450),
+                ts,
+            ))
+            .await;
     }
 
     (strategy, entry_price)
@@ -295,7 +297,9 @@ async fn warmup_short_with_exit_channel() -> (DonchianTrendV1, Decimal) {
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let signal = strategy.on_price(&trigger[0]).await
+    let signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("donchian_short_breakout fixture must produce a Short signal");
     assert_eq!(signal.direction, Direction::Short);
     let entry_price = dec!(148.000);
@@ -307,13 +311,15 @@ async fn warmup_short_with_exit_channel() -> (DonchianTrendV1, Decimal) {
             .unwrap()
             .with_timezone(&Utc);
         let ts = base + chrono::Duration::hours(i as i64 - 1);
-        let _ = strategy.on_price(&make_h1_event(
-            PAIR,
-            dec!(146.500),
-            dec!(146.550),
-            dec!(146.450),
-            ts,
-        )).await;
+        let _ = strategy
+            .on_price(&make_h1_event(
+                PAIR,
+                dec!(146.500),
+                dec!(146.550),
+                dec!(146.450),
+                ts,
+            ))
+            .await;
     }
 
     (strategy, entry_price)
@@ -330,7 +336,13 @@ async fn donchian_long_trailing_exit() {
     // Position already in profit at 153.5 level → unrealized=1.5 >= 1.0 (1R passes).
     // Exit channel 10-bar low ≈ 153.450 (12 bars with low=153.450).
     // Drop close to 153.0 < 153.450 → trailing break fires.
-    let pos = make_position("donchian_trend_v1", PAIR, Direction::Long, dec!(152.000), dec!(151.000));
+    let pos = make_position(
+        "donchian_trend_v1",
+        PAIR,
+        Direction::Long,
+        dec!(152.000),
+        dec!(151.000),
+    );
 
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-04T01:00:00Z")
         .unwrap()
@@ -338,7 +350,9 @@ async fn donchian_long_trailing_exit() {
     let exit_event = make_h1_event(PAIR, dec!(153.000), dec!(153.100), dec!(152.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert_eq!(exits.len(), 1, "expected trailing channel exit for Long");
     assert_eq!(exits[0].trade_id, pos.trade.id);
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
@@ -356,7 +370,13 @@ async fn donchian_short_trailing_exit() {
     // Position in profit at 146.5 level → unrealized=1.5 >= 1.0 (1R passes).
     // Exit channel 10-bar high ≈ 146.550.
     // Spike close to 147.0 > 146.550 → trailing break fires.
-    let pos = make_position("donchian_trend_v1", PAIR, Direction::Short, dec!(148.000), dec!(149.000));
+    let pos = make_position(
+        "donchian_trend_v1",
+        PAIR,
+        Direction::Short,
+        dec!(148.000),
+        dec!(149.000),
+    );
 
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-04T01:00:00Z")
         .unwrap()
@@ -364,7 +384,9 @@ async fn donchian_short_trailing_exit() {
     let exit_event = make_h1_event(PAIR, dec!(147.000), dec!(147.100), dec!(146.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert_eq!(exits.len(), 1, "expected trailing channel exit for Short");
     assert_eq!(exits[0].trade_id, pos.trade.id);
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
@@ -379,7 +401,13 @@ async fn donchian_long_trailing_no_break() {
     let (mut strategy, _entry_price) = warmup_long_with_exit_channel().await;
 
     // Long in profit, 1R reached.
-    let pos = make_position("donchian_trend_v1", PAIR, Direction::Long, dec!(152.000), dec!(151.000));
+    let pos = make_position(
+        "donchian_trend_v1",
+        PAIR,
+        Direction::Long,
+        dec!(152.000),
+        dec!(151.000),
+    );
 
     // Close at 153.500 ≥ 10-bar low 153.450 → no trailing break.
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-04T01:00:00Z")
@@ -388,7 +416,9 @@ async fn donchian_long_trailing_no_break() {
     let exit_event = make_h1_event(PAIR, dec!(153.500), dec!(153.600), dec!(153.400), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "price above 10-bar low → no trailing exit, got {} exits",
@@ -403,7 +433,13 @@ async fn donchian_long_trailing_no_break() {
 async fn donchian_short_trailing_no_break() {
     let (mut strategy, _entry_price) = warmup_short_with_exit_channel().await;
 
-    let pos = make_position("donchian_trend_v1", PAIR, Direction::Short, dec!(148.000), dec!(149.000));
+    let pos = make_position(
+        "donchian_trend_v1",
+        PAIR,
+        Direction::Short,
+        dec!(148.000),
+        dec!(149.000),
+    );
 
     // Close at 146.500 ≤ 10-bar high 146.550 → no trailing break.
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-04T01:00:00Z")
@@ -412,7 +448,9 @@ async fn donchian_short_trailing_no_break() {
     let exit_event = make_h1_event(PAIR, dec!(146.500), dec!(146.550), dec!(146.450), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "price below 10-bar high → no trailing exit for Short, got {} exits",
@@ -430,7 +468,13 @@ async fn donchian_1r_not_reached_long() {
     // Entry 153.0, SL 151.0 → sl_distance=2.0
     // Close 153.0 → unrealized = 0 < 2.0 → 1R not reached.
     // 153.0 < exit_low 153.450 → trailing would fire, but 1R blocks.
-    let pos = make_position("donchian_trend_v1", PAIR, Direction::Long, dec!(153.000), dec!(151.000));
+    let pos = make_position(
+        "donchian_trend_v1",
+        PAIR,
+        Direction::Long,
+        dec!(153.000),
+        dec!(151.000),
+    );
 
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-04T01:00:00Z")
         .unwrap()
@@ -438,7 +482,9 @@ async fn donchian_1r_not_reached_long() {
     let exit_event = make_h1_event(PAIR, dec!(153.000), dec!(153.100), dec!(152.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "1R not reached → trailing exit suppressed, got {} exits",
@@ -456,7 +502,13 @@ async fn donchian_1r_not_reached_short() {
     // Entry 146.5, SL 148.5 → sl_distance=2.0
     // Close 147.0 → unrealized = 146.5 - 147.0 = -0.5 (loss!) → 1R not reached.
     // 147.0 > exit_high 146.550 → trailing would fire, but 1R blocks.
-    let pos = make_position("donchian_trend_v1", PAIR, Direction::Short, dec!(146.500), dec!(148.500));
+    let pos = make_position(
+        "donchian_trend_v1",
+        PAIR,
+        Direction::Short,
+        dec!(146.500),
+        dec!(148.500),
+    );
 
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-04T01:00:00Z")
         .unwrap()
@@ -464,7 +516,9 @@ async fn donchian_1r_not_reached_short() {
     let exit_event = make_h1_event(PAIR, dec!(147.000), dec!(147.100), dec!(146.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "1R not reached → trailing exit suppressed for Short, got {} exits",

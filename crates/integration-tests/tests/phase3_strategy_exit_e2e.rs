@@ -136,7 +136,9 @@ async fn build_harness(pool: PgPool, account_label: &str) -> PipelineHarness {
 
 /// Wrap an executed Trade as a `Position` for `Strategy::on_open_positions`.
 fn position_from_trade(trade: &Trade) -> Position {
-    Position { trade: trade.clone() }
+    Position {
+        trade: trade.clone(),
+    }
 }
 
 /// Common assertions on a closed trade after `trader.close_position`.
@@ -168,7 +170,11 @@ fn assert_closed_trade(
         closed.exit_price.expect("exit_price must be set"),
         expected_exit_price,
         "exit_price must equal {} side ({})",
-        if matches!(direction, Direction::Long) { "bid" } else { "ask" },
+        if matches!(direction, Direction::Long) {
+            "bid"
+        } else {
+            "ask"
+        },
         expected_exit_price,
     );
 
@@ -199,24 +205,19 @@ fn assert_closed_trade(
 
 /// Load CSV fixture, set price store from the trigger candle's bid/ask,
 /// drive strategy with warmup + trigger, return entry signal.
-async fn drive_bb_entry(
-    harness: &PipelineHarness,
-    fixture: &str,
-) -> (BbMeanRevertV1, Signal) {
-    let mut strategy = BbMeanRevertV1::new(
-        "test_strategy".to_string(),
-        vec![Pair::new(PAIR)],
-    );
-    let events = load_events_from_csv(
-        &fixtures_dir().join(fixture),
-        EXCHANGE,
-        PAIR,
-        "M5",
-    );
+async fn drive_bb_entry(harness: &PipelineHarness, fixture: &str) -> (BbMeanRevertV1, Signal) {
+    let mut strategy = BbMeanRevertV1::new("test_strategy".to_string(), vec![Pair::new(PAIR)]);
+    let events = load_events_from_csv(&fixtures_dir().join(fixture), EXCHANGE, PAIR, "M5");
     let (warmup_events, trigger) = events.split_at(events.len() - 1);
     let trigger_event = trigger[0].clone();
-    let bid = trigger_event.candle.best_bid.expect("fixture must carry bid");
-    let ask = trigger_event.candle.best_ask.expect("fixture must carry ask");
+    let bid = trigger_event
+        .candle
+        .best_bid
+        .expect("fixture must carry bid");
+    let ask = trigger_event
+        .candle
+        .best_ask
+        .expect("fixture must carry ask");
     harness.set_market(bid, ask).await;
     let warmup_candles: Vec<_> = warmup_events.iter().map(|e| e.candle.clone()).collect();
     let signal = harness
@@ -230,20 +231,18 @@ async fn drive_donchian_entry(
     harness: &PipelineHarness,
     fixture: &str,
 ) -> (DonchianTrendV1, Signal) {
-    let mut strategy = DonchianTrendV1::new(
-        "test_strategy".to_string(),
-        vec![Pair::new(PAIR)],
-    );
-    let events = load_events_from_csv(
-        &fixtures_dir().join(fixture),
-        EXCHANGE,
-        PAIR,
-        "H1",
-    );
+    let mut strategy = DonchianTrendV1::new("test_strategy".to_string(), vec![Pair::new(PAIR)]);
+    let events = load_events_from_csv(&fixtures_dir().join(fixture), EXCHANGE, PAIR, "H1");
     let (warmup_events, trigger) = events.split_at(events.len() - 1);
     let trigger_event = trigger[0].clone();
-    let bid = trigger_event.candle.best_bid.expect("fixture must carry bid");
-    let ask = trigger_event.candle.best_ask.expect("fixture must carry ask");
+    let bid = trigger_event
+        .candle
+        .best_bid
+        .expect("fixture must carry bid");
+    let ask = trigger_event
+        .candle
+        .best_ask
+        .expect("fixture must carry ask");
     harness.set_market(bid, ask).await;
     let warmup_candles: Vec<_> = warmup_events.iter().map(|e| e.candle.clone()).collect();
     let signal = harness
@@ -262,16 +261,17 @@ async fn drive_donchian_evolve_entry(
         vec![Pair::new(PAIR)],
         serde_json::json!({}),
     );
-    let events = load_events_from_csv(
-        &fixtures_dir().join(fixture),
-        EXCHANGE,
-        PAIR,
-        "H1",
-    );
+    let events = load_events_from_csv(&fixtures_dir().join(fixture), EXCHANGE, PAIR, "H1");
     let (warmup_events, trigger) = events.split_at(events.len() - 1);
     let trigger_event = trigger[0].clone();
-    let bid = trigger_event.candle.best_bid.expect("fixture must carry bid");
-    let ask = trigger_event.candle.best_ask.expect("fixture must carry ask");
+    let bid = trigger_event
+        .candle
+        .best_bid
+        .expect("fixture must carry bid");
+    let ask = trigger_event
+        .candle
+        .best_ask
+        .expect("fixture must carry ask");
     harness.set_market(bid, ask).await;
     let warmup_candles: Vec<_> = warmup_events.iter().map(|e| e.candle.clone()).collect();
     let signal = harness
@@ -285,20 +285,18 @@ async fn drive_squeeze_entry(
     harness: &PipelineHarness,
     fixture: &str,
 ) -> (SqueezeMomentumV1, Signal) {
-    let mut strategy = SqueezeMomentumV1::new(
-        "test_strategy".to_string(),
-        vec![Pair::new(PAIR)],
-    );
-    let events = load_events_from_csv(
-        &fixtures_dir().join(fixture),
-        EXCHANGE,
-        PAIR,
-        "H1",
-    );
+    let mut strategy = SqueezeMomentumV1::new("test_strategy".to_string(), vec![Pair::new(PAIR)]);
+    let events = load_events_from_csv(&fixtures_dir().join(fixture), EXCHANGE, PAIR, "H1");
     let (warmup_events, trigger) = events.split_at(events.len() - 1);
     let trigger_event = trigger[0].clone();
-    let bid = trigger_event.candle.best_bid.expect("fixture must carry bid");
-    let ask = trigger_event.candle.best_ask.expect("fixture must carry ask");
+    let bid = trigger_event
+        .candle
+        .best_bid
+        .expect("fixture must carry bid");
+    let ask = trigger_event
+        .candle
+        .best_ask
+        .expect("fixture must carry ask");
     harness.set_market(bid, ask).await;
     let warmup_candles: Vec<_> = warmup_events.iter().map(|e| e.candle.clone()).collect();
     let signal = harness
@@ -422,7 +420,10 @@ async fn bb_mean_revert_short_mean_reached_closes_with_correct_pnl(pool: PgPool)
         .on_open_positions(std::slice::from_ref(&pos), &exit_event)
         .await;
     assert_eq!(exits.len(), 1, "BB Short expected 1 exit signal");
-    assert_eq!(exits[0].trade_id, trade.id, "trade_id must match open trade");
+    assert_eq!(
+        exits[0].trade_id, trade.id,
+        "trade_id must match open trade"
+    );
     assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);
 
     let closed = harness
@@ -449,8 +450,7 @@ async fn bb_mean_revert_short_mean_reached_closes_with_correct_pnl(pool: PgPool)
 async fn donchian_long_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
     let harness = build_harness(pool, "donchian_long_trailing").await;
 
-    let (mut strategy, signal) =
-        drive_donchian_entry(&harness, "donchian_long_breakout.csv").await;
+    let (mut strategy, signal) = drive_donchian_entry(&harness, "donchian_long_breakout.csv").await;
     assert_eq!(signal.direction, Direction::Long);
     let trade = harness.execute(&signal).await;
     let entry_price = trade.entry_price; // ask = 152.005
@@ -495,7 +495,10 @@ async fn donchian_long_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
         .on_open_positions(std::slice::from_ref(&pos), &exit_event)
         .await;
     assert_eq!(exits.len(), 1, "Donchian Long expected 1 trailing exit");
-    assert_eq!(exits[0].trade_id, trade.id, "trade_id must match open trade");
+    assert_eq!(
+        exits[0].trade_id, trade.id,
+        "trade_id must match open trade"
+    );
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
 
     let closed = harness
@@ -556,7 +559,10 @@ async fn donchian_short_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
         .on_open_positions(std::slice::from_ref(&pos), &exit_event)
         .await;
     assert_eq!(exits.len(), 1, "Donchian Short expected 1 trailing exit");
-    assert_eq!(exits[0].trade_id, trade.id, "trade_id must match open trade");
+    assert_eq!(
+        exits[0].trade_id, trade.id,
+        "trade_id must match open trade"
+    );
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
 
     let closed = harness
@@ -622,7 +628,10 @@ async fn donchian_evolve_long_trailing_channel_closes_with_correct_pnl(pool: PgP
         1,
         "DonchianTrendEvolve Long expected 1 trailing exit"
     );
-    assert_eq!(exits[0].trade_id, trade.id, "trade_id must match open trade");
+    assert_eq!(
+        exits[0].trade_id, trade.id,
+        "trade_id must match open trade"
+    );
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingChannel);
 
     let closed = harness
@@ -649,8 +658,7 @@ async fn donchian_evolve_long_trailing_channel_closes_with_correct_pnl(pool: PgP
 async fn squeeze_long_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
     let harness = build_harness(pool, "squeeze_long_trailing_ma").await;
 
-    let (mut strategy, signal) =
-        drive_squeeze_entry(&harness, "squeeze_long_entry.csv").await;
+    let (mut strategy, signal) = drive_squeeze_entry(&harness, "squeeze_long_entry.csv").await;
     assert_eq!(signal.direction, Direction::Long);
     let trade = harness.execute(&signal).await;
     let entry_price = trade.entry_price; // ask = 151.505
@@ -711,12 +719,11 @@ async fn squeeze_long_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
     let exits = strategy
         .on_open_positions(std::slice::from_ref(&pos), &exit_event)
         .await;
+    assert_eq!(exits.len(), 1, "Squeeze Long expected 1 Chandelier exit");
     assert_eq!(
-        exits.len(),
-        1,
-        "Squeeze Long expected 1 Chandelier exit"
+        exits[0].trade_id, trade.id,
+        "trade_id must match open trade"
     );
-    assert_eq!(exits[0].trade_id, trade.id, "trade_id must match open trade");
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
 
     let closed = harness
@@ -739,8 +746,7 @@ async fn squeeze_long_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
 async fn squeeze_short_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
     let harness = build_harness(pool, "squeeze_short_trailing_ma").await;
 
-    let (mut strategy, signal) =
-        drive_squeeze_entry(&harness, "squeeze_short_entry.csv").await;
+    let (mut strategy, signal) = drive_squeeze_entry(&harness, "squeeze_short_entry.csv").await;
     assert_eq!(signal.direction, Direction::Short);
     let trade = harness.execute(&signal).await;
     let entry_price = trade.entry_price; // bid = 148.495
@@ -791,12 +797,11 @@ async fn squeeze_short_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
     let exits = strategy
         .on_open_positions(std::slice::from_ref(&pos), &exit_event)
         .await;
+    assert_eq!(exits.len(), 1, "Squeeze Short expected 1 Chandelier exit");
     assert_eq!(
-        exits.len(),
-        1,
-        "Squeeze Short expected 1 Chandelier exit"
+        exits[0].trade_id, trade.id,
+        "trade_id must match open trade"
     );
-    assert_eq!(exits[0].trade_id, trade.id, "trade_id must match open trade");
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
 
     let closed = harness

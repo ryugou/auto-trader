@@ -8,9 +8,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{Strategy, StrategyExitReason};
-use auto_trader_core::types::{
-    Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus,
-};
+use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus};
 use auto_trader_integration_tests::helpers::trade_flow::{fixtures_dir, load_events_from_csv};
 use auto_trader_strategy::bb_mean_revert::BbMeanRevertV1;
 use chrono::{DateTime, Utc};
@@ -23,10 +21,7 @@ const PAIR: &str = "USD_JPY";
 const TIMEFRAME: &str = "M5";
 
 fn new_strategy() -> BbMeanRevertV1 {
-    BbMeanRevertV1::new(
-        "bb_mean_revert_v1".to_string(),
-        vec![Pair::new(PAIR)],
-    )
+    BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![Pair::new(PAIR)])
 }
 
 /// BB 下限 + RSI < 25 + lower-low → Long シグナル発火。
@@ -196,7 +191,13 @@ async fn bb_long_entry_bitflyer() {
 
 // ─── Exit tests helpers ──────────────────────────────────────────────────
 
-fn make_m5_event(pair: &str, close: Decimal, high: Decimal, low: Decimal, ts: DateTime<Utc>) -> PriceEvent {
+fn make_m5_event(
+    pair: &str,
+    close: Decimal,
+    high: Decimal,
+    low: Decimal,
+    ts: DateTime<Utc>,
+) -> PriceEvent {
     PriceEvent {
         pair: Pair::new(pair),
         exchange: Exchange::GmoFx,
@@ -262,7 +263,9 @@ async fn warmup_and_get_long_entry() -> (BbMeanRevertV1, auto_trader_core::types
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let signal = strategy.on_price(&trigger[0]).await
+    let signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("bb_long_entry fixture must produce a Long signal");
     assert_eq!(signal.direction, Direction::Long);
     (strategy, signal)
@@ -279,7 +282,9 @@ async fn warmup_and_get_short_entry() -> (BbMeanRevertV1, auto_trader_core::type
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let signal = strategy.on_price(&trigger[0]).await
+    let signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("bb_short_entry fixture must produce a Short signal");
     assert_eq!(signal.direction, Direction::Short);
     (strategy, signal)
@@ -299,7 +304,13 @@ async fn bb_long_midline_exit() {
     let sl_distance = entry_price * signal.stop_loss_pct;
     let stop_loss = entry_price - sl_distance;
 
-    let pos = make_position("bb_mean_revert_v1", PAIR, Direction::Long, entry_price, stop_loss);
+    let pos = make_position(
+        "bb_mean_revert_v1",
+        PAIR,
+        Direction::Long,
+        entry_price,
+        stop_loss,
+    );
 
     // Feed a candle where price is above midline (~150) AND 1R is reached.
     // SMA20 after the entry CSV ≈ 150 (first 20 bars centered around 150).
@@ -312,7 +323,9 @@ async fn bb_long_midline_exit() {
     let exit_event = make_m5_event(PAIR, dec!(152.000), dec!(152.100), dec!(151.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert_eq!(exits.len(), 1, "expected 1 mean-reached exit for Long");
     assert_eq!(exits[0].trade_id, pos.trade.id);
     assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);
@@ -332,7 +345,13 @@ async fn bb_short_midline_exit() {
     let sl_distance = entry_price * signal.stop_loss_pct;
     let stop_loss = entry_price + sl_distance;
 
-    let pos = make_position("bb_mean_revert_v1", PAIR, Direction::Short, entry_price, stop_loss);
+    let pos = make_position(
+        "bb_mean_revert_v1",
+        PAIR,
+        Direction::Short,
+        entry_price,
+        stop_loss,
+    );
 
     // Price drops to 148.0 — well below midline (~150) AND 1R reached.
     // Unrealized = 152.8 - 148.0 = 4.8, SL distance ≈ max 4.584
@@ -342,7 +361,9 @@ async fn bb_short_midline_exit() {
     let exit_event = make_m5_event(PAIR, dec!(148.000), dec!(148.100), dec!(147.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert_eq!(exits.len(), 1, "expected 1 mean-reached exit for Short");
     assert_eq!(exits[0].trade_id, pos.trade.id);
     assert_eq!(exits[0].reason, StrategyExitReason::MeanReached);
@@ -360,7 +381,13 @@ async fn bb_long_midline_not_reached() {
     let sl_distance = entry_price * signal.stop_loss_pct;
     let stop_loss_price = entry_price - sl_distance;
 
-    let pos = make_position("bb_mean_revert_v1", PAIR, Direction::Long, entry_price, stop_loss_price);
+    let pos = make_position(
+        "bb_mean_revert_v1",
+        PAIR,
+        Direction::Long,
+        entry_price,
+        stop_loss_price,
+    );
 
     // Price rises slightly but stays below midline (~150).
     // SMA20 ≈ 150; close=148.0 < 150 → midline NOT reached.
@@ -372,7 +399,9 @@ async fn bb_long_midline_not_reached() {
     let exit_event = make_m5_event(PAIR, dec!(148.000), dec!(148.100), dec!(147.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "price below midline → no mean-reached exit, got {} exits",
@@ -391,7 +420,13 @@ async fn bb_short_midline_not_reached() {
     let sl_distance = entry_price * signal.stop_loss_pct;
     let stop_loss = entry_price + sl_distance;
 
-    let pos = make_position("bb_mean_revert_v1", PAIR, Direction::Short, entry_price, stop_loss);
+    let pos = make_position(
+        "bb_mean_revert_v1",
+        PAIR,
+        Direction::Short,
+        entry_price,
+        stop_loss,
+    );
 
     // Price drops slightly but stays above midline (~150).
     // close=152.0 > 150 → midline NOT reached.
@@ -401,7 +436,9 @@ async fn bb_short_midline_not_reached() {
     let exit_event = make_m5_event(PAIR, dec!(152.000), dec!(152.100), dec!(151.900), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "price above midline → no mean-reached exit for Short, got {} exits",
@@ -418,7 +455,13 @@ async fn bb_1r_not_reached_long() {
 
     // Use a wide SL to make 1R hard to reach: entry 149.0, SL 146.0 → sl_distance=3.0
     // With close at 150.5 (above midline): unrealized = 150.5 - 149.0 = 1.5 < 3.0 → 1R fails.
-    let pos = make_position("bb_mean_revert_v1", PAIR, Direction::Long, dec!(149.000), dec!(146.000));
+    let pos = make_position(
+        "bb_mean_revert_v1",
+        PAIR,
+        Direction::Long,
+        dec!(149.000),
+        dec!(146.000),
+    );
 
     // Price at 150.5 — above midline (~150) but unrealized (1.5) < SL distance (3.0).
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-01T02:10:00Z")
@@ -427,7 +470,9 @@ async fn bb_1r_not_reached_long() {
     let exit_event = make_m5_event(PAIR, dec!(150.500), dec!(150.600), dec!(150.400), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "1R not reached → exit suppressed even though midline reached, got {} exits",
@@ -444,7 +489,13 @@ async fn bb_1r_not_reached_short() {
 
     // Short entry 151.0, SL 154.0 → sl_distance=3.0
     // Close at 149.5 (below midline ~150): unrealized = 151.0 - 149.5 = 1.5 < 3.0 → 1R fails.
-    let pos = make_position("bb_mean_revert_v1", PAIR, Direction::Short, dec!(151.000), dec!(154.000));
+    let pos = make_position(
+        "bb_mean_revert_v1",
+        PAIR,
+        Direction::Short,
+        dec!(151.000),
+        dec!(154.000),
+    );
 
     let ts = chrono::DateTime::parse_from_rfc3339("2026-05-01T02:10:00Z")
         .unwrap()
@@ -452,7 +503,9 @@ async fn bb_1r_not_reached_short() {
     let exit_event = make_m5_event(PAIR, dec!(149.500), dec!(149.600), dec!(149.400), ts);
     let _ = strategy.on_price(&exit_event).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &exit_event).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &exit_event)
+        .await;
     assert!(
         exits.is_empty(),
         "1R not reached → exit suppressed for Short, got {} exits",

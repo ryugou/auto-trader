@@ -67,9 +67,8 @@ pub fn compute_raw_quantity(
         liquidation_margin_level,
         entry_price,
     )?;
-    let max_alloc =
-        compute_max_alloc(leverage, stop_loss_pct, liquidation_margin_level)
-            .expect("max_alloc inputs validated above");
+    let max_alloc = compute_max_alloc(leverage, stop_loss_pct, liquidation_margin_level)
+        .expect("max_alloc inputs validated above");
     let risk_alloc = max_alloc.min(allocation_pct);
     Some(balance * leverage * risk_alloc / entry_price)
 }
@@ -161,11 +160,7 @@ pub fn expected_pnl(
 
 /// `margin = qty × entry / leverage`, truncated toward zero to whole yen
 /// (matching `Trader::execute`'s `truncate_yen` helper).
-pub fn expected_margin_lock(
-    quantity: Decimal,
-    entry_price: Decimal,
-    leverage: Decimal,
-) -> Decimal {
+pub fn expected_margin_lock(quantity: Decimal, entry_price: Decimal, leverage: Decimal) -> Decimal {
     (quantity * entry_price / leverage).round_dp_with_strategy(0, RoundingStrategy::ToZero)
 }
 
@@ -274,18 +269,72 @@ mod tests {
     /// Non-positive inputs → None (matches production validation).
     #[test]
     fn expected_quantity_rejects_non_positive_inputs() {
-        let p = |b, l, a, s, y, e| {
-            expected_quantity(b, l, a, s, y, e, dec!(0.001))
-        };
+        let p = |b, l, a, s, y, e| expected_quantity(b, l, a, s, y, e, dec!(0.001));
         // zero balance / leverage / allocation / SL / Y / entry → None
-        assert_eq!(p(dec!(0), dec!(2), dec!(1.0), dec!(0.02), dec!(0.5), dec!(1)), None);
-        assert_eq!(p(dec!(30000), dec!(0), dec!(1.0), dec!(0.02), dec!(0.5), dec!(1)), None);
-        assert_eq!(p(dec!(30000), dec!(2), dec!(0), dec!(0.02), dec!(0.5), dec!(1)), None);
-        assert_eq!(p(dec!(30000), dec!(2), dec!(1.0), dec!(0), dec!(0.5), dec!(1)), None);
-        assert_eq!(p(dec!(30000), dec!(2), dec!(1.0), dec!(0.02), dec!(0), dec!(1)), None);
-        assert_eq!(p(dec!(30000), dec!(2), dec!(1.0), dec!(0.02), dec!(0.5), dec!(0)), None);
+        assert_eq!(
+            p(dec!(0), dec!(2), dec!(1.0), dec!(0.02), dec!(0.5), dec!(1)),
+            None
+        );
+        assert_eq!(
+            p(
+                dec!(30000),
+                dec!(0),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(0.5),
+                dec!(1)
+            ),
+            None
+        );
+        assert_eq!(
+            p(
+                dec!(30000),
+                dec!(2),
+                dec!(0),
+                dec!(0.02),
+                dec!(0.5),
+                dec!(1)
+            ),
+            None
+        );
+        assert_eq!(
+            p(dec!(30000), dec!(2), dec!(1.0), dec!(0), dec!(0.5), dec!(1)),
+            None
+        );
+        assert_eq!(
+            p(
+                dec!(30000),
+                dec!(2),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(0),
+                dec!(1)
+            ),
+            None
+        );
+        assert_eq!(
+            p(
+                dec!(30000),
+                dec!(2),
+                dec!(1.0),
+                dec!(0.02),
+                dec!(0.5),
+                dec!(0)
+            ),
+            None
+        );
         // allocation > 1 → None
-        assert_eq!(p(dec!(30000), dec!(2), dec!(1.5), dec!(0.02), dec!(0.5), dec!(1)), None);
+        assert_eq!(
+            p(
+                dec!(30000),
+                dec!(2),
+                dec!(1.5),
+                dec!(0.02),
+                dec!(0.5),
+                dec!(1)
+            ),
+            None
+        );
     }
 
     /// `compute_max_alloc` rejects non-positive inputs (no division by zero).
@@ -297,8 +346,7 @@ mod tests {
         // negative
         assert_eq!(compute_max_alloc(dec!(-1), dec!(0.02), dec!(0.5)), None);
         // valid
-        let m = compute_max_alloc(dec!(2), dec!(0.02), dec!(0.5))
-            .expect("positive inputs");
+        let m = compute_max_alloc(dec!(2), dec!(0.02), dec!(0.5)).expect("positive inputs");
         assert!(m > Decimal::ZERO);
     }
 

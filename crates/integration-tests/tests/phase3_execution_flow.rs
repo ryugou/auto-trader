@@ -21,9 +21,7 @@ use auto_trader_executor::trader::Trader;
 use auto_trader_integration_tests::helpers::db::{read_current_balance, seed_trading_account};
 use auto_trader_integration_tests::helpers::sizing_invariants;
 use auto_trader_integration_tests::mocks::exchange_api::MockExchangeApiBuilder;
-use auto_trader_market::bitflyer_private::{
-    Execution, SendChildOrderResponse,
-};
+use auto_trader_market::bitflyer_private::{Execution, SendChildOrderResponse};
 use auto_trader_market::candle_builder::CandleBuilder;
 use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
 use auto_trader_notify::Notifier;
@@ -96,11 +94,17 @@ fn candle_boundary_m5() {
     );
 
     // Another tick still in the same M5 period
-    let t2 = Utc.with_ymd_and_hms(2026, 4, 10, 12, 4, 59).unwrap()
-        + chrono::Duration::milliseconds(500);
+    let t2 =
+        Utc.with_ymd_and_hms(2026, 4, 10, 12, 4, 59).unwrap() + chrono::Duration::milliseconds(500);
     assert!(
         builder
-            .on_tick(dec!(15_100_000), dec!(0.05), t2, Some(dec!(15_099_000)), Some(dec!(15_101_000)))
+            .on_tick(
+                dec!(15_100_000),
+                dec!(0.05),
+                t2,
+                Some(dec!(15_099_000)),
+                Some(dec!(15_101_000))
+            )
             .is_none(),
         "second tick in same period should not complete a candle"
     );
@@ -147,7 +151,11 @@ fn candle_boundary_h1() {
 
     // Tick at 12:30:00
     let t1 = Utc.with_ymd_and_hms(2026, 4, 10, 12, 30, 0).unwrap();
-    assert!(builder.on_tick(dec!(150), dec!(100), t1, None, None).is_none());
+    assert!(
+        builder
+            .on_tick(dec!(150), dec!(100), t1, None, None)
+            .is_none()
+    );
 
     // Tick at 13:00:00 — new hour, completes previous
     let t2 = Utc.with_ymd_and_hms(2026, 4, 10, 13, 0, 0).unwrap();
@@ -217,7 +225,10 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
 
     let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
-    let trade = trader.execute(&signal).await.expect("execute should succeed");
+    let trade = trader
+        .execute(&signal)
+        .await
+        .expect("execute should succeed");
 
     // Verify send_child_order was called
     assert!(
@@ -236,7 +247,11 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
     // qty: live path — fill_open returns the aggregated execution size from MockExchangeApi.
     //      Mock Execution.size = 6622 (the sizer-computed quantity is overridden by
     //      whatever the exchange reports). One execution → trade.quantity == 6622.
-    assert_eq!(trade.quantity, dec!(6622), "live fill should adopt exchange-reported size (mock=6622)");
+    assert_eq!(
+        trade.quantity,
+        dec!(6622),
+        "live fill should adopt exchange-reported size (mock=6622)"
+    );
     // Enriched assertions (Task 7) — SL/TP are still computed from fill_price.
     assert_eq!(
         trade.stop_loss,
@@ -323,7 +338,11 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: live path — Mock Execution.size = 6622 → trade.quantity == 6622.
-    assert_eq!(trade.quantity, dec!(6622), "live fill adopts exchange-reported size (mock=6622)");
+    assert_eq!(
+        trade.quantity,
+        dec!(6622),
+        "live fill adopts exchange-reported size (mock=6622)"
+    );
     // Open-side enrichment (live path).
     assert_eq!(
         trade.stop_loss,
@@ -548,13 +567,20 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
 
     let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
-    let trade = trader.execute(&signal).await.expect("execute should succeed");
+    let trade = trader
+        .execute(&signal)
+        .await
+        .expect("execute should succeed");
 
     // Verify: PriceStore was used (Long → ask price = 151)
     assert_eq!(trade.entry_price, dec!(151));
     // qty: dry_run — balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151, min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Enriched assertions (Task 7).
     assert_eq!(
         trade.stop_loss,
@@ -645,7 +671,10 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
 
     let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
-    let trade = trader.execute(&signal).await.expect("execute should succeed");
+    let trade = trader
+        .execute(&signal)
+        .await
+        .expect("execute should succeed");
 
     // Verify: Exchange API WAS called
     assert!(
@@ -659,7 +688,11 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
 
     assert_eq!(trade.status, TradeStatus::Open);
     // qty: live path — Mock Execution.size = 6622 → trade.quantity == 6622.
-    assert_eq!(trade.quantity, dec!(6622), "live fill adopts exchange-reported size (mock=6622)");
+    assert_eq!(
+        trade.quantity,
+        dec!(6622),
+        "live fill adopts exchange-reported size (mock=6622)"
+    );
     // Enriched assertions (Task 7) — live path SL/TP from fill_price.
     assert_eq!(
         trade.stop_loss,

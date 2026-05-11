@@ -174,7 +174,11 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -205,7 +209,11 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
         .await
         .expect("close should succeed");
     assert_eq!(closed.status, TradeStatus::Closed);
-    assert_eq!(closed.quantity, dec!(12735), "close should not mutate quantity");
+    assert_eq!(
+        closed.quantity,
+        dec!(12735),
+        "close should not mutate quantity"
+    );
     // Close-side enrichment. Long close at bid=150, entry was ask=151 → loss.
     assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
     let exit_price = closed.exit_price.expect("exit_price must be set");
@@ -228,10 +236,7 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
     let result = trader
         .close_position(&trade.id.to_string(), ExitReason::SlHit)
         .await;
-    assert!(
-        result.is_err(),
-        "re-closing a closed trade should fail"
-    );
+    assert!(result.is_err(), "re-closing a closed trade should fail");
 }
 
 // =========================================================================
@@ -261,7 +266,11 @@ async fn concurrent_close_only_one_succeeds(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader1.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -290,27 +299,19 @@ async fn concurrent_close_only_one_succeeds(pool: sqlx::PgPool) {
 
     // Spawn two concurrent close calls
     let id1 = trade_id.clone();
-    let handle1 = tokio::spawn(async move {
-        trader1.close_position(&id1, ExitReason::TpHit).await
-    });
+    let handle1 =
+        tokio::spawn(async move { trader1.close_position(&id1, ExitReason::TpHit).await });
     let id2 = trade_id;
-    let handle2 = tokio::spawn(async move {
-        trader2.close_position(&id2, ExitReason::SlHit).await
-    });
+    let handle2 =
+        tokio::spawn(async move { trader2.close_position(&id2, ExitReason::SlHit).await });
 
     let (r1, r2) = tokio::join!(handle1, handle2);
     let result1 = r1.expect("task 1 should not panic");
     let result2 = r2.expect("task 2 should not panic");
 
     // Exactly one should succeed and one should fail
-    let successes = [&result1, &result2]
-        .iter()
-        .filter(|r| r.is_ok())
-        .count();
-    let failures = [&result1, &result2]
-        .iter()
-        .filter(|r| r.is_err())
-        .count();
+    let successes = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
+    let failures = [&result1, &result2].iter().filter(|r| r.is_err()).count();
 
     assert_eq!(successes, 1, "exactly one close should succeed");
     assert_eq!(failures, 1, "exactly one close should fail");
@@ -363,9 +364,16 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
 
     let balance_before_open = read_current_balance(&pool, account_id).await;
     let signal = make_signal("USD_JPY", Direction::Long);
-    let trade = open_trader.execute(&signal).await.expect("open should succeed");
+    let trade = open_trader
+        .execute(&signal)
+        .await
+        .expect("open should succeed");
     // qty: dry_run open — 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -458,7 +466,11 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -492,7 +504,10 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
     .fetch_one(&pool)
     .await
     .expect("query should succeed");
-    assert_eq!(open_notif_count, 1, "trade_opened notification should exist");
+    assert_eq!(
+        open_notif_count, 1,
+        "trade_opened notification should exist"
+    );
 
     // Close the trade
     let closed = trader
@@ -573,7 +588,11 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,

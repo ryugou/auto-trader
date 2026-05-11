@@ -586,5 +586,8 @@ async fn positions_excludes_closed_trades(pool: sqlx::PgPool) {
 
     assert_eq!(resp.status().as_u16(), 200);
     let json: Vec<Value> = resp.json().await.unwrap();
-    assert!(json.is_empty(), "closed trades should not appear in positions");
+    assert!(
+        json.is_empty(),
+        "closed trades should not appear in positions"
+    );
 }

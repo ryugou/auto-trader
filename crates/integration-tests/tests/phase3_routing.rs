@@ -69,7 +69,9 @@ async fn oanda_event_routes_to_fx_channel() {
         .expect("routing should succeed");
 
     // Oanda event should arrive on the FX channel
-    let received = price_monitor_rx.try_recv().expect("should receive on FX channel");
+    let received = price_monitor_rx
+        .try_recv()
+        .expect("should receive on FX channel");
     assert_eq!(received.exchange, Exchange::Oanda);
 
     // Should NOT be on the crypto channel
@@ -92,7 +94,9 @@ async fn bitflyer_event_routes_to_crypto_channel() {
         .expect("routing should succeed");
 
     // BitflyerCfd should arrive on the crypto channel
-    let received = crypto_price_rx.try_recv().expect("should receive on crypto channel");
+    let received = crypto_price_rx
+        .try_recv()
+        .expect("should receive on crypto channel");
     assert_eq!(received.exchange, Exchange::BitflyerCfd);
 
     // Should NOT be on the FX channel
@@ -115,7 +119,9 @@ async fn gmo_fx_event_routes_to_crypto_channel() {
         .expect("routing should succeed");
 
     // GmoFx should arrive on the crypto channel
-    let received = crypto_price_rx.try_recv().expect("should receive on crypto channel");
+    let received = crypto_price_rx
+        .try_recv()
+        .expect("should receive on crypto channel");
     assert_eq!(received.exchange, Exchange::GmoFx);
 
     // Should NOT be on the FX channel
@@ -149,10 +155,7 @@ async fn channel_closed_is_detected_gracefully() {
     // Verify send fails gracefully (SendError, not panic)
     let event = make_price_event(Exchange::Oanda);
     let result = price_monitor_tx.send(event.clone()).await;
-    assert!(
-        result.is_err(),
-        "send to closed FX channel must return Err"
-    );
+    assert!(result.is_err(), "send to closed FX channel must return Err");
 
     let event = make_price_event(Exchange::BitflyerCfd);
     let result = crypto_price_tx.send(event.clone()).await;

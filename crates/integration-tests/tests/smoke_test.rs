@@ -27,13 +27,11 @@ async fn db_helper_snapshot_returns_table_contents(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn fixture_loader_inserts_candles(pool: sqlx::PgPool) {
-    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/smoke_test.csv");
-    let count = fixture_loader::load_price_candles(
-        &pool, "gmo_fx", "USD_JPY", "M5", &fixture_path,
-    )
-    .await
-    .unwrap();
+    let fixture_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/smoke_test.csv");
+    let count = fixture_loader::load_price_candles(&pool, "gmo_fx", "USD_JPY", "M5", &fixture_path)
+        .await
+        .unwrap();
     assert_eq!(count, 3);
 
     let (row_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM price_candles")
@@ -88,15 +86,17 @@ async fn mock_exchange_api_returns_configured_response() {
 
     // Test send_child_order
     let resp = mock
-        .send_child_order(auto_trader_market::bitflyer_private::SendChildOrderRequest {
-            product_code: "FX_BTC_JPY".to_string(),
-            child_order_type: auto_trader_market::bitflyer_private::ChildOrderType::Market,
-            side: auto_trader_market::bitflyer_private::Side::Buy,
-            size: dec!(0.01),
-            price: None,
-            minute_to_expire: None,
-            time_in_force: None,
-        })
+        .send_child_order(
+            auto_trader_market::bitflyer_private::SendChildOrderRequest {
+                product_code: "FX_BTC_JPY".to_string(),
+                child_order_type: auto_trader_market::bitflyer_private::ChildOrderType::Market,
+                side: auto_trader_market::bitflyer_private::Side::Buy,
+                size: dec!(0.01),
+                price: None,
+                minute_to_expire: None,
+                time_in_force: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(resp.child_order_acceptance_id, "test-123");
@@ -306,14 +306,14 @@ async fn mock_gemini_invalid_response() {
     assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
 }
 
-// ── MockVegapunk ──────────────────────────────────────────────────────────
+// ── MockVegapunkApi ───────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn mock_vegapunk_tracks_calls() {
-    use auto_trader_integration_tests::mocks::vegapunk::{MockVegapunkBuilder, SearchResult};
+    use auto_trader_integration_tests::mocks::vegapunk::{MockVegapunkApiBuilder, SearchResult};
     use std::sync::atomic::Ordering;
 
-    let mock = MockVegapunkBuilder::new()
+    let mock = MockVegapunkApiBuilder::new()
         .with_search_results(vec![SearchResult {
             text: "BTC correlates with risk-off sentiment".to_string(),
             score: 0.92,
@@ -362,10 +362,10 @@ async fn mock_vegapunk_tracks_calls() {
 
 #[tokio::test]
 async fn mock_vegapunk_failure_injection() {
-    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkBuilder;
+    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkApiBuilder;
     use std::sync::atomic::Ordering;
 
-    let mock = MockVegapunkBuilder::new()
+    let mock = MockVegapunkApiBuilder::new()
         .with_failures("search", 2)
         .build();
 
@@ -381,10 +381,10 @@ async fn mock_vegapunk_failure_injection() {
 
 #[tokio::test]
 async fn mock_vegapunk_global_fail_switch() {
-    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunk;
+    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkApi;
     use std::sync::atomic::Ordering;
 
-    let mock = MockVegapunk::new();
+    let mock = MockVegapunkApi::new();
     mock.should_fail.store(true, Ordering::SeqCst);
 
     assert!(mock.ingest_raw("x", "y", "z", "t").await.is_err());
@@ -402,10 +402,8 @@ async fn mock_bitflyer_ws_sends_ticks() {
 
     let ticks = vec![
         TickData::new(11_000_000, 10_999_000, 11_001_000),
-        TickData::new(11_050_000, 11_049_000, 11_051_000)
-            .with_timestamp("2026-04-28T00:00:01.000"),
-        TickData::new(11_100_000, 11_099_000, 11_101_000)
-            .with_timestamp("2026-04-28T00:00:02.000"),
+        TickData::new(11_050_000, 11_049_000, 11_051_000).with_timestamp("2026-04-28T00:00:01.000"),
+        TickData::new(11_100_000, 11_099_000, 11_101_000).with_timestamp("2026-04-28T00:00:02.000"),
     ];
 
     let mock = MockBitflyerWs::normal_ticks("FX_BTC_JPY", ticks).await;
@@ -427,10 +425,7 @@ async fn mock_bitflyer_ws_sends_ticks() {
             let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(parsed["jsonrpc"], "2.0");
             assert_eq!(parsed["method"], "channelMessage");
-            assert_eq!(
-                parsed["params"]["channel"],
-                "lightning_ticker_FX_BTC_JPY"
-            );
+            assert_eq!(parsed["params"]["channel"], "lightning_ticker_FX_BTC_JPY");
             let ltp = parsed["params"]["message"]["ltp"].as_i64().unwrap();
             received.push(ltp);
         }
@@ -458,11 +453,10 @@ async fn mock_bitflyer_ws_disconnect_after() {
     let (_write, mut read) = ws.split();
 
     let mut count = 0;
-    while let Some(result) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), read.next())
-            .await
-            .ok()
-            .flatten()
+    while let Some(result) = tokio::time::timeout(std::time::Duration::from_secs(5), read.next())
+        .await
+        .ok()
+        .flatten()
     {
         match result {
             Ok(tokio_tungstenite::tungstenite::Message::Text(_)) => count += 1,
@@ -512,30 +506,24 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
     use auto_trader_integration_tests::mocks::gemini::MockGemini;
     use auto_trader_integration_tests::mocks::gmo_fx_server::MockGmoFxServer;
     use auto_trader_integration_tests::mocks::slack_webhook::MockSlackWebhook;
-    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkBuilder;
+    use auto_trader_integration_tests::mocks::vegapunk::MockVegapunkApiBuilder;
     use auto_trader_market::exchange_api::ExchangeApi;
     use std::path::PathBuf;
     use tracing_subscriber::prelude::*;
 
     // 1. Seed accounts
     let accounts = db::seed_standard_accounts(&pool).await;
-    assert_ne!(
-        accounts.bitflyer_cfd_account_id,
-        accounts.gmo_fx_account_id
-    );
+    assert_ne!(accounts.bitflyer_cfd_account_id, accounts.gmo_fx_account_id);
 
     // 2. Load fixtures
-    let fixture_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/smoke_test.csv");
-    let count =
-        fixture_loader::load_price_candles(&pool, "gmo_fx", "USD_JPY", "M5", &fixture_path)
-            .await
-            .unwrap();
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/smoke_test.csv");
+    let count = fixture_loader::load_price_candles(&pool, "gmo_fx", "USD_JPY", "M5", &fixture_path)
+        .await
+        .unwrap();
     assert_eq!(count, 3);
 
     // 3. Verify DB state via snapshot
-    let snapshot =
-        db::snapshot_tables(&pool, &["trading_accounts", "price_candles"]).await;
+    let snapshot = db::snapshot_tables(&pool, &["trading_accounts", "price_candles"]).await;
     assert!(
         snapshot.contains("test_bitflyer_cfd"),
         "snapshot must contain bitflyer account: {snapshot}"
@@ -600,8 +588,8 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["entry_channel"], 20);
 
-    // 8. Create and use MockVegapunk
-    let mock_vegapunk = MockVegapunkBuilder::new().build();
+    // 8. Create and use MockVegapunkApi
+    let mock_vegapunk = MockVegapunkApiBuilder::new().build();
     let ingest = mock_vegapunk
         .ingest_raw("test data", "trading_log", "btc", "2026-04-29T00:00:00Z")
         .await
@@ -671,10 +659,8 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
         )
         .await;
 
-        let mut strategy = BbMeanRevertV1::new(
-            "bb_mean_revert_v1".to_string(),
-            vec![harness.pair.clone()],
-        );
+        let mut strategy =
+            BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![harness.pair.clone()]);
 
         // Reuse the same fixture as phase3_pipeline_e2e to avoid divergent
         // hand-crafted candle generators in this smoke test. The fixture is
@@ -714,8 +700,7 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
             .expect("smoke fixture trigger must carry ask");
         harness.set_market(entry_bid, entry_ask).await;
 
-        let warmup_candles: Vec<_> =
-            warmup_events.iter().map(|e| e.candle.clone()).collect();
+        let warmup_candles: Vec<_> = warmup_events.iter().map(|e| e.candle.clone()).collect();
 
         let signal = harness
             .drive_strategy(&mut strategy, &warmup_candles, &trigger_event.candle)
@@ -750,10 +735,7 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
         assert_eq!(closed.status, TradeStatus::Closed);
         assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
         // Long closes at bid.
-        assert_eq!(
-            closed.exit_price.expect("exit_price must be set"),
-            exit_bid,
-        );
+        assert_eq!(closed.exit_price.expect("exit_price must be set"), exit_bid,);
 
         let raw_pnl = sizing_invariants::expected_pnl(
             trade.entry_price,
@@ -761,8 +743,7 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
             trade.quantity,
             Direction::Long,
         );
-        let expected_pnl =
-            raw_pnl.round_dp_with_strategy(0, RoundingStrategy::ToZero);
+        let expected_pnl = raw_pnl.round_dp_with_strategy(0, RoundingStrategy::ToZero);
         assert_eq!(
             closed.pnl_amount.expect("pnl_amount must be set"),
             expected_pnl,

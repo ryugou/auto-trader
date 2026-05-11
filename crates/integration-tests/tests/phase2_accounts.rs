@@ -3,7 +3,7 @@
 use auto_trader_integration_tests::helpers::{app, seed};
 use chrono::Utc;
 use rust_decimal_macros::dec;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ── POST /api/trading-accounts ───────────────────────────────────────────
 
@@ -191,7 +191,8 @@ async fn create_account_rejected_when_exchange_missing_from_margin_config(pool: 
     // Levels map intentionally only contains bitflyer_cfd — gmo_fx is missing.
     let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
     levels.insert(Exchange::BitflyerCfd, dec!(0.50));
-    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let app =
+        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
     let client = app.client();
 
     let body = json!({
@@ -228,9 +229,7 @@ async fn create_account_rejected_when_exchange_missing_from_margin_config(pool: 
 /// This catches the "first account on a previously-unused exchange whose
 /// config was left at 0/negative" footgun that the startup gate cannot.
 #[sqlx::test(migrations = "../../migrations")]
-async fn create_account_rejected_when_liquidation_margin_level_non_positive(
-    pool: sqlx::PgPool,
-) {
+async fn create_account_rejected_when_liquidation_margin_level_non_positive(pool: sqlx::PgPool) {
     use auto_trader_core::types::Exchange;
     use auto_trader_market::price_store::PriceStore;
     use rust_decimal_macros::dec;
@@ -241,7 +240,8 @@ async fn create_account_rejected_when_liquidation_margin_level_non_positive(
     let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
     levels.insert(Exchange::BitflyerCfd, dec!(0.50));
     levels.insert(Exchange::GmoFx, dec!(0));
-    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let app =
+        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
     let client = app.client();
 
     let body = json!({

@@ -24,14 +24,15 @@ pub async fn reconcile_live_accounts_at_startup(
     price_store: Arc<PriceStore>,
 ) -> anyhow::Result<()> {
     for account in accounts.iter().filter(|a| a.account_type == "live") {
-        let exchange: auto_trader_core::types::Exchange = account.exchange.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "startup reconcile: live account '{}' has unknown exchange '{}': {e}; \
+        let exchange: auto_trader_core::types::Exchange =
+            account.exchange.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "startup reconcile: live account '{}' has unknown exchange '{}': {e}; \
                  cannot reconcile — refusing to start",
-                account.name,
-                account.exchange
-            )
-        })?;
+                    account.name,
+                    account.exchange
+                )
+            })?;
 
         let Some(api) = apis.get(&exchange) else {
             anyhow::bail!(
@@ -276,13 +277,12 @@ async fn force_close_db_only(
     // recorder task which is not running during startup reconciliation.
     let exit_date = chrono::Utc::now().date_naive();
     let win = if pnl > Decimal::ZERO { 1 } else { 0 };
-    let account_type: String = sqlx::query_scalar(
-        "SELECT account_type FROM trading_accounts WHERE id = $1",
-    )
-    .bind(trade.account_id)
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or_else(|| "paper".to_string());
+    let account_type: String =
+        sqlx::query_scalar("SELECT account_type FROM trading_accounts WHERE id = $1")
+            .bind(trade.account_id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or_else(|| "paper".to_string());
 
     if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
         pool,
@@ -298,7 +298,10 @@ async fn force_close_db_only(
     )
     .await
     {
-        tracing::warn!("startup reconcile: failed to update daily_summary for trade {}: {e}", trade.id);
+        tracing::warn!(
+            "startup reconcile: failed to update daily_summary for trade {}: {e}",
+            trade.id
+        );
     }
 
     Ok(())
@@ -339,14 +342,26 @@ mod tests {
 
     #[test]
     fn exchange_from_str_known() {
-        assert!("bitflyer_cfd".parse::<auto_trader_core::types::Exchange>().is_ok());
+        assert!(
+            "bitflyer_cfd"
+                .parse::<auto_trader_core::types::Exchange>()
+                .is_ok()
+        );
         assert!("oanda".parse::<auto_trader_core::types::Exchange>().is_ok());
-        assert!("gmo_fx".parse::<auto_trader_core::types::Exchange>().is_ok());
+        assert!(
+            "gmo_fx"
+                .parse::<auto_trader_core::types::Exchange>()
+                .is_ok()
+        );
     }
 
     #[test]
     fn exchange_from_str_unknown() {
-        assert!("unknown_exchange".parse::<auto_trader_core::types::Exchange>().is_err());
+        assert!(
+            "unknown_exchange"
+                .parse::<auto_trader_core::types::Exchange>()
+                .is_err()
+        );
     }
 }
 

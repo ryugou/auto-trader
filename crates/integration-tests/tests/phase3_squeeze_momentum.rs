@@ -8,9 +8,7 @@
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::{Strategy, StrategyExitReason};
-use auto_trader_core::types::{
-    Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus,
-};
+use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus};
 use auto_trader_integration_tests::helpers::trade_flow::{fixtures_dir, load_events_from_csv};
 use auto_trader_strategy::squeeze_momentum::SqueezeMomentumV1;
 use chrono::{DateTime, Duration, Utc};
@@ -23,10 +21,7 @@ const PAIR: &str = "USD_JPY";
 const TIMEFRAME: &str = "H1";
 
 fn new_strategy() -> SqueezeMomentumV1 {
-    SqueezeMomentumV1::new(
-        "squeeze_momentum_v1".to_string(),
-        vec![Pair::new(PAIR)],
-    )
+    SqueezeMomentumV1::new("squeeze_momentum_v1".to_string(), vec![Pair::new(PAIR)])
 }
 
 /// TTM Squeeze 解除 + 正の上昇モメンタム → Long シグナル。
@@ -137,10 +132,7 @@ async fn squeeze_atr_zero() {
         }
     }
 
-    assert!(
-        !any_signal,
-        "expected no signal when ATR is zero"
-    );
+    assert!(!any_signal, "expected no signal when ATR is zero");
 }
 
 /// 24 本未満 → 履歴不足でシグナルなし。
@@ -193,7 +185,13 @@ async fn squeeze_long_entry_bitflyer() {
 
 // ─── Exit test helpers ───────────────────────────────────────────────────
 
-fn make_h1_event(pair: &str, close: Decimal, high: Decimal, low: Decimal, ts: DateTime<Utc>) -> PriceEvent {
+fn make_h1_event(
+    pair: &str,
+    close: Decimal,
+    high: Decimal,
+    low: Decimal,
+    ts: DateTime<Utc>,
+) -> PriceEvent {
     PriceEvent {
         pair: Pair::new(pair),
         exchange: Exchange::GmoFx,
@@ -261,7 +259,9 @@ async fn warmup_long_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<U
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let signal = strategy.on_price(&trigger[0]).await
+    let signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("squeeze_long_entry fixture must produce a Long signal");
     assert_eq!(signal.direction, Direction::Long);
 
@@ -281,13 +281,15 @@ async fn warmup_long_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<U
     for i in 1..=20 {
         let ts = entry_ts + Duration::hours(i);
         let p = dec!(152.000) + Decimal::from(i) * dec!(0.100);
-        let _ = strategy.on_price(&make_h1_event(
-            PAIR,
-            p,
-            p + dec!(0.050),
-            p - dec!(0.050),
-            ts,
-        )).await;
+        let _ = strategy
+            .on_price(&make_h1_event(
+                PAIR,
+                p,
+                p + dec!(0.050),
+                p - dec!(0.050),
+                ts,
+            ))
+            .await;
     }
 
     (strategy, entry_ts)
@@ -304,7 +306,9 @@ async fn warmup_short_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let signal = strategy.on_price(&trigger[0]).await
+    let signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("squeeze_short_entry fixture must produce a Short signal");
     assert_eq!(signal.direction, Direction::Short);
 
@@ -323,13 +327,15 @@ async fn warmup_short_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<
     for i in 1..=20 {
         let ts = entry_ts + Duration::hours(i);
         let p = dec!(148.000) - Decimal::from(i) * dec!(0.100);
-        let _ = strategy.on_price(&make_h1_event(
-            PAIR,
-            p,
-            p + dec!(0.050),
-            p - dec!(0.050),
-            ts,
-        )).await;
+        let _ = strategy
+            .on_price(&make_h1_event(
+                PAIR,
+                p,
+                p + dec!(0.050),
+                p - dec!(0.050),
+                ts,
+            ))
+            .await;
     }
 
     (strategy, entry_ts)
@@ -349,15 +355,21 @@ async fn squeeze_long_chandelier_exit() {
     // highest_high(22) ≈ 154.05, ATR ≈ 0.1, stop ≈ 153.75.
     // 153.500 < stop → Chandelier fires.
     let pos = make_position(
-        "squeeze_momentum_v1", PAIR, Direction::Long,
-        dec!(151.500), dec!(151.000), entry_ts,
+        "squeeze_momentum_v1",
+        PAIR,
+        Direction::Long,
+        dec!(151.500),
+        dec!(151.000),
+        entry_ts,
     );
 
     let drop_ts = entry_ts + Duration::hours(21);
     let drop = make_h1_event(PAIR, dec!(153.500), dec!(153.550), dec!(153.450), drop_ts);
     let _ = strategy.on_price(&drop).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &drop).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &drop)
+        .await;
     assert_eq!(exits.len(), 1, "expected Chandelier exit for Long");
     assert_eq!(exits[0].trade_id, pos.trade.id);
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
@@ -377,15 +389,21 @@ async fn squeeze_short_chandelier_exit() {
     // lowest_low(22) ≈ 145.95, ATR ≈ 0.1, stop ≈ 146.25.
     // 146.500 > 146.25 → Chandelier fires.
     let pos = make_position(
-        "squeeze_momentum_v1", PAIR, Direction::Short,
-        dec!(148.500), dec!(149.000), entry_ts,
+        "squeeze_momentum_v1",
+        PAIR,
+        Direction::Short,
+        dec!(148.500),
+        dec!(149.000),
+        entry_ts,
     );
 
     let spike_ts = entry_ts + Duration::hours(21);
     let spike = make_h1_event(PAIR, dec!(146.500), dec!(146.550), dec!(146.450), spike_ts);
     let _ = strategy.on_price(&spike).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &spike).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &spike)
+        .await;
     assert_eq!(exits.len(), 1, "expected Chandelier exit for Short");
     assert_eq!(exits[0].trade_id, pos.trade.id);
     assert_eq!(exits[0].reason, StrategyExitReason::TrailingMa);
@@ -412,7 +430,9 @@ async fn squeeze_delay_phase_suppression() {
     );
     let (warmup, trigger) = events.split_at(events.len() - 1);
     strategy.warmup(warmup).await;
-    let _signal = strategy.on_price(&trigger[0]).await
+    let _signal = strategy
+        .on_price(&trigger[0])
+        .await
         .expect("fixture must produce signal");
 
     let entry_ts = chrono::DateTime::parse_from_rfc3339("2026-05-03T02:00:00Z")
@@ -422,21 +442,27 @@ async fn squeeze_delay_phase_suppression() {
     // Position: entry=151.500, SL=150.000 → sl_distance=1.500.
     // We'll set close=153.500 so unrealized=2.0 > 1.5 → 1R IS reached.
     let pos = make_position(
-        "squeeze_momentum_v1", PAIR, Direction::Long,
-        dec!(151.500), dec!(150.000), entry_ts,
+        "squeeze_momentum_v1",
+        PAIR,
+        Direction::Long,
+        dec!(151.500),
+        dec!(150.000),
+        entry_ts,
     );
 
     // Feed only 2 bars after entry (within DELAY_BARS=3).
     // Price is high enough that 1R passes, but delay phase should still suppress.
     for i in 1..=2 {
         let ts = entry_ts + Duration::hours(i);
-        let _ = strategy.on_price(&make_h1_event(
-            PAIR,
-            dec!(153.500),
-            dec!(154.000),
-            dec!(153.000),
-            ts,
-        )).await;
+        let _ = strategy
+            .on_price(&make_h1_event(
+                PAIR,
+                dec!(153.500),
+                dec!(154.000),
+                dec!(153.000),
+                ts,
+            ))
+            .await;
     }
 
     // Bar 3 after entry (bars_held=2 < DELAY_BARS=3 → still in delay).
@@ -446,9 +472,12 @@ async fn squeeze_delay_phase_suppression() {
     let bar3 = make_h1_event(PAIR, dec!(153.500), dec!(154.000), dec!(153.000), bar3_ts);
     let _ = strategy.on_price(&bar3).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &bar3).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &bar3)
+        .await;
     assert_eq!(
-        exits.len(), 0,
+        exits.len(),
+        0,
         "delay phase (bars_held < 3) should suppress Chandelier exit even when 1R is reached"
     );
 }
@@ -464,8 +493,12 @@ async fn squeeze_1r_not_reached_long() {
     // Close 153.600 → unrealized = 0.100 < 2.000 → 1R not reached.
     // Even though Chandelier stop might be breached, 1R guard blocks.
     let pos = make_position(
-        "squeeze_momentum_v1", PAIR, Direction::Long,
-        dec!(153.500), dec!(151.500), entry_ts,
+        "squeeze_momentum_v1",
+        PAIR,
+        Direction::Long,
+        dec!(153.500),
+        dec!(151.500),
+        entry_ts,
     );
 
     // Price slightly above entry — tiny unrealized profit < sl_distance.
@@ -473,7 +506,9 @@ async fn squeeze_1r_not_reached_long() {
     let drop = make_h1_event(PAIR, dec!(153.600), dec!(153.650), dec!(153.550), drop_ts);
     let _ = strategy.on_price(&drop).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &drop).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &drop)
+        .await;
     assert!(
         exits.is_empty(),
         "1R not reached → Chandelier exit suppressed, got {} exits",
@@ -491,8 +526,12 @@ async fn squeeze_1r_not_reached_short() {
     // Entry 146.500, SL 148.500 → sl_distance=2.000.
     // Close 146.400 → unrealized = 146.500 - 146.400 = 0.100 < 2.000 → 1R not reached.
     let pos = make_position(
-        "squeeze_momentum_v1", PAIR, Direction::Short,
-        dec!(146.500), dec!(148.500), entry_ts,
+        "squeeze_momentum_v1",
+        PAIR,
+        Direction::Short,
+        dec!(146.500),
+        dec!(148.500),
+        entry_ts,
     );
 
     // Price slightly below entry — tiny unrealized profit < sl_distance.
@@ -500,7 +539,9 @@ async fn squeeze_1r_not_reached_short() {
     let spike = make_h1_event(PAIR, dec!(146.400), dec!(146.450), dec!(146.350), spike_ts);
     let _ = strategy.on_price(&spike).await;
 
-    let exits = strategy.on_open_positions(std::slice::from_ref(&pos), &spike).await;
+    let exits = strategy
+        .on_open_positions(std::slice::from_ref(&pos), &spike)
+        .await;
     assert!(
         exits.is_empty(),
         "1R not reached → Chandelier exit suppressed for Short, got {} exits",
