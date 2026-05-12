@@ -2,7 +2,9 @@
 # scripts/install-hooks.sh
 #
 # Clone 後に 1 回実行する。`.githooks/` をリポジトリ共通の hook ディレクトリに
-# 設定し、強制ルール (main 直 push 禁止 / test-all.sh 必須) を有効化する。
+# 設定し、main 直 push 禁止の強制ルールを有効化する。テスト実行 (test-all.sh)
+# は git hook では強制せず、Claude Code 経由なら PreToolUse hook、それ以外は
+# 実装ワークフロー側の discipline で担保する (詳細は CLAUDE.md)。
 #
 # 使い方:
 #   ./scripts/install-hooks.sh

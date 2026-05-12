@@ -324,16 +324,30 @@ impl VegapunkApi for MockVegapunkApi {
         top_k: i32,
     ) -> anyhow::Result<SearchResults> {
         let results = MockVegapunkApi::search(self, query, mode.as_str(), top_k).await?;
-        let hits = results
+        // Real VegapunkClient respects top_k; mirror that here so tests catch
+        // regressions where a caller forgets the limit.
+        let limit = if top_k > 0 {
+            top_k as usize
+        } else {
+            results.len()
+        };
+        let hits: Vec<SearchHit> = results
             .into_iter()
+            .take(limit)
             .map(|r| SearchHit {
                 text: r.text,
                 score: r.score,
             })
             .collect();
+        // Use the cumulative search call count as part of the search_id so
+        // tests can distinguish multiple searches in the same scenario.
+        let call_count = self
+            .counters
+            .search
+            .load(std::sync::atomic::Ordering::SeqCst);
         Ok(SearchResults {
             hits,
-            search_id: "mock-search-id".to_string(),
+            search_id: format!("mock-search-{call_count}"),
         })
     }
 
