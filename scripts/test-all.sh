@@ -19,6 +19,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Hook 経由など PATH が貧弱な環境でも cargo / protoc を見つけられるよう、
+# 標準的なインストール先を補強する。シェルから直接動かす場合は既に
+# 入っているはずなので冪等。
+for p in "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin; do
+  if [[ -d "$p" && ":$PATH:" != *":$p:"* ]]; then
+    PATH="$p:$PATH"
+  fi
+done
+export PATH
+
 step() {
   printf '\n\033[1;34m== %s ==\033[0m\n' "$*"
 }
@@ -31,7 +41,8 @@ ok() {
 step "preflight"
 
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo not on PATH. Install via rustup." >&2
+  echo "cargo not on PATH (looked in \$HOME/.cargo/bin, /opt/homebrew/bin, /usr/local/bin)." >&2
+  echo "Install via rustup." >&2
   exit 1
 fi
 

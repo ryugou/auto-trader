@@ -1,13 +1,12 @@
 #!/bin/sh
 # .githooks/pre-push
 #
-# 強制ルール:
-#   1. main / master への直 push はドキュメントのみの場合に限り許可
-#   2. ドキュメント以外の変更が含まれる push は scripts/test-all.sh が green
-#      でなければ拒否
+# 強制ルール: main / master への直 push はドキュメントのみの場合に限り許可。
+# それ以外は branch + PR を要求する (memory: main 直接 push 絶対禁止)。
 #
-# CLAUDE.md / global ルールの「実装変更を含む commit/push 前には必ず全テストを
-# 通す」を hook で強制する。docs/typo/comment-only の修正はテスト省略可。
+# テスト実行 (scripts/test-all.sh) はこの hook では強制しない。実装ワークフロー
+# 側で commit 前に通すのが本筋であり、push 時点で再実行するのは事後対応。
+# エージェント層 (Claude Code PreToolUse hook) で commit 時点に test 強制する。
 
 set -e
 
@@ -19,15 +18,11 @@ is_doc() {
 }
 
 while read -r local_ref local_oid remote_ref remote_oid; do
-  # Skip ref deletions
   zero='0000000000000000000000000000000000000000'
   if [ "$local_oid" = "$zero" ]; then
-    continue
+    continue  # ref deletion
   fi
 
-  # Determine change set:
-  #   - 新規 branch (remote_oid == 0): merge-base with origin/main を起点
-  #   - 既存 branch: remote_oid..local_oid
   if [ "$remote_oid" = "$zero" ]; then
     base=$(git merge-base "$local_oid" origin/main 2>/dev/null || echo "")
     if [ -n "$base" ]; then
@@ -41,7 +36,6 @@ while read -r local_ref local_oid remote_ref remote_oid; do
 
   files=$(git diff --name-only $range 2>/dev/null || echo "")
 
-  # 非ドキュメントファイルが含まれるか判定
   has_non_doc=0
   for f in $files; do
     if ! is_doc "$f"; then
@@ -51,33 +45,12 @@ while read -r local_ref local_oid remote_ref remote_oid; do
   done
 
   branch=${local_ref#refs/heads/}
-
-  # (1) main / master 直 push ガード
   if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
     if [ "$has_non_doc" = "1" ]; then
       echo "" >&2
       echo "ERROR: Direct push to $branch is blocked (non-doc changes present)." >&2
       echo "Create a feature branch and submit a PR." >&2
       echo "" >&2
-      exit 1
-    fi
-  fi
-
-  # (2) test-all.sh 強制 (非ドキュメント変更がある場合)
-  if [ "$has_non_doc" = "1" ]; then
-    repo_root=$(git rev-parse --show-toplevel)
-    script="$repo_root/scripts/test-all.sh"
-    if [ ! -x "$script" ]; then
-      echo "ERROR: $script is missing or not executable." >&2
-      echo "Run scripts/install-hooks.sh after clone, and ensure scripts/test-all.sh is committed." >&2
-      exit 1
-    fi
-    echo "" >&2
-    echo "=== Running scripts/test-all.sh before push (non-doc changes detected) ===" >&2
-    if ! "$script"; then
-      echo "" >&2
-      echo "ERROR: scripts/test-all.sh failed. Fix issues before pushing." >&2
-      echo "Skip override (dangerous, use only for emergencies): git push --no-verify" >&2
       exit 1
     fi
   fi

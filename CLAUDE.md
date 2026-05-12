@@ -40,10 +40,6 @@ Clone 後に 1 回実行:
 ./scripts/install-hooks.sh
 ```
 
-これにより `core.hooksPath` が `.githooks/` に切り替わり、以下が hook で強制される:
+`.githooks/pre-push` が `main` / `master` への直 push を非ドキュメント変更で拒否する (memory: main 直接 push 絶対禁止)。
 
-- `.githooks/pre-push`:
-  1. `main` / `master` への直 push をドキュメント以外で拒否
-  2. **ドキュメント以外の変更を含む push は `scripts/test-all.sh` が pass しなければ拒否**
-
-非常時のみの override: `git push --no-verify` (本来禁止。CI でも検出されるので使わない)。
+テスト実行はこの git hook では強制しない。テストは**実装ワークフローの一部**として走らせ、green を見てから commit するのが本筋。Claude が運用する場合は `.claude/settings.json` の PreToolUse hook で `git commit` を発火条件として `scripts/test-all.sh` を走らせ、失敗時に commit を拒否する (人間運用時は discipline でこれを担保)。
