@@ -1416,51 +1416,48 @@ async fn main() -> anyhow::Result<()> {
 
                 match trader.execute(signal).await {
                     Ok(trade) => {
-                        {
-                            let trade_clone = trade.clone();
-                            let indicators_clone = signal_event.indicators.clone();
-                            let alloc_pct = signal.allocation_pct;
-                            let exec_pool = executor_pool.clone();
-                            let store_opt = knowledge_store_exec.clone();
-                            tokio::spawn(async move {
-                                // Save entry_indicators to DB (with regime classification)
-                                let mut ind_map = indicators_clone
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
-                                    .collect::<serde_json::Map<_, _>>();
-                                ind_map.insert(
-                                    "regime".to_string(),
-                                    serde_json::Value::String(
-                                        crate::regime::classify(&indicators_clone)
-                                            .as_str()
-                                            .to_string(),
-                                    ),
-                                );
-                                let ind_json = serde_json::Value::Object(ind_map);
-                                if let Err(e) = sqlx::query(
-                                    "UPDATE trades SET entry_indicators = $1 WHERE id = $2",
-                                )
-                                .bind(&ind_json)
-                                .bind(trade_clone.id)
-                                .execute(&exec_pool)
-                                .await
-                                {
-                                    tracing::warn!("failed to save entry_indicators: {e}");
-                                }
+                        let trade_clone = trade.clone();
+                        let indicators_clone = signal_event.indicators.clone();
+                        let alloc_pct = signal.allocation_pct;
+                        let exec_pool = executor_pool.clone();
+                        let store_opt = knowledge_store_exec.clone();
+                        tokio::spawn(async move {
+                            // Save entry_indicators to DB (with regime classification)
+                            let mut ind_map = indicators_clone
+                                .iter()
+                                .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
+                                .collect::<serde_json::Map<_, _>>();
+                            ind_map.insert(
+                                "regime".to_string(),
+                                serde_json::Value::String(
+                                    crate::regime::classify(&indicators_clone)
+                                        .as_str()
+                                        .to_string(),
+                                ),
+                            );
+                            let ind_json = serde_json::Value::Object(ind_map);
+                            if let Err(e) =
+                                sqlx::query("UPDATE trades SET entry_indicators = $1 WHERE id = $2")
+                                    .bind(&ind_json)
+                                    .bind(trade_clone.id)
+                                    .execute(&exec_pool)
+                                    .await
+                            {
+                                tracing::warn!("failed to save entry_indicators: {e}");
+                            }
 
-                                if let Some(store) = store_opt
-                                    && let Err(e) = store
-                                        .record_trade_open(
-                                            &trade_clone,
-                                            &indicators_clone,
-                                            Some(alloc_pct),
-                                        )
-                                        .await
-                                {
-                                    tracing::warn!("knowledge_store record_trade_open failed: {e}");
-                                }
-                            });
-                        }
+                            if let Some(store) = store_opt
+                                && let Err(e) = store
+                                    .record_trade_open(
+                                        &trade_clone,
+                                        &indicators_clone,
+                                        Some(alloc_pct),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!("knowledge_store record_trade_open failed: {e}");
+                            }
+                        });
                         if let Err(e) = trade_tx_clone
                             .send(TradeEvent {
                                 trade,

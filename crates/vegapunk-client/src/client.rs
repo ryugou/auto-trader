@@ -55,14 +55,6 @@ impl VegapunkClient {
             schema: schema.to_string(),
         })
     }
-
-    /// Create a new client sharing the same gRPC channel (no additional TCP connection).
-    pub fn clone_from_channel(existing: &Self, schema: &str) -> Self {
-        Self {
-            client: existing.client.clone(),
-            schema: schema.to_string(),
-        }
-    }
 }
 
 use async_trait::async_trait;

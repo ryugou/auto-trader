@@ -23,18 +23,19 @@ while read -r local_ref local_oid remote_ref remote_oid; do
     continue  # ref deletion
   fi
 
+  # range 必ず "<base>..<local_oid>" 形にする。新規 branch で merge-base が
+  # 見つからない場合は git の empty-tree SHA を base にする (= local_oid 全ファイル
+  # を変更扱い)。単純な "$local_oid" 単体だと git diff が working tree 比較に
+  # 化けて意図しないファイルを拾うので避ける。
+  EMPTY_TREE='4b825dc642cb6eb9a060e54bf8d69288fbee4904'
   if [ "$remote_oid" = "$zero" ]; then
-    base=$(git merge-base "$local_oid" origin/main 2>/dev/null || echo "")
-    if [ -n "$base" ]; then
-      range="$base..$local_oid"
-    else
-      range="$local_oid"
-    fi
+    base=$(git merge-base "$local_oid" origin/main 2>/dev/null || echo "$EMPTY_TREE")
   else
-    range="$remote_oid..$local_oid"
+    base="$remote_oid"
   fi
+  range="$base..$local_oid"
 
-  files=$(git diff --name-only $range 2>/dev/null || echo "")
+  files=$(git diff --name-only "$range" 2>/dev/null || echo "")
 
   has_non_doc=0
   for f in $files; do
