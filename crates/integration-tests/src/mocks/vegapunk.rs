@@ -219,13 +219,16 @@ impl MockVegapunkApi {
         Ok(IngestRawResult { chunk_count: 1 })
     }
 
+    /// Inherent search returns canned results truncated to `top_k`. Also
+    /// returns the ordinal from the call counter so the trait impl can
+    /// build a unique search_id atomically.
     pub async fn search(
         &self,
         query: &str,
         mode: &str,
         top_k: i32,
-    ) -> anyhow::Result<Vec<SearchResult>> {
-        self.counters.search.fetch_add(1, Ordering::SeqCst);
+    ) -> anyhow::Result<(Vec<SearchResult>, u32)> {
+        let ordinal = self.counters.search.fetch_add(1, Ordering::SeqCst) + 1;
         Self::check_fail(&self.should_fail, &self.search_failures)?;
 
         self.search_calls.lock().unwrap().push(SearchCall {
@@ -234,8 +237,11 @@ impl MockVegapunkApi {
             top_k,
         });
 
-        let results = self.search_results.lock().unwrap().clone();
-        Ok(results)
+        let mut results = self.search_results.lock().unwrap().clone();
+        if top_k > 0 && (top_k as usize) < results.len() {
+            results.truncate(top_k as usize);
+        }
+        Ok((results, ordinal))
     }
 
     pub async fn feedback(
@@ -323,31 +329,17 @@ impl VegapunkApi for MockVegapunkApi {
         mode: SearchMode,
         top_k: i32,
     ) -> anyhow::Result<SearchResults> {
-        let results = MockVegapunkApi::search(self, query, mode.as_str(), top_k).await?;
-        // Real VegapunkClient respects top_k; mirror that here so tests catch
-        // regressions where a caller forgets the limit.
-        let limit = if top_k > 0 {
-            top_k as usize
-        } else {
-            results.len()
-        };
+        let (results, ordinal) = MockVegapunkApi::search(self, query, mode.as_str(), top_k).await?;
         let hits: Vec<SearchHit> = results
             .into_iter()
-            .take(limit)
             .map(|r| SearchHit {
                 text: r.text,
                 score: r.score,
             })
             .collect();
-        // Use the cumulative search call count as part of the search_id so
-        // tests can distinguish multiple searches in the same scenario.
-        let call_count = self
-            .counters
-            .search
-            .load(std::sync::atomic::Ordering::SeqCst);
         Ok(SearchResults {
             hits,
-            search_id: format!("mock-search-{call_count}"),
+            search_id: format!("mock-search-{ordinal}"),
         })
     }
 

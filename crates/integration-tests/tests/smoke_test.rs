@@ -328,7 +328,7 @@ async fn mock_vegapunk_tracks_calls() {
     assert_eq!(ingest.chunk_count, 1);
 
     // search
-    let results = mock.search("BTC sentiment", "local", 5).await.unwrap();
+    let (results, _ordinal) = mock.search("BTC sentiment", "local", 5).await.unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].score > 0.9);
 
