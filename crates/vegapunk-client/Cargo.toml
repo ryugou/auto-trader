@@ -10,7 +10,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-auto-trader-core = { path = "../core" }
+auto-trader-core = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

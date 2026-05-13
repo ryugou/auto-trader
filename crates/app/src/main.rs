@@ -1667,13 +1667,13 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::warn!("failed to purge old read notifications: {e}"),
                 }
 
-                // Daily: Vegapunk Merge for community detection consolidation
+                // Daily: KnowledgeStore merge for community-detection consolidation
                 if let Some(store) = knowledge_store_daily.clone() {
                     tokio::spawn(async move {
                         if let Err(e) = store.run_merge().await {
-                            tracing::warn!("daily vegapunk merge failed: {e}");
+                            tracing::warn!("daily knowledge_store merge failed: {e}");
                         } else {
-                            tracing::info!("daily vegapunk merge completed");
+                            tracing::info!("daily knowledge_store merge completed");
                         }
                     });
                 }
