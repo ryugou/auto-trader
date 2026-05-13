@@ -106,12 +106,21 @@ impl VegapunkApi for VegapunkClient {
             structural_weight: None,
         };
         let response = client.search(request).await?.into_inner();
+        // proto の SearchResultItem.text は optional。None/空 text は consumer
+        // (Gemini prompt 等) に渡しても意味が無いので boundary で落とす。
         let hits = response
             .results
             .into_iter()
-            .map(|r| SearchHit {
-                text: r.text.unwrap_or_default(),
-                score: r.score.unwrap_or(0.0),
+            .filter_map(|r| {
+                let text = r.text?;
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(SearchHit {
+                        text,
+                        score: r.score.unwrap_or(0.0),
+                    })
+                }
             })
             .collect();
         Ok(SearchResults {

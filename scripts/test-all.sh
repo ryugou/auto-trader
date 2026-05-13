@@ -51,14 +51,9 @@ if ! command -v protoc >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "ERROR: \`docker\` not on PATH. Install Docker Desktop (macOS) or docker-ce (Linux)." >&2
-  exit 1
-fi
-if ! docker compose version >/dev/null 2>&1; then
-  echo "ERROR: \`docker compose\` plugin missing. Install Docker Compose v2." >&2
-  exit 1
-fi
+# docker / docker compose の存在は preflight では強制しない。
+# 後段の probe_db が成功すれば DB が既に外部で起動済とみなして compose は不要。
+# probe_db が失敗した時のみ docker compose に頼るので、その段階でチェックする。
 
 # ── DB 起動 (docker compose) ──────────────────────────────────────────
 if [[ -z "${DATABASE_URL:-}" ]]; then
@@ -96,6 +91,15 @@ probe_db() {
 if probe_db; then
   ok "db reachable on $(echo "$DATABASE_URL" | sed 's/.*@//')"
 elif [[ "${SKIP_DOCKER_COMPOSE:-0}" != "1" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: db not reachable and \`docker\` not on PATH — cannot start the DB automatically." >&2
+    echo "Either start Postgres manually (and set DATABASE_URL) or install Docker." >&2
+    exit 1
+  fi
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "ERROR: \`docker compose\` plugin missing — cannot start the DB automatically." >&2
+    exit 1
+  fi
   step "docker compose up -d db"
   docker compose up -d db >/dev/null
   # healthcheck 待ち (最大 30 秒)

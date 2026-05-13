@@ -10,7 +10,7 @@
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace --lib --bins` (全 crate の unit + bin tests)
+3. `cargo test --workspace --lib --bins --tests` (全 crate の lib + bin + `tests/` 配下 integration tests)
 4. `cargo test -p auto-trader-integration-tests` (smoke / phase1-4 / mocks 全件)
 5. `cargo test --workspace --doc` (全 crate の doc tests)
 
