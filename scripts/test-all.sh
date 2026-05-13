@@ -79,13 +79,20 @@ probe_db() {
   else
     # scheme:// 以降の authority (= [user[:pass]@]host[:port]) を抽出してから
     # credentials と path を順に剥がす。credentials が無い URL でも安全。
+    # port 省略時は PostgreSQL のデフォルト 5432 を使う。IPv6 (例: `[::1]`)
+    # は本プロジェクトの DATABASE_URL では使わない前提で未対応。
     local authority host port
     authority=${DATABASE_URL#*://}
     authority=${authority%%/*}
     authority=${authority##*@}
-    host=${authority%:*}
-    port=${authority##*:}
-    if [[ -z "$host" || -z "$port" || "$host" == "$port" ]]; then
+    if [[ "$authority" == *:* ]]; then
+      host=${authority%:*}
+      port=${authority##*:}
+    else
+      host=$authority
+      port=5432
+    fi
+    if [[ -z "$host" ]]; then
       return 1
     fi
     (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null
