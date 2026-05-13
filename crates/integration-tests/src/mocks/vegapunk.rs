@@ -238,8 +238,12 @@ impl MockVegapunkApi {
         });
 
         let mut results = self.search_results.lock().unwrap().clone();
-        if top_k > 0 && (top_k as usize) < results.len() {
-            results.truncate(top_k as usize);
+        // Mirror the proto's literal semantics: top_k is a hard cap on result
+        // count. Negative is treated as 0 (no results) since the proto is i32
+        // but logically unsigned.
+        let limit = top_k.max(0) as usize;
+        if limit < results.len() {
+            results.truncate(limit);
         }
         Ok((results, ordinal))
     }
