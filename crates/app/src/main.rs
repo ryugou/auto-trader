@@ -1489,7 +1489,7 @@ async fn main() -> anyhow::Result<()> {
     // Task: Trade recorder — handles side effects after UnifiedTrader has already
     // persisted the trade to the DB. Responsibilities:
     //   - Upsert daily_summary on close
-    //   - Fire-and-forget Vegapunk ingestion on close
+    //   - Fire-and-forget KnowledgeStore ingestion + feedback on close
     // Note: trade INSERT/UPDATE and balance changes are owned by UnifiedTrader.
     let recorder_pool = pool.clone();
     let knowledge_store_recorder = knowledge_store.clone();
