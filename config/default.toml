@@ -60,12 +60,18 @@ model = "gemini-2.5-flash"
 api_url = "https://generativelanguage.googleapis.com"
 
 [macro_analyst]
-enabled = false
+# Macro analyst ingests external news/economic-calendar into the KnowledgeStore
+# so weekly evolution + LLM-driven strategies have richer context. Disabled in
+# the initial deployment; turned on once Vegapunk wiring stabilized (PR #84).
+enabled = true
 calendar_interval_secs = 3600
 news_interval_secs = 1800
+# DailyFX (`www.dailyfx.com/feeds/market-news`) currently returns HTTP 403 to
+# unauthenticated user agents — removed until we either add an API key or
+# switch to a feed that's actually scrapeable. ForexLive's feed works (301
+# redirect → valid RSS).
 news_sources = [
     "https://www.forexlive.com/feed",
-    "https://www.dailyfx.com/feeds/market-news",
 ]
 
 [[strategies]]
