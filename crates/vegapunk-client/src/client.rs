@@ -95,7 +95,9 @@ impl VegapunkApi for VegapunkClient {
             text: query.to_string(),
             filter: None,
             depth: None,
-            top_k: Some(top_k),
+            // proto top_k は論理的に非負。consumer (MockVegapunkApi) と挙動を
+            // 揃えるため負数を 0 に clamp してから forward する。
+            top_k: Some(top_k.max(0)),
             format: None,
             mode: Some(mode.as_str().to_string()),
             schema: self.schema.clone(),

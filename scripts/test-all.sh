@@ -123,9 +123,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 ok "clippy clean"
 
 # ── テスト本体 ────────────────────────────────────────────────────────
-step "cargo test --workspace --lib --bins"
-cargo test --workspace --lib --bins
-ok "lib + bin unit tests passed"
+step "cargo test --workspace --lib --bins --tests"
+# --tests を付けて crates/*/tests/*.rs 直下の integration tests も拾う
+# (--lib --bins だけだと crate-local integration tests が完全に skip される)。
+cargo test --workspace --lib --bins --tests
+ok "lib + bin + per-crate integration tests passed"
 
 step "cargo test -p auto-trader-integration-tests"
 cargo test -p auto-trader-integration-tests
