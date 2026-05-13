@@ -395,7 +395,7 @@ fn validate_permissive(
         }
         for (key, current_val) in current_obj {
             let proposed_val = &proposed_obj[key];
-            if std::mem::discriminant(current_val) != std::mem::discriminant(proposed_val) {
+            if !json_types_compatible(current_val, proposed_val) {
                 anyhow::bail!(
                     "{strategy_name}: type mismatch for key '{key}': current={current_val} proposed={proposed_val}"
                 );
@@ -408,6 +408,24 @@ fn validate_permissive(
          Add a dedicated validator before relying on these params in production."
     );
     Ok(proposed.clone())
+}
+
+/// JSON-level compatibility check used by `validate_permissive`. Goes one
+/// level finer than `discriminant(Value)` by distinguishing integer numbers
+/// from floats — a strategy that uses `entry_channel: 20` (i64) should NOT
+/// silently accept `entry_channel: 20.5` (f64), since downstream code may
+/// `as_i64().unwrap()` on it.
+fn json_types_compatible(current: &serde_json::Value, proposed: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (current, proposed) {
+        (Value::Number(c), Value::Number(p)) => {
+            // Treat i64 and u64 as the same "integer" subtype; f64 is distinct.
+            let current_is_int = c.is_i64() || c.is_u64();
+            let proposed_is_int = p.is_i64() || p.is_u64();
+            current_is_int == proposed_is_int
+        }
+        _ => std::mem::discriminant(current) == std::mem::discriminant(proposed),
+    }
 }
 
 /// Load the current JSON params blob for a strategy from `strategy_params`.
@@ -843,6 +861,26 @@ mod tests {
             format!("{err}").contains("type mismatch"),
             "error should flag type mismatch: {err}"
         );
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_int_to_float_swap() {
+        // Codex round 2: discriminant(Value::Number) doesn't distinguish
+        // integer from float. We do the extra check; this test pins it.
+        let proposed = serde_json::json!({ "window": 20.5 });
+        let current = serde_json::json!({ "window": 20 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("type mismatch"),
+            "int→float swap should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_accepts_float_to_float() {
+        let proposed = serde_json::json!({ "threshold": 1.6 });
+        let current = serde_json::json!({ "threshold": 1.2 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_ok());
     }
 
     #[test]
