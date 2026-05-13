@@ -64,7 +64,9 @@ fi
 if [[ -z "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL='postgresql://auto-trader:auto-trader@localhost:15432/auto_trader'
 fi
-echo "DATABASE_URL=$DATABASE_URL"
+# 認証情報を含めずに表示 (`postgresql://USER:PASS@HOST:PORT/DB` →
+# `postgresql://***@HOST:PORT/DB` に置換)
+echo "DATABASE_URL=$(printf '%s' "$DATABASE_URL" | sed -E 's|://[^@]+@|://***@|')"
 
 # DB connectivity probe (worktree から docker compose を打つと既存 main 側
 # コンテナと port 衝突するので、まず外から到達できるかを試す)。

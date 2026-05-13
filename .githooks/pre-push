@@ -48,11 +48,14 @@ while read -r local_ref local_oid remote_ref remote_oid; do
     fi
   done
 
-  branch=${local_ref#refs/heads/}
-  if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+  # 受信側 (remote) のブランチ名でガードする。
+  # `git push origin feature:main` のような refspec ですり抜けないよう、
+  # 必ず `remote_ref` を見る (local_ref はソース側で偽装可能)。
+  remote_branch=${remote_ref#refs/heads/}
+  if [ "$remote_branch" = "main" ] || [ "$remote_branch" = "master" ]; then
     if [ "$has_non_doc" = "1" ]; then
       echo "" >&2
-      echo "ERROR: Direct push to $branch is blocked (non-doc changes present)." >&2
+      echo "ERROR: Direct push to $remote_branch is blocked (non-doc changes present)." >&2
       echo "Create a feature branch and submit a PR." >&2
       echo "" >&2
       exit 1
