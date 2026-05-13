@@ -65,7 +65,7 @@ pub async fn run(
         .await
         .context("compute_regime_wilson")?;
 
-    // 3. Optional Vegapunk context
+    // 3. Optional KnowledgeStore context
     let knowledge_context = fetch_knowledge_context(knowledge, STRATEGY).await;
 
     // 4. Current params from DB
@@ -147,12 +147,12 @@ pub async fn run(
         .await
         .context("insert_system_notification")?;
 
-    // 7. Vegapunk merge (best-effort)
+    // 7. KnowledgeStore merge (best-effort)
     if let Some(store) = knowledge {
         if let Err(err) = store.run_merge().await {
-            tracing::warn!("weekly_batch: Vegapunk merge failed: {err:#}");
+            tracing::warn!("weekly_batch: knowledge_store merge failed: {err:#}");
         } else {
-            tracing::info!("weekly_batch: Vegapunk merge triggered");
+            tracing::info!("weekly_batch: knowledge_store merge triggered");
         }
     }
 
@@ -372,7 +372,7 @@ fn build_gemini_prompt(
 
     // KnowledgeStore context section
     if let Some(context) = knowledge_context {
-        prompt.push_str("\n## Vegapunk 学習コンテキスト\n");
+        prompt.push_str("\n## 過去トレード学習コンテキスト\n");
         prompt.push_str(context);
         prompt.push('\n');
     }
@@ -527,8 +527,8 @@ mod tests {
 
         let prompt = build_gemini_prompt(&stats, None, &params, &wilson);
 
-        // Without context the Vegapunk section should be absent
-        assert!(!prompt.contains("Vegapunk 学習コンテキスト"));
+        // Without context the knowledge-store section should be absent
+        assert!(!prompt.contains("過去トレード学習コンテキスト"));
         // But prompt must still include output format instructions
         assert!(prompt.contains("GeminiProposal") || prompt.contains("rationale"));
     }

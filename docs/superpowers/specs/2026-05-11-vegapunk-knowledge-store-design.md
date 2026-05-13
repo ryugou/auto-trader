@@ -155,17 +155,21 @@ impl VegapunkApi for VegapunkClient {
 }
 ```
 
-- `connect` と `clone_from_channel` は inherent method のまま残置 (factory が複数 store を作る用)
+- `connect` は inherent method のまま残置 (factory)
 - 既存の `&mut self` メソッドは削除 (新 trait に置換)
+- ※ 初版設計では `clone_from_channel` を残す予定だったが、consumer 移行後に dead code 化したため実装段階で削除 (PR #83 simplify pass)
 
 ## 高レベル trait: `KnowledgeStore`
 
 配置: `crates/core/src/knowledge.rs`
 
+実装は `crates/core/src/knowledge.rs` 参照。要点:
+
 ```rust
-use crate::models::{Trade, Pair};
-use crate::indicators::Indicators;
+use crate::types::{Pair, Trade};
 use async_trait::async_trait;
+use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct PatternHit {
@@ -189,20 +193,27 @@ pub struct MarketEvent<'a> {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// `record_trade_close` で caller が DB から組み立てて渡すコンテキスト。
+#[derive(Debug, Clone, Copy)]
+pub struct TradeCloseContext<'a> {
+    pub entry_indicators: Option<&'a serde_json::Value>,
+    pub account_balance: Option<Decimal>,
+    pub account_initial: Option<Decimal>,
+}
+
 #[async_trait]
 pub trait KnowledgeStore: Send + Sync {
     async fn record_trade_open(
         &self,
         trade: &Trade,
-        indicators: &Indicators,
-        alloc_pct: Option<f64>,
+        indicators: &HashMap<String, Decimal>,
+        allocation_pct: Option<Decimal>,
     ) -> anyhow::Result<()>;
 
     async fn record_trade_close(
         &self,
         trade: &Trade,
-        exit_reason: &str,
-        pnl_pips: Option<f64>,
+        ctx: &TradeCloseContext<'_>,
     ) -> anyhow::Result<()>;
 
     async fn record_market_event(&self, event: &MarketEvent<'_>) -> anyhow::Result<()>;
@@ -210,7 +221,7 @@ pub trait KnowledgeStore: Send + Sync {
     async fn search_similar_patterns(
         &self,
         pair: &Pair,
-        current_price: rust_decimal::Decimal,
+        current_price: Decimal,
         top_k: i32,
     ) -> anyhow::Result<PatternSearchResults>;
 
@@ -230,6 +241,11 @@ pub trait KnowledgeStore: Send + Sync {
     async fn run_merge(&self) -> anyhow::Result<()>;
 }
 ```
+
+実装段階で確定したシグネチャ要点:
+- `record_trade_open` の indicators は `HashMap<String, Decimal>` (既存 `enriched_ingest::format_trade_open` の入力に合わせた)
+- `record_trade_close` は `TradeCloseContext` 構造体で `entry_indicators` / `account_balance` / `account_initial` をまとめて渡す (`enriched_ingest::format_trade_close` 要件)
+- `allocation_pct` は `Option<Decimal>` (`f64` ではない、既存 `Trade.alloc_pct` と整合)
 
 ### 高レベル実装: `VegapunkKnowledgeStore`
 

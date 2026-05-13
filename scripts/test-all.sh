@@ -51,9 +51,12 @@ if ! command -v protoc >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v psql >/dev/null 2>&1 && ! command -v pg_isready >/dev/null 2>&1; then
-  echo "ERROR: scripts/test-all.sh requires \`psql\` or \`pg_isready\` on PATH for the DB probe." >&2
-  echo "Install one: macOS \`brew install libpq\` / Debian \`apt install postgresql-client\`." >&2
+if ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: \`docker\` not on PATH. Install Docker Desktop (macOS) or docker-ce (Linux)." >&2
+  exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "ERROR: \`docker compose\` plugin missing. Install Docker Compose v2." >&2
   exit 1
 fi
 
@@ -64,13 +67,27 @@ fi
 echo "DATABASE_URL=$DATABASE_URL"
 
 # DB connectivity probe (worktree から docker compose を打つと既存 main 側
-# コンテナと port 衝突するので、まず外から到達できるかを試す)。preflight で
-# psql/pg_isready の存在を確認済なので、ここに到達した時点でどちらかは使える。
+# コンテナと port 衝突するので、まず外から到達できるかを試す)。
+#
+# 優先順:
+#   1. psql で実 SQL を打って確認 (一番厳密)
+#   2. pg_isready で readyz だけ確認
+#   3. bash の /dev/tcp 経由で TCP 到達だけ確認 (postgres プロトコルは未検査だが
+#      "ポートに何かがいる" は確認できるので開発時の起動チェックには十分)
 probe_db() {
   if command -v psql >/dev/null 2>&1; then
     PGCONNECT_TIMEOUT=2 psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1
-  else
+  elif command -v pg_isready >/dev/null 2>&1; then
     pg_isready -d "$DATABASE_URL" -t 2 >/dev/null 2>&1
+  else
+    local hostport host port
+    hostport=$(printf '%s' "$DATABASE_URL" | sed -n 's|.*@\([^/]*\)/.*|\1|p')
+    host=${hostport%:*}
+    port=${hostport#*:}
+    if [[ -z "$host" || -z "$port" ]]; then
+      return 1
+    fi
+    (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null
   fi
 }
 

@@ -157,8 +157,9 @@ where
 ///
 /// This function iterates `config.strategies`, constructs each strategy
 /// instance, and adds it to the engine via `engine.add_strategy`.
-/// Strategies that require external resources (Vegapunk, Gemini, DB params)
-/// are skipped with a warning if those resources are unavailable.
+/// Strategies that require external resources (a `KnowledgeStore`, Gemini,
+/// or DB-loaded params) are skipped with a warning if those resources are
+/// unavailable.
 pub async fn register_strategies(
     engine: &mut StrategyEngine,
     strategies: &[StrategyConfig],

@@ -29,8 +29,9 @@
 `./scripts/test-all.sh` は以下を前提とする:
 
 - `cargo` (rustup 経由) と `protoc` (macOS: `brew install protobuf`) が PATH 上
-- **`psql` または `pg_isready` が PATH 上** (macOS: `brew install libpq`、Debian: `apt install postgresql-client`)。DB 到達性 probe に必要
+- `docker` + `docker compose` (v2) が PATH 上 (DB を docker-compose で立てるため)
 - `DATABASE_URL` 未設定なら localhost:15432 の docker-compose Postgres を仮定し、必要なら `docker compose up -d db` を自動起動
+- DB 到達性 probe は `psql` → `pg_isready` → bash の `/dev/tcp` の順で fallback。`psql`/`pg_isready` があれば protocol レベルで確認、無ければ TCP 到達確認のみ (開発用途には十分)
 - 外部 API 接続を試したい場合は `VEGAPUNK_AUTH_TOKEN` / `OANDA_API_KEY` / `OANDA_ACCOUNT_ID` 等を env で渡す (未設定なら該当テストは SKIPPED)
 
 ## 【強制】git hook セットアップ
