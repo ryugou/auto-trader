@@ -1,5 +1,7 @@
 use crate::proto::graph_rag_engine_client::GraphRagEngineClient;
 use crate::proto::*;
+use async_trait::async_trait;
+use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
@@ -55,22 +57,18 @@ impl VegapunkClient {
             schema: schema.to_string(),
         })
     }
+}
 
-    /// Create a new client sharing the same gRPC channel (no additional TCP connection).
-    pub fn clone_from_channel(existing: &Self, schema: &str) -> Self {
-        Self {
-            client: existing.client.clone(),
-            schema: schema.to_string(),
-        }
-    }
-
-    pub async fn ingest_raw(
-        &mut self,
+#[async_trait]
+impl VegapunkApi for VegapunkClient {
+    async fn ingest_raw(
+        &self,
         text: &str,
         source_type: &str,
         channel: &str,
         timestamp: &str,
-    ) -> anyhow::Result<IngestRawResponse> {
+    ) -> anyhow::Result<()> {
+        let mut client = self.client.clone();
         let request = IngestRawRequest {
             text: text.to_string(),
             metadata: Some(IngestRawMetadata {
@@ -81,52 +79,72 @@ impl VegapunkClient {
             }),
             schema: self.schema.clone(),
         };
-        let response = self.client.ingest_raw(request).await?;
-        Ok(response.into_inner())
+        client.ingest_raw(request).await?;
+        Ok(())
     }
 
-    pub async fn search(
-        &mut self,
+    async fn search(
+        &self,
         query: &str,
-        mode: &str,
+        mode: SearchMode,
         top_k: i32,
-    ) -> anyhow::Result<SearchResponse> {
+    ) -> anyhow::Result<SearchResults> {
+        let mut client = self.client.clone();
         let request = SearchRequest {
             text: query.to_string(),
             filter: None,
             depth: None,
-            top_k: Some(top_k),
+            // proto top_k は論理的に非負。consumer (MockVegapunkApi) と挙動を
+            // 揃えるため負数を 0 に clamp してから forward する。
+            top_k: Some(top_k.max(0)),
             format: None,
-            mode: Some(mode.to_string()),
+            mode: Some(mode.as_str().to_string()),
             schema: self.schema.clone(),
             offset: None,
             limit: None,
             structural_weight: None,
         };
-        let response = self.client.search(request).await?;
-        Ok(response.into_inner())
+        let response = client.search(request).await?.into_inner();
+        // proto の SearchResultItem.text は optional。None/空 text は consumer
+        // (Gemini prompt 等) に渡しても意味が無いので boundary で落とす。
+        let hits = response
+            .results
+            .into_iter()
+            .filter_map(|r| {
+                let text = r.text?;
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(SearchHit {
+                        text,
+                        score: r.score.unwrap_or(0.0),
+                    })
+                }
+            })
+            .collect();
+        Ok(SearchResults {
+            hits,
+            search_id: response.search_id,
+        })
     }
 
-    pub async fn feedback(
-        &mut self,
-        search_id: &str,
-        rating: i32,
-        comment: &str,
-    ) -> anyhow::Result<()> {
+    async fn feedback(&self, search_id: &str, rating: i32, comment: &str) -> anyhow::Result<()> {
+        let mut client = self.client.clone();
         let request = FeedbackRequest {
             search_id: search_id.to_string(),
             rating,
             comment: comment.to_string(),
         };
-        self.client.feedback(request).await?;
+        client.feedback(request).await?;
         Ok(())
     }
 
-    pub async fn merge(&mut self) -> anyhow::Result<()> {
+    async fn merge(&self) -> anyhow::Result<()> {
+        let mut client = self.client.clone();
         let request = MergeRequest {
             schema: self.schema.clone(),
         };
-        self.client.merge(request).await?;
+        client.merge(request).await?;
         Ok(())
     }
 }

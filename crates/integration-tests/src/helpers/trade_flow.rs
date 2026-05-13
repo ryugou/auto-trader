@@ -73,7 +73,8 @@ pub fn load_events_from_csv(
 
 /// フィクスチャディレクトリのパスを返す。
 pub fn fixtures_dir() -> std::path::PathBuf {
-    let manifest =
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(manifest).join("fixtures").join("phase3")
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(manifest)
+        .join("fixtures")
+        .join("phase3")
 }

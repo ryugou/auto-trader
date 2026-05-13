@@ -95,9 +95,7 @@ pub async fn spawn_test_app_with_levels(
     let url = format!("http://{addr}");
 
     let handle = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .await
-            .expect("server error");
+        axum::serve(listener, router).await.expect("server error");
     });
 
     // Wait for the server to start accepting connections (TCP retry loop).

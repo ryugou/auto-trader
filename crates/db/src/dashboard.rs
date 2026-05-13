@@ -436,7 +436,14 @@ pub async fn get_all_evaluated_balances(
     let map = rows
         .into_iter()
         .map(|(id, current_balance, unrealized_pnl, evaluated_balance)| {
-            (id, EvaluatedBalance { current_balance, unrealized_pnl, evaluated_balance })
+            (
+                id,
+                EvaluatedBalance {
+                    current_balance,
+                    unrealized_pnl,
+                    evaluated_balance,
+                },
+            )
         })
         .collect();
     Ok(map)

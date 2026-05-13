@@ -93,7 +93,12 @@ fn make_signal(pair: &str, direction: Direction) -> Signal {
 async fn sl_hit_long(pool: sqlx::PgPool) {
     let exchange = Exchange::GmoFx;
     let account_id = seed_trading_account(
-        &pool, "sl_test", "paper", "gmo_fx", "test_strategy", 1_000_000,
+        &pool,
+        "sl_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
     )
     .await;
 
@@ -107,7 +112,11 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
     assert_eq!(trade.entry_price, dec!(151));
     // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -168,7 +177,10 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
     assert_eq!(closed.exit_price, Some(dec!(147)));
     // PnL = (147 - 151) * quantity → negative
     let pnl = closed.pnl_amount.expect("pnl should be set");
-    assert!(pnl < dec!(0), "SL hit Long should have negative PnL, got {pnl}");
+    assert!(
+        pnl < dec!(0),
+        "SL hit Long should have negative PnL, got {pnl}"
+    );
     // Exact PnL via helper.
     let exit_price = closed.exit_price.unwrap();
     let expected_pnl = sizing_invariants::expected_pnl(
@@ -192,7 +204,12 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
 async fn sl_hit_short(pool: sqlx::PgPool) {
     let exchange = Exchange::GmoFx;
     let account_id = seed_trading_account(
-        &pool, "sl_test", "paper", "gmo_fx", "test_strategy", 1_000_000,
+        &pool,
+        "sl_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
     )
     .await;
 
@@ -205,7 +222,11 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
     assert_eq!(trade.entry_price, dec!(150));
     // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=150 (Short@bid), min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 150 ≈ 12820.51 → 12820
-    assert_eq!(trade.quantity, dec!(12820), "sizer: 1M × 2 × (1/1.04) / 150 → 12820");
+    assert_eq!(
+        trade.quantity,
+        dec!(12820),
+        "sizer: 1M × 2 × (1/1.04) / 150 → 12820"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -264,7 +285,10 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
     // Short close → ask price
     assert_eq!(closed.exit_price, Some(dec!(154)));
     let pnl = closed.pnl_amount.expect("pnl should be set");
-    assert!(pnl < dec!(0), "SL hit Short should have negative PnL, got {pnl}");
+    assert!(
+        pnl < dec!(0),
+        "SL hit Short should have negative PnL, got {pnl}"
+    );
     // Exact PnL via helper.
     let exit_price = closed.exit_price.unwrap();
     let expected_pnl = sizing_invariants::expected_pnl(
@@ -274,7 +298,10 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
         closed.direction,
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
-    assert_eq!(pnl, expected_pnl, "pnl = TRUNC((entry - exit) × qty) for Short");
+    assert_eq!(
+        pnl, expected_pnl,
+        "pnl = TRUNC((entry - exit) × qty) for Short"
+    );
     let balance_after_close = read_current_balance(&pool, account_id).await;
     assert_eq!(
         balance_after_close,
@@ -292,7 +319,12 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
 async fn tp_hit_long(pool: sqlx::PgPool) {
     let exchange = Exchange::GmoFx;
     let account_id = seed_trading_account(
-        &pool, "tp_test", "paper", "gmo_fx", "test_strategy", 1_000_000,
+        &pool,
+        "tp_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
     )
     .await;
 
@@ -303,7 +335,11 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -360,7 +396,10 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
     assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
     assert_eq!(closed.exit_price, Some(dec!(158)));
     let pnl = closed.pnl_amount.expect("pnl should be set");
-    assert!(pnl > dec!(0), "TP hit Long should have positive PnL, got {pnl}");
+    assert!(
+        pnl > dec!(0),
+        "TP hit Long should have positive PnL, got {pnl}"
+    );
     // Exact PnL via helper.
     let exit_price = closed.exit_price.unwrap();
     let expected_pnl = sizing_invariants::expected_pnl(
@@ -384,7 +423,12 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
 async fn tp_hit_short(pool: sqlx::PgPool) {
     let exchange = Exchange::GmoFx;
     let account_id = seed_trading_account(
-        &pool, "tp_test", "paper", "gmo_fx", "test_strategy", 1_000_000,
+        &pool,
+        "tp_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
     )
     .await;
 
@@ -395,7 +439,11 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 150 → 12820 (Short@bid=150)
-    assert_eq!(trade.quantity, dec!(12820), "sizer: 1M × 2 × (1/1.04) / 150 → 12820");
+    assert_eq!(
+        trade.quantity,
+        dec!(12820),
+        "sizer: 1M × 2 × (1/1.04) / 150 → 12820"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -452,7 +500,10 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
     assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
     assert_eq!(closed.exit_price, Some(dec!(143)));
     let pnl = closed.pnl_amount.expect("pnl should be set");
-    assert!(pnl > dec!(0), "TP hit Short should have positive PnL, got {pnl}");
+    assert!(
+        pnl > dec!(0),
+        "TP hit Short should have positive PnL, got {pnl}"
+    );
     // Exact PnL via helper.
     let exit_price = closed.exit_price.unwrap();
     let expected_pnl = sizing_invariants::expected_pnl(
@@ -479,7 +530,12 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
 async fn time_limit_closes_expired_trade(pool: sqlx::PgPool) {
     let exchange = Exchange::GmoFx;
     let account_id = seed_trading_account(
-        &pool, "time_test", "paper", "gmo_fx", "test_strategy", 1_000_000,
+        &pool,
+        "time_test",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
     )
     .await;
 
@@ -501,7 +557,11 @@ async fn time_limit_closes_expired_trade(pool: sqlx::PgPool) {
     };
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -529,7 +589,10 @@ async fn time_limit_closes_expired_trade(pool: sqlx::PgPool) {
     // max_hold_until は過去 → position monitor が StrategyTimeLimit で close を発行
     assert!(trade.max_hold_until.is_some());
     let max_hold = trade.max_hold_until.unwrap();
-    assert!(max_hold < Utc::now(), "max_hold_until should be in the past");
+    assert!(
+        max_hold < Utc::now(),
+        "max_hold_until should be in the past"
+    );
 
     let closed = trader
         .close_position(&trade.id.to_string(), ExitReason::StrategyTimeLimit)

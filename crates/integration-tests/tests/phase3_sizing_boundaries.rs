@@ -25,12 +25,7 @@ use uuid::Uuid;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn make_signal(
-    pair: &str,
-    direction: Direction,
-    sl_pct: Decimal,
-    alloc_pct: Decimal,
-) -> Signal {
+fn make_signal(pair: &str, direction: Direction, sl_pct: Decimal, alloc_pct: Decimal) -> Signal {
     Signal {
         strategy_name: "boundary_strategy".to_string(),
         pair: Pair::new(pair),
@@ -177,7 +172,11 @@ async fn account_too_small_rejects_signal(pool: sqlx::PgPool) {
 
     // Sanity: balance unchanged because no fill happened.
     let bal = current_balance(&pool, account_id).await;
-    assert_eq!(bal, dec!(10_000), "balance must be untouched on rejected signal");
+    assert_eq!(
+        bal,
+        dec!(10_000),
+        "balance must be untouched on rejected signal"
+    );
 }
 
 /// **Test 2**: balance=30,000 yen on bitflyer_cfd at BTC = 12.5M with lev=2
@@ -236,11 +235,7 @@ async fn min_lot_truncation_realistic_bitflyer(pool: sqlx::PgPool) {
 
     // Post-SL margin level invariant: in the cap-binding branch margin
     // level lies *strictly above* Y, so the assertion must pass.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        dec!(30_000),
-        dec!(0.50),
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, dec!(30_000), dec!(0.50));
 }
 
 /// **Test 3**: SL=20% on gmo_fx (Y=1.0, lev=10) forces
@@ -311,11 +306,7 @@ async fn lc_constraint_binds_at_extreme_sl_gmo_fx(pool: sqlx::PgPool) {
     // level lands at (or just above) the broker threshold Y. Assert it
     // explicitly so a future tweak to the formula that silently breaks the
     // safety promise gets caught here.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        dec!(30_000),
-        dec!(1.00),
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, dec!(30_000), dec!(1.00));
 }
 
 /// **Test 4**: Two consecutive `trader.execute` calls share the same
@@ -412,7 +403,11 @@ async fn multiple_open_positions_share_balance_correctly(pool: sqlx::PgPool) {
         dec!(1),
     )
     .expect("trade 2 sizing should succeed");
-    assert_eq!(expected_qty2, dec!(265), "sanity check on expected_quantity for trade 2");
+    assert_eq!(
+        expected_qty2,
+        dec!(265),
+        "sanity check on expected_quantity for trade 2"
+    );
     assert_eq!(
         trade2.quantity,
         dec!(265),

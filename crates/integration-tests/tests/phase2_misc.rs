@@ -1,7 +1,7 @@
 //! Phase 2: Notifications, Health, Market, and Auth API tests.
 
-use auto_trader_integration_tests::helpers::{app, db, seed};
 use auto_trader_core::types::{Exchange, Pair};
+use auto_trader_integration_tests::helpers::{app, db, seed};
 use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;

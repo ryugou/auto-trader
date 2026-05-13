@@ -385,7 +385,10 @@ mod tests {
         // BitflyerCfd should be fresher than GmoFx, and GmoFx should remain
         // substantially older, proving the lookup is exchange-specific and
         // not contaminated by the other exchange's tick.
-        assert!(bf_age < gmo_age, "bf age {bf_age} should be less than gmo age {gmo_age}");
+        assert!(
+            bf_age < gmo_age,
+            "bf age {bf_age} should be less than gmo age {gmo_age}"
+        );
         assert!(
             gmo_age >= bf_age + 100,
             "gmo age {gmo_age} should be at least 100s older than bf age {bf_age}"

@@ -17,9 +17,7 @@
 //! dependency makes it a separate test concern.
 
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, TradeStatus};
-use auto_trader_integration_tests::helpers::pipeline::{
-    PipelineHarness, PipelineHarnessConfig,
-};
+use auto_trader_integration_tests::helpers::pipeline::{PipelineHarness, PipelineHarnessConfig};
 use auto_trader_integration_tests::helpers::sizing_invariants;
 use auto_trader_integration_tests::helpers::trade_flow::{fixtures_dir, load_events_from_csv};
 use auto_trader_strategy::bb_mean_revert::BbMeanRevertV1;
@@ -87,16 +85,9 @@ struct Scenario {
 ///
 /// The signal-emission step is parameterised by a closure so each strategy
 /// can plug in its own builder.
-async fn run_pipeline_test<F>(
-    pool: PgPool,
-    scenario: Scenario,
-    account_label: &str,
-    drive: F,
-) where
-    F: AsyncFnOnce(
-        &PipelineHarness,
-        &Scenario,
-    ) -> auto_trader_core::types::Signal,
+async fn run_pipeline_test<F>(pool: PgPool, scenario: Scenario, account_label: &str, drive: F)
+where
+    F: AsyncFnOnce(&PipelineHarness, &Scenario) -> auto_trader_core::types::Signal,
 {
     // 1. Build harness
     let mut harness = PipelineHarness::new(
@@ -195,11 +186,8 @@ async fn run_pipeline_test<F>(
     assert!(trade.pnl_amount.is_none());
 
     // 9. account_events must contain a margin_lock with amount = -margin.
-    let expected_margin = sizing_invariants::expected_margin_lock(
-        trade.quantity,
-        trade.entry_price,
-        trade.leverage,
-    );
+    let expected_margin =
+        sizing_invariants::expected_margin_lock(trade.quantity, trade.entry_price, trade.leverage);
     assert!(
         expected_margin > Decimal::ZERO,
         "expected_margin must be positive"
@@ -223,11 +211,7 @@ async fn run_pipeline_test<F>(
     );
 
     // 11. The new sizing invariant: post-SL margin level must stay >= Y.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        balance_before,
-        scenario.y,
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, scenario.y);
 
     // 12. Move the market in the trade's favour and close at TP.
     //     Use a 1.5% move so the close is clearly in profit but well within

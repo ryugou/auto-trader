@@ -243,12 +243,11 @@ async fn reconcile_orphan_force_closes(pool: PgPool) {
         .unwrap();
     assert_eq!(status, "closed", "orphan trade should be force-closed");
 
-    let exit_reason: String =
-        sqlx::query_scalar("SELECT exit_reason FROM trades WHERE id = $1")
-            .bind(trade_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let exit_reason: String = sqlx::query_scalar("SELECT exit_reason FROM trades WHERE id = $1")
+        .bind(trade_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(exit_reason, "reconciled");
 }
 
@@ -331,12 +330,11 @@ async fn reconcile_phase3_incomplete_force_closes(pool: PgPool) {
         "closing trade with no exchange position should be force-closed"
     );
 
-    let exit_reason: String =
-        sqlx::query_scalar("SELECT exit_reason FROM trades WHERE id = $1")
-            .bind(trade_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let exit_reason: String = sqlx::query_scalar("SELECT exit_reason FROM trades WHERE id = $1")
+        .bind(trade_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(exit_reason, "reconciled");
 }
 
@@ -376,9 +374,7 @@ async fn reconcile_api_retry_exhaustion(pool: PgPool) {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("exhausted")
-            || err_msg.contains("retry")
-            || err_msg.contains("retries"),
+        err_msg.contains("exhausted") || err_msg.contains("retry") || err_msg.contains("retries"),
         "error should mention retry exhaustion: {err_msg}"
     );
 }
@@ -412,8 +408,5 @@ async fn reconcile_api_immediate_error(pool: PgPool) {
     )
     .await;
 
-    assert!(
-        result.is_err(),
-        "reconcile should bail on API error"
-    );
+    assert!(result.is_err(), "reconcile should bail on API error");
 }

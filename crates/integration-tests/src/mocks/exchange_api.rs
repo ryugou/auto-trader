@@ -4,8 +4,8 @@
 //! Failure injection (`with_failures`) makes the first N calls return an error
 //! before falling through to the configured response.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use rust_decimal_macros::dec;
@@ -56,11 +56,11 @@ impl<T: Clone> MethodConfig<T> {
 
     /// Returns `Ok(response)` or `Err` depending on remaining failure count.
     fn try_respond(&self) -> anyhow::Result<T> {
-        let prev = self.fail_remaining.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |n| if n > 0 { Some(n - 1) } else { None },
-        );
+        let prev = self
+            .fail_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                if n > 0 { Some(n - 1) } else { None }
+            });
         match prev {
             Ok(_) => anyhow::bail!("MockExchangeApi: injected failure"),
             Err(_) => Ok(self.response.clone()),
@@ -110,23 +110,17 @@ impl ExchangeApi for MockExchangeApi {
         _product_code: &str,
         _child_order_acceptance_id: &str,
     ) -> anyhow::Result<Vec<Execution>> {
-        self.counters
-            .get_executions
-            .fetch_add(1, Ordering::SeqCst);
+        self.counters.get_executions.fetch_add(1, Ordering::SeqCst);
         self.get_executions_cfg.try_respond()
     }
 
     async fn get_positions(&self, _product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {
-        self.counters
-            .get_positions
-            .fetch_add(1, Ordering::SeqCst);
+        self.counters.get_positions.fetch_add(1, Ordering::SeqCst);
         self.get_positions_cfg.try_respond()
     }
 
     async fn get_collateral(&self) -> anyhow::Result<Collateral> {
-        self.counters
-            .get_collateral
-            .fetch_add(1, Ordering::SeqCst);
+        self.counters.get_collateral.fetch_add(1, Ordering::SeqCst);
         self.get_collateral_cfg.try_respond()
     }
 

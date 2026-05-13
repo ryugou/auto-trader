@@ -32,8 +32,7 @@ async fn register_all_standard_strategies(pool: sqlx::PgPool) {
         &strategies,
         &pool,
         &None, // no vegapunk
-        "test-schema",
-        None, // no gemini config
+        None,  // no gemini config
     )
     .await;
 
@@ -51,10 +50,7 @@ async fn register_disabled_strategies_skipped(pool: sqlx::PgPool) {
         strategy_cfg("donchian_trend_v1", false, &["USD_JPY"]),
     ];
 
-    auto_trader::startup::register_strategies(
-        &mut engine, &strategies, &pool, &None, "test-schema", None,
-    )
-    .await;
+    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None).await;
 
     assert_eq!(engine.registered_names().len(), 0);
 }
@@ -66,10 +62,7 @@ async fn register_unknown_strategy_skipped(pool: sqlx::PgPool) {
     let mut engine = StrategyEngine::new(signal_tx);
     let strategies = vec![strategy_cfg("totally_unknown_v99", true, &["USD_JPY"])];
 
-    auto_trader::startup::register_strategies(
-        &mut engine, &strategies, &pool, &None, "test-schema", None,
-    )
-    .await;
+    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None).await;
 
     assert_eq!(engine.registered_names().len(), 0);
 }
@@ -95,7 +88,6 @@ async fn register_swing_llm_skipped_without_gemini_key(pool: sqlx::PgPool) {
         &strategies,
         &pool,
         &None,
-        "test-schema",
         Some(&gemini),
     )
     .await;
@@ -124,7 +116,6 @@ async fn register_swing_llm_skipped_without_vegapunk(pool: sqlx::PgPool) {
         &strategies,
         &pool,
         &None,
-        "test-schema",
         Some(&gemini),
     )
     .await;
@@ -143,17 +134,10 @@ async fn register_swing_llm_skipped_without_vegapunk(pool: sqlx::PgPool) {
 async fn register_donchian_evolve_fallback_on_missing_params(pool: sqlx::PgPool) {
     let (signal_tx, _signal_rx) = mpsc::channel::<SignalEvent>(16);
     let mut engine = StrategyEngine::new(signal_tx);
-    let strategies = vec![strategy_cfg(
-        "donchian_trend_evolve_v1",
-        true,
-        &["USD_JPY"],
-    )];
+    let strategies = vec![strategy_cfg("donchian_trend_evolve_v1", true, &["USD_JPY"])];
 
     // No strategy_params row inserted — should fallback to defaults.
-    auto_trader::startup::register_strategies(
-        &mut engine, &strategies, &pool, &None, "test-schema", None,
-    )
-    .await;
+    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None).await;
 
     assert_eq!(engine.registered_names().len(), 1);
 }
@@ -196,7 +180,12 @@ liquidation_margin_level = 0.50
     )
     .unwrap();
 
-    let result = { let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap(); auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config) };
+    let result = {
+        let accts = auto_trader_db::trading_accounts::list_all(&pool)
+            .await
+            .unwrap();
+        auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
+    };
     let err = result
         .expect_err("expected fail-closed startup error when [exchange_margin.gmo_fx] missing");
     let msg = format!("{err:#}");
@@ -231,7 +220,12 @@ liquidation_margin_level = 0.50
     )
     .unwrap();
 
-    let result = { let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap(); auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config) };
+    let result = {
+        let accts = auto_trader_db::trading_accounts::list_all(&pool)
+            .await
+            .unwrap();
+        auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
+    };
     let err = result
         .expect_err("expected error when config has [exchange_margin.banana] (not an Exchange)");
     let msg = format!("{err:#}");
@@ -268,8 +262,12 @@ liquidation_margin_level = 1.00
     )
     .unwrap();
 
-    let result =
-        { let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap(); auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config) };
+    let result = {
+        let accts = auto_trader_db::trading_accounts::list_all(&pool)
+            .await
+            .unwrap();
+        auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
+    };
     let err = result.expect_err(
         "expected error when liquidation_margin_level is not positive on a required exchange",
     );
@@ -317,7 +315,9 @@ liquidation_margin_level = 0
     )
     .unwrap();
 
-    let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap();
+    let accts = auto_trader_db::trading_accounts::list_all(&pool)
+        .await
+        .unwrap();
     let map = auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
         .expect("unused exchange with bad value should not block startup");
     // bitflyer_cfd is in the parsed map but unused — value sanity is the
@@ -369,7 +369,9 @@ liquidation_margin_level = 1.00
     )
     .unwrap();
 
-    let accts = auto_trader_db::trading_accounts::list_all(&pool).await.unwrap();
+    let accts = auto_trader_db::trading_accounts::list_all(&pool)
+        .await
+        .unwrap();
     let map = auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
         .expect("resolver must succeed when all entries present");
     assert_eq!(
@@ -477,10 +479,8 @@ async fn notification_purge_deletes_old_read(pool: sqlx::PgPool) {
 /// M5 イベントで warmup → on_price で履歴があること（シグナルなしでもエラーなし）。
 #[tokio::test]
 async fn warmup_m5_populates_strategy_history() {
-    let mut strategy = BbMeanRevertV1::new(
-        "bb_mean_revert_v1".to_string(),
-        vec![Pair::new("USD_JPY")],
-    );
+    let mut strategy =
+        BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![Pair::new("USD_JPY")]);
 
     // Generate 50 M5 candles for warmup
     let events = make_candle_events("USD_JPY", "M5", Exchange::GmoFx, 50, dec!(150));
@@ -529,10 +529,8 @@ async fn warmup_m5_populates_strategy_history() {
 /// H1 イベントで warmup しても M5 戦略には影響しない（フィルタされる）。
 #[tokio::test]
 async fn warmup_h1_filtered_by_m5_strategy() {
-    let mut strategy = BbMeanRevertV1::new(
-        "bb_mean_revert_v1".to_string(),
-        vec![Pair::new("USD_JPY")],
-    );
+    let mut strategy =
+        BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![Pair::new("USD_JPY")]);
 
     // H1 candles — bb_mean_revert uses M5, so these should be ignored
     let events = make_candle_events("USD_JPY", "H1", Exchange::GmoFx, 50, dec!(150));
@@ -551,10 +549,8 @@ async fn warmup_h1_filtered_by_m5_strategy() {
 /// ゼロイベントで warmup → on_price は None (履歴不足)。
 #[tokio::test]
 async fn warmup_zero_events_gives_no_signal() {
-    let mut strategy = BbMeanRevertV1::new(
-        "bb_mean_revert_v1".to_string(),
-        vec![Pair::new("USD_JPY")],
-    );
+    let mut strategy =
+        BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![Pair::new("USD_JPY")]);
 
     // Warmup with empty slice
     strategy.warmup(&[]).await;
@@ -562,10 +558,7 @@ async fn warmup_zero_events_gives_no_signal() {
     // on_price should return None due to insufficient history
     let events = make_candle_events("USD_JPY", "M5", Exchange::GmoFx, 1, dec!(150));
     let result = strategy.on_price(&events[0]).await;
-    assert!(
-        result.is_none(),
-        "zero warmup events should give no signal"
-    );
+    assert!(result.is_none(), "zero warmup events should give no signal");
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

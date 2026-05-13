@@ -4,7 +4,7 @@
 
 use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_notify::{
-    NotifyEvent, Notifier, OrderFailedEvent, OrderFilledEvent, PositionClosedEvent,
+    Notifier, NotifyEvent, OrderFailedEvent, OrderFilledEvent, PositionClosedEvent,
 };
 use chrono::Utc;
 use rust_decimal_macros::dec;
@@ -63,7 +63,10 @@ async fn order_filled_noop_send() {
         at: Utc::now(),
     });
 
-    notifier.send(event).await.expect("noop send should succeed");
+    notifier
+        .send(event)
+        .await
+        .expect("noop send should succeed");
 }
 
 // =========================================================================
@@ -106,7 +109,10 @@ async fn order_failed_noop_send() {
         reason: "price stale".into(),
     });
 
-    notifier.send(event).await.expect("noop send should succeed");
+    notifier
+        .send(event)
+        .await
+        .expect("noop send should succeed");
 }
 
 // =========================================================================
@@ -150,5 +156,8 @@ async fn position_closed_noop_send() {
         reason: "tp_hit".into(),
     });
 
-    notifier.send(event).await.expect("noop send should succeed");
+    notifier
+        .send(event)
+        .await
+        .expect("noop send should succeed");
 }

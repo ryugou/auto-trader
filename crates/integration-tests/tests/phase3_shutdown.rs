@@ -85,7 +85,10 @@ async fn all_tasks_drain_on_channel_close() {
     let trade_count = trade_handle.await.expect("trade task should complete");
 
     assert_eq!(price_count, 1, "price consumer should have drained 1 event");
-    assert_eq!(signal_count, 1, "signal consumer should have drained 1 event");
+    assert_eq!(
+        signal_count, 1,
+        "signal consumer should have drained 1 event"
+    );
     assert_eq!(trade_count, 1, "trade consumer should have drained 1 event");
 }
 
@@ -98,15 +101,9 @@ async fn all_tasks_complete_within_timeout() {
     let (trade_tx, mut trade_rx) = mpsc::channel::<String>(16);
 
     // Spawn consumer tasks
-    let price_handle = tokio::spawn(async move {
-        while price_rx.recv().await.is_some() {}
-    });
-    let signal_handle = tokio::spawn(async move {
-        while signal_rx.recv().await.is_some() {}
-    });
-    let trade_handle = tokio::spawn(async move {
-        while trade_rx.recv().await.is_some() {}
-    });
+    let price_handle = tokio::spawn(async move { while price_rx.recv().await.is_some() {} });
+    let signal_handle = tokio::spawn(async move { while signal_rx.recv().await.is_some() {} });
+    let trade_handle = tokio::spawn(async move { while trade_rx.recv().await.is_some() {} });
 
     // Drop senders
     drop(price_tx);
@@ -190,22 +187,27 @@ async fn open_positions_preserved_after_shutdown(pool: sqlx::PgPool) {
         .fetch_one(&pool)
         .await
         .expect("trade 1 should exist");
-    assert_eq!(status_1, "open", "trade 1 should still be open after shutdown");
+    assert_eq!(
+        status_1, "open",
+        "trade 1 should still be open after shutdown"
+    );
 
     let status_2: String = sqlx::query_scalar("SELECT status FROM trades WHERE id = $1")
         .bind(trade_id_2)
         .fetch_one(&pool)
         .await
         .expect("trade 2 should exist");
-    assert_eq!(status_2, "open", "trade 2 should still be open after shutdown");
+    assert_eq!(
+        status_2, "open",
+        "trade 2 should still be open after shutdown"
+    );
 
     // Verify count of open trades
-    let open_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM trades WHERE account_id = $1 AND status = 'open'",
-    )
-    .bind(account_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let open_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE account_id = $1 AND status = 'open'")
+            .bind(account_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(open_count, 2, "both trades should remain open");
 }

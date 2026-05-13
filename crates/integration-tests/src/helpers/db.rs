@@ -14,8 +14,14 @@ pub struct StandardAccounts {
 /// テスト失敗時の診断ログに使う想定。
 pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
     const ALLOWED_TABLES: &[&str] = &[
-        "trading_accounts", "trades", "price_candles", "daily_summary",
-        "strategies", "strategy_params", "notifications", "account_events",
+        "trading_accounts",
+        "trades",
+        "price_candles",
+        "daily_summary",
+        "strategies",
+        "strategy_params",
+        "notifications",
+        "account_events",
         "macro_events",
     ];
 
@@ -26,9 +32,7 @@ pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
             "snapshot_tables: table name '{table}' is not in the allowlist"
         );
         // SAFETY: table name is validated against ALLOWED_TABLES above; no user input.
-        let query = format!(
-            "SELECT json_agg(t) FROM (SELECT * FROM {table}) t",
-        );
+        let query = format!("SELECT json_agg(t) FROM (SELECT * FROM {table}) t",);
         let row: (Option<serde_json::Value>,) = sqlx::query_as(&query)
             .fetch_one(pool)
             .await

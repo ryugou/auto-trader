@@ -39,29 +39,28 @@ async fn weekly_batch_updates_strategy_params(pool: sqlx::PgPool) {
     .unwrap();
 
     // Start MockGemini server that returns a valid proposal
-    let mock_gemini =
-        auto_trader_integration_tests::mocks::gemini::MockGemini::start().await;
+    let mock_gemini = auto_trader_integration_tests::mocks::gemini::MockGemini::start().await;
     let proposal_json = r#"{"params":{"entry_channel":22,"exit_channel":8,"atr_baseline_bars":60},"rationale":"test proposal","expected_effect":"improved win rate"}"#;
     mock_gemini.parameter_proposal(proposal_json).await;
 
     // Run the weekly batch (no Vegapunk)
-    let result = auto_trader::weekly_batch::run(
-        &pool,
-        None,
-        &mock_gemini.url(),
-        "test-key",
-        "test-model",
-    )
-    .await;
+    let result =
+        auto_trader::weekly_batch::run(&pool, None, &mock_gemini.url(), "test-key", "test-model")
+            .await;
 
-    assert!(result.is_ok(), "weekly batch should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "weekly batch should succeed: {:?}",
+        result.err()
+    );
 
     // Verify strategy_params were updated
-    let params: sqlx::types::Json<serde_json::Value> =
-        sqlx::query_scalar("SELECT params FROM strategy_params WHERE strategy_name = 'donchian_trend_evolve_v1'")
-            .fetch_one(&pool)
-            .await
-            .expect("should have strategy_params row");
+    let params: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+        "SELECT params FROM strategy_params WHERE strategy_name = 'donchian_trend_evolve_v1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("should have strategy_params row");
 
     assert_eq!(
         params.0["entry_channel"].as_i64(),
@@ -81,15 +80,12 @@ async fn weekly_batch_updates_strategy_params(pool: sqlx::PgPool) {
 
     // Verify system_notifications was inserted
     let notif_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM system_notifications WHERE message LIKE '%週次進化バッチ完了%'"
+        "SELECT COUNT(*) FROM system_notifications WHERE message LIKE '%週次進化バッチ完了%'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(
-        notif_count >= 1,
-        "system notification should be inserted"
-    );
+    assert!(notif_count >= 1, "system notification should be inserted");
 }
 
 // ─── 3.105: Daily batch backfill ─────────────────────────────────────────
@@ -153,15 +149,16 @@ async fn daily_batch_backfill_creates_summary(pool: sqlx::PgPool) {
         .expect("backfill should succeed");
 
     // Verify daily_summary rows were created
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM daily_summary WHERE date = $1",
-    )
-    .bind(yesterday_date)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM daily_summary WHERE date = $1")
+        .bind(yesterday_date)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-    assert!(count >= 1, "daily_summary should have rows for yesterday, got {count}");
+    assert!(
+        count >= 1,
+        "daily_summary should have rows for yesterday, got {count}"
+    );
 }
 
 // ─── 3.106: Overnight fee JOB ────────────────────────────────────────────
@@ -225,11 +222,10 @@ async fn overnight_fee_job_applies_to_paper_bitflyer_trades(pool: sqlx::PgPool) 
             }
 
             let mut tx = pool.begin().await.expect("begin tx");
-            let applied = auto_trader_db::trades::apply_overnight_fee(
-                &mut tx, pac.id, trade.id, fee,
-            )
-            .await
-            .expect("apply_overnight_fee");
+            let applied =
+                auto_trader_db::trades::apply_overnight_fee(&mut tx, pac.id, trade.id, fee)
+                    .await
+                    .expect("apply_overnight_fee");
             tx.commit().await.expect("commit");
 
             if let Some(_new_balance) = applied {
@@ -241,21 +237,23 @@ async fn overnight_fee_job_applies_to_paper_bitflyer_trades(pool: sqlx::PgPool) 
     // Expected fee: 5_000_000 * 0.01 * 0.0004 = 20 JPY
     let expected_fee = (entry_price * quantity * fee_rate)
         .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
-    assert_eq!(total_fee, expected_fee, "fee should be calculated correctly");
+    assert_eq!(
+        total_fee, expected_fee,
+        "fee should be calculated correctly"
+    );
 
     // Verify balance was reduced
-    let balance: Decimal = sqlx::query_scalar(
-        "SELECT current_balance FROM trading_accounts WHERE id = $1",
-    )
-    .bind(account_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let balance: Decimal =
+        sqlx::query_scalar("SELECT current_balance FROM trading_accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(balance, initial_balance - expected_fee);
 
     // Verify account_events was inserted
     let event_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'overnight_fee'"
+        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'overnight_fee'",
     )
     .bind(trade_id)
     .fetch_one(&pool)
@@ -306,9 +304,7 @@ async fn macro_analyst_produces_update() {
         }]
     });
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(&gemini_body),
-        )
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&gemini_body))
         .mount(&gemini_server)
         .await;
 
@@ -326,15 +322,13 @@ async fn macro_analyst_produces_update() {
     // Run the analyst in a task with a short interval
     let handle = tokio::spawn(async move {
         // We only want one iteration, so we'll let it run briefly
-        let _ = analyst.run(macro_tx, std::time::Duration::from_millis(100)).await;
+        let _ = analyst
+            .run(macro_tx, std::time::Duration::from_millis(100))
+            .await;
     });
 
     // Wait for a MacroUpdate (with timeout)
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        macro_rx.recv(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), macro_rx.recv()).await;
 
     // Cancel the analyst task
     handle.abort();
@@ -385,17 +379,23 @@ fn enriched_ingest_format_trade_open() {
     indicators.insert("rsi_14".to_string(), dec!(55));
     indicators.insert("adx_14".to_string(), dec!(30));
 
-    let text = auto_trader::enriched_ingest::format_trade_open(
-        &trade,
-        &indicators,
-        Some(dec!(0.5)),
-    );
+    let text =
+        auto_trader::enriched_ingest::format_trade_open(&trade, &indicators, Some(dec!(0.5)));
 
     // Verify key elements are present
     assert!(text.contains("USD_JPY"), "should contain pair");
-    assert!(text.contains("ロング"), "should contain direction in Japanese");
-    assert!(text.contains("donchian_trend_v1"), "should contain strategy name");
-    assert!(text.contains("155.500") || text.contains("155.5"), "should contain entry price");
+    assert!(
+        text.contains("ロング"),
+        "should contain direction in Japanese"
+    );
+    assert!(
+        text.contains("donchian_trend_v1"),
+        "should contain strategy name"
+    );
+    assert!(
+        text.contains("155.500") || text.contains("155.5"),
+        "should contain entry price"
+    );
     assert!(text.contains("SMA20乖離"), "should contain SMA deviation");
     assert!(text.contains("レジーム"), "should contain regime label");
     assert!(text.contains("allocation"), "should contain allocation");
@@ -441,7 +441,10 @@ fn enriched_ingest_format_trade_close() {
 
     assert!(text.contains("FX_BTC_JPY"), "should contain pair");
     assert!(text.contains("ショート"), "should contain direction");
-    assert!(text.contains("bb_mean_revert_v1"), "should contain strategy");
+    assert!(
+        text.contains("bb_mean_revert_v1"),
+        "should contain strategy"
+    );
     assert!(text.contains("TpHit"), "should contain exit reason");
     assert!(text.contains("500"), "should contain PnL");
     assert!(text.contains("3時間"), "should contain holding time");

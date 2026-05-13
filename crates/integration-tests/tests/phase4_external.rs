@@ -56,10 +56,7 @@ mod gmo_fx {
             resp.status()
         );
 
-        let ticker: TickerResponse = resp
-            .json()
-            .await
-            .expect("GMO FX ticker JSON parse failed");
+        let ticker: TickerResponse = resp.json().await.expect("GMO FX ticker JSON parse failed");
 
         // status=0 is normal, status=5 is maintenance — both are valid
         assert!(
@@ -108,32 +105,39 @@ mod gmo_fx {
             .await
             .expect("GMO FX ticker request failed");
 
-        let ticker: TickerResponse = resp
-            .json()
-            .await
-            .expect("GMO FX ticker JSON parse failed");
+        let ticker: TickerResponse = resp.json().await.expect("GMO FX ticker JSON parse failed");
 
         if ticker.status == 5 {
             println!("GMO FX: maintenance mode — market status detection skipped");
             return;
         }
 
-        assert_eq!(ticker.status, 0, "GMO FX: unexpected status {}", ticker.status);
+        assert_eq!(
+            ticker.status, 0,
+            "GMO FX: unexpected status {}",
+            ticker.status
+        );
 
         for item in &ticker.data {
             match item.status.as_str() {
                 "OPEN" => {
                     // Verify bid/ask are parseable decimals
-                    let bid: f64 = item
-                        .bid
-                        .parse()
-                        .unwrap_or_else(|e| panic!("GMO FX {}: invalid bid '{}': {e}", item.symbol, item.bid));
-                    let ask: f64 = item
-                        .ask
-                        .parse()
-                        .unwrap_or_else(|e| panic!("GMO FX {}: invalid ask '{}': {e}", item.symbol, item.ask));
-                    assert!(bid > 0.0, "GMO FX {}: bid must be positive, got {bid}", item.symbol);
-                    assert!(ask > 0.0, "GMO FX {}: ask must be positive, got {ask}", item.symbol);
+                    let bid: f64 = item.bid.parse().unwrap_or_else(|e| {
+                        panic!("GMO FX {}: invalid bid '{}': {e}", item.symbol, item.bid)
+                    });
+                    let ask: f64 = item.ask.parse().unwrap_or_else(|e| {
+                        panic!("GMO FX {}: invalid ask '{}': {e}", item.symbol, item.ask)
+                    });
+                    assert!(
+                        bid > 0.0,
+                        "GMO FX {}: bid must be positive, got {bid}",
+                        item.symbol
+                    );
+                    assert!(
+                        ask > 0.0,
+                        "GMO FX {}: ask must be positive, got {ask}",
+                        item.symbol
+                    );
                     assert!(
                         ask >= bid,
                         "GMO FX {}: ask ({ask}) must be >= bid ({bid})",
@@ -148,13 +152,22 @@ mod gmo_fx {
                         )
                     });
 
-                    println!("GMO FX {}: OPEN  bid={} ask={}", item.symbol, item.bid, item.ask);
+                    println!(
+                        "GMO FX {}: OPEN  bid={} ask={}",
+                        item.symbol, item.bid, item.ask
+                    );
                 }
                 "CLOSE" => {
-                    println!("GMO FX {}: CLOSE (market closed — normal for weekends/holidays)", item.symbol);
+                    println!(
+                        "GMO FX {}: CLOSE (market closed — normal for weekends/holidays)",
+                        item.symbol
+                    );
                 }
                 other => {
-                    panic!("GMO FX {}: unknown status '{}' — expected OPEN or CLOSE", item.symbol, other);
+                    panic!(
+                        "GMO FX {}: unknown status '{}' — expected OPEN or CLOSE",
+                        item.symbol, other
+                    );
                 }
             }
         }
@@ -232,7 +245,9 @@ async fn connect_bitflyer_and_receive_tick() -> Option<serde_json::Value> {
                 return None;
             }
             Err(_) => {
-                println!("BitFlyer WS: no tick received within 30s — SKIPPED (market may be inactive)");
+                println!(
+                    "BitFlyer WS: no tick received within 30s — SKIPPED (market may be inactive)"
+                );
                 return None;
             }
         };
@@ -250,8 +265,13 @@ async fn connect_bitflyer_and_receive_tick() -> Option<serde_json::Value> {
             continue;
         }
 
-        let params = parsed.get("params").expect("channelMessage must have params");
-        let message = params.get("message").expect("params must have message").clone();
+        let params = parsed
+            .get("params")
+            .expect("channelMessage must have params");
+        let message = params
+            .get("message")
+            .expect("params must have message")
+            .clone();
 
         return Some(message);
     }
@@ -273,13 +293,26 @@ mod bitflyer_ws {
         };
 
         // Verify required fields
-        assert!(message.get("ltp").is_some(), "BitFlyer tick must contain 'ltp'");
-        assert!(message.get("best_bid").is_some(), "BitFlyer tick must contain 'best_bid'");
-        assert!(message.get("best_ask").is_some(), "BitFlyer tick must contain 'best_ask'");
+        assert!(
+            message.get("ltp").is_some(),
+            "BitFlyer tick must contain 'ltp'"
+        );
+        assert!(
+            message.get("best_bid").is_some(),
+            "BitFlyer tick must contain 'best_bid'"
+        );
+        assert!(
+            message.get("best_ask").is_some(),
+            "BitFlyer tick must contain 'best_ask'"
+        );
 
         let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
-        let best_bid = message["best_bid"].as_f64().expect("best_bid must be numeric");
-        let best_ask = message["best_ask"].as_f64().expect("best_ask must be numeric");
+        let best_bid = message["best_bid"]
+            .as_f64()
+            .expect("best_bid must be numeric");
+        let best_ask = message["best_ask"]
+            .as_f64()
+            .expect("best_ask must be numeric");
 
         assert!(ltp > 0.0, "ltp must be positive, got {ltp}");
         assert!(best_bid > 0.0, "best_bid must be positive, got {best_bid}");
@@ -309,7 +342,9 @@ mod bitflyer_ws {
         let tick2 = match connect_bitflyer_and_receive_tick().await {
             Some(m) => m,
             None => {
-                println!("BitFlyer WS: reconnection returned None — SKIPPED (market may be inactive)");
+                println!(
+                    "BitFlyer WS: reconnection returned None — SKIPPED (market may be inactive)"
+                );
                 return;
             }
         };
@@ -341,8 +376,12 @@ mod candle_builder_real_tick {
         };
 
         let ltp = message["ltp"].as_f64().expect("ltp must be numeric");
-        let best_bid = message["best_bid"].as_f64().expect("best_bid must be numeric");
-        let best_ask = message["best_ask"].as_f64().expect("best_ask must be numeric");
+        let best_bid = message["best_bid"]
+            .as_f64()
+            .expect("best_bid must be numeric");
+        let best_ask = message["best_ask"]
+            .as_f64()
+            .expect("best_ask must be numeric");
         let volume = message["volume"].as_f64().unwrap_or(0.0);
         let timestamp_str = message["timestamp"]
             .as_str()
@@ -356,8 +395,11 @@ mod candle_builder_real_tick {
         let bid = Some(Decimal::from_str(&best_bid.to_string()).unwrap());
         let ask = Some(Decimal::from_str(&best_ask.to_string()).unwrap());
 
-        let mut builder =
-            CandleBuilder::new(Pair::new("FX_BTC_JPY"), Exchange::BitflyerCfd, "M5".to_string());
+        let mut builder = CandleBuilder::new(
+            Pair::new("FX_BTC_JPY"),
+            Exchange::BitflyerCfd,
+            "M5".to_string(),
+        );
 
         // Feed into CandleBuilder — it won't emit a candle (same M5 period)
         // but internal state should be populated
@@ -381,8 +423,14 @@ mod candle_builder_real_tick {
         assert!(c.high >= c.open, "high must be >= open");
         assert!(c.low <= c.open, "low must be <= open");
         assert!(c.close > Decimal::ZERO, "close must be positive");
-        assert!(c.best_bid.is_some(), "best_bid should be set from real tick");
-        assert!(c.best_ask.is_some(), "best_ask should be set from real tick");
+        assert!(
+            c.best_bid.is_some(),
+            "best_bid should be set from real tick"
+        );
+        assert!(
+            c.best_ask.is_some(),
+            "best_ask should be set from real tick"
+        );
 
         println!(
             "CandleBuilder: built candle from real tick — O={} H={} L={} C={} bid={:?} ask={:?}",
@@ -395,6 +443,7 @@ mod candle_builder_real_tick {
 
 mod vegapunk {
     use super::*;
+    use auto_trader_core::vegapunk_port::{SearchMode, VegapunkApi};
 
     #[tokio::test]
     async fn vegapunk_connection_and_search() {
@@ -405,11 +454,15 @@ mod vegapunk {
         // Try to connect — Vegapunk may not be running
         let connect_result = tokio::time::timeout(
             Duration::from_secs(10),
-            auto_trader_vegapunk::client::VegapunkClient::connect(&endpoint, "fx-trading", token.as_deref()),
+            auto_trader_vegapunk::client::VegapunkClient::connect(
+                &endpoint,
+                "fx-trading",
+                token.as_deref(),
+            ),
         )
         .await;
 
-        let mut client = match connect_result {
+        let client = match connect_result {
             Ok(Ok(client)) => {
                 println!("Vegapunk: connected to {endpoint}");
                 client
@@ -433,7 +486,7 @@ mod vegapunk {
         // expected (gRPC connect succeeds without auth, but RPCs require it).
         let search_result = tokio::time::timeout(
             Duration::from_secs(15),
-            client.search("test query", "local", 5),
+            client.search("test query", SearchMode::Local, 5),
         )
         .await;
 
@@ -441,14 +494,16 @@ mod vegapunk {
             Ok(Ok(response)) => {
                 println!(
                     "Vegapunk: search returned {} results (search_id={})",
-                    response.results.len(),
+                    response.hits.len(),
                     response.search_id
                 );
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
                 if msg.contains("Unauthenticated") && token.is_none() {
-                    println!("Vegapunk: search returned Unauthenticated (VEGAPUNK_AUTH_TOKEN not set) — SKIPPED");
+                    println!(
+                        "Vegapunk: search returned Unauthenticated (VEGAPUNK_AUTH_TOKEN not set) — SKIPPED"
+                    );
                     return;
                 }
                 panic!("Vegapunk: search failed after successful connection ({e})");
@@ -500,7 +555,7 @@ mod vegapunk {
     /// 4.8 partial: Vegapunk ingest_raw — ingest text and verify success.
     #[tokio::test]
     async fn vegapunk_ingest_raw() {
-        let mut client = match connect_vegapunk().await {
+        let client = match connect_vegapunk().await {
             Some(c) => c,
             None => return,
         };
@@ -518,8 +573,8 @@ mod vegapunk {
         .await;
 
         match result {
-            Ok(Ok(response)) => {
-                println!("Vegapunk ingest: success (response: {:?})", response);
+            Ok(Ok(())) => {
+                println!("Vegapunk ingest: success");
             }
             Ok(Err(e)) => {
                 panic!("Vegapunk ingest failed: {e}");
@@ -533,7 +588,7 @@ mod vegapunk {
     /// 4.8 partial: Vegapunk feedback — search then submit feedback.
     #[tokio::test]
     async fn vegapunk_feedback() {
-        let mut client = match connect_vegapunk().await {
+        let client = match connect_vegapunk().await {
             Some(c) => c,
             None => return,
         };
@@ -541,7 +596,7 @@ mod vegapunk {
         // First do a search to get a search_id
         let search_result = tokio::time::timeout(
             Duration::from_secs(15),
-            client.search("USD/JPY trend analysis", "local", 3),
+            client.search("USD/JPY trend analysis", SearchMode::Local, 3),
         )
         .await;
 
@@ -549,7 +604,7 @@ mod vegapunk {
             Ok(Ok(response)) => {
                 println!(
                     "Vegapunk feedback: search returned {} results (search_id={})",
-                    response.results.len(),
+                    response.hits.len(),
                     response.search_id
                 );
                 response.search_id
@@ -610,21 +665,20 @@ mod oanda {
         let base_url = std::env::var("OANDA_BASE_URL")
             .unwrap_or_else(|_| "https://api-fxpractice.oanda.com".to_string());
 
-        let client =
-            auto_trader_market::oanda::OandaClient::new(&base_url, &account_id, &api_key)
-                .expect("failed to create OANDA client");
+        let client = auto_trader_market::oanda::OandaClient::new(&base_url, &account_id, &api_key)
+            .expect("failed to create OANDA client");
 
         let pair = auto_trader_core::types::Pair::new("USD_JPY");
 
-        let candles_result = tokio::time::timeout(
-            Duration::from_secs(30),
-            client.get_candles(&pair, "M5", 5),
-        )
-        .await;
+        let candles_result =
+            tokio::time::timeout(Duration::from_secs(30), client.get_candles(&pair, "M5", 5)).await;
 
         match candles_result {
             Ok(Ok(candles)) => {
-                assert!(!candles.is_empty(), "OANDA returned zero candles — expected at least 1 for recent M5");
+                assert!(
+                    !candles.is_empty(),
+                    "OANDA returned zero candles — expected at least 1 for recent M5"
+                );
                 println!("OANDA: fetched {} candles for USD_JPY M5", candles.len());
                 for c in &candles {
                     assert!(c.open > rust_decimal::Decimal::ZERO);

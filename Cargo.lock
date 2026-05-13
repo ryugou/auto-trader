@@ -254,7 +254,6 @@ dependencies = [
  "anyhow",
  "auto-trader-core",
  "auto-trader-db",
- "auto-trader-vegapunk",
  "chrono",
  "feed-rs",
  "reqwest",
@@ -319,7 +318,6 @@ dependencies = [
  "async-trait",
  "auto-trader-core",
  "auto-trader-market",
- "auto-trader-vegapunk",
  "chrono",
  "reqwest",
  "rust_decimal",
@@ -335,6 +333,8 @@ name = "auto-trader-vegapunk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "auto-trader-core",
  "prost",
  "tokio",
  "tonic",

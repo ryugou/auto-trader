@@ -73,8 +73,7 @@ impl PipelineHarness {
         min_sizes.insert(pair.clone(), cfg.min_order_size);
         let sizer = Arc::new(PositionSizer::new(min_sizes));
 
-        let api: Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
-            Arc::new(NullExchangeApi);
+        let api: Arc<dyn auto_trader_market::exchange_api::ExchangeApi> = Arc::new(NullExchangeApi);
         let notifier = Arc::new(Notifier::new_disabled());
 
         let trader = Trader::new(

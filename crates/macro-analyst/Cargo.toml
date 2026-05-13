@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 auto-trader-core = { workspace = true }
 auto-trader-db = { workspace = true }
-auto-trader-vegapunk = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }

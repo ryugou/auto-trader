@@ -1,8 +1,7 @@
 use anyhow::Context as _;
-use auto_trader_vegapunk::client::VegapunkClient;
+use auto_trader_core::knowledge::KnowledgeStore;
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -36,14 +35,14 @@ struct GeminiProposal {
 /// Workflow:
 /// 1. Fetch the past-7-day trade stats from the DB.
 /// 2. Compute Wilson-Score lower bounds per regime.
-/// 3. Optionally query Vegapunk for recent trade context.
+/// 3. Optionally query the KnowledgeStore for recent trade context.
 /// 4. Load the current evolve-strategy params from `strategy_params`.
 /// 5. Ask Gemini to propose updated params.
 /// 6. Persist the proposed params and emit a `system_notifications` row.
-/// 7. Trigger a Vegapunk merge so the ingested context is consolidated.
+/// 7. Trigger a KnowledgeStore merge so the ingested context is consolidated.
 pub async fn run(
     pool: &PgPool,
-    vegapunk: Option<&Arc<Mutex<VegapunkClient>>>,
+    knowledge: Option<&Arc<dyn KnowledgeStore>>,
     gemini_api_url: &str,
     gemini_api_key: &str,
     gemini_model: &str,
@@ -66,8 +65,8 @@ pub async fn run(
         .await
         .context("compute_regime_wilson")?;
 
-    // 3. Optional Vegapunk context
-    let vp_context = fetch_vegapunk_context(vegapunk, &stats).await;
+    // 3. Optional KnowledgeStore context
+    let knowledge_context = fetch_knowledge_context(knowledge, STRATEGY).await;
 
     // 4. Current params from DB
     let current_params = load_current_params(pool, STRATEGY)
@@ -75,7 +74,12 @@ pub async fn run(
         .context("load_current_params")?;
 
     // 5. Ask Gemini for a proposal
-    let prompt = build_gemini_prompt(&stats, vp_context.as_deref(), &current_params, &wilson);
+    let prompt = build_gemini_prompt(
+        &stats,
+        knowledge_context.as_deref(),
+        &current_params,
+        &wilson,
+    );
     let proposal = call_gemini(gemini_api_url, gemini_api_key, gemini_model, &prompt)
         .await
         .unwrap_or_else(|err| {
@@ -143,13 +147,12 @@ pub async fn run(
         .await
         .context("insert_system_notification")?;
 
-    // 7. Vegapunk merge (best-effort)
-    if let Some(vp) = vegapunk {
-        let mut client = vp.lock().await;
-        if let Err(err) = client.merge().await {
-            tracing::warn!("weekly_batch: Vegapunk merge failed: {err:#}");
+    // 7. KnowledgeStore merge (best-effort)
+    if let Some(store) = knowledge {
+        if let Err(err) = store.run_merge().await {
+            tracing::warn!("weekly_batch: knowledge_store merge failed: {err:#}");
         } else {
-            tracing::info!("weekly_batch: Vegapunk merge triggered");
+            tracing::info!("weekly_batch: knowledge_store merge triggered");
         }
     }
 
@@ -290,25 +293,19 @@ async fn insert_system_notification(pool: &PgPool, message: &str) -> anyhow::Res
     Ok(())
 }
 
-/// Attempt to retrieve recent trade context from Vegapunk.
+/// Attempt to retrieve recent trade context from the knowledge store.
 /// Returns `None` on failure (non-fatal — the batch continues without it).
-async fn fetch_vegapunk_context(
-    vegapunk: Option<&Arc<Mutex<VegapunkClient>>>,
-    stats: &WeeklyStats,
+async fn fetch_knowledge_context(
+    knowledge: Option<&Arc<dyn KnowledgeStore>>,
+    strategy_name: &str,
 ) -> Option<String> {
-    let vp = vegapunk?;
-    let mut client = vp.lock().await;
-
-    let query = format!(
-        "過去7日間のトレード結果と学習: 総トレード数={}, 戦略別勝率を分析してください",
-        stats.total_trades
-    );
-    match client.search(&query, "hybrid", 5).await {
-        Ok(response) => {
-            let context = response
-                .results
+    let store = knowledge?;
+    match store.search_strategy_outcomes(strategy_name, 5).await {
+        Ok(res) => {
+            let context = res
+                .hits
                 .into_iter()
-                .filter_map(|item| item.text)
+                .map(|h| h.text)
                 .collect::<Vec<_>>()
                 .join("\n---\n");
             if context.is_empty() {
@@ -318,17 +315,17 @@ async fn fetch_vegapunk_context(
             }
         }
         Err(err) => {
-            tracing::warn!("weekly_batch: Vegapunk search failed: {err:#}");
+            tracing::warn!("weekly_batch: knowledge search failed: {err:#}");
             None
         }
     }
 }
 
 /// Build the Gemini prompt from gathered stats, Wilson analysis, optional
-/// Vegapunk context, and the current parameter blob.
+/// KnowledgeStore context, and the current parameter blob.
 fn build_gemini_prompt(
     stats: &WeeklyStats,
-    vp_context: Option<&str>,
+    knowledge_context: Option<&str>,
     current_params: &serde_json::Value,
     wilson: &[RegimeAnalysis],
 ) -> String {
@@ -373,9 +370,9 @@ fn build_gemini_prompt(
         }
     }
 
-    // Vegapunk context section
-    if let Some(context) = vp_context {
-        prompt.push_str("\n## Vegapunk 学習コンテキスト\n");
+    // KnowledgeStore context section
+    if let Some(context) = knowledge_context {
+        prompt.push_str("\n## 過去トレード学習コンテキスト\n");
         prompt.push_str(context);
         prompt.push('\n');
     }
@@ -530,8 +527,8 @@ mod tests {
 
         let prompt = build_gemini_prompt(&stats, None, &params, &wilson);
 
-        // Without context the Vegapunk section should be absent
-        assert!(!prompt.contains("Vegapunk 学習コンテキスト"));
+        // Without context the knowledge-store section should be absent
+        assert!(!prompt.contains("過去トレード学習コンテキスト"));
         // But prompt must still include output format instructions
         assert!(prompt.contains("GeminiProposal") || prompt.contains("rationale"));
     }

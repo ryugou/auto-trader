@@ -57,9 +57,7 @@ impl MockGemini {
         self.server.reset().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/v1beta/models/.+:generateContent"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("this is not valid json {{{"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("this is not valid json {{{"))
             .mount(&self.server)
             .await;
     }

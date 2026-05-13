@@ -1,24 +1,26 @@
 //! Phase 3A: SwingLLM V1 strategy signal tests (3.40-3.43).
 //!
-//! SwingLLMv1 calls Vegapunk (gRPC) for context search and Gemini
+//! SwingLLMv1 calls KnowledgeStore for context search and Gemini
 //! (REST) for trade decisions. These tests use:
-//! - MockVegapunkGrpc: a real tonic gRPC server returning canned search results
+//! - MockVegapunkApi + VegapunkKnowledgeStore: lightweight in-process mock
 //! - MockGemini: a wiremock HTTP server returning canned Gemini responses
 //!
-//! Each test constructs a SwingLLMv1 with the mock endpoints and feeds
+//! Each test constructs a SwingLLMv1 with the mock store and feeds
 //! a PriceEvent to trigger a decision.
 
+use auto_trader::knowledge::VegapunkKnowledgeStore;
 use auto_trader_core::event::PriceEvent;
+use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::strategy::Strategy;
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair};
 use auto_trader_integration_tests::mocks::gemini::MockGemini;
-use auto_trader_integration_tests::mocks::vegapunk_grpc::MockVegapunkGrpc;
+use auto_trader_integration_tests::mocks::vegapunk::{MockVegapunkApiBuilder, SearchResult};
 use auto_trader_strategy::swing_llm::SwingLLMv1;
-use auto_trader_vegapunk::client::VegapunkClient;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const PAIR: &str = "USD_JPY";
 
@@ -45,23 +47,28 @@ fn make_price_event(pair: &str, close: Decimal) -> PriceEvent {
     }
 }
 
-async fn create_strategy(
-    gemini_url: &str,
-    vegapunk_endpoint: &str,
-) -> SwingLLMv1 {
-    let vegapunk = VegapunkClient::connect(vegapunk_endpoint, "test", None)
-        .await
-        .expect("connect to mock vegapunk");
-
+async fn create_strategy(gemini_url: &str, store: Arc<dyn KnowledgeStore>) -> SwingLLMv1 {
     SwingLLMv1::new(
         "swing_llm_v1".to_string(),
         vec![Pair::new(PAIR)],
         7, // holding_days_max
-        vegapunk,
+        store,
         gemini_url.to_string(),
         "test-api-key".to_string(),
         "gemini-2.0-flash".to_string(),
     )
+}
+
+fn make_store(search_text: &str) -> Arc<dyn KnowledgeStore> {
+    let mock_api = Arc::new(
+        MockVegapunkApiBuilder::new()
+            .with_search_results(vec![SearchResult {
+                text: search_text.to_string(),
+                score: 0.9,
+            }])
+            .build(),
+    );
+    Arc::new(VegapunkKnowledgeStore::new(mock_api))
 }
 
 // ─── 3.40: Long entry ────────────────────────────────────────────────────
@@ -69,16 +76,13 @@ async fn create_strategy(
 /// Gemini returns action=long with confidence >= 0.6 → Long signal.
 #[tokio::test]
 async fn swing_llm_long_entry() {
-    let vegapunk = MockVegapunkGrpc::start(vec![
-        "USD/JPY bullish trend detected".to_string(),
-    ])
-    .await;
+    let store = make_store("USD/JPY bullish trend detected");
     let gemini = MockGemini::start().await;
     gemini
         .swing_signal(r#"{"action":"long","confidence":0.8,"sl_pips":50,"tp_pips":100,"reason":"bullish momentum"}"#)
         .await;
 
-    let mut strategy = create_strategy(&gemini.url(), &vegapunk.endpoint()).await;
+    let mut strategy = create_strategy(&gemini.url(), store).await;
     let event = make_price_event(PAIR, dec!(150.000));
     let signal = strategy.on_price(&event).await;
 
@@ -100,16 +104,13 @@ async fn swing_llm_long_entry() {
 /// Gemini returns action=short with confidence >= 0.6 → Short signal.
 #[tokio::test]
 async fn swing_llm_short_entry() {
-    let vegapunk = MockVegapunkGrpc::start(vec![
-        "USD/JPY bearish reversal pattern".to_string(),
-    ])
-    .await;
+    let store = make_store("USD/JPY bearish reversal pattern");
     let gemini = MockGemini::start().await;
     gemini
         .swing_signal(r#"{"action":"short","confidence":0.75,"sl_pips":40,"tp_pips":80,"reason":"bearish divergence"}"#)
         .await;
 
-    let mut strategy = create_strategy(&gemini.url(), &vegapunk.endpoint()).await;
+    let mut strategy = create_strategy(&gemini.url(), store).await;
     let event = make_price_event(PAIR, dec!(150.000));
     let signal = strategy.on_price(&event).await;
 
@@ -125,16 +126,13 @@ async fn swing_llm_short_entry() {
 /// Gemini returns action=none → no signal emitted.
 #[tokio::test]
 async fn swing_llm_no_trade() {
-    let vegapunk = MockVegapunkGrpc::start(vec![
-        "USD/JPY sideways consolidation".to_string(),
-    ])
-    .await;
+    let store = make_store("USD/JPY sideways consolidation");
     let gemini = MockGemini::start().await;
     gemini
         .swing_signal(r#"{"action":"none","confidence":0.3,"sl_pips":0,"tp_pips":0,"reason":"no clear direction"}"#)
         .await;
 
-    let mut strategy = create_strategy(&gemini.url(), &vegapunk.endpoint()).await;
+    let mut strategy = create_strategy(&gemini.url(), store).await;
     let event = make_price_event(PAIR, dec!(150.000));
     let signal = strategy.on_price(&event).await;
 
@@ -146,14 +144,11 @@ async fn swing_llm_no_trade() {
 /// Gemini returns malformed / non-JSON response → gracefully returns no signal.
 #[tokio::test]
 async fn swing_llm_invalid_response() {
-    let vegapunk = MockVegapunkGrpc::start(vec![
-        "some context".to_string(),
-    ])
-    .await;
+    let store = make_store("some context");
     let gemini = MockGemini::start().await;
     gemini.invalid_response().await;
 
-    let mut strategy = create_strategy(&gemini.url(), &vegapunk.endpoint()).await;
+    let mut strategy = create_strategy(&gemini.url(), store).await;
     let event = make_price_event(PAIR, dec!(150.000));
     let signal = strategy.on_price(&event).await;
 

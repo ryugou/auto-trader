@@ -1,0 +1,74 @@
+#!/bin/sh
+# .githooks/pre-push
+#
+# 強制ルール: main / master への直 push はドキュメントのみの場合に限り許可。
+# それ以外は branch + PR を要求する (memory: main 直接 push 絶対禁止)。
+#
+# テスト実行 (scripts/test-all.sh) はこの hook では強制しない。実装ワークフロー
+# 側で commit 前に通すのが本筋であり、push 時点で再実行するのは事後対応。
+# エージェント層 (Claude Code PreToolUse hook) で commit 時点に test 強制する。
+
+set -e
+
+# git は pre-push hook 起動時に `$1` に remote 名、`$2` に remote URL を渡す。
+# 複数 remote 環境 (例: origin / upstream) で誤った merge-base を使わないよう、
+# 動的検出はこの remote 名で行う。未指定時は origin にフォールバック。
+remote_name=${1:-origin}
+
+is_doc() {
+  # POSIX sh の case patten では `*` は `/` を含む任意文字列にマッチするので
+  # `docs/*` は `docs/superpowers/specs/foo.md` のような nested path にも
+  # マッチする (bash の filename glob とは挙動が違う点に注意)。実機検証済。
+  case "$1" in
+    *.md|*.txt|docs/*|CLAUDE.md|TESTING.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+  zero='0000000000000000000000000000000000000000'
+  if [ "$local_oid" = "$zero" ]; then
+    continue  # ref deletion
+  fi
+
+  # range 必ず "<base>..<local_oid>" 形にする。新規 branch で merge-base が
+  # 見つからない場合は git の empty-tree SHA を base にする (= local_oid 全ファイル
+  # を変更扱い)。単純な "$local_oid" 単体だと git diff が working tree 比較に
+  # 化けて意図しないファイルを拾うので避ける。
+  EMPTY_TREE='4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+  # デフォルトブランチを動的に検出。$remote_name を使うので複数 remote でも OK
+  default_branch=$(git symbolic-ref --short "refs/remotes/$remote_name/HEAD" 2>/dev/null | sed "s|^$remote_name/||")
+  default_branch="${default_branch:-main}"
+  if [ "$remote_oid" = "$zero" ]; then
+    base=$(git merge-base "$local_oid" "$remote_name/$default_branch" 2>/dev/null || echo "$EMPTY_TREE")
+  else
+    base="$remote_oid"
+  fi
+  range="$base..$local_oid"
+
+  files=$(git diff --name-only "$range" 2>/dev/null || echo "")
+
+  has_non_doc=0
+  for f in $files; do
+    if ! is_doc "$f"; then
+      has_non_doc=1
+      break
+    fi
+  done
+
+  # 受信側 (remote) のブランチ名でガードする。
+  # `git push origin feature:main` のような refspec ですり抜けないよう、
+  # 必ず `remote_ref` を見る (local_ref はソース側で偽装可能)。
+  remote_branch=${remote_ref#refs/heads/}
+  if [ "$remote_branch" = "main" ] || [ "$remote_branch" = "master" ]; then
+    if [ "$has_non_doc" = "1" ]; then
+      echo "" >&2
+      echo "ERROR: Direct push to $remote_branch is blocked (non-doc changes present)." >&2
+      echo "Create a feature branch and submit a PR." >&2
+      echo "" >&2
+      exit 1
+    fi
+  fi
+done
+
+exit 0

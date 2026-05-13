@@ -153,22 +153,21 @@ async fn null_exchange_api_returns_error_on_all_methods() {
 
     // send_child_order
     let result = api
-        .send_child_order(auto_trader_market::bitflyer_private::SendChildOrderRequest {
-            product_code: "FX_BTC_JPY".to_string(),
-            child_order_type: auto_trader_market::bitflyer_private::ChildOrderType::Limit,
-            side: auto_trader_market::bitflyer_private::Side::Buy,
-            price: Some(dec!(15_000_000)),
-            size: dec!(0.01),
-            minute_to_expire: None,
-            time_in_force: None,
-        })
+        .send_child_order(
+            auto_trader_market::bitflyer_private::SendChildOrderRequest {
+                product_code: "FX_BTC_JPY".to_string(),
+                child_order_type: auto_trader_market::bitflyer_private::ChildOrderType::Limit,
+                side: auto_trader_market::bitflyer_private::Side::Buy,
+                price: Some(dec!(15_000_000)),
+                size: dec!(0.01),
+                minute_to_expire: None,
+                time_in_force: None,
+            },
+        )
         .await;
     assert!(result.is_err(), "send_child_order should return error");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("NullExchangeApi"),
+        result.unwrap_err().to_string().contains("NullExchangeApi"),
         "error should mention NullExchangeApi"
     );
 

@@ -1,4 +1,3 @@
-mod enriched_ingest;
 mod regime;
 mod startup_reconcile;
 mod weekly_batch;
@@ -25,7 +24,7 @@ use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
 
@@ -222,9 +221,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Vegapunk: single gRPC channel with optional Bearer token auth
+    // Vegapunk: single gRPC channel wrapped in KnowledgeStore facade
     let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
-    let vegapunk_base: Option<auto_trader_vegapunk::client::VegapunkClient> =
+    let knowledge_store: Option<Arc<dyn auto_trader_core::knowledge::KnowledgeStore>> =
         match auto_trader_vegapunk::client::VegapunkClient::connect(
             &config.vegapunk.endpoint,
             &config.vegapunk.schema,
@@ -234,7 +233,11 @@ async fn main() -> anyhow::Result<()> {
         {
             Ok(client) => {
                 tracing::info!("vegapunk connected: {}", config.vegapunk.endpoint);
-                Some(client)
+                Some(
+                    Arc::new(auto_trader::knowledge::VegapunkKnowledgeStore::new(
+                        Arc::new(client),
+                    )) as Arc<dyn auto_trader_core::knowledge::KnowledgeStore>,
+                )
             }
             Err(e) => {
                 tracing::warn!("vegapunk unavailable (continuing without): {e}");
@@ -248,8 +251,7 @@ async fn main() -> anyhow::Result<()> {
         &mut engine,
         &config.strategies,
         &pool,
-        &vegapunk_base,
-        &config.vegapunk.schema,
+        &knowledge_store,
         config.gemini.as_ref(),
     )
     .await;
@@ -622,17 +624,6 @@ async fn main() -> anyhow::Result<()> {
         .map(|r| r.price_freshness_secs)
         .unwrap_or(60);
 
-    let vegapunk_client_exec: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
-        vegapunk_base.as_ref().map(|base| {
-            Arc::new(Mutex::new(
-                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
-                    base,
-                    &config.vegapunk.schema,
-                ),
-            ))
-        });
-    let vegapunk_client_recorder = vegapunk_client_exec.clone();
-
     // Build the market-feed registry — one entry per exchange that is
     // configured and has credentials. Adding a new exchange's price feed
     // = impl MarketFeed for NewFeed + insert here.
@@ -718,7 +709,9 @@ async fn main() -> anyhow::Result<()> {
     let exchange_pairs: Arc<HashMap<Exchange, HashSet<String>>> = {
         let mut map: HashMap<Exchange, HashSet<String>> = HashMap::new();
         for fk in &expected_feeds {
-            map.entry(fk.exchange).or_default().insert(fk.pair.0.clone());
+            map.entry(fk.exchange)
+                .or_default()
+                .insert(fk.pair.0.clone());
         }
         Arc::new(map)
     };
@@ -778,14 +771,9 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .with_db(pool.clone());
 
-                // Clone from shared Vegapunk channel for macro event ingestion
-                if let Some(base) = &vegapunk_base {
-                    let vp_for_macro =
-                        auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
-                            base,
-                            &config.vegapunk.schema,
-                        );
-                    analyst = analyst.with_vegapunk(vp_for_macro);
+                // Wire KnowledgeStore for macro event ingestion
+                if let Some(store) = &knowledge_store {
+                    analyst = analyst.with_knowledge(Arc::clone(store));
                 }
 
                 let news_interval = std::time::Duration::from_secs(mac.news_interval_secs);
@@ -932,14 +920,15 @@ async fn main() -> anyhow::Result<()> {
                                 )
                             }
                         };
-                    let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
-                        &crypto_monitor_exchange_liquidation_levels,
-                        trade.exchange,
-                        || format!("close trade {}", trade.id),
-                    ) {
-                        Some(y) => y,
-                        None => continue,
-                    };
+                    let liquidation_margin_level =
+                        match auto_trader::startup::liquidation_level_or_log(
+                            &crypto_monitor_exchange_liquidation_levels,
+                            trade.exchange,
+                            || format!("close trade {}", trade.id),
+                        ) {
+                            Some(y) => y,
+                            None => continue,
+                        };
                     let trader = UnifiedTrader::new(
                         crypto_monitor_pool.clone(),
                         trade.exchange,
@@ -1279,6 +1268,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
+    let knowledge_store_exec = knowledge_store.clone();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
@@ -1426,54 +1416,48 @@ async fn main() -> anyhow::Result<()> {
 
                 match trader.execute(signal).await {
                     Ok(trade) => {
-                        if let Some(vp) = vegapunk_client_exec.clone() {
-                            let trade_clone = trade.clone();
-                            let indicators_clone = signal_event.indicators.clone();
-                            let alloc_pct = signal.allocation_pct;
-                            let exec_pool = executor_pool.clone();
-                            tokio::spawn(async move {
-                                // Save entry_indicators to DB (with regime classification)
-                                let mut ind_map = indicators_clone
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
-                                    .collect::<serde_json::Map<_, _>>();
-                                ind_map.insert(
-                                    "regime".to_string(),
-                                    serde_json::Value::String(
-                                        crate::regime::classify(&indicators_clone)
-                                            .as_str()
-                                            .to_string(),
-                                    ),
-                                );
-                                let ind_json = serde_json::Value::Object(ind_map);
-                                if let Err(e) = sqlx::query(
-                                    "UPDATE trades SET entry_indicators = $1 WHERE id = $2",
-                                )
-                                .bind(&ind_json)
-                                .bind(trade_clone.id)
-                                .execute(&exec_pool)
-                                .await
-                                {
-                                    tracing::warn!("failed to save entry_indicators: {e}");
-                                }
-
-                                let mut vp = vp.lock().await;
-                                let text = crate::enriched_ingest::format_trade_open(
-                                    &trade_clone,
-                                    &indicators_clone,
-                                    Some(alloc_pct),
-                                );
-                                let channel =
-                                    format!("{}-trades", trade_clone.pair.0.to_lowercase());
-                                let timestamp = chrono::Utc::now().to_rfc3339();
-                                if let Err(e) = vp
-                                    .ingest_raw(&text, "trade_signal", &channel, &timestamp)
+                        let trade_clone = trade.clone();
+                        let indicators_clone = signal_event.indicators.clone();
+                        let alloc_pct = signal.allocation_pct;
+                        let exec_pool = executor_pool.clone();
+                        let store_opt = knowledge_store_exec.clone();
+                        tokio::spawn(async move {
+                            // Save entry_indicators to DB (with regime classification)
+                            let mut ind_map = indicators_clone
+                                .iter()
+                                .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
+                                .collect::<serde_json::Map<_, _>>();
+                            ind_map.insert(
+                                "regime".to_string(),
+                                serde_json::Value::String(
+                                    crate::regime::classify(&indicators_clone)
+                                        .as_str()
+                                        .to_string(),
+                                ),
+                            );
+                            let ind_json = serde_json::Value::Object(ind_map);
+                            if let Err(e) =
+                                sqlx::query("UPDATE trades SET entry_indicators = $1 WHERE id = $2")
+                                    .bind(&ind_json)
+                                    .bind(trade_clone.id)
+                                    .execute(&exec_pool)
                                     .await
-                                {
-                                    tracing::warn!("vegapunk ingest failed for trade open: {e}");
-                                }
-                            });
-                        }
+                            {
+                                tracing::warn!("failed to save entry_indicators: {e}");
+                            }
+
+                            if let Some(store) = store_opt
+                                && let Err(e) = store
+                                    .record_trade_open(
+                                        &trade_clone,
+                                        &indicators_clone,
+                                        Some(alloc_pct),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!("knowledge_store record_trade_open failed: {e}");
+                            }
+                        });
                         if let Err(e) = trade_tx_clone
                             .send(TradeEvent {
                                 trade,
@@ -1505,9 +1489,10 @@ async fn main() -> anyhow::Result<()> {
     // Task: Trade recorder — handles side effects after UnifiedTrader has already
     // persisted the trade to the DB. Responsibilities:
     //   - Upsert daily_summary on close
-    //   - Fire-and-forget Vegapunk ingestion on close
+    //   - Fire-and-forget KnowledgeStore ingestion + feedback on close
     // Note: trade INSERT/UPDATE and balance changes are owned by UnifiedTrader.
     let recorder_pool = pool.clone();
+    let knowledge_store_recorder = knowledge_store.clone();
     let recorder_handle = tokio::spawn(async move {
         while let Some(trade_event) = trade_rx.recv().await {
             match trade_event.action {
@@ -1527,10 +1512,7 @@ async fn main() -> anyhow::Result<()> {
                         let date = exit_at.date_naive();
                         let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
                         let account_id = t.account_id;
-                        let account_type = trade_event
-                            .account_type
-                            .as_deref()
-                            .unwrap_or("paper");
+                        let account_type = trade_event.account_type.as_deref().unwrap_or("paper");
                         if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
                             &recorder_pool,
                             date,
@@ -1547,8 +1529,8 @@ async fn main() -> anyhow::Result<()> {
                         {
                             tracing::error!("upsert daily summary error: {e}");
                         }
-                        // Fire-and-forget Vegapunk ingestion (don't block DB recording)
-                        if let Some(vp) = vegapunk_client_recorder.clone() {
+                        // Fire-and-forget KnowledgeStore ingestion (don't block DB recording)
+                        if let Some(store) = knowledge_store_recorder.clone() {
                             let t = t.clone();
                             let close_pool = recorder_pool.clone();
                             tokio::spawn(async move {
@@ -1579,24 +1561,15 @@ async fn main() -> anyhow::Result<()> {
                                     .unwrap_or((None, None))
                                 };
 
-                                let text = crate::enriched_ingest::format_trade_close(
-                                    &t,
-                                    entry_ind.as_ref(),
-                                    bal,
-                                    init,
-                                );
-                                let channel = format!("{}-trades", t.pair.0.to_lowercase());
-                                let timestamp = t
-                                    .exit_at
-                                    .map(|e| e.to_rfc3339())
-                                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-
-                                let mut vp = vp.lock().await;
-                                if let Err(e) = vp
-                                    .ingest_raw(&text, "trade_result", &channel, &timestamp)
-                                    .await
-                                {
-                                    tracing::warn!("vegapunk ingest failed for trade close: {e}");
+                                let ctx = auto_trader_core::knowledge::TradeCloseContext {
+                                    entry_indicators: entry_ind.as_ref(),
+                                    account_balance: bal,
+                                    account_initial: init,
+                                };
+                                if let Err(e) = store.record_trade_close(&t, &ctx).await {
+                                    tracing::warn!(
+                                        "knowledge_store record_trade_close failed: {e}"
+                                    );
                                 }
 
                                 // Auto-feedback if this trade had a Vegapunk search attached
@@ -1610,9 +1583,8 @@ async fn main() -> anyhow::Result<()> {
                                 .flatten();
 
                                 if let Some(sid) = search_id {
-                                    let sid = sid.to_string();
                                     let rating =
-                                        crate::enriched_ingest::compute_feedback_rating(&t);
+                                        auto_trader::enriched_ingest::compute_feedback_rating(&t);
                                     let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;
                                     let regime = entry_ind
                                         .as_ref()
@@ -1620,8 +1592,13 @@ async fn main() -> anyhow::Result<()> {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     let comment = format!("PnL: {net_pnl}, regime: {regime}");
-                                    if let Err(e) = vp.feedback(&sid, rating, &comment).await {
-                                        tracing::warn!("vegapunk feedback failed: {e}");
+                                    let sid_str = sid.to_string();
+                                    if let Err(e) =
+                                        store.submit_feedback(&sid_str, rating, &comment).await
+                                    {
+                                        tracing::warn!(
+                                            "knowledge_store submit_feedback failed: {e}"
+                                        );
                                     }
                                 }
                             });
@@ -1635,16 +1612,8 @@ async fn main() -> anyhow::Result<()> {
     // Task: Daily batch (max_drawdown calculation at UTC 0:00)
     // On startup, idempotently recompute last 7 days to cover any missed batches.
     // update_daily_max_drawdown is safe to re-run (overwrites max_drawdown).
-    let vegapunk_client_daily: Option<Arc<Mutex<auto_trader_vegapunk::client::VegapunkClient>>> =
-        vegapunk_base.as_ref().map(|base| {
-            Arc::new(Mutex::new(
-                auto_trader_vegapunk::client::VegapunkClient::clone_from_channel(
-                    base,
-                    &config.vegapunk.schema,
-                ),
-            ))
-        });
-    let vegapunk_client_weekly = vegapunk_client_daily.clone();
+    let knowledge_store_daily = knowledge_store.clone();
+    let knowledge_store_weekly = knowledge_store.clone();
     let gemini_api_url = config
         .gemini
         .as_ref()
@@ -1698,14 +1667,13 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::warn!("failed to purge old read notifications: {e}"),
                 }
 
-                // Daily: Vegapunk Merge for community detection consolidation
-                if let Some(vp) = vegapunk_client_daily.clone() {
+                // Daily: KnowledgeStore merge for community-detection consolidation
+                if let Some(store) = knowledge_store_daily.clone() {
                     tokio::spawn(async move {
-                        let mut client = vp.lock().await;
-                        if let Err(e) = client.merge().await {
-                            tracing::warn!("daily vegapunk merge failed: {e}");
+                        if let Err(e) = store.run_merge().await {
+                            tracing::warn!("daily knowledge_store merge failed: {e}");
                         } else {
-                            tracing::info!("daily vegapunk merge completed");
+                            tracing::info!("daily knowledge_store merge completed");
                         }
                     });
                 }
@@ -1717,7 +1685,7 @@ async fn main() -> anyhow::Result<()> {
                 if jst_weekday == chrono::Weekday::Sun
                     && let Err(e) = crate::weekly_batch::run(
                         &daily_pool,
-                        vegapunk_client_weekly.as_ref(),
+                        knowledge_store_weekly.as_ref(),
                         &gemini_api_url,
                         &gemini_api_key,
                         &gemini_model,

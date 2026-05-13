@@ -119,7 +119,11 @@ async fn balance_after_trade(pool: sqlx::PgPool) {
     let quantity = trade.quantity;
     // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 151 ≈ 12735.39 → 12735
-    assert_eq!(quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -174,10 +178,8 @@ async fn balance_after_trade(pool: sqlx::PgPool) {
     // PnL = TRUNC((exit - entry) * qty, 0) = TRUNC((155 - 151) * qty, 0)
     let expected_pnl_raw = (exit_price - entry_price) * quantity;
     // truncate toward zero (JPY)
-    let expected_pnl = expected_pnl_raw.round_dp_with_strategy(
-        0,
-        rust_decimal::RoundingStrategy::ToZero,
-    );
+    let expected_pnl =
+        expected_pnl_raw.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(pnl, expected_pnl, "PnL should be truncated to whole yen");
     // Cross-check via helper.
     let helper_pnl = sizing_invariants::expected_pnl(
@@ -187,7 +189,10 @@ async fn balance_after_trade(pool: sqlx::PgPool) {
         closed.direction,
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
-    assert_eq!(pnl, helper_pnl, "pnl matches sizing_invariants::expected_pnl");
+    assert_eq!(
+        pnl, helper_pnl,
+        "pnl matches sizing_invariants::expected_pnl"
+    );
 
     // Check DB balance
     let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
@@ -226,10 +231,17 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
     // Trade 1: Long, close with profit
     let balance_before_t1 = read_current_balance(&pool, account_id).await;
     let signal1 = make_signal("USD_JPY", Direction::Long);
-    let trade1 = trader.execute(&signal1).await.expect("open 1 should succeed");
+    let trade1 = trader
+        .execute(&signal1)
+        .await
+        .expect("open 1 should succeed");
     // qty: balance=10_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=151 (Long@ask), min_lot=1
     //      max_alloc = 1/1.04, raw = 10_000_000 × 2 / 1.04 / 151 ≈ 127356.087 → 127356
-    assert_eq!(trade1.quantity, dec!(127356), "sizer: 10M × 2 × (1/1.04) / 151 → 127356");
+    assert_eq!(
+        trade1.quantity,
+        dec!(127356),
+        "sizer: 10M × 2 × (1/1.04) / 151 → 127356"
+    );
     // Open-side enrichment for trade 1.
     assert_eq!(
         trade1.stop_loss,
@@ -300,11 +312,18 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
 
     let balance_before_t2 = read_current_balance(&pool, account_id).await;
     let signal2 = make_signal("USD_JPY", Direction::Short);
-    let trade2 = trader.execute(&signal2).await.expect("open 2 should succeed");
+    let trade2 = trader
+        .execute(&signal2)
+        .await
+        .expect("open 2 should succeed");
     // qty: balance has grown by trade1 PnL (+509424 yen: (155-151)×127356) → ≈10_509_424
     //      lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=155 (Short@bid), min_lot=1
     //      max_alloc = 1/1.04, raw = 10_509_424 × 2 × (1/1.04) / 155 ≈ 130389 → 130389
-    assert_eq!(trade2.quantity, dec!(130389), "sizer: ~10.51M × 2 × (1/1.04) / 155 → 130389 (balance grew by trade1 PnL)");
+    assert_eq!(
+        trade2.quantity,
+        dec!(130389),
+        "sizer: ~10.51M × 2 × (1/1.04) / 155 → 130389 (balance grew by trade1 PnL)"
+    );
     // Open-side enrichment for trade 2.
     assert_eq!(
         trade2.stop_loss,
@@ -391,10 +410,16 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
     let pnl2 = closed2.pnl_amount.unwrap();
 
     let expected_wins = if pnl1 > dec!(0) { 1 } else { 0 } + if pnl2 > dec!(0) { 1 } else { 0 };
-    assert_eq!(*win_count, expected_wins, "win_count should match profitable trades");
+    assert_eq!(
+        *win_count, expected_wins,
+        "win_count should match profitable trades"
+    );
 
     let expected_total_pnl = pnl1 + pnl2;
-    assert_eq!(*total_pnl, expected_total_pnl, "total_pnl should be sum of individual PnLs");
+    assert_eq!(
+        *total_pnl, expected_total_pnl,
+        "total_pnl should be sum of individual PnLs"
+    );
 }
 
 // =========================================================================
@@ -476,15 +501,9 @@ async fn candle_upsert_updates_values(pool: sqlx::PgPool) {
         .await
         .expect("second upsert");
 
-    let candles = auto_trader_db::candles::get_candles(
-        &pool,
-        "gmo_fx",
-        "USD_JPY",
-        "M5",
-        10,
-    )
-    .await
-    .expect("get_candles should succeed");
+    let candles = auto_trader_db::candles::get_candles(&pool, "gmo_fx", "USD_JPY", "M5", 10)
+        .await
+        .expect("get_candles should succeed");
 
     assert_eq!(candles.len(), 1);
     assert_eq!(candles[0].close, dec!(152), "close should be updated");
@@ -522,7 +541,11 @@ async fn jpy_truncation_on_pnl(pool: sqlx::PgPool) {
     let quantity = trade.quantity;
     // qty: balance=1_000_000, lev=2, Y=1.00, SL=0.02, alloc=1.0, entry=150.777 (Long@ask), min_lot=1
     //      max_alloc = 1/1.04, raw = 1_000_000 × 2 × (1/1.04) / 150.777 ≈ 12754.42 → 12754
-    assert_eq!(quantity, dec!(12754), "sizer: 1M × 2 × (1/1.04) / 150.777 → 12754");
+    assert_eq!(
+        quantity,
+        dec!(12754),
+        "sizer: 1M × 2 × (1/1.04) / 150.777 → 12754"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -576,10 +599,7 @@ async fn jpy_truncation_on_pnl(pool: sqlx::PgPool) {
 
     // PnL should be truncated to 0 decimal places (toward zero)
     let raw_pnl = (exit_price - entry_price) * quantity;
-    let expected_pnl = raw_pnl.round_dp_with_strategy(
-        0,
-        rust_decimal::RoundingStrategy::ToZero,
-    );
+    let expected_pnl = raw_pnl.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(pnl, expected_pnl, "PnL should be truncated to whole yen");
     assert_eq!(pnl.scale(), 0, "PnL scale should be 0 (integer)");
     // Cross-check via helper.
@@ -627,17 +647,19 @@ async fn overnight_fee_applied_to_open_trade(pool: sqlx::PgPool) {
 
     let fee_amount = dec!(50);
     let mut tx = pool.begin().await.expect("begin tx");
-    let result = auto_trader_db::trades::apply_overnight_fee(
-        &mut tx, account_id, trade_id, fee_amount,
-    )
-    .await
-    .expect("apply_overnight_fee should succeed");
+    let result =
+        auto_trader_db::trades::apply_overnight_fee(&mut tx, account_id, trade_id, fee_amount)
+            .await
+            .expect("apply_overnight_fee should succeed");
     tx.commit().await.expect("commit");
 
     // Should return Some(new_balance)
     let new_balance = result.expect("fee should be applied to open trade");
     let expected_balance = Decimal::from(initial_balance) - fee_amount;
-    assert_eq!(new_balance, expected_balance, "balance should decrease by fee");
+    assert_eq!(
+        new_balance, expected_balance,
+        "balance should decrease by fee"
+    );
 
     // Verify fees on trade
     let fees: Decimal = sqlx::query_scalar("SELECT fees FROM trades WHERE id = $1")
@@ -649,7 +671,7 @@ async fn overnight_fee_applied_to_open_trade(pool: sqlx::PgPool) {
 
     // Verify account_events row
     let event_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'overnight_fee'"
+        "SELECT COUNT(*) FROM account_events WHERE trade_id = $1 AND event_type = 'overnight_fee'",
     )
     .bind(trade_id)
     .fetch_one(&pool)
@@ -690,11 +712,10 @@ async fn overnight_fee_skips_closed_trade(pool: sqlx::PgPool) {
 
     let fee_amount = dec!(50);
     let mut tx = pool.begin().await.expect("begin tx");
-    let result = auto_trader_db::trades::apply_overnight_fee(
-        &mut tx, account_id, trade_id, fee_amount,
-    )
-    .await
-    .expect("apply_overnight_fee should not error");
+    let result =
+        auto_trader_db::trades::apply_overnight_fee(&mut tx, account_id, trade_id, fee_amount)
+            .await
+            .expect("apply_overnight_fee should not error");
     tx.commit().await.expect("commit");
 
     assert!(
@@ -723,18 +744,9 @@ async fn daily_batch_backfill(pool: sqlx::PgPool) {
 
     // Use a specific past date
     let target_date = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
-    let entry_at = target_date
-        .and_hms_opt(10, 0, 0)
-        .unwrap()
-        .and_utc();
-    let exit_at1 = target_date
-        .and_hms_opt(11, 0, 0)
-        .unwrap()
-        .and_utc();
-    let exit_at2 = target_date
-        .and_hms_opt(12, 0, 0)
-        .unwrap()
-        .and_utc();
+    let entry_at = target_date.and_hms_opt(10, 0, 0).unwrap().and_utc();
+    let exit_at1 = target_date.and_hms_opt(11, 0, 0).unwrap().and_utc();
+    let exit_at2 = target_date.and_hms_opt(12, 0, 0).unwrap().and_utc();
 
     // Trade 1: win (+500)
     auto_trader_integration_tests::helpers::seed::seed_closed_trade(
@@ -800,7 +812,10 @@ async fn daily_batch_backfill(pool: sqlx::PgPool) {
     assert_eq!(rows.len(), 1, "should have exactly 1 daily_summary row");
     let (trade_count, win_count, total_pnl, _max_drawdown) = &rows[0];
     assert_eq!(*trade_count, 2, "trade_count should be 2");
-    assert_eq!(*win_count, 1, "win_count should be 1 (one profitable trade)");
+    assert_eq!(
+        *win_count, 1,
+        "win_count should be 1 (one profitable trade)"
+    );
     assert_eq!(*total_pnl, dec!(200), "total_pnl should be 500 - 300 = 200");
 }
 
@@ -830,7 +845,11 @@ async fn account_events_margin_lock_release(pool: sqlx::PgPool) {
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
-    assert_eq!(trade.quantity, dec!(12735), "sizer: 1M × 2 × (1/1.04) / 151 → 12735");
+    assert_eq!(
+        trade.quantity,
+        dec!(12735),
+        "sizer: 1M × 2 × (1/1.04) / 151 → 12735"
+    );
     // Open-side enrichment.
     assert_eq!(
         trade.stop_loss,
@@ -924,10 +943,7 @@ async fn account_events_margin_lock_release(pool: sqlx::PgPool) {
     .fetch_one(&pool)
     .await
     .expect("query should succeed");
-    assert_eq!(
-        close_count, 1,
-        "trade_close event should exist after close"
-    );
+    assert_eq!(close_count, 1, "trade_close event should exist after close");
 }
 
 // =========================================================================
@@ -1033,11 +1049,7 @@ async fn price_store_mid_with_bid_ask() {
         .await;
 
     let mid = store.mid(&pair).await;
-    assert_eq!(
-        mid,
-        Some(dec!(150)),
-        "mid should be (149 + 151) / 2 = 150"
-    );
+    assert_eq!(mid, Some(dec!(150)), "mid should be (149 + 151) / 2 = 150");
 }
 
 /// PriceStore::mid() falls back to LTP when bid/ask are absent.

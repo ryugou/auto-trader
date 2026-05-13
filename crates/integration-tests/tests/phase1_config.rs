@@ -47,7 +47,7 @@ fn config_empty_pairs_loads_with_empty_vecs() {
         .expect("empty pairs is valid (strategies may not reference any)");
     assert!(config.pairs.fx.is_empty());
     assert!(
-        config.pairs.crypto.as_ref().map_or(true, |v| v.is_empty()),
+        config.pairs.crypto.as_ref().is_none_or(|v| v.is_empty()),
         "crypto pairs should be empty"
     );
 }

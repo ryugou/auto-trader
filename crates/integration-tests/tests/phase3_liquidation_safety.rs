@@ -28,12 +28,7 @@ use uuid::Uuid;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn make_signal(
-    pair: &str,
-    direction: Direction,
-    sl_pct: Decimal,
-    alloc_pct: Decimal,
-) -> Signal {
+fn make_signal(pair: &str, direction: Direction, sl_pct: Decimal, alloc_pct: Decimal) -> Signal {
     Signal {
         strategy_name: "liquidation_safety_strategy".to_string(),
         pair: Pair::new(pair),
@@ -183,11 +178,7 @@ async fn post_sl_margin_level_above_y_bitflyer_cfd_cap_binding(pool: sqlx::PgPoo
     assert_eq!(trade.quantity, dec!(0.004));
 
     // Core invariant.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        balance_before,
-        dec!(0.50),
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, dec!(0.50));
 
     // Pin the concrete margin level so a future regression that erodes
     // the cap-binding cushion is caught.
@@ -251,11 +242,7 @@ async fn post_sl_margin_level_at_y_gmo_fx(pool: sqlx::PgPool) {
     assert_eq!(trade.quantity, dec!(1592));
 
     // Core invariant.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        balance_before,
-        dec!(1.00),
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, dec!(1.00));
 
     // Pin the post-SL margin level to exactly Y (within the 0.5% tolerance
     // dictated by min_lot truncation). At exact-cap qty=1592.36 the level
@@ -380,11 +367,7 @@ async fn pre_sl_drawdown_stays_above_y_gmo_fx(pool: sqlx::PgPool) {
     );
 
     // The standing invariant at the SL itself.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        balance_before,
-        y,
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, y);
 }
 
 /// **Test 4** (negative case — gap-through): same setup as Test 3, but
@@ -504,11 +487,7 @@ async fn post_sl_margin_level_at_y_gmo_fx_with_tight_sl(pool: sqlx::PgPool) {
     assert_eq!(trade.quantity, dec!(1819));
 
     // Core invariant.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        balance_before,
-        dec!(1.00),
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, dec!(1.00));
 
     // Pin the post-SL margin level to exactly Y within tolerance.
     let pnl_at_sl = (trade.stop_loss - trade.entry_price) * trade.quantity;
@@ -577,11 +556,7 @@ async fn bitflyer_cfd_max_alloc_capped_at_one_realistic(pool: sqlx::PgPool) {
     );
 
     // Core invariant.
-    sizing_invariants::assert_post_sl_margin_level_at_least_y(
-        &trade,
-        balance_before,
-        dec!(0.50),
-    );
+    sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, dec!(0.50));
 
     // Pin the cushion explicitly:
     //   pnl_at_sl = (12_125_000 - 12_500_000) × 0.004 = -1500
