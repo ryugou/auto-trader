@@ -11,6 +11,9 @@
 set -e
 
 is_doc() {
+  # POSIX sh の case patten では `*` は `/` を含む任意文字列にマッチするので
+  # `docs/*` は `docs/superpowers/specs/foo.md` のような nested path にも
+  # マッチする (bash の filename glob とは挙動が違う点に注意)。実機検証済。
   case "$1" in
     *.md|*.txt|docs/*|CLAUDE.md|TESTING.md) return 0 ;;
     *) return 1 ;;
