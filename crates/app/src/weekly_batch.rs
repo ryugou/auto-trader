@@ -176,8 +176,9 @@ async fn run_for_strategy(
         proposal.rationale
     );
 
-    // 6. Validate + persist
-    let normalized = match validate_params(strategy_name, &proposal.params) {
+    // 6. Validate + persist. `current_params` is passed so the permissive
+    //    validator can enforce key-set/type parity with the existing row.
+    let normalized = match validate_params(strategy_name, &proposal.params, &current_params) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("weekly_batch: {strategy_name} validation failed: {e}");
@@ -225,14 +226,22 @@ async fn list_evolvable_strategies(pool: &PgPool) -> anyhow::Result<Vec<String>>
 }
 
 /// Query trade stats for the past 7 days for a single strategy.
+///
+/// Counts only `status = 'closed'` rows with a non-null `pnl_amount`, since
+/// `closing` (in-flight) trades can carry partial fields that would distort
+/// the win-rate computation. `COALESCE(SUM, 0)` is required because Postgres
+/// aggregates over an empty set return NULL, and the tuple decoder expects
+/// `i64` (not `Option<i64>`).
 async fn fetch_strategy_stats(pool: &PgPool, strategy_name: &str) -> anyhow::Result<StrategyStats> {
     let row: Option<(i64, i64, Option<f64>)> = sqlx::query_as(
         r#"
-        SELECT COUNT(*)::bigint                                          AS trades,
-               SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END)::bigint AS wins,
-               AVG(pnl_amount)::float8                                  AS avg_pnl
+        SELECT COUNT(*)::bigint                                                     AS trades,
+               COALESCE(SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END), 0)::bigint AS wins,
+               AVG(pnl_amount)::float8                                              AS avg_pnl
         FROM trades
         WHERE strategy_name = $1
+          AND status = 'closed'
+          AND pnl_amount IS NOT NULL
           AND exit_at > NOW() - INTERVAL '7 days'
         "#,
     )
@@ -250,18 +259,21 @@ async fn fetch_strategy_stats(pool: &PgPool, strategy_name: &str) -> anyhow::Res
 }
 
 /// Compute Wilson Score 95% lower bounds per market regime for the past 7 days,
-/// scoped to a single strategy.
+/// scoped to a single strategy. Only `status = 'closed'` rows are counted to
+/// stay consistent with `fetch_strategy_stats`.
 async fn compute_regime_wilson(
     pool: &PgPool,
     strategy_name: &str,
 ) -> anyhow::Result<Vec<RegimeAnalysis>> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
         r#"
-        SELECT entry_indicators->>'regime'                              AS regime,
-               COUNT(*)::bigint                                         AS trades,
-               SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END)::bigint AS wins
+        SELECT entry_indicators->>'regime'                                          AS regime,
+               COUNT(*)::bigint                                                     AS trades,
+               COALESCE(SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END), 0)::bigint AS wins
         FROM trades
         WHERE exit_at > NOW() - INTERVAL '7 days'
+          AND status = 'closed'
+          AND pnl_amount IS NOT NULL
           AND entry_indicators IS NOT NULL
           AND entry_indicators->>'regime' IS NOT NULL
           AND strategy_name = $1
@@ -289,17 +301,20 @@ async fn compute_regime_wilson(
 }
 
 /// Dispatch validation to a per-strategy validator.
-/// Unknown strategies use a permissive default (JSON object + non-empty) so
-/// adding a new strategy to `strategy_params` doesn't require a code change
-/// to be wired in — but ideally each strategy gets its own strict validator
-/// added before going live with Gemini-proposed params.
+/// Unknown strategies use a permissive default that requires the proposed
+/// JSON to match the existing `current_params` in both key set and per-key
+/// type. This keeps "INSERT a row to enable evolution" as a one-step
+/// ergonomic while still rejecting LLM hallucinations (new keys, missing
+/// keys, type swaps). Strategies with non-trivial invariants should still
+/// get a dedicated strict validator (cf. `validate_donchian_trend_evolve_v1`).
 fn validate_params(
     strategy_name: &str,
-    params: &serde_json::Value,
+    proposed: &serde_json::Value,
+    current: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     match strategy_name {
-        "donchian_trend_evolve_v1" => validate_donchian_trend_evolve_v1(params),
-        _ => validate_permissive(strategy_name, params),
+        "donchian_trend_evolve_v1" => validate_donchian_trend_evolve_v1(proposed),
+        _ => validate_permissive(strategy_name, proposed, current),
     }
 }
 
@@ -340,27 +355,59 @@ fn validate_donchian_trend_evolve_v1(
     }))
 }
 
-/// Permissive fallback validator. Accepts any JSON object that is non-empty
-/// and contains no null values. Used for strategies with no dedicated
-/// validator registered yet.
+/// Permissive fallback validator. Requires the proposed JSON to:
+/// - be a non-empty object with no null values
+/// - have an identical key set to `current` (no added or dropped keys)
+/// - preserve the JSON type per key (e.g. number stays number)
+///
+/// Used for strategies with no dedicated validator registered yet. If
+/// `current` is empty (first-time evolution), only the basic non-empty /
+/// non-null check is applied — but operators should pre-seed
+/// `strategy_params` with a known-good baseline rather than letting the
+/// LLM define the initial schema.
 fn validate_permissive(
     strategy_name: &str,
-    params: &serde_json::Value,
+    proposed: &serde_json::Value,
+    current: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let obj = params
+    let proposed_obj = proposed
         .as_object()
         .with_context(|| format!("{strategy_name}: params must be a JSON object"))?;
-    if obj.is_empty() {
+    if proposed_obj.is_empty() {
         anyhow::bail!("{strategy_name}: params object is empty (Gemini proposed no fields)");
     }
-    if obj.values().any(|v| v.is_null()) {
+    if proposed_obj.values().any(|v| v.is_null()) {
         anyhow::bail!("{strategy_name}: params contain null values");
     }
+
+    if let Some(current_obj) = current.as_object()
+        && !current_obj.is_empty()
+    {
+        use std::collections::BTreeSet;
+        let current_keys: BTreeSet<&str> = current_obj.keys().map(String::as_str).collect();
+        let proposed_keys: BTreeSet<&str> = proposed_obj.keys().map(String::as_str).collect();
+        let added: Vec<&&str> = proposed_keys.difference(&current_keys).collect();
+        let removed: Vec<&&str> = current_keys.difference(&proposed_keys).collect();
+        if !added.is_empty() || !removed.is_empty() {
+            anyhow::bail!(
+                "{strategy_name}: param key set differs from current. added={added:?} removed={removed:?}"
+            );
+        }
+        for (key, current_val) in current_obj {
+            let proposed_val = &proposed_obj[key];
+            if std::mem::discriminant(current_val) != std::mem::discriminant(proposed_val) {
+                anyhow::bail!(
+                    "{strategy_name}: type mismatch for key '{key}': current={current_val} proposed={proposed_val}"
+                );
+            }
+        }
+    }
+
     tracing::warn!(
         "weekly_batch: {strategy_name} uses permissive validator (no strict schema). \
          Add a dedicated validator before relying on these params in production."
     );
-    Ok(params.clone())
+    Ok(proposed.clone())
 }
 
 /// Load the current JSON params blob for a strategy from `strategy_params`.
@@ -525,10 +572,14 @@ fn build_gemini_prompt(
 
 /// Call the Gemini API and parse the `GeminiProposal` from the response text.
 ///
-/// Returns a fallback proposal with unchanged params when:
+/// Returns `Err` when:
 /// - `api_key` is empty (Gemini disabled in config)
-/// - The HTTP call fails
+/// - The HTTP call fails or returns non-2xx
 /// - The response cannot be parsed as `GeminiProposal`
+///
+/// Callers are responsible for handling the error (the weekly batch surfaces
+/// it as a `system_notification` and leaves params unchanged — no silent
+/// fallback to current params, since that would mask LLM outages).
 async fn call_gemini(
     api_url: &str,
     api_key: &str,
@@ -700,7 +751,8 @@ mod tests {
             "atr_baseline_bars": 50,
             "sl_pct": 0.03, // hallucinated extra
         });
-        let v = validate_params("donchian_trend_evolve_v1", &proposed).unwrap();
+        let current = serde_json::json!({});
+        let v = validate_params("donchian_trend_evolve_v1", &proposed, &current).unwrap();
         assert_eq!(v["entry_channel"], 20);
         assert_eq!(v["exit_channel"], 10);
         assert_eq!(v["atr_baseline_bars"], 50);
@@ -714,7 +766,8 @@ mod tests {
             "exit_channel": 10,
             "atr_baseline_bars": 50,
         });
-        assert!(validate_params("donchian_trend_evolve_v1", &proposed).is_err());
+        let current = serde_json::json!({});
+        assert!(validate_params("donchian_trend_evolve_v1", &proposed, &current).is_err());
     }
 
     #[test]
@@ -724,34 +777,80 @@ mod tests {
             "exit_channel": 15, // exit >= entry
             "atr_baseline_bars": 50,
         });
-        assert!(validate_params("donchian_trend_evolve_v1", &proposed).is_err());
+        let current = serde_json::json!({});
+        assert!(validate_params("donchian_trend_evolve_v1", &proposed, &current).is_err());
     }
 
     #[test]
-    fn validate_params_permissive_accepts_unknown_strategy() {
-        let proposed = serde_json::json!({
-            "window": 20,
-            "threshold": 1.5,
-        });
-        let v = validate_params("bb_mean_revert_v1", &proposed).unwrap();
+    fn validate_params_permissive_accepts_matching_key_set() {
+        let proposed = serde_json::json!({ "window": 20, "threshold": 1.5 });
+        let current = serde_json::json!({ "window": 15, "threshold": 1.0 });
+        let v = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap();
         assert_eq!(v["window"], 20);
     }
 
     #[test]
     fn validate_params_permissive_rejects_empty_object() {
         let proposed = serde_json::json!({});
-        assert!(validate_params("bb_mean_revert_v1", &proposed).is_err());
+        let current = serde_json::json!({ "window": 15 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_err());
     }
 
     #[test]
     fn validate_params_permissive_rejects_non_object() {
         let proposed = serde_json::json!([1, 2, 3]);
-        assert!(validate_params("bb_mean_revert_v1", &proposed).is_err());
+        let current = serde_json::json!({ "window": 15 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_err());
     }
 
     #[test]
     fn validate_params_permissive_rejects_null_values() {
         let proposed = serde_json::json!({"window": null});
-        assert!(validate_params("bb_mean_revert_v1", &proposed).is_err());
+        let current = serde_json::json!({ "window": 15 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_err());
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_added_key() {
+        // Hallucinated extra key — must be rejected when current has fixed schema.
+        let proposed = serde_json::json!({ "window": 20, "threshold": 1.5, "rogue": 99 });
+        let current = serde_json::json!({ "window": 15, "threshold": 1.0 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("rogue"),
+            "error should name the extra key: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_dropped_key() {
+        let proposed = serde_json::json!({ "window": 20 });
+        let current = serde_json::json!({ "window": 15, "threshold": 1.0 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("threshold"),
+            "error should name the dropped key: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_type_swap() {
+        // LLM returned a string instead of a number — must be rejected.
+        let proposed = serde_json::json!({ "window": "20" });
+        let current = serde_json::json!({ "window": 15 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("type mismatch"),
+            "error should flag type mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_relaxes_when_current_empty() {
+        // First-time evolution: no current schema to compare against; still
+        // require non-empty + non-null but accept arbitrary keys.
+        let proposed = serde_json::json!({ "anything": 1 });
+        let current = serde_json::json!({});
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_ok());
     }
 }

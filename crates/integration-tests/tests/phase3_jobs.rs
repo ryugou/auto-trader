@@ -228,6 +228,70 @@ async fn weekly_batch_skips_low_sample_strategy(pool: sqlx::PgPool) {
     );
 }
 
+// ─── 3.104c: weekly_batch with zero past-week trades ──────────────────────
+//
+// Test: with N=0 closed trades in the past 7 days, fetch_strategy_stats must
+// not blow up on a NULL aggregate (the SUM(...) returns NULL on an empty
+// set; we rely on COALESCE(...,0)). The small-sample guard then kicks in
+// and leaves params untouched.
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn weekly_batch_handles_zero_trades(pool: sqlx::PgPool) {
+    sqlx::query(
+        r#"INSERT INTO strategies (name, display_name, category, risk_level, description, default_params)
+           VALUES ('donchian_trend_evolve_v1', 'Donchian Evolve', 'trend', 'medium', 'test', '{}'::jsonb)
+           ON CONFLICT (name) DO NOTHING"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let initial_params = r#"{"entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50}"#;
+    sqlx::query(
+        r#"INSERT INTO strategy_params (strategy_name, params, updated_at)
+           VALUES ('donchian_trend_evolve_v1', $1::jsonb, NOW())
+           ON CONFLICT (strategy_name)
+           DO UPDATE SET params = EXCLUDED.params, updated_at = NOW()"#,
+    )
+    .bind(initial_params)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Intentionally no trades inserted.
+
+    let mock_gemini = auto_trader_integration_tests::mocks::gemini::MockGemini::start().await;
+    let aggressive = r#"{"params":{"entry_channel":12,"exit_channel":11,"atr_baseline_bars":20},"rationale":"x","expected_effect":"y"}"#;
+    mock_gemini.parameter_proposal(aggressive).await;
+
+    let result =
+        auto_trader::weekly_batch::run(&pool, None, &mock_gemini.url(), "test-key", "test-model")
+            .await;
+    assert!(
+        result.is_ok(),
+        "weekly batch must not panic on zero trades: {:?}",
+        result.err()
+    );
+
+    // Params unchanged
+    let params: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+        "SELECT params FROM strategy_params WHERE strategy_name = 'donchian_trend_evolve_v1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("strategy_params row");
+    assert_eq!(params.0["atr_baseline_bars"].as_i64(), Some(50));
+
+    // サンプル不足 notification
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM system_notifications WHERE message LIKE '%サンプル不足%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(n >= 1, "small-sample notification should be inserted");
+}
+
 // ─── 3.105: Daily batch backfill ─────────────────────────────────────────
 //
 // Test: insert closed trades for past dates, call update_daily_max_drawdown,
