@@ -28,8 +28,11 @@ while read -r local_ref local_oid remote_ref remote_oid; do
   # を変更扱い)。単純な "$local_oid" 単体だと git diff が working tree 比較に
   # 化けて意図しないファイルを拾うので避ける。
   EMPTY_TREE='4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+  # デフォルトブランチを動的に検出 (main / master / その他に対応)
+  default_branch=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  default_branch="${default_branch:-main}"
   if [ "$remote_oid" = "$zero" ]; then
-    base=$(git merge-base "$local_oid" origin/main 2>/dev/null || echo "$EMPTY_TREE")
+    base=$(git merge-base "$local_oid" "origin/$default_branch" 2>/dev/null || echo "$EMPTY_TREE")
   else
     base="$remote_oid"
   fi

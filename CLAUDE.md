@@ -28,8 +28,9 @@
 
 `./scripts/test-all.sh` は以下を前提とする:
 
-- `protoc` が PATH 上 (macOS: `brew install protobuf`)
-- `DATABASE_URL` 未設定なら localhost:15432 の docker-compose Postgres を仮定し、必要なら自動起動する
+- `cargo` (rustup 経由) と `protoc` (macOS: `brew install protobuf`) が PATH 上
+- **`psql` または `pg_isready` が PATH 上** (macOS: `brew install libpq`、Debian: `apt install postgresql-client`)。DB 到達性 probe に必要
+- `DATABASE_URL` 未設定なら localhost:15432 の docker-compose Postgres を仮定し、必要なら `docker compose up -d db` を自動起動
 - 外部 API 接続を試したい場合は `VEGAPUNK_AUTH_TOKEN` / `OANDA_API_KEY` / `OANDA_ACCOUNT_ID` 等を env で渡す (未設定なら該当テストは SKIPPED)
 
 ## 【強制】git hook セットアップ
@@ -40,6 +41,29 @@ Clone 後に 1 回実行:
 ./scripts/install-hooks.sh
 ```
 
-`.githooks/pre-push` が `main` / `master` への直 push を非ドキュメント変更で拒否する (memory: main 直接 push 絶対禁止)。
+`.githooks/pre-push` が default branch (`origin/HEAD` から動的検出、通常は `main` / `master`) への直 push を非ドキュメント変更で拒否する (memory: main 直接 push 絶対禁止)。
 
-テスト実行はこの git hook では強制しない。テストは**実装ワークフローの一部**として走らせ、green を見てから commit するのが本筋。Claude が運用する場合は `.claude/settings.json` の PreToolUse hook で `git commit` を発火条件として `scripts/test-all.sh` を走らせ、失敗時に commit を拒否する (人間運用時は discipline でこれを担保)。
+テスト実行はこの git hook では強制しない。テストは**実装ワークフローの一部**として走らせ、green を見てから commit するのが本筋。Claude Code 運用時は `.claude/settings.local.json` の PreToolUse hook で `git commit` 時点に `scripts/test-all.sh` を走らせ、失敗時に commit を拒否する。
+
+注: `.claude/` は `.gitignore` 対象なので、`.claude/settings.local.json` および `.claude/hooks/test-before-commit.sh` はリポジトリ管理外 (個人設定)。Claude Code を使う各環境で個別に設置する必要がある。設置例:
+
+```jsonc
+// .claude/settings.local.json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{
+          "type": "command",
+          "if": "Bash(git commit*)",
+          "command": "bash $CLAUDE_PROJECT_DIR/.claude/hooks/test-before-commit.sh",
+          "timeout": 600
+        }]
+      }
+    ]
+  }
+}
+```
+
+人間運用時は discipline でこれを担保する。

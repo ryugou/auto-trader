@@ -51,6 +51,12 @@ if ! command -v protoc >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v psql >/dev/null 2>&1 && ! command -v pg_isready >/dev/null 2>&1; then
+  echo "ERROR: scripts/test-all.sh requires \`psql\` or \`pg_isready\` on PATH for the DB probe." >&2
+  echo "Install one: macOS \`brew install libpq\` / Debian \`apt install postgresql-client\`." >&2
+  exit 1
+fi
+
 # ── DB 起動 (docker compose) ──────────────────────────────────────────
 if [[ -z "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL='postgresql://auto-trader:auto-trader@localhost:15432/auto_trader'
@@ -58,15 +64,13 @@ fi
 echo "DATABASE_URL=$DATABASE_URL"
 
 # DB connectivity probe (worktree から docker compose を打つと既存 main 側
-# コンテナと port 衝突するので、まず外から到達できるかを試す)
+# コンテナと port 衝突するので、まず外から到達できるかを試す)。preflight で
+# psql/pg_isready の存在を確認済なので、ここに到達した時点でどちらかは使える。
 probe_db() {
   if command -v psql >/dev/null 2>&1; then
     PGCONNECT_TIMEOUT=2 psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1
-  elif command -v pg_isready >/dev/null 2>&1; then
-    pg_isready -d "$DATABASE_URL" -t 2 >/dev/null 2>&1
   else
-    echo "ERROR: install postgresql client (psql or pg_isready) to enable DB probe (macOS: brew install libpq)" >&2
-    return 1
+    pg_isready -d "$DATABASE_URL" -t 2 >/dev/null 2>&1
   fi
 }
 

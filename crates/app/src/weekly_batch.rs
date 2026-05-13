@@ -35,11 +35,11 @@ struct GeminiProposal {
 /// Workflow:
 /// 1. Fetch the past-7-day trade stats from the DB.
 /// 2. Compute Wilson-Score lower bounds per regime.
-/// 3. Optionally query Vegapunk for recent trade context.
+/// 3. Optionally query the KnowledgeStore for recent trade context.
 /// 4. Load the current evolve-strategy params from `strategy_params`.
 /// 5. Ask Gemini to propose updated params.
 /// 6. Persist the proposed params and emit a `system_notifications` row.
-/// 7. Trigger a Vegapunk merge so the ingested context is consolidated.
+/// 7. Trigger a KnowledgeStore merge so the ingested context is consolidated.
 pub async fn run(
     pool: &PgPool,
     knowledge: Option<&Arc<dyn KnowledgeStore>>,
@@ -66,7 +66,7 @@ pub async fn run(
         .context("compute_regime_wilson")?;
 
     // 3. Optional Vegapunk context
-    let vp_context = fetch_knowledge_context(knowledge, STRATEGY).await;
+    let knowledge_context = fetch_knowledge_context(knowledge, STRATEGY).await;
 
     // 4. Current params from DB
     let current_params = load_current_params(pool, STRATEGY)
@@ -74,7 +74,12 @@ pub async fn run(
         .context("load_current_params")?;
 
     // 5. Ask Gemini for a proposal
-    let prompt = build_gemini_prompt(&stats, vp_context.as_deref(), &current_params, &wilson);
+    let prompt = build_gemini_prompt(
+        &stats,
+        knowledge_context.as_deref(),
+        &current_params,
+        &wilson,
+    );
     let proposal = call_gemini(gemini_api_url, gemini_api_key, gemini_model, &prompt)
         .await
         .unwrap_or_else(|err| {
@@ -317,10 +322,10 @@ async fn fetch_knowledge_context(
 }
 
 /// Build the Gemini prompt from gathered stats, Wilson analysis, optional
-/// Vegapunk context, and the current parameter blob.
+/// KnowledgeStore context, and the current parameter blob.
 fn build_gemini_prompt(
     stats: &WeeklyStats,
-    vp_context: Option<&str>,
+    knowledge_context: Option<&str>,
     current_params: &serde_json::Value,
     wilson: &[RegimeAnalysis],
 ) -> String {
@@ -365,8 +370,8 @@ fn build_gemini_prompt(
         }
     }
 
-    // Vegapunk context section
-    if let Some(context) = vp_context {
+    // KnowledgeStore context section
+    if let Some(context) = knowledge_context {
         prompt.push_str("\n## Vegapunk 学習コンテキスト\n");
         prompt.push_str(context);
         prompt.push('\n');

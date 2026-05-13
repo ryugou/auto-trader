@@ -1,8 +1,8 @@
 # Vegapunk KnowledgeStore 抽象化 設計
 
 - 作成日: 2026-05-11
-- ステータス: brainstorming 完了、未実装
-- 関連: `specs/vegapunk-integration.md`, `crates/integration-tests/src/mocks/vegapunk.rs:1` の TODO
+- ステータス: 実装完了 (PR #83)
+- 関連: `specs/vegapunk-integration.md`, 実装計画 `docs/superpowers/plans/2026-05-11-vegapunk-knowledge-store.md`
 
 ## 背景
 
