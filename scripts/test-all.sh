@@ -77,11 +77,15 @@ probe_db() {
   elif command -v pg_isready >/dev/null 2>&1; then
     pg_isready -d "$DATABASE_URL" -t 2 >/dev/null 2>&1
   else
-    local hostport host port
-    hostport=$(printf '%s' "$DATABASE_URL" | sed -n 's|.*@\([^/]*\)/.*|\1|p')
-    host=${hostport%:*}
-    port=${hostport#*:}
-    if [[ -z "$host" || -z "$port" ]]; then
+    # scheme:// 以降の authority (= [user[:pass]@]host[:port]) を抽出してから
+    # credentials と path を順に剥がす。credentials が無い URL でも安全。
+    local authority host port
+    authority=${DATABASE_URL#*://}
+    authority=${authority%%/*}
+    authority=${authority##*@}
+    host=${authority%:*}
+    port=${authority##*:}
+    if [[ -z "$host" || -z "$port" || "$host" == "$port" ]]; then
       return 1
     fi
     (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null
@@ -130,14 +134,12 @@ ok "clippy clean"
 
 # ── テスト本体 ────────────────────────────────────────────────────────
 step "cargo test --workspace --lib --bins --tests"
-# --tests を付けて crates/*/tests/*.rs 直下の integration tests も拾う
+# `--tests` で crates/*/tests/*.rs 直下の integration tests も拾う
 # (--lib --bins だけだと crate-local integration tests が完全に skip される)。
+# auto-trader-integration-tests crate もここで一括実行される
+# (smoke / phase1-4 / mocks 含む)。
 cargo test --workspace --lib --bins --tests
-ok "lib + bin + per-crate integration tests passed"
-
-step "cargo test -p auto-trader-integration-tests"
-cargo test -p auto-trader-integration-tests
-ok "integration tests passed"
+ok "lib + bin + per-crate integration tests passed (incl. auto-trader-integration-tests)"
 
 step "cargo test --workspace --doc"
 cargo test --workspace --doc
