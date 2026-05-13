@@ -62,10 +62,11 @@ echo "DATABASE_URL=$DATABASE_URL"
 probe_db() {
   if command -v psql >/dev/null 2>&1; then
     PGCONNECT_TIMEOUT=2 psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1
+  elif command -v pg_isready >/dev/null 2>&1; then
+    pg_isready -d "$DATABASE_URL" -t 2 >/dev/null 2>&1
   else
-    # psql が無い環境: docker の postgres イメージで probe
-    docker run --rm --network host postgres:16-alpine \
-      psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1
+    echo "ERROR: install postgresql client (psql or pg_isready) to enable DB probe (macOS: brew install libpq)" >&2
+    return 1
   fi
 }
 

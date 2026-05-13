@@ -1592,9 +1592,9 @@ async fn main() -> anyhow::Result<()> {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     let comment = format!("PnL: {net_pnl}, regime: {regime}");
-                                    if let Err(e) = store
-                                        .submit_feedback(&sid.to_string(), rating, &comment)
-                                        .await
+                                    let sid_str = sid.to_string();
+                                    if let Err(e) =
+                                        store.submit_feedback(&sid_str, rating, &comment).await
                                     {
                                         tracing::warn!(
                                             "knowledge_store submit_feedback failed: {e}"

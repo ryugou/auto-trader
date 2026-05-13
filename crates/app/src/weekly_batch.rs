@@ -66,7 +66,7 @@ pub async fn run(
         .context("compute_regime_wilson")?;
 
     // 3. Optional Vegapunk context
-    let vp_context = fetch_knowledge_context(knowledge, &stats).await;
+    let vp_context = fetch_knowledge_context(knowledge, STRATEGY).await;
 
     // 4. Current params from DB
     let current_params = load_current_params(pool, STRATEGY)
@@ -292,13 +292,10 @@ async fn insert_system_notification(pool: &PgPool, message: &str) -> anyhow::Res
 /// Returns `None` on failure (non-fatal — the batch continues without it).
 async fn fetch_knowledge_context(
     knowledge: Option<&Arc<dyn KnowledgeStore>>,
-    _stats: &WeeklyStats,
+    strategy_name: &str,
 ) -> Option<String> {
     let store = knowledge?;
-    match store
-        .search_strategy_outcomes("donchian_trend_evolve_v1", 5)
-        .await
-    {
+    match store.search_strategy_outcomes(strategy_name, 5).await {
         Ok(res) => {
             let context = res
                 .hits
