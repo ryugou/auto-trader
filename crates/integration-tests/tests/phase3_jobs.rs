@@ -38,6 +38,36 @@ async fn weekly_batch_updates_strategy_params(pool: sqlx::PgPool) {
     .await
     .unwrap();
 
+    // Seed at least MIN_TRADES_FOR_EVOLUTION (=5) closed trades for the past 7
+    // days so the small-sample guard doesn't short-circuit the evolution.
+    let account_id = auto_trader_integration_tests::helpers::db::seed_trading_account(
+        &pool,
+        "weekly_batch_test",
+        "paper",
+        "gmo_fx",
+        "donchian_trend_evolve_v1",
+        1_000_000,
+    )
+    .await;
+    for i in 0..6 {
+        sqlx::query(
+            r#"INSERT INTO trades
+                   (id, account_id, strategy_name, pair, exchange, direction,
+                    entry_price, entry_at, stop_loss, quantity, leverage, status,
+                    exit_price, exit_at, pnl_amount, fees, exit_reason)
+               VALUES ($1, $2, 'donchian_trend_evolve_v1', 'USD_JPY', 'gmo_fx', 'long',
+                       150.0, NOW() - INTERVAL '2 days', 149.0, 1000, 2, 'closed',
+                       151.0, NOW() - INTERVAL '1 day', $3, 0, 'tp_hit')"#,
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(account_id)
+        // Mix of positive and negative pnl so wins/losses are non-trivial
+        .bind(if i % 2 == 0 { 100.0_f64 } else { -50.0_f64 })
+        .execute(&pool)
+        .await
+        .expect("seed closed trade");
+    }
+
     // Start MockGemini server that returns a valid proposal
     let mock_gemini = auto_trader_integration_tests::mocks::gemini::MockGemini::start().await;
     let proposal_json = r#"{"params":{"entry_channel":22,"exit_channel":8,"atr_baseline_bars":60},"rationale":"test proposal","expected_effect":"improved win rate"}"#;
@@ -86,6 +116,116 @@ async fn weekly_batch_updates_strategy_params(pool: sqlx::PgPool) {
     .await
     .unwrap();
     assert!(notif_count >= 1, "system notification should be inserted");
+}
+
+// ─── 3.104b: weekly_batch small-sample guard ─────────────────────────────
+//
+// Test: with fewer than MIN_TRADES_FOR_EVOLUTION trades in the past 7 days,
+// weekly_batch must NOT update strategy_params and must emit a notification
+// containing the "サンプル不足" marker. Guards against the over-fitting
+// pattern observed in production (N=1 → aggressive param change).
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn weekly_batch_skips_low_sample_strategy(pool: sqlx::PgPool) {
+    sqlx::query(
+        r#"INSERT INTO strategies (name, display_name, category, risk_level, description, default_params)
+           VALUES ('donchian_trend_evolve_v1', 'Donchian Evolve', 'trend', 'medium', 'test', '{}'::jsonb)
+           ON CONFLICT (name) DO NOTHING"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Override the migration-seeded params with a known initial state so the
+    // assertions below can detect any unexpected change.
+    let initial_params = r#"{"entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50}"#;
+    sqlx::query(
+        r#"INSERT INTO strategy_params (strategy_name, params, updated_at)
+           VALUES ('donchian_trend_evolve_v1', $1::jsonb, NOW())
+           ON CONFLICT (strategy_name)
+           DO UPDATE SET params = EXCLUDED.params, updated_at = NOW()"#,
+    )
+    .bind(initial_params)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Seed only 2 closed trades (< MIN_TRADES_FOR_EVOLUTION = 5)
+    let account_id = auto_trader_integration_tests::helpers::db::seed_trading_account(
+        &pool,
+        "small_sample_test",
+        "paper",
+        "gmo_fx",
+        "donchian_trend_evolve_v1",
+        1_000_000,
+    )
+    .await;
+    for _ in 0..2 {
+        sqlx::query(
+            r#"INSERT INTO trades
+                   (id, account_id, strategy_name, pair, exchange, direction,
+                    entry_price, entry_at, stop_loss, quantity, leverage, status,
+                    exit_price, exit_at, pnl_amount, fees, exit_reason)
+               VALUES ($1, $2, 'donchian_trend_evolve_v1', 'USD_JPY', 'gmo_fx', 'long',
+                       150.0, NOW() - INTERVAL '2 days', 149.0, 1000, 2, 'closed',
+                       151.0, NOW() - INTERVAL '1 day', 100, 0, 'tp_hit')"#,
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("seed closed trade");
+    }
+
+    // Use a MockGemini that would propose aggressive change IF called —
+    // its appearance in DB after the run is a sign the guard didn't fire.
+    let mock_gemini = auto_trader_integration_tests::mocks::gemini::MockGemini::start().await;
+    let aggressive_proposal = r#"{"params":{"entry_channel":12,"exit_channel":11,"atr_baseline_bars":20},"rationale":"N=1 win → aggressive","expected_effect":"more trades"}"#;
+    mock_gemini.parameter_proposal(aggressive_proposal).await;
+
+    let result =
+        auto_trader::weekly_batch::run(&pool, None, &mock_gemini.url(), "test-key", "test-model")
+            .await;
+    assert!(
+        result.is_ok(),
+        "weekly batch should succeed: {:?}",
+        result.err()
+    );
+
+    // Params must be unchanged (still 20/10/50)
+    let params: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar(
+        "SELECT params FROM strategy_params WHERE strategy_name = 'donchian_trend_evolve_v1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("strategy_params row");
+    assert_eq!(
+        params.0["entry_channel"].as_i64(),
+        Some(20),
+        "entry_channel should be unchanged"
+    );
+    assert_eq!(
+        params.0["exit_channel"].as_i64(),
+        Some(10),
+        "exit_channel should be unchanged"
+    );
+    assert_eq!(
+        params.0["atr_baseline_bars"].as_i64(),
+        Some(50),
+        "atr_baseline_bars should be unchanged"
+    );
+
+    // A "サンプル不足" notification must have been emitted
+    let notif_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM system_notifications WHERE message LIKE '%サンプル不足%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        notif_count >= 1,
+        "small-sample notification should be inserted"
+    );
 }
 
 // ─── 3.105: Daily batch backfill ─────────────────────────────────────────

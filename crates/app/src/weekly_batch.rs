@@ -152,16 +152,24 @@ async fn run_for_strategy(
         &current_params,
         &wilson,
     );
-    let proposal = call_gemini(gemini_api_url, gemini_api_key, gemini_model, &prompt)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("weekly_batch: Gemini call failed ({err:#}); using fallback params");
-            GeminiProposal {
-                params: current_params.clone(),
-                rationale: "LLM unavailable".to_string(),
-                expected_effect: String::new(),
-            }
-        });
+    // 5b. Gemini call — fail-fast notification if unavailable, so the operator
+    //     sees something happened. Without this branch the run would silently
+    //     fall through to validate_params(current_params), which for the
+    //     permissive default validator (empty current_params object) bails
+    //     out with no system_notification.
+    let proposal = match call_gemini(gemini_api_url, gemini_api_key, gemini_model, &prompt).await {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!("weekly_batch: {strategy_name} Gemini call failed: {err:#}");
+            let msg = format!(
+                "週次進化バッチ: {strategy_name} は LLM 呼び出し失敗のため現状パラメータを維持します。理由: {err}"
+            );
+            insert_system_notification(pool, &msg)
+                .await
+                .context("insert_system_notification (gemini failure)")?;
+            return Ok(());
+        }
+    };
 
     tracing::info!(
         "weekly_batch: {strategy_name} proposal rationale = {:?}",
@@ -174,6 +182,12 @@ async fn run_for_strategy(
         Err(e) => {
             tracing::warn!("weekly_batch: {strategy_name} validation failed: {e}");
             tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
+            let msg = format!(
+                "週次進化バッチ: {strategy_name} は LLM 提案の検証に失敗したため現状パラメータを維持します。理由: {e}"
+            );
+            insert_system_notification(pool, &msg)
+                .await
+                .context("insert_system_notification (validation failure)")?;
             return Ok(());
         }
     };
@@ -228,7 +242,6 @@ async fn fetch_strategy_stats(pool: &PgPool, strategy_name: &str) -> anyhow::Res
     .with_context(|| format!("SELECT weekly trade stats for {strategy_name}"))?;
 
     let (total_trades, wins, avg_pnl) = row.unwrap_or((0, 0, None));
-    let _ = strategy_name; // strategy_name only needed for the SQL bind above
     Ok(StrategyStats {
         total_trades,
         wins,
@@ -295,13 +308,18 @@ fn validate_params(
 fn validate_donchian_trend_evolve_v1(
     params: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let entry = params["entry_channel"].as_i64().unwrap_or(20);
-    let exit = params["exit_channel"].as_i64().unwrap_or(10);
-    let baseline = params["atr_baseline_bars"].as_i64().unwrap_or(50);
+    // 必須キーの存在チェックを先に。デフォルト値で穴埋めしてから range を
+    // 見ると「キー欠落」と「範囲外」が同じエラー扱いになって誤魔化される。
+    let entry = params["entry_channel"]
+        .as_i64()
+        .context("entry_channel missing or non-integer")?;
+    let exit = params["exit_channel"]
+        .as_i64()
+        .context("exit_channel missing or non-integer")?;
+    let baseline = params["atr_baseline_bars"]
+        .as_i64()
+        .context("atr_baseline_bars missing or non-integer")?;
 
-    if entry < 0 || exit < 0 || baseline < 0 {
-        anyhow::bail!("negative parameter values not allowed");
-    }
     if !(10..=30).contains(&entry) {
         anyhow::bail!("entry_channel {entry} out of range [10, 30]");
     }
@@ -313,15 +331,6 @@ fn validate_donchian_trend_evolve_v1(
     }
     if exit >= entry {
         anyhow::bail!("exit_channel ({exit}) must be < entry_channel ({entry})");
-    }
-    if params["entry_channel"].as_i64().is_none() {
-        anyhow::bail!("entry_channel missing or non-integer");
-    }
-    if params["exit_channel"].as_i64().is_none() {
-        anyhow::bail!("exit_channel missing or non-integer");
-    }
-    if params["atr_baseline_bars"].as_i64().is_none() {
-        anyhow::bail!("atr_baseline_bars missing or non-integer");
     }
 
     Ok(serde_json::json!({
