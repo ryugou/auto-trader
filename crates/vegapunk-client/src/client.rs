@@ -1,5 +1,7 @@
 use crate::proto::graph_rag_engine_client::GraphRagEngineClient;
 use crate::proto::*;
+use async_trait::async_trait;
+use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
@@ -56,9 +58,6 @@ impl VegapunkClient {
         })
     }
 }
-
-use async_trait::async_trait;
-use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
 
 #[async_trait]
 impl VegapunkApi for VegapunkClient {
