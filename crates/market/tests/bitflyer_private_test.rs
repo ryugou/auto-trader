@@ -45,6 +45,7 @@ async fn send_child_order_market_order_returns_acceptance_id() {
         price: None,
         minute_to_expire: None,
         time_in_force: None,
+        close_position_id: None,
     };
     let resp = api.send_child_order(req).await.unwrap();
     assert_eq!(resp.child_order_acceptance_id, "JRF20260414-050237-639234");
@@ -73,6 +74,7 @@ async fn send_child_order_insufficient_funds_maps_to_typed_error() {
         price: None,
         minute_to_expire: None,
         time_in_force: None,
+        close_position_id: None,
     };
     let err = api.send_child_order(req).await.unwrap_err();
     match err {
@@ -106,6 +108,7 @@ async fn send_child_order_invalid_api_key_maps_to_typed_error() {
         price: None,
         minute_to_expire: None,
         time_in_force: None,
+        close_position_id: None,
     };
     let err = api.send_child_order(req).await.unwrap_err();
     assert!(matches!(err, BitflyerApiError::InvalidApiKey));

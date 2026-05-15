@@ -425,6 +425,7 @@ mod tests {
             exit_reason: None,
             status: TradeStatus::Open,
             max_hold_until: None,
+            exchange_position_id: None,
         }
     }
 

@@ -19,7 +19,9 @@ use auto_trader_market::bitflyer_private::{
 };
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::price_store::{FeedKey, PriceStore};
-use auto_trader_notify::{Notifier, NotifyEvent, OrderFilledEvent, PositionClosedEvent};
+use auto_trader_notify::{
+    Notifier, NotifyEvent, OrderFailedEvent, OrderFilledEvent, PositionClosedEvent,
+};
 use chrono::Utc;
 use rust_decimal::{Decimal, RoundingStrategy};
 use sqlx::PgPool;
@@ -379,6 +381,7 @@ impl Trader {
             };
             Ok(price)
         } else {
+            self.ensure_close_position_id_present(trade)?;
             let req = self.opposite_side_market_order(trade);
             let resp = self.api.send_child_order(req).await?;
             let (price, _qty) = self
@@ -443,7 +446,72 @@ impl Trader {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         }
+    }
+
+    /// Resolve `exchange_position_id` from the exchange with a short retry
+    /// loop. GMO's `/v1/openPositions` can lag the fill by a few hundred ms,
+    /// so a single GET right after `fill_open` often returns nothing. Three
+    /// attempts at 500ms spacing covers typical settlement latency without
+    /// blocking the open path for long.
+    async fn resolve_position_id_with_retry(
+        &self,
+        product_code: &str,
+        after: chrono::DateTime<chrono::Utc>,
+        expected_side: Side,
+        expected_size: Decimal,
+    ) -> Option<String> {
+        const MAX_ATTEMPTS: usize = 3;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self
+                .api
+                .resolve_position_id(product_code, after, expected_side, expected_size)
+                .await
+            {
+                Ok(Some(pid)) => return Some(pid),
+                Ok(None) => {
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(BACKOFF).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        pair = %product_code,
+                        attempt,
+                        error = %e,
+                        "resolve_position_id error (retrying if attempts remain)"
+                    );
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(BACKOFF).await;
+                    }
+                }
+            }
+        }
+        tracing::warn!(
+            pair = %product_code,
+            attempts = MAX_ATTEMPTS,
+            "resolve_position_id returned None after all retries"
+        );
+        None
+    }
+
+    /// Reject a live close on exchanges that require a position id when the
+    /// trade has none stored. On GMO FX this prevents a close-without-positionId
+    /// from being silently dispatched to `/v1/order`, which would open an
+    /// opposite-direction position instead of closing the original.
+    /// bitFlyer-style exchanges return `false` from `requires_close_position_id`
+    /// and pass this check regardless of `exchange_position_id`.
+    fn ensure_close_position_id_present(&self, trade: &Trade) -> anyhow::Result<()> {
+        if self.api.requires_close_position_id() && trade.exchange_position_id.is_none() {
+            anyhow::bail!(
+                "live close refused for trade {} on {}: exchange_position_id is None and this exchange requires it (closing without a position id would open an opposite position)",
+                trade.id,
+                self.exchange.as_str()
+            );
+        }
+        Ok(())
     }
 
     /// 反対売買用 (close)
@@ -462,6 +530,7 @@ impl Trader {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: trade.exchange_position_id.clone(),
         }
     }
 
@@ -575,6 +644,7 @@ impl Trader {
             // Dry-run: return price from PriceStore regardless of size (same as fill_close).
             return self.fill_close(trade).await;
         }
+        self.ensure_close_position_id_present(trade)?;
         let side = match trade.direction {
             Direction::Long => Side::Sell,
             Direction::Short => Side::Buy,
@@ -587,6 +657,7 @@ impl Trader {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: trade.exchange_position_id.clone(),
         };
         let resp = self.api.send_child_order(req).await?;
         let (price, _qty) = self
@@ -698,6 +769,14 @@ impl OrderExecutor for Trader {
                 )
             })?;
 
+        // Capture the cutoff BEFORE sending the open order. GMO timestamps
+        // the position at fill time, which is earlier than the moment we
+        // observe completion after `fill_open` returns. Using a post-fill
+        // timestamp would filter out the just-opened position.
+        // Subtract a small safety margin (1 second) to cover any clock skew
+        // between this host and GMO's exchange-side clock.
+        let position_cutoff = Utc::now() - chrono::Duration::seconds(1);
+
         // 3. fill_open() で fill 価格 + 実数量取得
         let (fill_price, actual_qty) = self.fill_open(signal, quantity).await?;
 
@@ -714,6 +793,56 @@ impl OrderExecutor for Trader {
         // 5. Trade 構築
         let entry_at = Utc::now();
         let margin = truncate_yen(fill_price * actual_qty / leverage);
+
+        // Resolve the exchange-side position id for exchanges that model
+        // positions individually (GMO FX). Required by /v1/closeOrder later.
+        // Paper trades (dry_run) and exchanges that net positions internally
+        // (bitFlyer) return None. We retry with backoff because the exchange
+        // may not surface the position in /v1/openPositions for ~hundreds of
+        // milliseconds after the fill response. If all retries fail on an
+        // exchange that requires a position id (GMO), emit a Slack alert —
+        // the resulting trade row will be unclosable until an operator runs
+        // manual reconciliation (the position_monitor / startup reconciler
+        // can also recover the id later).
+        let order_side = match signal.direction {
+            Direction::Long => Side::Buy,
+            Direction::Short => Side::Sell,
+        };
+        // Only spend retry latency on exchanges that actually use the field.
+        // bitFlyer / OANDA / null impls always return Ok(None); calling them
+        // (and waiting 1.5s of backoff) just to discard the result adds dead
+        // latency to every non-GMO live open.
+        let exchange_position_id = if self.dry_run || !self.api.requires_close_position_id() {
+            None
+        } else {
+            self.resolve_position_id_with_retry(
+                &signal.pair.0,
+                position_cutoff,
+                order_side,
+                actual_qty,
+            )
+            .await
+        };
+        if !self.dry_run && self.api.requires_close_position_id() && exchange_position_id.is_none()
+        {
+            let notifier = self.notifier.clone();
+            let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
+                account_name: self.account_name.clone(),
+                exchange: self.exchange,
+                strategy_name: signal.strategy_name.clone(),
+                pair: signal.pair.clone(),
+                reason: format!(
+                    "open succeeded but resolve_position_id returned None for {} after retries — \
+                     trade will be unclosable until exchange_position_id is reconciled",
+                    signal.pair.0
+                ),
+            });
+            tokio::spawn(async move {
+                if let Err(e) = notifier.send(ev).await {
+                    tracing::error!("failed to send unresolved-position-id alert: {e}");
+                }
+            });
+        }
 
         let trade = Trade {
             id: Uuid::new_v4(),
@@ -735,6 +864,7 @@ impl OrderExecutor for Trader {
             exit_reason: None,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            exchange_position_id,
         };
 
         // 6. DB 操作 (1 トランザクション)
@@ -930,6 +1060,7 @@ impl OrderExecutor for Trader {
             exit_reason: Some(exit_reason),
             status: TradeStatus::Closed,
             max_hold_until: trade.max_hold_until,
+            exchange_position_id: trade.exchange_position_id.clone(),
         };
 
         // CRITICAL: Phase 2 (exchange fill) succeeded. If this Phase 3 DB tx

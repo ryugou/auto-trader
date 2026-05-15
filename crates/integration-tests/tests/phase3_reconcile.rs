@@ -100,6 +100,16 @@ impl ExchangeApi for ReconcileMockApi {
     ) -> anyhow::Result<()> {
         unimplemented!("not used in reconciler tests")
     }
+
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+        _expected_side: auto_trader_market::bitflyer_private::Side,
+        _expected_size: rust_decimal::Decimal,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 // =========================================================================

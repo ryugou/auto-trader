@@ -39,6 +39,7 @@ async fn send_child_order_returns_order_id() {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         })
         .await
         .unwrap();
@@ -67,6 +68,7 @@ async fn send_child_order_falls_back_to_id_when_order_id_missing() {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         })
         .await
         .unwrap();
@@ -132,6 +134,7 @@ async fn send_child_order_rejects_zero_size() {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         })
         .await
         .unwrap_err();
@@ -151,6 +154,7 @@ async fn send_child_order_rejects_limit() {
             price: Some(dec!(148.5)),
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         })
         .await
         .unwrap_err();
@@ -249,6 +253,7 @@ async fn send_child_order_rejects_fractional_size() {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         })
         .await
         .unwrap_err();
@@ -268,6 +273,7 @@ async fn send_child_order_rejects_negative_size() {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         })
         .await
         .unwrap_err();

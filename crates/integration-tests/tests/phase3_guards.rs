@@ -162,6 +162,7 @@ async fn null_exchange_api_returns_error_on_all_methods() {
                 size: dec!(0.01),
                 minute_to_expire: None,
                 time_in_force: None,
+                close_position_id: None,
             },
         )
         .await;

@@ -3,6 +3,7 @@ pub mod bitflyer_private;
 pub mod candle_builder;
 pub mod exchange_api;
 pub mod gmo_fx;
+pub mod gmo_fx_private;
 pub mod indicators;
 pub mod market_feed;
 pub mod monitor;

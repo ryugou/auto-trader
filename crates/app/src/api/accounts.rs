@@ -119,6 +119,10 @@ pub async fn create(
         Ok(e) => e,
         Err(e) => return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string())),
     };
+    if let Err(msg) = trading_accounts::validate_leverage_for_exchange(exchange_enum, req.leverage)
+    {
+        return Err(ApiError(StatusCode::BAD_REQUEST, msg));
+    }
     // Defense in depth: reject creation on exchanges that have no
     // [exchange_margin.<name>] entry, or whose entry is non-positive.
     //
@@ -207,6 +211,31 @@ pub async fn update(
             StatusCode::BAD_REQUEST,
             format!("strategy '{name}' not found in catalog (see GET /api/strategies)"),
         ));
+    }
+    // Leverage cap pre-check at the HTTP boundary so a violation returns 400
+    // with the human-readable cap message. (`update_account` re-checks for
+    // non-HTTP callers but its anyhow::bail! would otherwise surface as a
+    // generic 500 here.)
+    //
+    // Uses let-chains (`if let && let`). Although Cargo.toml's
+    // `rust-version = "1.85"` predates the feature's stabilization (1.88),
+    // `rust-toolchain.toml` pins the workspace toolchain to `stable` for
+    // both local and CI builds, so the actual compiler is well past 1.88.
+    // The flat form also avoids clippy::collapsible_if on nested `if let`.
+    if let Some(new_leverage) = req.leverage
+        && let Some(account) = trading_accounts::get(&state.pool, id)
+            .await
+            .map_err(ApiError::from)?
+    {
+        let exchange_enum: Exchange = account
+            .exchange
+            .parse()
+            .map_err(|e: anyhow::Error| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Err(msg) =
+            trading_accounts::validate_leverage_for_exchange(exchange_enum, new_leverage)
+        {
+            return Err(ApiError(StatusCode::BAD_REQUEST, msg));
+        }
     }
     trading_accounts::update_account(&state.pool, id, &req)
         .await

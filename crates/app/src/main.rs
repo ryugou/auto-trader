@@ -125,6 +125,26 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // GMO FX ExchangeApi — optional; requires `GMO_API_KEY` + `GMO_API_SECRET`.
+    fn env_trimmed(name: &str) -> Option<String> {
+        std::env::var(name)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    match (env_trimmed("GMO_API_KEY"), env_trimmed("GMO_API_SECRET")) {
+        (Some(key), Some(secret)) => {
+            let gmo_api: Arc<dyn ExchangeApi> = Arc::new(
+                auto_trader_market::gmo_fx_private::GmoFxPrivateApi::new(key, secret),
+            );
+            exchange_apis.insert(Exchange::GmoFx, gmo_api);
+            tracing::info!("GMO FX ExchangeApi registered");
+        }
+        _ => tracing::info!(
+            "GMO FX ExchangeApi not registered (requires GMO_API_KEY + GMO_API_SECRET env)"
+        ),
+    }
+
     let exchange_apis = Arc::new(exchange_apis);
 
     // Notifier — Slack Webhook for operator alerts.

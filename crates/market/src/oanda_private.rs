@@ -499,6 +499,16 @@ impl ExchangeApi for OandaPrivateApi {
         let _ = self.send_json(self.authed(Method::PUT, &path)).await?;
         Ok(())
     }
+
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+        _expected_side: crate::bitflyer_private::Side,
+        _expected_size: rust_decimal::Decimal,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Map OANDA order JSON → `ChildOrder`.
@@ -637,6 +647,7 @@ mod tests {
                 price: None,
                 minute_to_expire: None,
                 time_in_force: None,
+                close_position_id: None,
             })
             .await
             .unwrap_err();
@@ -677,6 +688,7 @@ mod tests {
                 price: None,
                 minute_to_expire: None,
                 time_in_force: None,
+                close_position_id: None,
             })
             .await
             .unwrap_err();

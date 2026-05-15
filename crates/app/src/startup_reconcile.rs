@@ -464,6 +464,16 @@ mod reconcile_tests {
         ) -> anyhow::Result<()> {
             unimplemented!("MockExchangeApi: cancel_child_order not used in reconciler tests")
         }
+
+        async fn resolve_position_id(
+            &self,
+            _product_code: &str,
+            _after: chrono::DateTime<chrono::Utc>,
+            _expected_side: auto_trader_market::bitflyer_private::Side,
+            _expected_size: rust_decimal::Decimal,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -523,6 +533,7 @@ mod reconcile_tests {
             exit_reason: None,
             status: TradeStatus::Open,
             max_hold_until: None,
+            exchange_position_id: None,
         };
         sqlx::query(
             r#"INSERT INTO trades

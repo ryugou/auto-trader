@@ -46,6 +46,13 @@ pub struct SendChildOrderRequest {
     pub minute_to_expire: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_in_force: Option<TimeInForce>,
+    /// `Some(positionId)` marks this request as closing an existing exchange
+    /// position. bitFlyer ignores it (it nets positions internally and treats
+    /// every order as a new opposite-side order). GMO FX dispatches to
+    /// `/v1/closeOrder` with this positionId. Internal field — never serialised
+    /// on the wire.
+    #[serde(skip)]
+    pub close_position_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -585,6 +592,19 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
         self.cancel_child_order(product_code, child_order_acceptance_id)
             .await
             .map_err(anyhow::Error::from)
+    }
+
+    /// bitFlyer nets positions internally — there is no per-position id to
+    /// dispatch closes against. The trader's close path falls back to
+    /// opposite-side market orders.
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+        _expected_side: Side,
+        _expected_size: rust_decimal::Decimal,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
     }
 }
 

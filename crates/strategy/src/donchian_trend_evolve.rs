@@ -443,6 +443,7 @@ mod tests {
                 exit_reason: None,
                 status: TradeStatus::Open,
                 max_hold_until: None,
+                exchange_position_id: None,
             },
         };
         let drop_event = make_event("FX_BTC_JPY", dec!(10500000), dec!(10550000), dec!(10450000));
@@ -496,6 +497,7 @@ mod tests {
                 exit_reason: None,
                 status: TradeStatus::Open,
                 max_hold_until: None,
+                exchange_position_id: None,
             },
         };
         let spike = make_event("FX_BTC_JPY", dec!(11100000), dec!(11150000), dec!(11050000));
@@ -553,6 +555,7 @@ mod tests {
                 exit_reason: None,
                 status: TradeStatus::Open,
                 max_hold_until: None,
+                exchange_position_id: None,
             },
         };
         let drop_event = make_event("FX_BTC_JPY", dec!(10900000), dec!(10950000), dec!(10850000));
