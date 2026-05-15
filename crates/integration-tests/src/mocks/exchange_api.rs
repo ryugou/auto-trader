@@ -134,6 +134,14 @@ impl ExchangeApi for MockExchangeApi {
             .fetch_add(1, Ordering::SeqCst);
         self.cancel_child_order_cfg.try_respond()
     }
+
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------

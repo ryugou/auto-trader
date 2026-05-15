@@ -464,6 +464,14 @@ mod reconcile_tests {
         ) -> anyhow::Result<()> {
             unimplemented!("MockExchangeApi: cancel_child_order not used in reconciler tests")
         }
+
+        async fn resolve_position_id(
+            &self,
+            _product_code: &str,
+            _after: chrono::DateTime<chrono::Utc>,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
     }
 
     // -----------------------------------------------------------------------

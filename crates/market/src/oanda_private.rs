@@ -499,6 +499,14 @@ impl ExchangeApi for OandaPrivateApi {
         let _ = self.send_json(self.authed(Method::PUT, &path)).await?;
         Ok(())
     }
+
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Map OANDA order JSON → `ChildOrder`.

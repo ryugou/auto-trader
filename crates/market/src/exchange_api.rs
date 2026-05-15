@@ -43,4 +43,15 @@ pub trait ExchangeApi: Send + Sync {
         product_code: &str,
         child_order_acceptance_id: &str,
     ) -> anyhow::Result<()>;
+
+    /// Return the exchange-side position identifier created by a recent open
+    /// order. `after` is the timestamp when the open was sent — implementations
+    /// pick the newest position with `open_timestamp >= after`. Returns
+    /// `Ok(None)` when the exchange does not model positions individually
+    /// (bitFlyer nets positions internally) or no matching position is found.
+    async fn resolve_position_id(
+        &self,
+        product_code: &str,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Option<String>>;
 }

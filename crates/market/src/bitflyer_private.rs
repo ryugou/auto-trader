@@ -593,6 +593,17 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
             .await
             .map_err(anyhow::Error::from)
     }
+
+    /// bitFlyer nets positions internally — there is no per-position id to
+    /// dispatch closes against. The trader's close path falls back to
+    /// opposite-side market orders.
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// parse/format エラー文字列に埋め込む body text を 512 文字で丸める。

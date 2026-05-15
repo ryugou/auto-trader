@@ -58,4 +58,12 @@ impl ExchangeApi for NullExchangeApi {
     ) -> anyhow::Result<()> {
         anyhow::bail!("NullExchangeApi: cancel_child_order called on stub")
     }
+
+    async fn resolve_position_id(
+        &self,
+        _product_code: &str,
+        _after: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
