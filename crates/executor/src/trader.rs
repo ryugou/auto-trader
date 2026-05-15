@@ -36,12 +36,13 @@ fn truncate_yen(amount: Decimal) -> Decimal {
     amount.round_dp_with_strategy(0, RoundingStrategy::ToZero)
 }
 
-/// Aggregate a non-empty execution list into (volume-weighted avg price, total size).
+/// Aggregate a non-empty execution list into
+/// (volume-weighted avg price, total size, total commission).
 ///
 /// Used when `poll_executions` timed out but a follow-up `get_executions` call
 /// confirmed the order did fill. Returns an error if the executions are empty
 /// or total size is zero (caller should have guarded against the empty case).
-fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal)> {
+fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
     let total_size: Decimal = execs.iter().map(|e| e.size).sum();
     if total_size.is_zero() {
         anyhow::bail!(
@@ -50,7 +51,8 @@ fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal
         );
     }
     let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
-    Ok((total_notional / total_size, total_size))
+    let total_commission: Decimal = execs.iter().map(|e| e.commission).sum();
+    Ok((total_notional / total_size, total_size, total_commission))
 }
 
 pub struct Trader {
@@ -210,7 +212,7 @@ impl Trader {
                         Ok(execs) if !execs.is_empty() => {
                             // Fill did happen — aggregate to get avg price + total size.
                             match aggregate_executions(&execs) {
-                                Ok((avg_price, total_size)) => {
+                                Ok((avg_price, total_size, _commission)) => {
                                     tracing::info!(
                                         "open fill reconciled after timeout: order {} filled {} @ {}",
                                         order_id,
@@ -259,7 +261,7 @@ impl Trader {
                                                 .await
                                             {
                                                 Ok(execs) if !execs.is_empty() => {
-                                                    let (avg_price, total_size) =
+                                                    let (avg_price, total_size, _commission) =
                                                         aggregate_executions(&execs)?;
                                                     Ok((avg_price, total_size))
                                                 }
