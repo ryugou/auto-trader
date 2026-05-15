@@ -385,11 +385,8 @@ impl Trader {
                 Direction::Long => bid,
                 Direction::Short => ask,
             };
-            let commission = auto_trader_core::commission::estimate_close(
-                self.exchange,
-                price,
-                trade.quantity,
-            );
+            let commission =
+                auto_trader_core::commission::estimate_close(self.exchange, price, trade.quantity);
             Ok((price, commission))
         } else {
             self.ensure_close_position_id_present(trade)?;
@@ -1014,22 +1011,22 @@ impl OrderExecutor for Trader {
         // to a best-effort price. We fire an operator alert after Phase 3 in
         // that case so the PnL approximation is always visible.
         let mut stale_approximate = false;
-        let exit_result: anyhow::Result<(Decimal, Decimal)> =
-            if !self.dry_run && was_stale_recovery {
-                tracing::warn!(
-                    "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
-                    trade.id
-                );
-                match self.fill_close_with_stale_recovery(&trade).await {
-                    Ok((price, commission, approximate)) => {
-                        stale_approximate = approximate;
-                        Ok((price, commission))
-                    }
-                    Err(e) => Err(e),
+        let exit_result: anyhow::Result<(Decimal, Decimal)> = if !self.dry_run && was_stale_recovery
+        {
+            tracing::warn!(
+                "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
+                trade.id
+            );
+            match self.fill_close_with_stale_recovery(&trade).await {
+                Ok((price, commission, approximate)) => {
+                    stale_approximate = approximate;
+                    Ok((price, commission))
                 }
-            } else {
-                self.fill_close(&trade).await
-            };
+                Err(e) => Err(e),
+            }
+        } else {
+            self.fill_close(&trade).await
+        };
         let (exit_price, close_commission) = match exit_result {
             Ok(pair) => pair,
             Err(e) => {
