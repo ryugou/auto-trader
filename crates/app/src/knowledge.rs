@@ -200,6 +200,7 @@ mod tests {
             exit_at: None,
             exit_reason: None,
             max_hold_until: None,
+            exchange_position_id: None,
         }
     }
 

@@ -284,6 +284,12 @@ pub struct Trade {
     /// Optional time-based fail-safe — see `Signal::max_hold_until`.
     #[serde(default)]
     pub max_hold_until: Option<DateTime<Utc>>,
+    /// Exchange-side position identifier. Set by `ExchangeApi::resolve_position_id`
+    /// after a live open; used by GMO FX to dispatch `/v1/closeOrder` against the
+    /// correct position. `None` for exchanges that net positions internally
+    /// (bitFlyer) and for paper trades.
+    #[serde(default)]
+    pub exchange_position_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

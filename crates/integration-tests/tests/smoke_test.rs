@@ -95,6 +95,7 @@ async fn mock_exchange_api_returns_configured_response() {
                 price: None,
                 minute_to_expire: None,
                 time_in_force: None,
+                close_position_id: None,
             },
         )
         .await

@@ -443,6 +443,7 @@ impl Trader {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: None,
         }
     }
 
@@ -462,6 +463,7 @@ impl Trader {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: trade.exchange_position_id.clone(),
         }
     }
 
@@ -587,6 +589,7 @@ impl Trader {
             price: None,
             minute_to_expire: None,
             time_in_force: None,
+            close_position_id: trade.exchange_position_id.clone(),
         };
         let resp = self.api.send_child_order(req).await?;
         let (price, _qty) = self
@@ -735,6 +738,7 @@ impl OrderExecutor for Trader {
             exit_reason: None,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
+            exchange_position_id: None,
         };
 
         // 6. DB 操作 (1 トランザクション)
@@ -930,6 +934,7 @@ impl OrderExecutor for Trader {
             exit_reason: Some(exit_reason),
             status: TradeStatus::Closed,
             max_hold_until: trade.max_hold_until,
+            exchange_position_id: trade.exchange_position_id.clone(),
         };
 
         // CRITICAL: Phase 2 (exchange fill) succeeded. If this Phase 3 DB tx

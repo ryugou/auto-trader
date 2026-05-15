@@ -177,6 +177,7 @@ async fn seed_open_trade(
         exit_reason: None,
         status: TradeStatus::Open,
         max_hold_until: None,
+        exchange_position_id: None,
     };
     sqlx::query(
         r#"INSERT INTO trades

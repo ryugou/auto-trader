@@ -637,6 +637,7 @@ mod tests {
                 price: None,
                 minute_to_expire: None,
                 time_in_force: None,
+                close_position_id: None,
             })
             .await
             .unwrap_err();
@@ -677,6 +678,7 @@ mod tests {
                 price: None,
                 minute_to_expire: None,
                 time_in_force: None,
+                close_position_id: None,
             })
             .await
             .unwrap_err();

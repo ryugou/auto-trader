@@ -46,6 +46,13 @@ pub struct SendChildOrderRequest {
     pub minute_to_expire: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_in_force: Option<TimeInForce>,
+    /// `Some(positionId)` marks this request as closing an existing exchange
+    /// position. bitFlyer ignores it (it nets positions internally and treats
+    /// every order as a new opposite-side order). GMO FX dispatches to
+    /// `/v1/closeOrder` with this positionId. Internal field — never serialised
+    /// on the wire.
+    #[serde(skip)]
+    pub close_position_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
