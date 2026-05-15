@@ -125,6 +125,31 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // GMO FX ExchangeApi — registered when both GMO_API_KEY and GMO_API_SECRET
+    // env vars are set (trimmed, non-empty). Without these, Exchange::GmoFx
+    // live accounts are silently skipped at dispatch (same as any unregistered
+    // exchange). The trader's dry_run path doesn't touch the registry.
+    let gmo_api_key = std::env::var("GMO_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let gmo_api_secret = std::env::var("GMO_API_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match (gmo_api_key, gmo_api_secret) {
+        (Some(key), Some(secret)) => {
+            let gmo_api: Arc<dyn ExchangeApi> = Arc::new(
+                auto_trader_market::gmo_fx_private::GmoFxPrivateApi::new(key, secret),
+            );
+            exchange_apis.insert(Exchange::GmoFx, gmo_api);
+            tracing::info!("GMO FX ExchangeApi registered");
+        }
+        _ => tracing::info!(
+            "GMO FX ExchangeApi not registered (requires GMO_API_KEY + GMO_API_SECRET env)"
+        ),
+    }
+
     let exchange_apis = Arc::new(exchange_apis);
 
     // Notifier — Slack Webhook for operator alerts.
