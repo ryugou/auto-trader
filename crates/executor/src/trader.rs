@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use auto_trader_core::commission;
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
@@ -39,19 +40,25 @@ fn truncate_yen(amount: Decimal) -> Decimal {
 /// Aggregate a non-empty execution list into
 /// (volume-weighted avg price, total size, total commission).
 ///
-/// Used when `poll_executions` timed out but a follow-up `get_executions` call
-/// confirmed the order did fill. Returns an error if the executions are empty
-/// or total size is zero (caller should have guarded against the empty case).
+/// Single-pass fold over `execs` for all three sums. Used by both
+/// `poll_executions` (live happy path) and the post-timeout reconcile path
+/// inside `fill_open` — keeping one definition prevents the three values
+/// from drifting apart.
+///
+/// Returns an error if total size is zero (the caller should have guarded
+/// against the empty-list case so `total_size == 0` only happens with
+/// pathological zero-size executions).
 fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
-    let total_size: Decimal = execs.iter().map(|e| e.size).sum();
+    let (total_size, total_notional, total_commission) = execs.iter().fold(
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+        |(s, n, c), e| (s + e.size, n + e.price * e.size, c + e.commission),
+    );
     if total_size.is_zero() {
         anyhow::bail!(
             "aggregate_executions: total size is zero across {} execs",
             execs.len()
         );
     }
-    let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
-    let total_commission: Decimal = execs.iter().map(|e| e.commission).sum();
     Ok((total_notional / total_size, total_size, total_commission))
 }
 
@@ -189,7 +196,7 @@ impl Trader {
                 Direction::Short => bid,
             };
             let commission =
-                auto_trader_core::commission::estimate_open(self.exchange, price, quantity);
+                commission::estimate(commission::Action::Open, self.exchange, price, quantity);
             Ok((price, quantity, commission))
         } else {
             let req = self.signal_to_send_child_order(signal, quantity);
@@ -385,8 +392,12 @@ impl Trader {
                 Direction::Long => bid,
                 Direction::Short => ask,
             };
-            let commission =
-                auto_trader_core::commission::estimate_close(self.exchange, price, trade.quantity);
+            let commission = commission::estimate(
+                commission::Action::Close,
+                self.exchange,
+                price,
+                trade.quantity,
+            );
             Ok((price, commission))
         } else {
             self.ensure_close_position_id_present(trade)?;
@@ -423,12 +434,13 @@ impl Trader {
             }
             let execs = self.api.get_executions(pair_str, acceptance_id).await?;
             if !execs.is_empty() {
-                let total_size: Decimal = execs.iter().map(|e| e.size).sum();
-                if !total_size.is_zero() {
-                    let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
-                    let total_commission: Decimal = execs.iter().map(|e| e.commission).sum();
-                    let avg = total_notional / total_size;
-                    return Ok((avg, total_size, total_commission));
+                // Reuse aggregate_executions so size/notional/commission stay
+                // computed in one place. aggregate's zero-size bail is mapped
+                // back to "still polling" — a strictly-zero-size execution
+                // batch is rare (zero-size fills); keep looping instead of
+                // surfacing the aggregate error to the caller.
+                if let Ok(outcome) = aggregate_executions(&execs) {
+                    return Ok(outcome);
                 }
             }
             tokio::time::sleep(delay).await;

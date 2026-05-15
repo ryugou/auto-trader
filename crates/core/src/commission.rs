@@ -12,17 +12,27 @@
 use crate::types::Exchange;
 use rust_decimal::Decimal;
 
-/// open 約定時の commission を計算する (paper 側 estimate)。
-pub fn estimate_open(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Decimal {
-    match exchange {
-        Exchange::BitflyerCfd => Decimal::ZERO,
-        Exchange::GmoFx => Decimal::ZERO,
-        Exchange::Oanda => Decimal::ZERO,
-    }
+/// commission を見積もる対象の約定種別。
+///
+/// open / close で個別の料率を取りたい時にここを増やせば、`estimate` の
+/// match で全 exchange 対応を強制できる (新 variant 追加時にコンパイル
+/// エラーで気づける構造)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Open,
+    Close,
 }
 
-/// close 約定時の commission を計算する (paper 側 estimate)。
-pub fn estimate_close(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Decimal {
+/// paper 側 commission を見積もる。現状は全 exchange / 全 action で 0 を返す。
+///
+/// `_fill_price` / `_qty` は将来 notional / qty 比例料率を入れる時のための
+/// 拡張口。今は未使用で warning も抑える。
+pub fn estimate(
+    _action: Action,
+    exchange: Exchange,
+    _fill_price: Decimal,
+    _qty: Decimal,
+) -> Decimal {
     match exchange {
         Exchange::BitflyerCfd => Decimal::ZERO,
         Exchange::GmoFx => Decimal::ZERO,
@@ -36,34 +46,22 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn estimate_open_all_exchanges_currently_zero() {
-        assert_eq!(
-            estimate_open(Exchange::BitflyerCfd, dec!(150), dec!(1)),
-            Decimal::ZERO
-        );
-        assert_eq!(
-            estimate_open(Exchange::GmoFx, dec!(150), dec!(1)),
-            Decimal::ZERO
-        );
-        assert_eq!(
-            estimate_open(Exchange::Oanda, dec!(150), dec!(1)),
-            Decimal::ZERO
-        );
+    fn estimate_all_exchanges_currently_zero_for_open() {
+        for ex in [Exchange::BitflyerCfd, Exchange::GmoFx, Exchange::Oanda] {
+            assert_eq!(
+                estimate(Action::Open, ex, dec!(150), dec!(1)),
+                Decimal::ZERO
+            );
+        }
     }
 
     #[test]
-    fn estimate_close_all_exchanges_currently_zero() {
-        assert_eq!(
-            estimate_close(Exchange::BitflyerCfd, dec!(150), dec!(1)),
-            Decimal::ZERO
-        );
-        assert_eq!(
-            estimate_close(Exchange::GmoFx, dec!(150), dec!(1)),
-            Decimal::ZERO
-        );
-        assert_eq!(
-            estimate_close(Exchange::Oanda, dec!(150), dec!(1)),
-            Decimal::ZERO
-        );
+    fn estimate_all_exchanges_currently_zero_for_close() {
+        for ex in [Exchange::BitflyerCfd, Exchange::GmoFx, Exchange::Oanda] {
+            assert_eq!(
+                estimate(Action::Close, ex, dec!(150), dec!(1)),
+                Decimal::ZERO
+            );
+        }
     }
 }
