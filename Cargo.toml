@@ -64,3 +64,15 @@ urlencoding = "2"
 # test helpers (reserved for PR 2+)
 wiremock = "0.6"
 csv = "1"
+
+# ── Dev profile tuning ────────────────────────────────────────────────────────
+# Speed up local incremental builds and shrink the disk footprint of `target/`:
+# - codegen-units = 16: more parallel codegen at the cost of slightly slower
+#   single-binary optimization (irrelevant for dev). Cuts dev build wallclock.
+# - third-party deps get `debug = false` so we don't pay debug-info disk for
+#   crates we don't step into. Workspace crates keep their default debug info.
+[profile.dev]
+codegen-units = 16
+
+[profile.dev.package."*"]
+debug = false
