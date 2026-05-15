@@ -37,6 +37,13 @@ pub type RateLimiter = governor::RateLimiter<
 
 const DEFAULT_API_URL: &str = "https://forex-api.coin.z.com";
 
+/// Strip `?query` from a path for GMO FX HMAC signing (GMO's auth scheme
+/// signs the path component only, not the query string). Pure function so
+/// callers and tests can verify the contract without going through HTTP.
+pub(crate) fn sign_path_for(path: &str) -> &str {
+    path.split_once('?').map(|(p, _)| p).unwrap_or(path)
+}
+
 /// HMAC-SHA256(secret, timestamp_ms || method || path || body), hex-encoded.
 pub(crate) fn sign(
     api_secret: &str,
@@ -246,9 +253,12 @@ impl GmoFxPrivateApi {
         }
         let body_str = body.map(|v| v.to_string()).unwrap_or_default();
         let ts = Utc::now().timestamp_millis();
-        // GMO signs only the path without the query string. Strip `?...` before
-        // signing, but send the full URL with the query intact.
-        let sign_path = path.split_once('?').map(|(p, _)| p).unwrap_or(path);
+        // GMO Coin FX signs the path **without** the query string. Reference:
+        // https://api.coin.z.com/fxdocs/en/#authentication-required and the
+        // official sample code that uses `path` (not including `?` onwards).
+        // The query string still appears in the URL we send; only the signing
+        // input is stripped.
+        let sign_path = sign_path_for(path);
         let sig = sign(&self.api_secret, ts, method.as_str(), sign_path, &body_str);
         let url = format!("{}{}{}", self.api_url, "/private", path);
         let mut req = self
@@ -485,17 +495,16 @@ impl ExchangeApi for GmoFxPrivateApi {
 
     async fn cancel_child_order(
         &self,
-        product_code: &str,
+        _product_code: &str,
         child_order_acceptance_id: &str,
     ) -> anyhow::Result<()> {
         let order_id: u64 = child_order_acceptance_id.parse().with_context(|| {
             format!("cancel: acceptance_id is not a u64: {child_order_acceptance_id}")
         })?;
-        // The published GMO FX spec documents only `orderId`, but sending the
-        // symbol alongside is harmless and defends against the case where the
-        // exchange's routing layer expects it for disambiguation. Mirrors
-        // bitFlyer's behavior, which carries the product_code on cancels.
-        let body = serde_json::json!({ "symbol": product_code, "orderId": order_id });
+        // GMO FX `/v1/cancelOrder` body per official docs: `{ "orderId": <int> }`.
+        // The product_code is intentionally ignored — adding a `symbol` field
+        // risks strict-body validators rejecting the request.
+        let body = serde_json::json!({ "orderId": order_id });
         let _: serde_json::Value = self
             .signed_request(Method::POST, "/v1/cancelOrder", Some(&body))
             .await?;
@@ -573,6 +582,37 @@ mod tests {
         let with_body = sign("s", 1, "POST", "/p", "{}");
         let without_body = sign("s", 1, "POST", "/p", "");
         assert_ne!(with_body, without_body);
+    }
+
+    #[test]
+    fn sign_path_for_strips_query_string() {
+        // GMO Coin FX HMAC signs the path WITHOUT the query string.
+        // Confirms `sign_path_for` returns identical input for paths with and
+        // without `?symbol=...`, so the same HMAC is produced regardless of
+        // query content.
+        assert_eq!(
+            sign_path_for("/v1/openPositions?symbol=USD_JPY"),
+            "/v1/openPositions"
+        );
+        assert_eq!(sign_path_for("/v1/account/assets"), "/v1/account/assets");
+        // Multiple `?` (technically malformed but defensive) — strip at first.
+        assert_eq!(sign_path_for("/v1/x?a=1?b=2"), "/v1/x");
+    }
+
+    #[test]
+    fn sign_produces_same_hash_regardless_of_query_string() {
+        // The signing input is identical whether or not the path carries a
+        // query string. Lock this behavior in so a future refactor that
+        // accidentally signs the full URL is caught by tests.
+        let with_query = sign(
+            "s",
+            1700000000,
+            "GET",
+            sign_path_for("/v1/openPositions?symbol=USD_JPY"),
+            "",
+        );
+        let without_query = sign("s", 1700000000, "GET", "/v1/openPositions", "");
+        assert_eq!(with_query, without_query);
     }
 
     #[test]

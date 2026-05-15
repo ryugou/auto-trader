@@ -216,6 +216,12 @@ pub async fn update(
     // with the human-readable cap message. (`update_account` re-checks for
     // non-HTTP callers but its anyhow::bail! would otherwise surface as a
     // generic 500 here.)
+    //
+    // Uses let-chains (`if let && let`). Although Cargo.toml's
+    // `rust-version = "1.85"` predates the feature's stabilization (1.88),
+    // `rust-toolchain.toml` pins the workspace toolchain to `stable` for
+    // both local and CI builds, so the actual compiler is well past 1.88.
+    // The flat form also avoids clippy::collapsible_if on nested `if let`.
     if let Some(new_leverage) = req.leverage
         && let Some(account) = trading_accounts::get(&state.pool, id)
             .await
