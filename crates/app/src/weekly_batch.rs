@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
-struct WeeklyStats {
+/// Per-strategy slice of weekly trade stats.
+struct StrategyStats {
     total_trades: i64,
-    /// Each entry is `(strategy_name, trades, wins, avg_pnl)`.
-    by_strategy: Vec<(String, i64, i64, f64)>,
+    wins: i64,
+    avg_pnl: f64,
 }
 
 struct RegimeAnalysis {
@@ -27,19 +28,23 @@ struct GeminiProposal {
     expected_effect: String,
 }
 
+/// Minimum closed-trade count (in the past 7 days, for a given strategy) below
+/// which the evolution loop refuses to propose updates. Wilson-Score lower
+/// bound is meaningless at N=1〜2, and Gemini has historically over-fit to
+/// 100%-win runs at that scale.
+const MIN_TRADES_FOR_EVOLUTION: i64 = 5;
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Run the weekly evolution batch. Called from the daily batch when
 /// day-of-week == Sunday (JST).
 ///
 /// Workflow:
-/// 1. Fetch the past-7-day trade stats from the DB.
-/// 2. Compute Wilson-Score lower bounds per regime.
-/// 3. Optionally query the KnowledgeStore for recent trade context.
-/// 4. Load the current evolve-strategy params from `strategy_params`.
-/// 5. Ask Gemini to propose updated params.
-/// 6. Persist the proposed params and emit a `system_notifications` row.
-/// 7. Trigger a KnowledgeStore merge so the ingested context is consolidated.
+/// 1. Enumerate evolvable strategies (= rows in `strategy_params`).
+/// 2. For each strategy: fetch stats, skip if low-sample, compute Wilson,
+///    optionally pull KnowledgeStore context, ask Gemini for a proposal,
+///    validate (strategy-specific or permissive default), persist, notify.
+/// 3. Trigger a single KnowledgeStore merge after all strategies are processed.
 pub async fn run(
     pool: &PgPool,
     knowledge: Option<&Arc<dyn KnowledgeStore>>,
@@ -47,107 +52,39 @@ pub async fn run(
     gemini_api_key: &str,
     gemini_model: &str,
 ) -> anyhow::Result<()> {
-    const STRATEGY: &str = "donchian_trend_evolve_v1";
-
-    tracing::info!("weekly_batch: starting evolution run for {STRATEGY}");
-
-    // 1. Past-week stats
-    let stats = fetch_weekly_stats(pool)
+    let strategies = list_evolvable_strategies(pool)
         .await
-        .context("fetch_weekly_stats")?;
-    tracing::info!(
-        "weekly_batch: {} trades in the past 7 days",
-        stats.total_trades
-    );
-
-    // 2. Wilson Score by regime
-    let wilson = compute_regime_wilson(pool)
-        .await
-        .context("compute_regime_wilson")?;
-
-    // 3. Optional KnowledgeStore context
-    let knowledge_context = fetch_knowledge_context(knowledge, STRATEGY).await;
-
-    // 4. Current params from DB
-    let current_params = load_current_params(pool, STRATEGY)
-        .await
-        .context("load_current_params")?;
-
-    // 5. Ask Gemini for a proposal
-    let prompt = build_gemini_prompt(
-        &stats,
-        knowledge_context.as_deref(),
-        &current_params,
-        &wilson,
-    );
-    let proposal = call_gemini(gemini_api_url, gemini_api_key, gemini_model, &prompt)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("weekly_batch: Gemini call failed ({err:#}); using fallback params");
-            GeminiProposal {
-                params: current_params.clone(),
-                rationale: "LLM unavailable".to_string(),
-                expected_effect: String::new(),
-            }
-        });
-
-    tracing::info!(
-        "weekly_batch: proposal rationale = {:?}",
-        proposal.rationale
-    );
-
-    // 6. Validate and persist proposed params.
-    // Normalize to only the three allowed keys before writing so that stale or
-    // hallucinated keys (e.g. `sl_pct`, `allocation_pct`) are never written back
-    // to the DB despite the cleanup migration that removed them.
-    if let Err(e) = validate_params(&proposal.params) {
-        tracing::warn!("weekly_batch: LLM proposed invalid params, rejecting: {e}");
-        tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
-        return Ok(());
-    }
-    let Some(entry_channel) = proposal
-        .params
-        .get("entry_channel")
-        .and_then(|v| v.as_i64())
-    else {
-        tracing::warn!("weekly_batch: LLM proposed non-integer/missing entry_channel, rejecting");
-        return Ok(());
-    };
-    let Some(exit_channel) = proposal.params.get("exit_channel").and_then(|v| v.as_i64()) else {
-        tracing::warn!("weekly_batch: LLM proposed non-integer/missing exit_channel, rejecting");
-        return Ok(());
-    };
-    let Some(atr_baseline_bars) = proposal
-        .params
-        .get("atr_baseline_bars")
-        .and_then(|v| v.as_i64())
-    else {
-        tracing::warn!(
-            "weekly_batch: LLM proposed non-integer/missing atr_baseline_bars, rejecting"
+        .context("list_evolvable_strategies")?;
+    if strategies.is_empty() {
+        tracing::info!(
+            "weekly_batch: strategy_params is empty; nothing to evolve. \
+             INSERT a row for each strategy you want to be auto-tuned."
         );
         return Ok(());
-    };
-    let normalized = serde_json::json!({
-        "entry_channel": entry_channel,
-        "exit_channel": exit_channel,
-        "atr_baseline_bars": atr_baseline_bars,
-    });
-    persist_params(pool, STRATEGY, &normalized)
-        .await
-        .context("persist_params")?;
-
-    let notification_message = format!(
-        "週次進化バッチ完了: {STRATEGY}\n\
-         根拠: {}\n\
-         期待効果: {}\n\
-         新パラメータ: {}",
-        proposal.rationale, proposal.expected_effect, normalized,
+    }
+    tracing::info!(
+        "weekly_batch: evolving {} strategies: {:?}",
+        strategies.len(),
+        strategies
     );
-    insert_system_notification(pool, &notification_message)
-        .await
-        .context("insert_system_notification")?;
 
-    // 7. KnowledgeStore merge (best-effort)
+    for strategy_name in &strategies {
+        if let Err(e) = run_for_strategy(
+            pool,
+            knowledge,
+            gemini_api_url,
+            gemini_api_key,
+            gemini_model,
+            strategy_name,
+        )
+        .await
+        {
+            // 1 strategy のエラーで全体を止めない
+            tracing::error!("weekly_batch: strategy {strategy_name} failed: {e:#}");
+        }
+    }
+
+    // KnowledgeStore merge は 1 回だけ。全 strategy 投入後に走らせる。
     if let Some(store) = knowledge {
         if let Err(err) = store.run_merge().await {
             tracing::warn!("weekly_batch: knowledge_store merge failed: {err:#}");
@@ -160,52 +97,193 @@ pub async fn run(
     Ok(())
 }
 
+async fn run_for_strategy(
+    pool: &PgPool,
+    knowledge: Option<&Arc<dyn KnowledgeStore>>,
+    gemini_api_url: &str,
+    gemini_api_key: &str,
+    gemini_model: &str,
+    strategy_name: &str,
+) -> anyhow::Result<()> {
+    tracing::info!("weekly_batch: starting evolution for {strategy_name}");
+
+    // 1. Past-week stats (this strategy only)
+    let stats = fetch_strategy_stats(pool, strategy_name)
+        .await
+        .context("fetch_strategy_stats")?;
+    tracing::info!(
+        "weekly_batch: {} had {} trades in the past 7 days",
+        strategy_name,
+        stats.total_trades
+    );
+
+    // 1b. Small-sample guard
+    if stats.total_trades < MIN_TRADES_FOR_EVOLUTION {
+        let msg = format!(
+            "週次進化バッチ: {strategy_name} はサンプル不足 (n={}, 必要={MIN_TRADES_FOR_EVOLUTION}) のため、\
+             現状パラメータを維持します。",
+            stats.total_trades
+        );
+        tracing::info!("{msg}");
+        insert_system_notification(pool, &msg)
+            .await
+            .context("insert_system_notification (small-sample)")?;
+        return Ok(());
+    }
+
+    // 2. Wilson Score by regime (this strategy only)
+    let wilson = compute_regime_wilson(pool, strategy_name)
+        .await
+        .context("compute_regime_wilson")?;
+
+    // 3. Optional KnowledgeStore context
+    let knowledge_context = fetch_knowledge_context(knowledge, strategy_name).await;
+
+    // 4. Current params
+    let current_params = load_current_params(pool, strategy_name)
+        .await
+        .context("load_current_params")?;
+
+    // 5. Ask Gemini
+    let prompt = build_gemini_prompt(
+        strategy_name,
+        &stats,
+        knowledge_context.as_deref(),
+        &current_params,
+        &wilson,
+    );
+    // 5b. Gemini call — fail-fast notification if unavailable, so the operator
+    //     sees something happened. Without this branch the run would silently
+    //     fall through to validate_params(current_params), which for the
+    //     permissive default validator (empty current_params object) bails
+    //     out with no system_notification.
+    let proposal = match call_gemini(gemini_api_url, gemini_api_key, gemini_model, &prompt).await {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!("weekly_batch: {strategy_name} Gemini call failed: {err:#}");
+            let msg = format!(
+                "週次進化バッチ: {strategy_name} は LLM 呼び出し失敗のため現状パラメータを維持します。理由: {err}"
+            );
+            insert_system_notification(pool, &msg)
+                .await
+                .context("insert_system_notification (gemini failure)")?;
+            return Ok(());
+        }
+    };
+
+    tracing::info!(
+        "weekly_batch: {strategy_name} proposal rationale = {:?}",
+        proposal.rationale
+    );
+
+    // 6. Validate + persist. `current_params` is passed so the permissive
+    //    validator can enforce key-set/type parity with the existing row.
+    let normalized = match validate_params(strategy_name, &proposal.params, &current_params) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("weekly_batch: {strategy_name} validation failed: {e}");
+            tracing::warn!("weekly_batch: rejected params: {}", proposal.params);
+            let msg = format!(
+                "週次進化バッチ: {strategy_name} は LLM 提案の検証に失敗したため現状パラメータを維持します。理由: {e}"
+            );
+            insert_system_notification(pool, &msg)
+                .await
+                .context("insert_system_notification (validation failure)")?;
+            return Ok(());
+        }
+    };
+    persist_params(pool, strategy_name, &normalized)
+        .await
+        .context("persist_params")?;
+
+    let notification_message = format!(
+        "週次進化バッチ完了: {strategy_name}\n\
+         根拠: {}\n\
+         期待効果: {}\n\
+         新パラメータ: {}",
+        proposal.rationale, proposal.expected_effect, normalized,
+    );
+    insert_system_notification(pool, &notification_message)
+        .await
+        .context("insert_system_notification")?;
+
+    Ok(())
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Query trade stats for the past 7 days, grouped by strategy.
-async fn fetch_weekly_stats(pool: &PgPool) -> anyhow::Result<WeeklyStats> {
-    // sqlx::FromRow on an anonymous struct would require a named type;
-    // using query_as with a tuple is simpler here.
-    let rows: Vec<(String, i64, i64, f64)> = sqlx::query_as(
+/// Strategies that are wired into the evolution loop. The convention is:
+/// "to enable auto-tuning for strategy X, INSERT a row into strategy_params"
+/// (which `donchian_trend_evolve_v1` does via migration; future strategies
+/// can be added with an explicit INSERT or migration).
+async fn list_evolvable_strategies(pool: &PgPool) -> anyhow::Result<Vec<String>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT strategy_name FROM strategy_params ORDER BY strategy_name")
+            .fetch_all(pool)
+            .await
+            .context("SELECT FROM strategy_params")?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
+/// Query trade stats for the past 7 days for a single strategy.
+///
+/// Counts only `status = 'closed'` rows with a non-null `pnl_amount`, since
+/// `closing` (in-flight) trades can carry partial fields that would distort
+/// the win-rate computation. `COALESCE(SUM, 0)` is required because Postgres
+/// aggregates over an empty set return NULL, and the tuple decoder expects
+/// `i64` (not `Option<i64>`).
+async fn fetch_strategy_stats(pool: &PgPool, strategy_name: &str) -> anyhow::Result<StrategyStats> {
+    let row: Option<(i64, i64, Option<f64>)> = sqlx::query_as(
         r#"
-        SELECT strategy_name,
-               COUNT(*)::bigint                                          AS trades,
-               SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END)::bigint AS wins,
-               AVG(pnl_amount)::float8                                  AS avg_pnl
+        SELECT COUNT(*)::bigint                                                     AS trades,
+               COALESCE(SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END), 0)::bigint AS wins,
+               AVG(pnl_amount)::float8                                              AS avg_pnl
         FROM trades
-        WHERE exit_at > NOW() - INTERVAL '7 days'
-        GROUP BY strategy_name
+        WHERE strategy_name = $1
+          AND status = 'closed'
+          AND pnl_amount IS NOT NULL
+          AND exit_at > NOW() - INTERVAL '7 days'
         "#,
     )
-    .fetch_all(pool)
+    .bind(strategy_name)
+    .fetch_optional(pool)
     .await
-    .context("SELECT weekly trade stats")?;
+    .with_context(|| format!("SELECT weekly trade stats for {strategy_name}"))?;
 
-    let total_trades = rows.iter().map(|(_, trades, _, _)| trades).sum();
-    Ok(WeeklyStats {
+    let (total_trades, wins, avg_pnl) = row.unwrap_or((0, 0, None));
+    Ok(StrategyStats {
         total_trades,
-        by_strategy: rows,
+        wins,
+        avg_pnl: avg_pnl.unwrap_or(0.0),
     })
 }
 
-/// Compute Wilson Score 95% lower bounds per market regime for the past 7 days.
-async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalysis>> {
+/// Compute Wilson Score 95% lower bounds per market regime for the past 7 days,
+/// scoped to a single strategy. Only `status = 'closed'` rows are counted to
+/// stay consistent with `fetch_strategy_stats`.
+async fn compute_regime_wilson(
+    pool: &PgPool,
+    strategy_name: &str,
+) -> anyhow::Result<Vec<RegimeAnalysis>> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
         r#"
-        SELECT entry_indicators->>'regime'                              AS regime,
-               COUNT(*)::bigint                                         AS trades,
-               SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END)::bigint AS wins
+        SELECT entry_indicators->>'regime'                                          AS regime,
+               COUNT(*)::bigint                                                     AS trades,
+               COALESCE(SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END), 0)::bigint AS wins
         FROM trades
         WHERE exit_at > NOW() - INTERVAL '7 days'
+          AND status = 'closed'
+          AND pnl_amount IS NOT NULL
           AND entry_indicators IS NOT NULL
           AND entry_indicators->>'regime' IS NOT NULL
-          AND strategy_name LIKE 'donchian_trend%'
+          AND strategy_name = $1
         GROUP BY entry_indicators->>'regime'
         "#,
     )
+    .bind(strategy_name)
     .fetch_all(pool)
     .await
-    .context("SELECT regime Wilson stats")?;
+    .with_context(|| format!("SELECT regime Wilson stats for {strategy_name}"))?;
 
     let analyses = rows
         .into_iter()
@@ -222,17 +300,41 @@ async fn compute_regime_wilson(pool: &PgPool) -> anyhow::Result<Vec<RegimeAnalys
     Ok(analyses)
 }
 
-/// Validate that LLM-proposed params are within safe bounds.
-/// Rejects any proposal with out-of-range values to prevent the
-/// evolve strategy from running with dangerous parameters.
-fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
-    let entry = params["entry_channel"].as_i64().unwrap_or(20);
-    let exit = params["exit_channel"].as_i64().unwrap_or(10);
-    let baseline = params["atr_baseline_bars"].as_i64().unwrap_or(50);
-
-    if entry < 0 || exit < 0 || baseline < 0 {
-        anyhow::bail!("negative parameter values not allowed");
+/// Dispatch validation to a per-strategy validator.
+/// Unknown strategies use a permissive default that requires the proposed
+/// JSON to match the existing `current_params` in both key set and per-key
+/// type. This keeps "INSERT a row to enable evolution" as a one-step
+/// ergonomic while still rejecting LLM hallucinations (new keys, missing
+/// keys, type swaps). Strategies with non-trivial invariants should still
+/// get a dedicated strict validator (cf. `validate_donchian_trend_evolve_v1`).
+fn validate_params(
+    strategy_name: &str,
+    proposed: &serde_json::Value,
+    current: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    match strategy_name {
+        "donchian_trend_evolve_v1" => validate_donchian_trend_evolve_v1(proposed),
+        _ => validate_permissive(strategy_name, proposed, current),
     }
+}
+
+/// Strict validator for donchian_trend_evolve_v1. Returns a normalized JSON
+/// containing only the three allowed keys to defeat hallucinated extras.
+fn validate_donchian_trend_evolve_v1(
+    params: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    // 必須キーの存在チェックを先に。デフォルト値で穴埋めしてから range を
+    // 見ると「キー欠落」と「範囲外」が同じエラー扱いになって誤魔化される。
+    let entry = params["entry_channel"]
+        .as_i64()
+        .context("entry_channel missing or non-integer")?;
+    let exit = params["exit_channel"]
+        .as_i64()
+        .context("exit_channel missing or non-integer")?;
+    let baseline = params["atr_baseline_bars"]
+        .as_i64()
+        .context("atr_baseline_bars missing or non-integer")?;
+
     if !(10..=30).contains(&entry) {
         anyhow::bail!("entry_channel {entry} out of range [10, 30]");
     }
@@ -245,7 +347,85 @@ fn validate_params(params: &serde_json::Value) -> anyhow::Result<()> {
     if exit >= entry {
         anyhow::bail!("exit_channel ({exit}) must be < entry_channel ({entry})");
     }
-    Ok(())
+
+    Ok(serde_json::json!({
+        "entry_channel": entry,
+        "exit_channel": exit,
+        "atr_baseline_bars": baseline,
+    }))
+}
+
+/// Permissive fallback validator. Requires the proposed JSON to:
+/// - be a non-empty object with no null values
+/// - have an identical key set to `current` (no added or dropped keys)
+/// - preserve the JSON type per key (e.g. number stays number)
+///
+/// Used for strategies with no dedicated validator registered yet. If
+/// `current` is empty (first-time evolution), only the basic non-empty /
+/// non-null check is applied — but operators should pre-seed
+/// `strategy_params` with a known-good baseline rather than letting the
+/// LLM define the initial schema.
+fn validate_permissive(
+    strategy_name: &str,
+    proposed: &serde_json::Value,
+    current: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let proposed_obj = proposed
+        .as_object()
+        .with_context(|| format!("{strategy_name}: params must be a JSON object"))?;
+    if proposed_obj.is_empty() {
+        anyhow::bail!("{strategy_name}: params object is empty (Gemini proposed no fields)");
+    }
+    if proposed_obj.values().any(|v| v.is_null()) {
+        anyhow::bail!("{strategy_name}: params contain null values");
+    }
+
+    if let Some(current_obj) = current.as_object()
+        && !current_obj.is_empty()
+    {
+        use std::collections::BTreeSet;
+        let current_keys: BTreeSet<&str> = current_obj.keys().map(String::as_str).collect();
+        let proposed_keys: BTreeSet<&str> = proposed_obj.keys().map(String::as_str).collect();
+        let added: Vec<&&str> = proposed_keys.difference(&current_keys).collect();
+        let removed: Vec<&&str> = current_keys.difference(&proposed_keys).collect();
+        if !added.is_empty() || !removed.is_empty() {
+            anyhow::bail!(
+                "{strategy_name}: param key set differs from current. added={added:?} removed={removed:?}"
+            );
+        }
+        for (key, current_val) in current_obj {
+            let proposed_val = &proposed_obj[key];
+            if !json_types_compatible(current_val, proposed_val) {
+                anyhow::bail!(
+                    "{strategy_name}: type mismatch for key '{key}': current={current_val} proposed={proposed_val}"
+                );
+            }
+        }
+    }
+
+    tracing::warn!(
+        "weekly_batch: {strategy_name} uses permissive validator (no strict schema). \
+         Add a dedicated validator before relying on these params in production."
+    );
+    Ok(proposed.clone())
+}
+
+/// JSON-level compatibility check used by `validate_permissive`. Goes one
+/// level finer than `discriminant(Value)` by distinguishing integer numbers
+/// from floats — a strategy that uses `entry_channel: 20` (i64) should NOT
+/// silently accept `entry_channel: 20.5` (f64), since downstream code may
+/// `as_i64().unwrap()` on it.
+fn json_types_compatible(current: &serde_json::Value, proposed: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (current, proposed) {
+        (Value::Number(c), Value::Number(p)) => {
+            // Treat i64 and u64 as the same "integer" subtype; f64 is distinct.
+            let current_is_int = c.is_i64() || c.is_u64();
+            let proposed_is_int = p.is_i64() || p.is_u64();
+            current_is_int == proposed_is_int
+        }
+        _ => std::mem::discriminant(current) == std::mem::discriminant(proposed),
+    }
 }
 
 /// Load the current JSON params blob for a strategy from `strategy_params`.
@@ -324,7 +504,8 @@ async fn fetch_knowledge_context(
 /// Build the Gemini prompt from gathered stats, Wilson analysis, optional
 /// KnowledgeStore context, and the current parameter blob.
 fn build_gemini_prompt(
-    stats: &WeeklyStats,
+    strategy_name: &str,
+    stats: &StrategyStats,
     knowledge_context: Option<&str>,
     current_params: &serde_json::Value,
     wilson: &[RegimeAnalysis],
@@ -337,20 +518,18 @@ fn build_gemini_prompt(
          JSON以外のテキストは一切含めないこと。\n\n",
     );
 
-    // Weekly trade stats section
+    // Strategy stats section
+    let win_rate = if stats.total_trades > 0 {
+        stats.wins as f64 / stats.total_trades as f64 * 100.0
+    } else {
+        0.0
+    };
+    prompt.push_str(&format!("## 対象戦略: {}\n", strategy_name));
     prompt.push_str("## 過去7日間のトレード統計\n");
-    prompt.push_str(&format!("総トレード数: {}\n", stats.total_trades));
-    prompt.push_str("戦略別集計:\n");
-    for (strategy, trades, wins, avg_pnl) in &stats.by_strategy {
-        let win_rate = if *trades > 0 {
-            *wins as f64 / *trades as f64 * 100.0
-        } else {
-            0.0
-        };
-        prompt.push_str(&format!(
-            "  - {strategy}: {trades}トレード, 勝率={win_rate:.1}%, 平均損益={avg_pnl:.4}\n"
-        ));
-    }
+    prompt.push_str(&format!(
+        "総トレード数: {}, 勝率: {:.1}%, 平均損益: {:.4}\n",
+        stats.total_trades, win_rate, stats.avg_pnl
+    ));
 
     // Wilson Score section
     prompt.push_str("\n## レジーム別 Wilson Score 分析 (95%信頼区間下限)\n");
@@ -358,14 +537,14 @@ fn build_gemini_prompt(
         prompt.push_str("データなし\n");
     } else {
         for analysis in wilson {
-            let win_rate = if analysis.trades > 0 {
+            let regime_win_rate = if analysis.trades > 0 {
                 analysis.wins as f64 / analysis.trades as f64 * 100.0
             } else {
                 0.0
             };
             prompt.push_str(&format!(
                 "  - {}: {}トレード, 勝率={:.1}%, Wilson下限={:.4}\n",
-                analysis.regime, analysis.trades, win_rate, analysis.wilson_lb
+                analysis.regime, analysis.trades, regime_win_rate, analysis.wilson_lb
             ));
         }
     }
@@ -382,12 +561,27 @@ fn build_gemini_prompt(
     prompt.push_str(&current_params.to_string());
     prompt.push('\n');
 
-    // Instructions
+    // Instructions — strategy-aware
+    prompt.push_str("\n## 指示\n");
+    prompt.push_str(&format!(
+        "上記データを踏まえ、`{strategy_name}` 戦略の最適なパラメータを提案してください。\n"
+    ));
+    match strategy_name {
+        "donchian_trend_evolve_v1" => {
+            prompt.push_str(
+                "パラメータキー: entry_channel (整数), exit_channel (整数), atr_baseline_bars (整数)。\n\
+                 制約: exit_channel < entry_channel、いずれも正の整数。\n",
+            );
+        }
+        _ => {
+            prompt.push_str(
+                "現在のパラメータ構造を維持し、各キーの型と意味的妥当性を保ったまま値のみ調整してください。\n\
+                 新しいキーの追加は禁止。\n",
+            );
+        }
+    }
     prompt.push_str(
-        "\n## 指示\n\
-         上記データを踏まえ、`donchian_trend_evolve_v1` 戦略の最適なパラメータを提案してください。\
-         パラメータキー: entry_channel (整数), exit_channel (整数), atr_baseline_bars (整数)。\n\
-         以下のJSON形式のみで応答すること:\n\
+        "以下のJSON形式のみで応答すること:\n\
          {\"params\":{...},\"rationale\":\"変更理由\",\"expected_effect\":\"期待効果\"}\n",
     );
 
@@ -396,10 +590,14 @@ fn build_gemini_prompt(
 
 /// Call the Gemini API and parse the `GeminiProposal` from the response text.
 ///
-/// Returns a fallback proposal with unchanged params when:
+/// Returns `Err` when:
 /// - `api_key` is empty (Gemini disabled in config)
-/// - The HTTP call fails
+/// - The HTTP call fails or returns non-2xx
 /// - The response cannot be parsed as `GeminiProposal`
+///
+/// Callers are responsible for handling the error (the weekly batch surfaces
+/// it as a `system_notification` and leaves params unchanged — no silent
+/// fallback to current params, since that would mask LLM outages).
 async fn call_gemini(
     api_url: &str,
     api_key: &str,
@@ -494,9 +692,10 @@ mod tests {
 
     #[test]
     fn build_gemini_prompt_contains_key_sections() {
-        let stats = WeeklyStats {
+        let stats = StrategyStats {
             total_trades: 42,
-            by_strategy: vec![("donchian_trend_evolve_v1".to_string(), 42, 28, 150.5)],
+            wins: 28,
+            avg_pnl: 150.5,
         };
         let wilson = vec![RegimeAnalysis {
             regime: "trending".to_string(),
@@ -506,7 +705,13 @@ mod tests {
         }];
         let params = serde_json::json!({"entry_channel": 20});
 
-        let prompt = build_gemini_prompt(&stats, Some("vp context text"), &params, &wilson);
+        let prompt = build_gemini_prompt(
+            "donchian_trend_evolve_v1",
+            &stats,
+            Some("vp context text"),
+            &params,
+            &wilson,
+        );
 
         assert!(prompt.contains("42"));
         assert!(prompt.contains("donchian_trend_evolve_v1"));
@@ -517,19 +722,173 @@ mod tests {
     }
 
     #[test]
-    fn build_gemini_prompt_no_vegapunk_context() {
-        let stats = WeeklyStats {
+    fn build_gemini_prompt_no_knowledge_context() {
+        let stats = StrategyStats {
             total_trades: 0,
-            by_strategy: vec![],
+            wins: 0,
+            avg_pnl: 0.0,
         };
         let wilson: Vec<RegimeAnalysis> = vec![];
         let params = serde_json::json!({});
 
-        let prompt = build_gemini_prompt(&stats, None, &params, &wilson);
+        let prompt =
+            build_gemini_prompt("donchian_trend_evolve_v1", &stats, None, &params, &wilson);
 
         // Without context the knowledge-store section should be absent
         assert!(!prompt.contains("過去トレード学習コンテキスト"));
         // But prompt must still include output format instructions
-        assert!(prompt.contains("GeminiProposal") || prompt.contains("rationale"));
+        assert!(prompt.contains("rationale"));
+    }
+
+    #[test]
+    fn build_gemini_prompt_uses_strategy_specific_instructions() {
+        let stats = StrategyStats {
+            total_trades: 27,
+            wins: 10,
+            avg_pnl: -140.7,
+        };
+        let prompt = build_gemini_prompt(
+            "bb_mean_revert_v1",
+            &stats,
+            None,
+            &serde_json::json!({"something": 1}),
+            &[],
+        );
+
+        assert!(prompt.contains("bb_mean_revert_v1"));
+        // Unknown strategy → generic instructions, NOT donchian's specific keys
+        assert!(!prompt.contains("entry_channel"));
+        assert!(prompt.contains("現在のパラメータ構造を維持"));
+    }
+
+    #[test]
+    fn validate_params_donchian_normalizes_and_drops_extras() {
+        let proposed = serde_json::json!({
+            "entry_channel": 20,
+            "exit_channel": 10,
+            "atr_baseline_bars": 50,
+            "sl_pct": 0.03, // hallucinated extra
+        });
+        let current = serde_json::json!({});
+        let v = validate_params("donchian_trend_evolve_v1", &proposed, &current).unwrap();
+        assert_eq!(v["entry_channel"], 20);
+        assert_eq!(v["exit_channel"], 10);
+        assert_eq!(v["atr_baseline_bars"], 50);
+        assert!(v.get("sl_pct").is_none(), "extra keys should be dropped");
+    }
+
+    #[test]
+    fn validate_params_donchian_rejects_out_of_range() {
+        let proposed = serde_json::json!({
+            "entry_channel": 100, // out of [10, 30]
+            "exit_channel": 10,
+            "atr_baseline_bars": 50,
+        });
+        let current = serde_json::json!({});
+        assert!(validate_params("donchian_trend_evolve_v1", &proposed, &current).is_err());
+    }
+
+    #[test]
+    fn validate_params_donchian_rejects_exit_ge_entry() {
+        let proposed = serde_json::json!({
+            "entry_channel": 12,
+            "exit_channel": 15, // exit >= entry
+            "atr_baseline_bars": 50,
+        });
+        let current = serde_json::json!({});
+        assert!(validate_params("donchian_trend_evolve_v1", &proposed, &current).is_err());
+    }
+
+    #[test]
+    fn validate_params_permissive_accepts_matching_key_set() {
+        let proposed = serde_json::json!({ "window": 20, "threshold": 1.5 });
+        let current = serde_json::json!({ "window": 15, "threshold": 1.0 });
+        let v = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap();
+        assert_eq!(v["window"], 20);
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_empty_object() {
+        let proposed = serde_json::json!({});
+        let current = serde_json::json!({ "window": 15 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_err());
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_non_object() {
+        let proposed = serde_json::json!([1, 2, 3]);
+        let current = serde_json::json!({ "window": 15 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_err());
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_null_values() {
+        let proposed = serde_json::json!({"window": null});
+        let current = serde_json::json!({ "window": 15 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_err());
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_added_key() {
+        // Hallucinated extra key — must be rejected when current has fixed schema.
+        let proposed = serde_json::json!({ "window": 20, "threshold": 1.5, "rogue": 99 });
+        let current = serde_json::json!({ "window": 15, "threshold": 1.0 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("rogue"),
+            "error should name the extra key: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_dropped_key() {
+        let proposed = serde_json::json!({ "window": 20 });
+        let current = serde_json::json!({ "window": 15, "threshold": 1.0 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("threshold"),
+            "error should name the dropped key: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_type_swap() {
+        // LLM returned a string instead of a number — must be rejected.
+        let proposed = serde_json::json!({ "window": "20" });
+        let current = serde_json::json!({ "window": 15 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("type mismatch"),
+            "error should flag type mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_rejects_int_to_float_swap() {
+        // Codex round 2: discriminant(Value::Number) doesn't distinguish
+        // integer from float. We do the extra check; this test pins it.
+        let proposed = serde_json::json!({ "window": 20.5 });
+        let current = serde_json::json!({ "window": 20 });
+        let err = validate_params("bb_mean_revert_v1", &proposed, &current).unwrap_err();
+        assert!(
+            format!("{err}").contains("type mismatch"),
+            "int→float swap should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_params_permissive_accepts_float_to_float() {
+        let proposed = serde_json::json!({ "threshold": 1.6 });
+        let current = serde_json::json!({ "threshold": 1.2 });
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_ok());
+    }
+
+    #[test]
+    fn validate_params_permissive_relaxes_when_current_empty() {
+        // First-time evolution: no current schema to compare against; still
+        // require non-empty + non-null but accept arbitrary keys.
+        let proposed = serde_json::json!({ "anything": 1 });
+        let current = serde_json::json!({});
+        assert!(validate_params("bb_mean_revert_v1", &proposed, &current).is_ok());
     }
 }
