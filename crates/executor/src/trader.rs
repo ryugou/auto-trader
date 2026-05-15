@@ -718,6 +718,28 @@ impl OrderExecutor for Trader {
         let entry_at = Utc::now();
         let margin = truncate_yen(fill_price * actual_qty / leverage);
 
+        // Resolve the exchange-side position id for exchanges that model
+        // positions individually (GMO FX). Required by /v1/closeOrder later.
+        // Paper trades (dry_run) and exchanges that net positions internally
+        // (bitFlyer) return None — the close path falls back to opposite-side
+        // market orders. Failure to resolve is non-fatal: log + proceed with
+        // None so we don't lose a successful fill.
+        let exchange_position_id = if self.dry_run {
+            None
+        } else {
+            match self.api.resolve_position_id(&signal.pair.0, entry_at).await {
+                Ok(pid) => pid,
+                Err(e) => {
+                    tracing::warn!(
+                        pair = %signal.pair.0,
+                        error = %e,
+                        "resolve_position_id failed — close will fall back to opposite-side market order"
+                    );
+                    None
+                }
+            }
+        };
+
         let trade = Trade {
             id: Uuid::new_v4(),
             account_id: self.account_id,
@@ -738,7 +760,7 @@ impl OrderExecutor for Trader {
             exit_reason: None,
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
-            exchange_position_id: None,
+            exchange_position_id,
         };
 
         // 6. DB 操作 (1 トランザクション)
