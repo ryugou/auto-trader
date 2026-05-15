@@ -46,8 +46,8 @@ pub(crate) fn sign(
     body: &str,
 ) -> String {
     let msg = format!("{timestamp_ms}{method}{path}{body}");
-    let mut mac = HmacSha256::new_from_slice(api_secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(api_secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(msg.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -58,14 +58,14 @@ pub(crate) fn sign(
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum GmoSide {
+pub(crate) enum GmoSide {
     Buy,
     Sell,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum GmoExecutionType {
+pub(crate) enum GmoExecutionType {
     Market,
     Limit,
     Stop,
@@ -73,7 +73,7 @@ pub enum GmoExecutionType {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoOrderRequest {
+pub(crate) struct GmoOrderRequest {
     pub symbol: String,
     pub side: GmoSide,
     pub execution_type: GmoExecutionType,
@@ -82,14 +82,14 @@ pub struct GmoOrderRequest {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoSettlePosition {
+pub(crate) struct GmoSettlePosition {
     pub position_id: u64,
     pub size: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoCloseRequest {
+pub(crate) struct GmoCloseRequest {
     pub symbol: String,
     pub side: GmoSide,
     pub execution_type: GmoExecutionType,
@@ -98,12 +98,12 @@ pub struct GmoCloseRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoOrderResponseData {
+pub(crate) struct GmoOrderResponseData {
     pub root_order_id: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct GmoApiResponse<T> {
+pub(crate) struct GmoApiResponse<T> {
     pub status: i32,
     #[serde(default)]
     pub messages: Vec<GmoApiMessage>,
@@ -112,14 +112,15 @@ pub struct GmoApiResponse<T> {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoApiMessage {
+#[allow(dead_code)] // fields appear in the Debug-derived error message
+pub(crate) struct GmoApiMessage {
     pub message_code: String,
     pub message_string: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoOpenPosition {
+pub(crate) struct GmoOpenPosition {
     pub position_id: u64,
     pub symbol: String,
     pub side: String,
@@ -128,9 +129,13 @@ pub struct GmoOpenPosition {
     pub timestamp: String,
 }
 
+/// `GET /v1/executions` element. `position_id` / `settle_type` / `loss_gain` /
+/// `symbol` are part of the wire format but not consumed by the trader yet;
+/// keep them deserialized so the Debug-derived shape stays useful for logs.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoExecution {
+#[allow(dead_code)]
+pub(crate) struct GmoExecution {
     pub execution_id: u64,
     pub order_id: u64,
     pub position_id: Option<u64>,
@@ -144,9 +149,13 @@ pub struct GmoExecution {
     pub timestamp: String,
 }
 
+/// `GET /v1/account/assets` response. Only `balance` / `margin` /
+/// `position_loss_gain` / `margin_ratio` map into the shared `Collateral`
+/// type; the remaining fields stay for future use + debug visibility.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GmoAccountAssets {
+#[allow(dead_code)]
+pub(crate) struct GmoAccountAssets {
     pub equity: Decimal,
     pub available_amount: Decimal,
     pub balance: Decimal,
@@ -161,7 +170,7 @@ pub struct GmoAccountAssets {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(bound = "T: serde::de::DeserializeOwned")]
-pub struct GmoListResponse<T> {
+pub(crate) struct GmoListResponse<T> {
     #[serde(default = "Vec::new")]
     pub list: Vec<T>,
 }
@@ -200,16 +209,6 @@ impl GmoFxPrivateApi {
 
     pub fn with_api_url(mut self, url: String) -> Self {
         self.api_url = url;
-        self
-    }
-
-    pub fn with_post_limiter(mut self, lim: Arc<RateLimiter>) -> Self {
-        self.post_limiter = lim;
-        self
-    }
-
-    pub fn with_get_limiter(mut self, lim: Arc<RateLimiter>) -> Self {
-        self.get_limiter = lim;
         self
     }
 
@@ -261,9 +260,12 @@ impl GmoFxPrivateApi {
                 api_resp.messages
             );
         }
-        api_resp
-            .data
-            .ok_or_else(|| anyhow::anyhow!("GMO FX API success but data is null: {}", truncate(&text, 500)))
+        api_resp.data.ok_or_else(|| {
+            anyhow::anyhow!(
+                "GMO FX API success but data is null: {}",
+                truncate(&text, 500)
+            )
+        })
     }
 
     async fn post_open_order(
@@ -290,9 +292,9 @@ impl GmoFxPrivateApi {
         req: SendChildOrderRequest,
         position_id_str: String,
     ) -> anyhow::Result<SendChildOrderResponse> {
-        let position_id: u64 = position_id_str.parse().with_context(|| {
-            format!("close_position_id is not a u64: {position_id_str}")
-        })?;
+        let position_id: u64 = position_id_str
+            .parse()
+            .with_context(|| format!("close_position_id is not a u64: {position_id_str}"))?;
         let body = GmoCloseRequest {
             symbol: req.product_code,
             side: side_to_gmo(req.side),
@@ -355,9 +357,8 @@ impl ExchangeApi for GmoFxPrivateApi {
         child_order_acceptance_id: &str,
     ) -> anyhow::Result<Vec<Execution>> {
         let path = format!("/v1/executions?orderId={child_order_acceptance_id}");
-        let data: GmoListResponse<GmoExecution> = self
-            .signed_request(Method::GET, &path, None)
-            .await?;
+        let data: GmoListResponse<GmoExecution> =
+            self.signed_request(Method::GET, &path, None).await?;
         Ok(data
             .list
             .into_iter()
@@ -376,9 +377,8 @@ impl ExchangeApi for GmoFxPrivateApi {
 
     async fn get_positions(&self, product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {
         let path = format!("/v1/openPositions?symbol={product_code}");
-        let data: GmoListResponse<GmoOpenPosition> = self
-            .signed_request(Method::GET, &path, None)
-            .await?;
+        let data: GmoListResponse<GmoOpenPosition> =
+            self.signed_request(Method::GET, &path, None).await?;
         Ok(data
             .list
             .into_iter()
@@ -431,9 +431,8 @@ impl ExchangeApi for GmoFxPrivateApi {
         after: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<Option<String>> {
         let path = format!("/v1/openPositions?symbol={product_code}");
-        let data: GmoListResponse<GmoOpenPosition> = self
-            .signed_request(Method::GET, &path, None)
-            .await?;
+        let data: GmoListResponse<GmoOpenPosition> =
+            self.signed_request(Method::GET, &path, None).await?;
         let mut newest: Option<(chrono::DateTime<chrono::Utc>, u64)> = None;
         for p in data.list {
             let Ok(ts) = p.timestamp.parse::<chrono::DateTime<chrono::Utc>>() else {

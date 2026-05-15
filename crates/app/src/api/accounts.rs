@@ -112,12 +112,6 @@ pub async fn create(
     if let Err(msg) = validate_initial_balance(&req.currency, req.initial_balance) {
         return Err(ApiError(StatusCode::BAD_REQUEST, msg));
     }
-    if let Err(msg) = trading_accounts::validate_leverage_for_exchange(
-        &req.exchange.trim().to_ascii_lowercase(),
-        req.leverage,
-    ) {
-        return Err(ApiError(StatusCode::BAD_REQUEST, msg));
-    }
     // Validate exchange is a known enum value (returns 400 instead of letting
     // the DB CHECK constraint surface as 500).
     let exchange_normalized = req.exchange.trim().to_ascii_lowercase();
@@ -125,6 +119,10 @@ pub async fn create(
         Ok(e) => e,
         Err(e) => return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string())),
     };
+    if let Err(msg) = trading_accounts::validate_leverage_for_exchange(exchange_enum, req.leverage)
+    {
+        return Err(ApiError(StatusCode::BAD_REQUEST, msg));
+    }
     // Defense in depth: reject creation on exchanges that have no
     // [exchange_margin.<name>] entry, or whose entry is non-positive.
     //
@@ -214,16 +212,21 @@ pub async fn update(
             format!("strategy '{name}' not found in catalog (see GET /api/strategies)"),
         ));
     }
-    if let Some(new_leverage) = req.leverage {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT exchange FROM trading_accounts WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await
-                .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
-        if let Some((exchange,)) = row
-            && let Err(msg) =
-                trading_accounts::validate_leverage_for_exchange(&exchange, new_leverage)
+    // Leverage cap pre-check at the HTTP boundary so a violation returns 400
+    // with the human-readable cap message. (`update_account` re-checks for
+    // non-HTTP callers but its anyhow::bail! would otherwise surface as a
+    // generic 500 here.)
+    if let Some(new_leverage) = req.leverage
+        && let Some(account) = trading_accounts::get(&state.pool, id)
+            .await
+            .map_err(ApiError::from)?
+    {
+        let exchange_enum: Exchange = account
+            .exchange
+            .parse()
+            .map_err(|e: anyhow::Error| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Err(msg) =
+            trading_accounts::validate_leverage_for_exchange(exchange_enum, new_leverage)
         {
             return Err(ApiError(StatusCode::BAD_REQUEST, msg));
         }

@@ -33,17 +33,19 @@ pub fn validate_initial_balance(currency: &str, initial_balance: Decimal) -> Res
 
 /// Validate that `leverage` does not exceed the regulatory cap for `exchange`.
 ///
-/// Caps reflect Japan FSA retail-account limits:
-///   - `bitflyer_cfd`: 2x (crypto-asset CFD)
-///   - `gmo_fx`: 25x (FX)
-///   - other exchanges: pass through (no cap enforced here)
+/// Caps reflect Japan FSA retail-account limits. Exhaustive `match` on
+/// `Exchange` so adding a new variant fails compilation until a cap is
+/// registered here.
 ///
 /// Returns `Err(message)` suitable for surfacing as a 400 from the accounts API.
-pub fn validate_leverage_for_exchange(exchange: &str, leverage: Decimal) -> Result<(), String> {
+pub fn validate_leverage_for_exchange(exchange: Exchange, leverage: Decimal) -> Result<(), String> {
     let cap = match exchange {
-        "bitflyer_cfd" => dec!(2),
-        "gmo_fx" => dec!(25),
-        _ => return Ok(()),
+        Exchange::BitflyerCfd => dec!(2),
+        Exchange::GmoFx => dec!(25),
+        // OANDA retail FX caps are not enforced here today; the account
+        // shape is being deprecated and no new live OANDA accounts are
+        // expected.
+        Exchange::Oanda => return Ok(()),
     };
     if leverage > cap {
         Err(format!(
@@ -227,7 +229,8 @@ pub async fn create_account(
     if let Err(msg) = validate_initial_balance(&currency, req.initial_balance) {
         anyhow::bail!(msg);
     }
-    if let Err(msg) = validate_leverage_for_exchange(&exchange, req.leverage) {
+    let exchange_enum: Exchange = exchange.parse()?;
+    if let Err(msg) = validate_leverage_for_exchange(exchange_enum, req.leverage) {
         anyhow::bail!(msg);
     }
     let initial_balance = if currency == "JPY" {
@@ -285,19 +288,20 @@ pub async fn update_account(
     id: Uuid,
     req: &UpdateTradingAccount,
 ) -> anyhow::Result<Option<TradingAccount>> {
-    // Validate leverage against the account's exchange before issuing UPDATE.
-    // We need the exchange from the existing row — fetch it cheaply, then run
-    // the validation only when the caller is actually changing leverage.
+    // Validate leverage against the account's exchange before UPDATE. We need
+    // the exchange from the existing row — fetch only when the caller is
+    // actually changing leverage to avoid an extra query on no-op updates.
     if let Some(new_leverage) = req.leverage {
         let exchange: Option<(String,)> =
             sqlx::query_as("SELECT exchange FROM trading_accounts WHERE id = $1")
                 .bind(id)
                 .fetch_optional(pool)
                 .await?;
-        if let Some((exchange,)) = exchange
-            && let Err(msg) = validate_leverage_for_exchange(&exchange, new_leverage)
-        {
-            anyhow::bail!(msg);
+        if let Some((exchange_str,)) = exchange {
+            let exchange_enum: Exchange = exchange_str.parse()?;
+            if let Err(msg) = validate_leverage_for_exchange(exchange_enum, new_leverage) {
+                anyhow::bail!(msg);
+            }
         }
     }
     let sql = format!(
@@ -431,36 +435,37 @@ pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid
 #[cfg(test)]
 mod leverage_validation {
     use super::validate_leverage_for_exchange;
+    use auto_trader_core::types::Exchange;
     use rust_decimal_macros::dec;
 
     #[test]
     fn gmo_fx_accepts_up_to_25x() {
-        assert!(validate_leverage_for_exchange("gmo_fx", dec!(25)).is_ok());
-        assert!(validate_leverage_for_exchange("gmo_fx", dec!(1)).is_ok());
+        assert!(validate_leverage_for_exchange(Exchange::GmoFx, dec!(25)).is_ok());
+        assert!(validate_leverage_for_exchange(Exchange::GmoFx, dec!(1)).is_ok());
     }
 
     #[test]
     fn gmo_fx_rejects_above_25x() {
-        let err = validate_leverage_for_exchange("gmo_fx", dec!(26)).unwrap_err();
+        let err = validate_leverage_for_exchange(Exchange::GmoFx, dec!(26)).unwrap_err();
         assert!(err.contains("25"), "error mentions cap: {err}");
         assert!(err.contains("gmo_fx"), "error mentions exchange: {err}");
     }
 
     #[test]
     fn bitflyer_cfd_accepts_up_to_2x() {
-        assert!(validate_leverage_for_exchange("bitflyer_cfd", dec!(2)).is_ok());
-        assert!(validate_leverage_for_exchange("bitflyer_cfd", dec!(1)).is_ok());
+        assert!(validate_leverage_for_exchange(Exchange::BitflyerCfd, dec!(2)).is_ok());
+        assert!(validate_leverage_for_exchange(Exchange::BitflyerCfd, dec!(1)).is_ok());
     }
 
     #[test]
     fn bitflyer_cfd_rejects_above_2x() {
-        let err = validate_leverage_for_exchange("bitflyer_cfd", dec!(3)).unwrap_err();
+        let err = validate_leverage_for_exchange(Exchange::BitflyerCfd, dec!(3)).unwrap_err();
         assert!(err.contains("2"), "error mentions cap: {err}");
     }
 
     #[test]
-    fn unknown_exchange_passes() {
-        assert!(validate_leverage_for_exchange("future_exchange", dec!(100)).is_ok());
+    fn oanda_currently_uncapped() {
+        assert!(validate_leverage_for_exchange(Exchange::Oanda, dec!(100)).is_ok());
     }
 }
 
