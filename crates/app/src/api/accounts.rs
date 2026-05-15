@@ -112,6 +112,12 @@ pub async fn create(
     if let Err(msg) = validate_initial_balance(&req.currency, req.initial_balance) {
         return Err(ApiError(StatusCode::BAD_REQUEST, msg));
     }
+    if let Err(msg) = trading_accounts::validate_leverage_for_exchange(
+        &req.exchange.trim().to_ascii_lowercase(),
+        req.leverage,
+    ) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, msg));
+    }
     // Validate exchange is a known enum value (returns 400 instead of letting
     // the DB CHECK constraint surface as 500).
     let exchange_normalized = req.exchange.trim().to_ascii_lowercase();
@@ -207,6 +213,20 @@ pub async fn update(
             StatusCode::BAD_REQUEST,
             format!("strategy '{name}' not found in catalog (see GET /api/strategies)"),
         ));
+    }
+    if let Some(new_leverage) = req.leverage {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT exchange FROM trading_accounts WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+        if let Some((exchange,)) = row
+            && let Err(msg) =
+                trading_accounts::validate_leverage_for_exchange(&exchange, new_leverage)
+        {
+            return Err(ApiError(StatusCode::BAD_REQUEST, msg));
+        }
     }
     trading_accounts::update_account(&state.pool, id, &req)
         .await
