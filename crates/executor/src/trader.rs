@@ -367,11 +367,11 @@ impl Trader {
         }
     }
 
-    /// fill_close: trade → 決済価格
+    /// fill_close: trade → 決済価格 + commission
     ///
-    /// - dry_run=true: PriceStore から Long 決済=bid / Short 決済=ask
-    /// - dry_run=false: 反対売買 send_child_order → poll_executions
-    async fn fill_close(&self, trade: &Trade) -> anyhow::Result<Decimal> {
+    /// - dry_run=true: PriceStore から Long 決済=bid / Short 決済=ask、commission は estimate_close
+    /// - dry_run=false: 反対売買 send_child_order → poll_executions、commission は約定の合計
+    async fn fill_close(&self, trade: &Trade) -> anyhow::Result<(Decimal, Decimal)> {
         if self.dry_run {
             let feed_key = FeedKey::new(self.exchange, trade.pair.clone());
             let (bid, ask) = self
@@ -385,19 +385,24 @@ impl Trader {
                 Direction::Long => bid,
                 Direction::Short => ask,
             };
-            Ok(price)
+            let commission = auto_trader_core::commission::estimate_close(
+                self.exchange,
+                price,
+                trade.quantity,
+            );
+            Ok((price, commission))
         } else {
             self.ensure_close_position_id_present(trade)?;
             let req = self.opposite_side_market_order(trade);
             let resp = self.api.send_child_order(req).await?;
-            let (price, _qty, _commission) = self
+            let (price, _qty, commission) = self
                 .poll_executions(
                     &resp.child_order_acceptance_id,
                     &trade.pair.0,
                     self.poll_timeout,
                 )
                 .await?;
-            Ok(price)
+            Ok((price, commission))
         }
     }
 
@@ -553,14 +558,16 @@ impl Trader {
     /// `trade.quantity`, only the remaining size is closed to prevent over-close
     /// (which would otherwise open an unintended opposite position).
     ///
-    /// Returns `(exit_price, was_approximate)`.  `was_approximate` is `true`
-    /// when the exchange position was already gone and we used a best-effort
-    /// price (PriceStore mid or entry_price fallback). Callers should emit an
-    /// operator-visible alert when this flag is set.
+    /// Returns `(exit_price, close_commission, was_approximate)`.
+    /// `was_approximate` is `true` when the exchange position was already gone
+    /// and we used a best-effort price (PriceStore mid or entry_price fallback);
+    /// in that case close_commission is 0 because no fresh execution data is
+    /// available. Callers should emit an operator-visible alert when this flag
+    /// is set.
     async fn fill_close_with_stale_recovery(
         &self,
         trade: &Trade,
-    ) -> anyhow::Result<(Decimal, bool)> {
+    ) -> anyhow::Result<(Decimal, Decimal, bool)> {
         let positions = self.api.get_positions(&trade.pair.0).await?;
 
         let mut total_exchange_size = Decimal::ZERO;
@@ -603,7 +610,8 @@ impl Trader {
                 trade.id
             );
             let price = self.resolve_stale_exit_price(trade).await?;
-            Ok((price, true))
+            // No fresh execution → commission unknown, fall back to 0.
+            Ok((price, Decimal::ZERO, true))
         } else if total_exchange_size == trade.quantity {
             // Full quantity still open → Phase 2 really failed, re-run it.
             tracing::info!(
@@ -611,8 +619,8 @@ impl Trader {
                 total_exchange_size,
                 trade.id
             );
-            let price = self.fill_close(trade).await?;
-            Ok((price, false))
+            let (price, commission) = self.fill_close(trade).await?;
+            Ok((price, commission, false))
         } else if total_exchange_size < trade.quantity {
             // Partial fill before crash: close only remaining size to avoid
             // over-close which would open an unintended opposite position.
@@ -622,10 +630,10 @@ impl Trader {
                 trade.quantity,
                 total_exchange_size
             );
-            let price = self.fill_close_size(trade, total_exchange_size).await?;
+            let (price, commission) = self.fill_close_size(trade, total_exchange_size).await?;
             // The DB row still records trade.quantity; the already-filled delta was
             // handled in the original Phase 2 before the crash. We approximate here.
-            Ok((price, true))
+            Ok((price, commission, true))
         } else {
             // Exchange size > trade.quantity — invariant violation. A single
             // exchange account per process should never have more than trade.quantity
@@ -646,7 +654,11 @@ impl Trader {
     /// Used by stale recovery when a partial fill was detected: the remaining
     /// exchange position is smaller than `trade.quantity`, so we close only what
     /// the exchange actually holds to prevent over-close / unintended reversal.
-    async fn fill_close_size(&self, trade: &Trade, size: Decimal) -> anyhow::Result<Decimal> {
+    async fn fill_close_size(
+        &self,
+        trade: &Trade,
+        size: Decimal,
+    ) -> anyhow::Result<(Decimal, Decimal)> {
         if self.dry_run {
             // Dry-run: return price from PriceStore regardless of size (same as fill_close).
             return self.fill_close(trade).await;
@@ -667,14 +679,14 @@ impl Trader {
             close_position_id: trade.exchange_position_id.clone(),
         };
         let resp = self.api.send_child_order(req).await?;
-        let (price, _qty, _commission) = self
+        let (price, _qty, commission) = self
             .poll_executions(
                 &resp.child_order_acceptance_id,
                 &trade.pair.0,
                 self.poll_timeout,
             )
             .await?;
-        Ok(price)
+        Ok((price, commission))
     }
 
     /// Best-effort exit price for a trade that was closed at the exchange but
@@ -1002,23 +1014,24 @@ impl OrderExecutor for Trader {
         // to a best-effort price. We fire an operator alert after Phase 3 in
         // that case so the PnL approximation is always visible.
         let mut stale_approximate = false;
-        let exit_price_result: anyhow::Result<Decimal> = if !self.dry_run && was_stale_recovery {
-            tracing::warn!(
-                "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
-                trade.id
-            );
-            match self.fill_close_with_stale_recovery(&trade).await {
-                Ok((price, approximate)) => {
-                    stale_approximate = approximate;
-                    Ok(price)
+        let exit_result: anyhow::Result<(Decimal, Decimal)> =
+            if !self.dry_run && was_stale_recovery {
+                tracing::warn!(
+                    "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
+                    trade.id
+                );
+                match self.fill_close_with_stale_recovery(&trade).await {
+                    Ok((price, commission, approximate)) => {
+                        stale_approximate = approximate;
+                        Ok((price, commission))
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            }
-        } else {
-            self.fill_close(&trade).await
-        };
-        let exit_price = match exit_price_result {
-            Ok(price) => price,
+            } else {
+                self.fill_close(&trade).await
+            };
+        let (exit_price, close_commission) = match exit_result {
+            Ok(pair) => pair,
             Err(e) => {
                 // Roll back the lock so future close attempts can retry.
                 if let Err(release_err) =
@@ -1060,7 +1073,7 @@ impl OrderExecutor for Trader {
             take_profit: trade.take_profit,
             quantity: trade.quantity,
             leverage: trade.leverage,
-            fees: trade.fees,
+            fees: trade.fees + close_commission,
             entry_at: trade.entry_at,
             exit_at: Some(exit_at),
             pnl_amount: Some(pnl_amount),
