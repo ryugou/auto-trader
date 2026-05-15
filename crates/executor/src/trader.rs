@@ -379,6 +379,7 @@ impl Trader {
             };
             Ok(price)
         } else {
+            self.ensure_close_position_id_present(trade)?;
             let req = self.opposite_side_market_order(trade);
             let resp = self.api.send_child_order(req).await?;
             let (price, _qty) = self
@@ -445,6 +446,23 @@ impl Trader {
             time_in_force: None,
             close_position_id: None,
         }
+    }
+
+    /// Reject a live close on exchanges that require a position id when the
+    /// trade has none stored. On GMO FX this prevents a close-without-positionId
+    /// from being silently dispatched to `/v1/order`, which would open an
+    /// opposite-direction position instead of closing the original.
+    /// bitFlyer-style exchanges return `false` from `requires_close_position_id`
+    /// and pass this check regardless of `exchange_position_id`.
+    fn ensure_close_position_id_present(&self, trade: &Trade) -> anyhow::Result<()> {
+        if self.api.requires_close_position_id() && trade.exchange_position_id.is_none() {
+            anyhow::bail!(
+                "live close refused for trade {} on {}: exchange_position_id is None and this exchange requires it (closing without a position id would open an opposite position)",
+                trade.id,
+                self.exchange.as_str()
+            );
+        }
+        Ok(())
     }
 
     /// 反対売買用 (close)
@@ -577,6 +595,7 @@ impl Trader {
             // Dry-run: return price from PriceStore regardless of size (same as fill_close).
             return self.fill_close(trade).await;
         }
+        self.ensure_close_position_id_present(trade)?;
         let side = match trade.direction {
             Direction::Long => Side::Sell,
             Direction::Short => Side::Buy,
@@ -701,6 +720,14 @@ impl OrderExecutor for Trader {
                 )
             })?;
 
+        // Capture the cutoff BEFORE sending the open order. GMO timestamps
+        // the position at fill time, which is earlier than the moment we
+        // observe completion after `fill_open` returns. Using a post-fill
+        // timestamp would filter out the just-opened position.
+        // Subtract a small safety margin (1 second) to cover any clock skew
+        // between this host and GMO's exchange-side clock.
+        let position_cutoff = Utc::now() - chrono::Duration::seconds(1);
+
         // 3. fill_open() で fill 価格 + 実数量取得
         let (fill_price, actual_qty) = self.fill_open(signal, quantity).await?;
 
@@ -727,7 +754,11 @@ impl OrderExecutor for Trader {
         let exchange_position_id = if self.dry_run {
             None
         } else {
-            match self.api.resolve_position_id(&signal.pair.0, entry_at).await {
+            match self
+                .api
+                .resolve_position_id(&signal.pair.0, position_cutoff)
+                .await
+            {
                 Ok(pid) => pid,
                 Err(e) => {
                     tracing::warn!(

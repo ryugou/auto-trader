@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::bitflyer_private::{
-    ChildOrder, Collateral, ExchangePosition, Execution, SendChildOrderRequest,
-    SendChildOrderResponse, Side,
+    ChildOrder, ChildOrderState, ChildOrderType, Collateral, ExchangePosition, Execution,
+    SendChildOrderRequest, SendChildOrderResponse, Side,
 };
 use crate::exchange_api::ExchangeApi;
 
@@ -175,6 +175,26 @@ pub(crate) struct GmoListResponse<T> {
     pub list: Vec<T>,
 }
 
+/// `GET /v1/orders?orderId={id}` list element. Shape per
+/// <https://api.coin.z.com/fxdocs/en/#order-status>.
+/// `executed_size` defaults to 0 because GMO omits the field when no
+/// execution has occurred yet.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct GmoOrder {
+    pub order_id: u64,
+    pub symbol: String,
+    pub side: String,
+    pub execution_type: String,
+    pub size: Decimal,
+    #[serde(default)]
+    pub executed_size: Decimal,
+    pub price: Decimal,
+    pub status: String,
+    pub timestamp: String,
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -272,6 +292,7 @@ impl GmoFxPrivateApi {
         &self,
         req: SendChildOrderRequest,
     ) -> anyhow::Result<SendChildOrderResponse> {
+        ensure_market_order(&req)?;
         let body = GmoOrderRequest {
             symbol: req.product_code,
             side: side_to_gmo(req.side),
@@ -292,6 +313,7 @@ impl GmoFxPrivateApi {
         req: SendChildOrderRequest,
         position_id_str: String,
     ) -> anyhow::Result<SendChildOrderResponse> {
+        ensure_market_order(&req)?;
         let position_id: u64 = position_id_str
             .parse()
             .with_context(|| format!("close_position_id is not a u64: {position_id_str}"))?;
@@ -312,6 +334,35 @@ impl GmoFxPrivateApi {
             child_order_acceptance_id: data.root_order_id.to_string(),
         })
     }
+}
+
+/// Map GMO order status string → bitFlyer-shaped `ChildOrderState`.
+///
+/// GMO terminal: `EXECUTED` / `CANCELED` / `EXPIRED` / `REJECTED`.
+/// GMO active:   `WAITING` / `ORDERED` / `MODIFYING` / `CANCELLING`.
+fn gmo_status_to_state(status: &str) -> ChildOrderState {
+    match status {
+        "EXECUTED" => ChildOrderState::Completed,
+        "CANCELED" => ChildOrderState::Canceled,
+        "EXPIRED" => ChildOrderState::Expired,
+        "REJECTED" => ChildOrderState::Rejected,
+        _ => ChildOrderState::Active,
+    }
+}
+
+fn ensure_market_order(req: &SendChildOrderRequest) -> anyhow::Result<()> {
+    if !matches!(req.child_order_type, ChildOrderType::Market) {
+        anyhow::bail!(
+            "GmoFxPrivateApi only supports MARKET orders currently; LIMIT support is a future addition"
+        );
+    }
+    if req.price.is_some() {
+        anyhow::bail!(
+            "GmoFxPrivateApi: price must be None for MARKET orders (got {:?})",
+            req.price
+        );
+    }
+    Ok(())
 }
 
 fn side_to_gmo(side: Side) -> GmoSide {
@@ -342,13 +393,35 @@ impl ExchangeApi for GmoFxPrivateApi {
         _product_code: &str,
         child_order_acceptance_id: &str,
     ) -> anyhow::Result<Vec<ChildOrder>> {
-        // GMO FX `/v1/orders?orderId={id}` exists but its order-status shape
-        // differs from bitFlyer's ChildOrder. The trader's open/close paths
-        // verify completion through get_executions (which we do implement),
-        // so an empty list here is acceptable for the current call sites.
+        // trader::cleanup_unfilled_order relies on `child_order_state` to
+        // decide Completed vs Canceled/Expired/Rejected vs Active. Map GMO
+        // `/v1/orders?orderId={id}.data.list[].status` → `ChildOrderState`
+        // and synthesise a minimal ChildOrder; an empty list would otherwise
+        // be treated as "no order record found → cleanup/cancel".
         let path = format!("/v1/orders?orderId={child_order_acceptance_id}");
-        let _: serde_json::Value = self.signed_request(Method::GET, &path, None).await?;
-        Ok(vec![])
+        let data: GmoListResponse<GmoOrder> = self.signed_request(Method::GET, &path, None).await?;
+        Ok(data
+            .list
+            .into_iter()
+            .map(|o| ChildOrder {
+                id: o.order_id,
+                child_order_id: o.order_id.to_string(),
+                product_code: o.symbol,
+                side: o.side,
+                child_order_type: o.execution_type,
+                price: o.price,
+                average_price: o.price,
+                size: o.size,
+                child_order_state: gmo_status_to_state(&o.status),
+                expire_date: String::new(),
+                child_order_date: o.timestamp,
+                child_order_acceptance_id: o.order_id.to_string(),
+                outstanding_size: o.size - o.executed_size,
+                cancel_size: Decimal::ZERO,
+                executed_size: o.executed_size,
+                total_commission: Decimal::ZERO,
+            })
+            .collect())
     }
 
     async fn get_executions(
@@ -448,6 +521,10 @@ impl ExchangeApi for GmoFxPrivateApi {
             }
         }
         Ok(newest.map(|(_, pid)| pid.to_string()))
+    }
+
+    fn requires_close_position_id(&self) -> bool {
+        true
     }
 }
 
@@ -668,5 +745,79 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("status=1"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn requires_close_position_id_is_true() {
+        let api = GmoFxPrivateApi::new("k".into(), "s".into());
+        assert!(api.requires_close_position_id());
+    }
+
+    #[tokio::test]
+    async fn limit_open_order_is_rejected() {
+        let api = GmoFxPrivateApi::new("k".into(), "s".into());
+        let err = api
+            .send_child_order(SendChildOrderRequest {
+                product_code: "USD_JPY".into(),
+                child_order_type: ChildOrderType::Limit,
+                side: Side::Buy,
+                size: dec!(1000),
+                price: Some(dec!(150.0)),
+                minute_to_expire: None,
+                time_in_force: None,
+                close_position_id: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("MARKET"),
+            "should mention MARKET-only: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_child_orders_maps_gmo_status_to_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/private/v1/orders"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "data": {
+                    "list": [
+                        {
+                            "orderId": 9876,
+                            "symbol": "USD_JPY",
+                            "side": "BUY",
+                            "executionType": "MARKET",
+                            "size": "1000",
+                            "executedSize": "1000",
+                            "price": "150.0",
+                            "status": "EXECUTED",
+                            "timestamp": "2026-05-15T10:00:00Z"
+                        }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        let orders = api.get_child_orders("USD_JPY", "9876").await.unwrap();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(
+            orders[0].child_order_state,
+            crate::bitflyer_private::ChildOrderState::Completed
+        );
+        assert_eq!(orders[0].id, 9876);
+        assert_eq!(orders[0].executed_size, dec!(1000));
+    }
+
+    #[test]
+    fn gmo_status_to_state_maps_each_terminal_status() {
+        assert_eq!(gmo_status_to_state("EXECUTED"), ChildOrderState::Completed);
+        assert_eq!(gmo_status_to_state("CANCELED"), ChildOrderState::Canceled);
+        assert_eq!(gmo_status_to_state("EXPIRED"), ChildOrderState::Expired);
+        assert_eq!(gmo_status_to_state("REJECTED"), ChildOrderState::Rejected);
+        assert_eq!(gmo_status_to_state("ORDERED"), ChildOrderState::Active);
+        assert_eq!(gmo_status_to_state("WAITING"), ChildOrderState::Active);
     }
 }

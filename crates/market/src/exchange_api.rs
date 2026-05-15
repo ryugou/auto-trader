@@ -54,4 +54,14 @@ pub trait ExchangeApi: Send + Sync {
         product_code: &str,
         after: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<Option<String>>;
+
+    /// `true` when this exchange requires a position identifier on close
+    /// requests. GMO FX returns `true` (close requests without a position id
+    /// would silently open an opposite position via `/v1/order`). bitFlyer
+    /// returns `false` (closes are opposite-side market orders against the
+    /// netted position). Trader uses this to refuse live closes that lack a
+    /// resolved exchange_position_id.
+    fn requires_close_position_id(&self) -> bool {
+        false
+    }
 }
