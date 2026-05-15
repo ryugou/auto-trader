@@ -197,7 +197,7 @@ impl Trader {
                 .poll_executions(&order_id, &signal.pair.0, self.poll_timeout)
                 .await
             {
-                Ok((price, qty)) => Ok((price, qty)),
+                Ok((price, qty, _commission)) => Ok((price, qty)),
                 Err(poll_err) => {
                     // poll_executions failed — the order may or may not have filled at the exchange.
                     // Consult the exchange before giving up to avoid creating an
@@ -386,7 +386,7 @@ impl Trader {
             self.ensure_close_position_id_present(trade)?;
             let req = self.opposite_side_market_order(trade);
             let resp = self.api.send_child_order(req).await?;
-            let (price, _qty) = self
+            let (price, _qty, _commission) = self
                 .poll_executions(
                     &resp.child_order_acceptance_id,
                     &trade.pair.0,
@@ -408,7 +408,7 @@ impl Trader {
         acceptance_id: &str,
         pair_str: &str,
         timeout: Duration,
-    ) -> anyhow::Result<(Decimal, Decimal)> {
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
         let start = Instant::now();
         let mut delay = Duration::from_millis(100);
         loop {
@@ -420,8 +420,9 @@ impl Trader {
                 let total_size: Decimal = execs.iter().map(|e| e.size).sum();
                 if !total_size.is_zero() {
                     let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
+                    let total_commission: Decimal = execs.iter().map(|e| e.commission).sum();
                     let avg = total_notional / total_size;
-                    return Ok((avg, total_size));
+                    return Ok((avg, total_size, total_commission));
                 }
             }
             tokio::time::sleep(delay).await;
@@ -662,7 +663,7 @@ impl Trader {
             close_position_id: trade.exchange_position_id.clone(),
         };
         let resp = self.api.send_child_order(req).await?;
-        let (price, _qty) = self
+        let (price, _qty, _commission) = self
             .poll_executions(
                 &resp.child_order_acceptance_id,
                 &trade.pair.0,
