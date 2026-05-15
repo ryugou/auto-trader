@@ -168,15 +168,15 @@ impl Trader {
         self
     }
 
-    /// fill_open: signal → 約定価格 + 実数量
+    /// fill_open: signal → 約定価格 + 実数量 + commission
     ///
-    /// - dry_run=true: PriceStore から Long=ask / Short=bid
-    /// - dry_run=false: send_child_order → poll_executions
+    /// - dry_run=true: PriceStore から Long=ask / Short=bid、commission は estimate_open
+    /// - dry_run=false: send_child_order → poll_executions、commission は約定の合計
     async fn fill_open(
         &self,
         signal: &Signal,
         quantity: Decimal,
-    ) -> anyhow::Result<(Decimal, Decimal)> {
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
         if self.dry_run {
             let feed_key = FeedKey::new(self.exchange, signal.pair.clone());
             let (bid, ask) = self
@@ -188,7 +188,9 @@ impl Trader {
                 Direction::Long => ask,
                 Direction::Short => bid,
             };
-            Ok((price, quantity))
+            let commission =
+                auto_trader_core::commission::estimate_open(self.exchange, price, quantity);
+            Ok((price, quantity, commission))
         } else {
             let req = self.signal_to_send_child_order(signal, quantity);
             let resp = self.api.send_child_order(req).await?;
@@ -197,7 +199,7 @@ impl Trader {
                 .poll_executions(&order_id, &signal.pair.0, self.poll_timeout)
                 .await
             {
-                Ok((price, qty, _commission)) => Ok((price, qty)),
+                Ok((price, qty, commission)) => Ok((price, qty, commission)),
                 Err(poll_err) => {
                     // poll_executions failed — the order may or may not have filled at the exchange.
                     // Consult the exchange before giving up to avoid creating an
@@ -212,14 +214,14 @@ impl Trader {
                         Ok(execs) if !execs.is_empty() => {
                             // Fill did happen — aggregate to get avg price + total size.
                             match aggregate_executions(&execs) {
-                                Ok((avg_price, total_size, _commission)) => {
+                                Ok((avg_price, total_size, commission)) => {
                                     tracing::info!(
                                         "open fill reconciled after timeout: order {} filled {} @ {}",
                                         order_id,
                                         total_size,
                                         avg_price
                                     );
-                                    Ok((avg_price, total_size))
+                                    Ok((avg_price, total_size, commission))
                                 }
                                 Err(agg_err) => {
                                     // aggregate failed (e.g. all size=0) — fall through to
@@ -261,18 +263,19 @@ impl Trader {
                                                 .await
                                             {
                                                 Ok(execs) if !execs.is_empty() => {
-                                                    let (avg_price, total_size, _commission) =
+                                                    let (avg_price, total_size, commission) =
                                                         aggregate_executions(&execs)?;
-                                                    Ok((avg_price, total_size))
+                                                    Ok((avg_price, total_size, commission))
                                                 }
                                                 _ => {
                                                     // Fall back to order-level data.
+                                                    // commission は execution レベルでしか取得できないので 0。
                                                     if order.average_price > Decimal::ZERO
                                                         && order.executed_size > Decimal::ZERO
                                                     {
                                                         tracing::warn!(
                                                             "open fill: order {} Completed but get_executions empty; \
-                                                             using order-level avg_price={} executed_size={}",
+                                                             using order-level avg_price={} executed_size={}, commission=0",
                                                             order_id,
                                                             order.average_price,
                                                             order.executed_size
@@ -280,6 +283,7 @@ impl Trader {
                                                         Ok((
                                                             order.average_price,
                                                             order.executed_size,
+                                                            Decimal::ZERO,
                                                         ))
                                                     } else {
                                                         Err(anyhow::anyhow!(
@@ -780,8 +784,8 @@ impl OrderExecutor for Trader {
         // between this host and GMO's exchange-side clock.
         let position_cutoff = Utc::now() - chrono::Duration::seconds(1);
 
-        // 3. fill_open() で fill 価格 + 実数量取得
-        let (fill_price, actual_qty) = self.fill_open(signal, quantity).await?;
+        // 3. fill_open() で fill 価格 + 実数量 + commission 取得
+        let (fill_price, actual_qty, open_commission) = self.fill_open(signal, quantity).await?;
 
         // 4. SL/TP を fill_price から逆算
         let stop_loss = match signal.direction {
@@ -860,7 +864,7 @@ impl OrderExecutor for Trader {
             take_profit,
             quantity: actual_qty,
             leverage,
-            fees: Decimal::ZERO,
+            fees: open_commission,
             entry_at,
             exit_at: None,
             pnl_amount: None,
