@@ -63,6 +63,8 @@ impl ExchangeApi for NullExchangeApi {
         &self,
         _product_code: &str,
         _after: chrono::DateTime<chrono::Utc>,
+        _expected_side: crate::bitflyer_private::Side,
+        _expected_size: rust_decimal::Decimal,
     ) -> anyhow::Result<Option<String>> {
         Ok(None)
     }

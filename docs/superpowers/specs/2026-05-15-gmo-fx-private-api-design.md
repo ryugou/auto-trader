@@ -1,7 +1,7 @@
 # GMO FX Private API + Leverage Validation 設計
 
 - 作成日: 2026-05-15
-- ステータス: brainstorming 完了、未実装
+- ステータス: 実装済 (PR #86) — 本ドキュメントは設計・意思決定の記録として保存
 - 目的: 「paper = live 契約」を成立させるための 9 項目のうち、(1) GMO FX Private API 実装 と (8) leverage 規制 validation をまとめて 1 PR に
 - 関連: `~/.claude/projects/-Users-ryugo-Developer-src-personal-auto-trader/memory/feedback_paper_equals_live_in_unified_design.md`、本セッションで実施した paper=live 監査の Critical C1 と C2
 

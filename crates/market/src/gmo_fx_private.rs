@@ -502,12 +502,28 @@ impl ExchangeApi for GmoFxPrivateApi {
         &self,
         product_code: &str,
         after: chrono::DateTime<chrono::Utc>,
+        expected_side: Side,
+        expected_size: Decimal,
     ) -> anyhow::Result<Option<String>> {
         let path = format!("/v1/openPositions?symbol={product_code}");
         let data: GmoListResponse<GmoOpenPosition> =
             self.signed_request(Method::GET, &path, None).await?;
+        let expected_side_str = match expected_side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
         let mut newest: Option<(chrono::DateTime<chrono::Utc>, u64)> = None;
         for p in data.list {
+            // Match the just-opened position by symbol+side+size+timestamp.
+            // Symbol filter is enforced by the GMO query string; double-check
+            // side and size here so a concurrent same-symbol open from another
+            // strategy / manual trade cannot bind the wrong positionId.
+            if p.side != expected_side_str {
+                continue;
+            }
+            if p.size != expected_size {
+                continue;
+            }
             let Ok(ts) = p.timestamp.parse::<chrono::DateTime<chrono::Utc>>() else {
                 continue;
             };
@@ -688,7 +704,10 @@ mod tests {
         let after = "2026-05-15T09:00:00Z"
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap();
-        let pid = api.resolve_position_id("USD_JPY", after).await.unwrap();
+        let pid = api
+            .resolve_position_id("USD_JPY", after, Side::Buy, dec!(1000))
+            .await
+            .unwrap();
         assert_eq!(pid.as_deref(), Some("101"));
     }
 
@@ -713,8 +732,48 @@ mod tests {
         let after = "2026-05-15T09:00:00Z"
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap();
-        let pid = api.resolve_position_id("USD_JPY", after).await.unwrap();
+        let pid = api
+            .resolve_position_id("USD_JPY", after, Side::Buy, dec!(1000))
+            .await
+            .unwrap();
         assert_eq!(pid, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_position_id_skips_unrelated_side_and_size() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/private/v1/openPositions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "data": {
+                    "list": [
+                        // Newer but wrong side — must be skipped.
+                        { "positionId": 200, "symbol": "USD_JPY", "side": "SELL",
+                          "size": "1000", "price": "150.0",
+                          "timestamp": "2026-05-15T12:00:00Z" },
+                        // Newer but wrong size — must be skipped.
+                        { "positionId": 201, "symbol": "USD_JPY", "side": "BUY",
+                          "size": "500", "price": "150.0",
+                          "timestamp": "2026-05-15T11:30:00Z" },
+                        // Exact match — should be returned.
+                        { "positionId": 202, "symbol": "USD_JPY", "side": "BUY",
+                          "size": "1000", "price": "150.0",
+                          "timestamp": "2026-05-15T11:00:00Z" }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        let after = "2026-05-15T09:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let pid = api
+            .resolve_position_id("USD_JPY", after, Side::Buy, dec!(1000))
+            .await
+            .unwrap();
+        assert_eq!(pid.as_deref(), Some("202"));
     }
 
     #[tokio::test]

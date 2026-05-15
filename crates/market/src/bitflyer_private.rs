@@ -601,6 +601,8 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
         &self,
         _product_code: &str,
         _after: chrono::DateTime<chrono::Utc>,
+        _expected_side: Side,
+        _expected_size: rust_decimal::Decimal,
     ) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
