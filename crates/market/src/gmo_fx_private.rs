@@ -485,13 +485,17 @@ impl ExchangeApi for GmoFxPrivateApi {
 
     async fn cancel_child_order(
         &self,
-        _product_code: &str,
+        product_code: &str,
         child_order_acceptance_id: &str,
     ) -> anyhow::Result<()> {
         let order_id: u64 = child_order_acceptance_id.parse().with_context(|| {
             format!("cancel: acceptance_id is not a u64: {child_order_acceptance_id}")
         })?;
-        let body = serde_json::json!({ "orderId": order_id });
+        // The published GMO FX spec documents only `orderId`, but sending the
+        // symbol alongside is harmless and defends against the case where the
+        // exchange's routing layer expects it for disambiguation. Mirrors
+        // bitFlyer's behavior, which carries the product_code on cancels.
+        let body = serde_json::json!({ "symbol": product_code, "orderId": order_id });
         let _: serde_json::Value = self
             .signed_request(Method::POST, "/v1/cancelOrder", Some(&body))
             .await?;

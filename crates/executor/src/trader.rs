@@ -808,7 +808,11 @@ impl OrderExecutor for Trader {
             Direction::Long => Side::Buy,
             Direction::Short => Side::Sell,
         };
-        let exchange_position_id = if self.dry_run {
+        // Only spend retry latency on exchanges that actually use the field.
+        // bitFlyer / OANDA / null impls always return Ok(None); calling them
+        // (and waiting 1.5s of backoff) just to discard the result adds dead
+        // latency to every non-GMO live open.
+        let exchange_position_id = if self.dry_run || !self.api.requires_close_position_id() {
             None
         } else {
             self.resolve_position_id_with_retry(
