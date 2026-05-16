@@ -513,6 +513,23 @@ impl BitflyerPrivateApi {
         })
     }
 
+    /// `/v1/me/getpositions` の sfd field を合計して返す。
+    ///
+    /// bitFlyer は同一 product_code の position を内部 netting するが、
+    /// `get_positions` は open 単位の row を返す。同 product_code を持つ
+    /// 全 position の sfd を合計し、close 時の SFD 累積として返す。
+    /// 同時に open している複数 trade は v1 では FIFO 風単純積算で
+    /// 最初に close した trade に全 SFD が attribute される (spec
+    /// `2026-05-17-sfd-fees-design.md` "多重ポジション attribution"
+    /// 参照)。
+    pub async fn fetch_close_sfd(
+        &self,
+        product_code: &str,
+    ) -> Result<Decimal, BitflyerApiError> {
+        let positions = self.get_positions(product_code).await?;
+        Ok(positions.iter().map(|p| p.sfd).sum())
+    }
+
     /// `POST /v1/me/cancelchildorder` — 未約定注文をキャンセルする。
     /// 成功時は 2xx 空 body が返るため、型上は `()` を返す。
     pub async fn cancel_child_order(
@@ -605,6 +622,12 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
         _expected_size: rust_decimal::Decimal,
     ) -> anyhow::Result<Option<String>> {
         Ok(None)
+    }
+
+    async fn fetch_close_sfd(&self, product_code: &str) -> anyhow::Result<Decimal> {
+        self.fetch_close_sfd(product_code)
+            .await
+            .map_err(anyhow::Error::from)
     }
 }
 
@@ -929,6 +952,130 @@ mod tests {
     fn truncate_body_passthrough_for_short_text() {
         let short = "hello";
         assert_eq!(truncate_body(short), "hello");
+    }
+
+    /// fetch_close_sfd が get_positions の sfd 合計を返すこと。
+    #[tokio::test]
+    async fn fetch_close_sfd_sums_all_positions_for_product() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!([
+            {
+                "product_code": "FX_BTC_JPY",
+                "side": "BUY",
+                "price": "36000",
+                "size": "0.1",
+                "commission": "0",
+                "swap_point_accumulate": "0",
+                "require_collateral": "120000",
+                "open_date": "2026-05-17T10:00:00",
+                "leverage": "2",
+                "pnl": "0",
+                "sfd": "100"
+            },
+            {
+                "product_code": "FX_BTC_JPY",
+                "side": "BUY",
+                "price": "36000",
+                "size": "0.1",
+                "commission": "0",
+                "swap_point_accumulate": "0",
+                "require_collateral": "120000",
+                "open_date": "2026-05-17T10:01:00",
+                "leverage": "2",
+                "pnl": "0",
+                "sfd": "50"
+            }
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getpositions"))
+            .and(query_param("product_code", "FX_BTC_JPY"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let api =
+            BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
+        let sfd = api.fetch_close_sfd("FX_BTC_JPY").await.unwrap();
+        assert_eq!(sfd, dec!(150), "sfd values across all matching positions sum");
+    }
+
+    /// 空の position list で 0 が返ること。
+    #[tokio::test]
+    async fn fetch_close_sfd_returns_zero_for_empty_positions() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getpositions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let api =
+            BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
+        let sfd = api.fetch_close_sfd("FX_BTC_JPY").await.unwrap();
+        assert_eq!(sfd, Decimal::ZERO);
+    }
+
+    /// trait 経由で呼んでも inherent と同じ挙動になること。
+    #[tokio::test]
+    async fn trait_fetch_close_sfd_delegates_to_inherent() {
+        use crate::exchange_api::ExchangeApi as ExchangeApiTrait;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!([
+            {
+                "product_code": "FX_BTC_JPY",
+                "side": "SELL",
+                "price": "36000",
+                "size": "0.1",
+                "commission": "0",
+                "swap_point_accumulate": "0",
+                "require_collateral": "120000",
+                "open_date": "2026-05-17T10:00:00",
+                "leverage": "2",
+                "pnl": "0",
+                "sfd": "42"
+            }
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getpositions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let api: Box<dyn ExchangeApiTrait> = Box::new(BitflyerPrivateApi::new_for_test(
+            server.uri(),
+            "key".to_string(),
+            "secret".to_string(),
+        ));
+        let sfd = api.fetch_close_sfd("FX_BTC_JPY").await.unwrap();
+        assert_eq!(sfd, dec!(42));
+    }
+
+    /// HTTP 503 で Err が返ること (上位の warn 経路で扱われる前提)。
+    #[tokio::test]
+    async fn fetch_close_sfd_propagates_http_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/getpositions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let api =
+            BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
+        let res = api.fetch_close_sfd("FX_BTC_JPY").await;
+        assert!(res.is_err(), "503 must surface as Err");
     }
 
     /// parse 失敗時の InvalidResponse メッセージが 512 文字以内に収まること。
