@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Trade, TradeStatus};
+use auto_trader_core::event::{PriceEvent, TradeAction, TradeEvent};
+use auto_trader_core::types::{Candle, Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};
 use auto_trader_db::trades::OpenTradeWithAccount;
 use auto_trader_integration_tests::helpers::db::seed_trading_account;
 use auto_trader_market::price_store::{FeedKey, LatestTick, PriceStore};
@@ -399,4 +399,98 @@ async fn liquidation_returns_all_trades_in_breached_account(pool: sqlx::PgPool) 
         returned_ids, expected_ids,
         "breached account must return ALL its open trades for force-close"
     );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn close_trade_with_liquidation_reason_persists_and_emits_event(pool: sqlx::PgPool) {
+    // detect_liquidation_targets で trade_id を取った後、closer::close_trade
+    // を呼んで実際に DB の trade 行が `status='closed'` / `exit_reason='liquidation'`
+    // になり、`TradeEvent::Closed` が trade_tx に流れることを確認する
+    // (Copilot round-3 end-to-end test 不足の指摘)。
+    let account_id = seed_trading_account(
+        &pool,
+        "liq_e2e",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        100_000,
+    )
+    .await;
+    let trade = make_trade(
+        account_id,
+        Exchange::GmoFx,
+        "USD_JPY",
+        Direction::Long,
+        dec!(150),
+        dec!(10000),
+        dec!(25),
+    );
+    seed_and_lock(&pool, &trade).await;
+    let trade_id = trade.id;
+
+    // close 経路は fill_close (dry_run=true) で PriceStore から bid を読む。
+    let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(145), dec!(145.1)).await;
+
+    let mut apis: std::collections::HashMap<
+        Exchange,
+        Arc<dyn auto_trader_market::exchange_api::ExchangeApi>,
+    > = std::collections::HashMap::new();
+    apis.insert(
+        Exchange::GmoFx,
+        Arc::new(auto_trader_market::null_exchange_api::NullExchangeApi),
+    );
+
+    let mut min_sizes: HashMap<Pair, Decimal> = HashMap::new();
+    min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
+    let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
+        min_sizes,
+    ));
+    let notifier = Arc::new(auto_trader_notify::Notifier::new_disabled());
+
+    let (trade_tx, mut trade_rx) = tokio::sync::mpsc::channel::<TradeEvent>(16);
+
+    let ctx = auto_trader::closer::CloseContext {
+        pool: pool.clone(),
+        apis: Arc::new(apis),
+        price_store: ps,
+        notifier,
+        position_sizer,
+        liquidation_levels: Arc::new(levels()),
+        trade_tx,
+    };
+
+    auto_trader::closer::close_trade(
+        &ctx,
+        &trade,
+        "liq_e2e".to_string(),
+        "paper".to_string(),
+        true,
+        ExitReason::Liquidation,
+        dec!(145),
+    )
+    .await;
+
+    // DB row が closed + exit_reason='liquidation' になっていることを確認
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT status, exit_reason FROM trades WHERE id = $1")
+            .bind(trade_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.0, "closed", "trade status should be closed");
+    assert_eq!(
+        row.1.as_deref(),
+        Some("liquidation"),
+        "trade exit_reason should be liquidation"
+    );
+
+    // TradeEvent::Closed が emit されていることを確認
+    let ev = trade_rx.recv().await.expect("TradeEvent should be emitted");
+    assert_eq!(ev.trade.id, trade_id);
+    match ev.action {
+        TradeAction::Closed { exit_reason, .. } => {
+            assert_eq!(exit_reason, ExitReason::Liquidation);
+        }
+        other => panic!("expected Closed action, got {:?}", other),
+    }
 }

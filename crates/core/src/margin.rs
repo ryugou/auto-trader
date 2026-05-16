@@ -15,7 +15,7 @@
 //! ロスカット式と同じ。
 
 use crate::types::Direction;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenPosition {
@@ -36,9 +36,16 @@ impl OpenPosition {
         diff * self.quantity
     }
 
-    /// 必要証拠金 = entry_price × quantity / leverage
+    /// 必要証拠金 = `truncate_yen(entry_price × quantity / leverage)`。
+    ///
+    /// `Trader::execute` / `lock_margin` / `release_margin` は yen 整数化
+    /// (`round_dp_with_strategy(0, ToZero)`) で ledger に書く。維持率の
+    /// denominator を ledger と揃えないと、threshold 境界で
+    /// `required_margin(unrounded) / required_margin(rounded)` 分だけ
+    /// ratio がズレて誤発火 / 漏れの可能性。同じ rounding をここでも適用。
     pub fn required_margin(&self) -> Decimal {
-        self.entry_price * self.quantity / self.leverage
+        (self.entry_price * self.quantity / self.leverage)
+            .round_dp_with_strategy(0, RoundingStrategy::ToZero)
     }
 }
 
@@ -141,6 +148,16 @@ mod tests {
     fn compute_maintenance_ratio_zero_required_returns_none() {
         // 空 vec → required=0 → None
         assert!(compute_maintenance_ratio(dec!(100000), &[]).is_none());
+    }
+
+    #[test]
+    fn required_margin_is_truncated_to_yen_to_match_ledger() {
+        // entry=150.123, qty=10000, lev=25 → 150.123*10000/25 = 60049.2
+        // ledger 側は `truncate_yen` で 60049 を lock。維持率の denominator
+        // も同じ 60049 でなければズレる (Copilot round-3 指摘の regression
+        // guard)。
+        let pos = long_at(dec!(150.123), dec!(150.123), dec!(10000), dec!(25));
+        assert_eq!(pos.required_margin(), dec!(60049));
     }
 
     #[test]
