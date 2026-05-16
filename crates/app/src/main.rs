@@ -860,6 +860,84 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+
+            // Liquidation 判定 (paper のみ): tick の event.exchange と一致する account を
+            // walk して、維持率が threshold を下回ったら同 account の全 trade を順次
+            // ExitReason::Liquidation で close する。SL/TP/TimeLimit 判定の前に走らせ、
+            // 既存 close 経路と排他は acquire_close_lock の natural CAS で成立する。
+            let liq_targets = auto_trader::liquidation::detect_liquidation_targets(
+                &open_trades,
+                &event,
+                &crypto_monitor_price_store,
+                &crypto_monitor_pool,
+                &crypto_monitor_exchange_liquidation_levels,
+                crypto_monitor_live_forces_dry_run,
+            )
+            .await;
+            for (account_id, trade_ids) in liq_targets {
+                for trade_id in trade_ids {
+                    let owned = match open_trades.iter().find(|t| t.trade.id == trade_id) {
+                        Some(o) => o,
+                        None => continue, // 既に他経路で close 済 (まれ)
+                    };
+                    let trade = &owned.trade;
+                    let account_name = owned
+                        .account_name
+                        .clone()
+                        .unwrap_or_else(|| account_id.to_string());
+                    let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
+                        match crypto_monitor_exchange_apis.get(&trade.exchange) {
+                            Some(a) => a.clone(),
+                            None => std::sync::Arc::new(
+                                auto_trader_market::null_exchange_api::NullExchangeApi,
+                            ),
+                        };
+                    let liquidation_margin_level =
+                        match auto_trader::startup::liquidation_level_or_log(
+                            &crypto_monitor_exchange_liquidation_levels,
+                            trade.exchange,
+                            || format!("liquidation close trade {}", trade.id),
+                        ) {
+                            Some(y) => y,
+                            None => continue,
+                        };
+                    let trader = UnifiedTrader::new(
+                        crypto_monitor_pool.clone(),
+                        trade.exchange,
+                        account_id,
+                        account_name,
+                        api,
+                        crypto_monitor_price_store.clone(),
+                        crypto_monitor_notifier.clone(),
+                        crypto_monitor_position_sizer.clone(),
+                        liquidation_margin_level,
+                        true, // dry_run: paper のみここに来る (detect 内で account_type=paper を確認済)
+                    );
+                    match trader
+                        .close_position(
+                            &trade.id.to_string(),
+                            auto_trader_core::types::ExitReason::Liquidation,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(
+                                "liquidation: trade {} closed (account {})",
+                                trade.id,
+                                account_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "liquidation: failed to close trade {} (account {}): {e} — continuing",
+                                trade.id,
+                                account_id
+                            );
+                        }
+                    }
+                }
+            }
+
             for owned in open_trades {
                 let trade = owned.trade;
                 // Match by exchange + pair so GmoFx trades are monitored against
