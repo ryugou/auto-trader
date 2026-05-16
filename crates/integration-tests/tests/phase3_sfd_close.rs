@@ -5,6 +5,7 @@
 //!   - send_child_order/get_child_orders/get_executions: open/close 用の
 //!     固定 execution + commission を返す
 //!   - fetch_close_sfd: テストごとに指定した値 (もしくは Err)
+//!
 //! を返し、以下を確認:
 //!   - live + sfd>0  : close 時に fees に open+close commission + sfd が積まれ DB にも反映
 //!   - live + sfd=0  : fees に SFD 加算なし、DB も一致

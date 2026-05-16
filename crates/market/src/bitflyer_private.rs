@@ -522,10 +522,7 @@ impl BitflyerPrivateApi {
     /// 最初に close した trade に全 SFD が attribute される (spec
     /// `2026-05-17-sfd-fees-design.md` "多重ポジション attribution"
     /// 参照)。
-    pub async fn fetch_close_sfd(
-        &self,
-        product_code: &str,
-    ) -> Result<Decimal, BitflyerApiError> {
+    pub async fn fetch_close_sfd(&self, product_code: &str) -> Result<Decimal, BitflyerApiError> {
         let positions = self.get_positions(product_code).await?;
         Ok(positions.iter().map(|p| p.sfd).sum())
     }
@@ -999,7 +996,11 @@ mod tests {
         let api =
             BitflyerPrivateApi::new_for_test(server.uri(), "key".to_string(), "secret".to_string());
         let sfd = api.fetch_close_sfd("FX_BTC_JPY").await.unwrap();
-        assert_eq!(sfd, dec!(150), "sfd values across all matching positions sum");
+        assert_eq!(
+            sfd,
+            dec!(150),
+            "sfd values across all matching positions sum"
+        );
     }
 
     /// 空の position list で 0 が返ること。
