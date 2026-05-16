@@ -102,25 +102,25 @@ params = { holding_days_max = 14 }
 name = "bb_mean_revert_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY", "USD_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY", "EUR_USD"]
 
 [[strategies]]
 name = "donchian_trend_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY", "USD_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY", "EUR_USD"]
 
 [[strategies]]
 name = "donchian_trend_evolve_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY", "USD_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY", "EUR_USD"]
 
 [[strategies]]
 name = "squeeze_momentum_v1"
 enabled = true
 mode = "paper"
-pairs = ["FX_BTC_JPY", "USD_JPY"]
+pairs = ["FX_BTC_JPY", "USD_JPY", "EUR_USD"]
 
 # Trading accounts are managed in the database (trading_accounts table).
 # Initial accounts are seeded by migration. Use the REST API to manage:
