@@ -165,6 +165,60 @@ async fn liquidation_fires_when_maintenance_drops_below_threshold(pool: sqlx::Pg
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn liquidation_does_not_fire_at_exact_threshold(pool: sqlx::PgPool) {
+    // 境界条件: ratio == threshold は `<` のみ発火の契約により発火しない。
+    // この test は `<=` への regression を防ぐ guard (Copilot round-4 指摘)。
+    //
+    // balance after lock = 40k, required = 60k, threshold = 1.00。
+    // ratio = 1.00 となるには equity = required = 60k:
+    //   equity = current_balance + lock 戻し(60k) + unrealized = 60k
+    //   → current_balance + unrealized = 0
+    //   → 40k + unrealized = 0 → unrealized = -40k
+    //   → (current - 150) * 10000 = -40000 → current = 146
+    let account_id = seed_trading_account(
+        &pool,
+        "liq_boundary",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        100_000,
+    )
+    .await;
+    let trade = make_trade(
+        account_id,
+        Exchange::GmoFx,
+        "USD_JPY",
+        Direction::Long,
+        dec!(150),
+        dec!(10000),
+        dec!(25),
+    );
+    seed_and_lock(&pool, &trade).await;
+
+    let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(146), dec!(146.1)).await;
+    let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(146));
+
+    let owned = OpenTradeWithAccount {
+        trade,
+        account_name: Some("liq_boundary".into()),
+        account_type: Some("paper".into()),
+    };
+    let ctx = auto_trader::liquidation::LiquidationContext {
+        pool: pool.clone(),
+        price_store: ps,
+        exchange_liquidation_levels: std::sync::Arc::new(levels()),
+        live_forces_dry_run: false,
+    };
+    let targets =
+        auto_trader::liquidation::detect_liquidation_targets(&ctx, &[owned], &event).await;
+    assert!(
+        targets.is_empty(),
+        "ratio == threshold (1.00) must NOT liquidate; \
+         only strictly `< threshold` fires (regression guard for `<=`)"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn liquidation_does_not_fire_above_threshold(pool: sqlx::PgPool) {
     let account_id = seed_trading_account(
         &pool,
