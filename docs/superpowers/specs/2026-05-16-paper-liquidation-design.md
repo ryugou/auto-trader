@@ -38,7 +38,7 @@ paper account (`account_type == "paper"`、または `LIVE_DRY_RUN=1` で paper 
 
 ## Architecture
 
-paper の position monitor (`crates/app/src/main.rs:836-1000` 周辺の crypto monitor) に **アカウント維持率判定**を追加。tick が来た `event.exchange + event.pair` に対し、同 account の全 open trade を walk して unrealized pnl を合算、`maintenance_ratio = (current_balance + Σunrealized_pnl) / Σrequired_margin` を計算、`< liquidation_margin_level` なら同 account の全 trade を `ExitReason::Liquidation` で順次 close する。
+paper の position monitor (`crates/app/src/main.rs:836-1000` 周辺の crypto monitor) に **アカウント維持率判定**を追加。tick が来た `event.exchange + event.pair` に対し、同 account の全 open trade を walk して unrealized pnl を合算、`maintenance_ratio = (current_balance + Σrequired_margin + Σunrealized_pnl) / Σrequired_margin` を計算、`< liquidation_margin_level` なら同 account の全 trade を `ExitReason::Liquidation` で順次 close する。`current_balance` は margin lock 後の free cash なので、純資産算出時に lock 額 (= Σrequired_margin) を加算して initial-balance ベースに戻している点に注意。
 
 live 経路は早期スキップ。既存の SL/TP/TimeLimit 判定の**直前** (`acquire_close_lock` より前) に置く ─ Liquidation が走ったら他 trade は既に `status='closing'/'closed'` で、SL/TP 判定の `acquire_close_lock` が natural に skip する。
 
@@ -84,7 +84,9 @@ impl OpenPosition {
     }
 }
 
-/// 維持率 = (現金残高 + 評価損益合計) / 必要証拠金合計。
+/// 維持率 = 純資産 / 必要証拠金合計。
+/// 純資産 = current_balance(free cash) + Σrequired_margin(lock 戻し)
+///         + Σunrealized_pnl
 /// 必要証拠金合計が 0 (open trade 無し) のとき `None`。
 pub fn compute_maintenance_ratio(
     current_balance: Decimal,

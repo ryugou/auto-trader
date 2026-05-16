@@ -1,6 +1,15 @@
 //! exchange-agnostic な維持率計算。pure 関数で IO 依存なし。
 //!
-//! 維持率 = (現金残高 + 評価損益合計) / 必要証拠金合計
+//! 維持率 = 純資産 / 必要証拠金合計
+//!     純資産 = 現金残高(free cash) + ロック中証拠金合計 + 評価損益合計
+//!           = `current_balance` + Σ`required_margin` + Σ`unrealized_pnl`
+//!
+//! `trading_accounts.current_balance` は **margin lock 後** の free cash で、
+//! lock 額 (= 必要証拠金) を差し引いた値になっている。ナイーブに
+//! `current_balance / required` で割ると open 直後 (unrealized=0) でも
+//! 維持率が `(initial - required) / required` まで低下して誤発火する。
+//! 純資産計算では `+ Σrequired_margin` で lock 分を戻し、initial_balance
+//! ベースの正しい equity に揃える。
 //!
 //! `Trader::close_position` の force-close 判定で使う。live exchange の
 //! ロスカット式と同じ。
@@ -33,10 +42,14 @@ impl OpenPosition {
     }
 }
 
-/// 維持率 = (現金残高 + 評価損益合計) / 必要証拠金合計。
+/// 維持率 = 純資産 / 必要証拠金合計。
+///
+/// 純資産 = `current_balance` (free cash, margin lock 後)
+///         + Σ`required_margin` (lock 中証拠金を戻す)
+///         + Σ`unrealized_pnl`
 ///
 /// 必要証拠金合計が 0 (open position 無し) のとき `None` を返す。
-/// 残高 + 評価損益が負になっても比率はそのまま負を返す (caller 側で
+/// 純資産が負になっても比率はそのまま負を返す (caller 側で
 /// `< threshold` 比較に使える)。
 pub fn compute_maintenance_ratio(
     current_balance: Decimal,
@@ -47,7 +60,10 @@ pub fn compute_maintenance_ratio(
         return None;
     }
     let total_unrealized: Decimal = positions.iter().map(|p| p.unrealized_pnl()).sum();
-    Some((current_balance + total_unrealized) / total_required)
+    // current_balance は margin lock 後の free cash。lock 中の証拠金合計
+    // (== total_required) を加算して initial-balance ベースの equity に戻す。
+    let equity = current_balance + total_required + total_unrealized;
+    Some(equity / total_required)
 }
 
 #[cfg(test)]
@@ -77,24 +93,37 @@ mod tests {
 
     #[test]
     fn compute_maintenance_ratio_long_in_profit() {
-        // balance=100k, entry=150, current=151, qty=10000, lev=25
+        // 引数の current_balance は free cash (lock 後)。
+        // balance=40k (= 100k initial - 60k lock), entry=150, current=151, qty=10000, lev=25
         // required = 150*10000/25 = 60000
         // unrealized = (151-150)*10000 = 10000
-        // ratio = (100000+10000)/60000 ≈ 1.8333
+        // equity = 40k + 60k(lock 戻し) + 10k = 110k
+        // ratio = 110k/60k ≈ 1.8333
         let pos = long_at(dec!(150), dec!(151), dec!(10000), dec!(25));
-        let ratio = compute_maintenance_ratio(dec!(100000), &[pos]).unwrap();
+        let ratio = compute_maintenance_ratio(dec!(40000), &[pos]).unwrap();
         assert_eq!(ratio, dec!(110000) / dec!(60000));
     }
 
     #[test]
     fn compute_maintenance_ratio_short_in_loss() {
-        // balance=100k, entry=150, current=152, qty=10000, lev=25, Short
-        // required = 60000
-        // unrealized = (150-152)*10000 = -20000
-        // ratio = (100000-20000)/60000 ≈ 1.333
+        // balance=40k (free cash), entry=150, current=152, qty=10000, lev=25, Short
+        // required = 60000, unrealized = (150-152)*10000 = -20000
+        // equity = 40k + 60k(lock 戻し) - 20k = 80k
+        // ratio = 80k/60k ≈ 1.333
         let pos = short_at(dec!(150), dec!(152), dec!(10000), dec!(25));
-        let ratio = compute_maintenance_ratio(dec!(100000), &[pos]).unwrap();
+        let ratio = compute_maintenance_ratio(dec!(40000), &[pos]).unwrap();
         assert_eq!(ratio, dec!(80000) / dec!(60000));
+    }
+
+    #[test]
+    fn compute_maintenance_ratio_open_immediately_after_fill() {
+        // 重要: open 直後 (unrealized=0) は理屈上「initial / required」になる
+        // べき (lock 額分を戻すので)。balance=40k (= 100k - 60k lock),
+        // required=60k, unrealized=0 → equity = 100k → ratio = 100k/60k ≈ 1.667。
+        // この test は Copilot round-1 で指摘された誤発火 bug の regression guard。
+        let pos = long_at(dec!(150), dec!(150), dec!(10000), dec!(25));
+        let ratio = compute_maintenance_ratio(dec!(40000), &[pos]).unwrap();
+        assert_eq!(ratio, dec!(100000) / dec!(60000));
     }
 
     #[test]
@@ -116,11 +145,11 @@ mod tests {
 
     #[test]
     fn compute_maintenance_ratio_negative_equity_returns_negative_ratio() {
-        // balance=10000, big short loss → equity < 0、ratio も負
-        let pos = short_at(dec!(150), dec!(170), dec!(10000), dec!(25));
-        // required = 60000, unrealized = (150-170)*10000 = -200000
-        // ratio = (10000-200000)/60000 ≈ -3.166
-        let ratio = compute_maintenance_ratio(dec!(10000), &[pos]).unwrap();
-        assert!(ratio.is_sign_negative());
+        // balance=0 (lock で free cash 使い切り想定), 巨大な逆行で equity < 0、ratio も負。
+        // entry=150, current=400 → unrealized = (150-400)*10000 = -2,500,000
+        // equity = 0 + 60k(lock 戻し) - 2.5M = -2.44M → ratio < 0
+        let pos = short_at(dec!(150), dec!(400), dec!(10000), dec!(25));
+        let ratio = compute_maintenance_ratio(dec!(0), &[pos]).unwrap();
+        assert!(ratio.is_sign_negative(), "ratio={ratio}, expected negative");
     }
 }

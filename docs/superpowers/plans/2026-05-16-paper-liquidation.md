@@ -207,10 +207,11 @@ impl OpenPosition {
     }
 }
 
-/// 維持率 = (現金残高 + 評価損益合計) / 必要証拠金合計。
+/// 維持率 = 純資産 / 必要証拠金合計。
+/// 純資産 = current_balance(free cash) + Σrequired_margin (lock 戻し) + Σunrealized_pnl
 ///
 /// 必要証拠金合計が 0 (open position 無し) のとき `None` を返す。
-/// 残高 + 評価損益が負になっても比率はそのまま負を返す (caller 側で
+/// 純資産が負になっても比率はそのまま負を返す (caller 側で
 /// `< threshold` 比較に使える)。
 pub fn compute_maintenance_ratio(
     current_balance: Decimal,

@@ -138,10 +138,13 @@ async fn liquidation_fires_when_maintenance_drops_below_threshold(pool: sqlx::Pg
     );
     seed_and_lock(&pool, &trade).await;
 
-    // current=148 → unrealized=(148-150)*10000=-20000
-    // balance after lock = 100k-60k = 40k, equity = 40k-20k = 20k, ratio = 20k/60k ≈ 0.333 < 1.00
-    let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(148), dec!(148.1)).await;
-    let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(148));
+    // balance after lock = 100k - 60k = 40k (free cash)。equity 計算は
+    // free cash + lock 戻し (60k) + unrealized。threshold=1.00 を下回るには
+    // equity < 60k、つまり unrealized < -40k → current < 146。
+    // current=145 → unrealized=(145-150)*10000=-50000、equity=40k+60k-50k=50k、
+    // ratio = 50k/60k ≈ 0.833 < 1.00 → fire
+    let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(145), dec!(145.1)).await;
+    let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(145));
 
     let owned = OpenTradeWithAccount {
         trade,
@@ -183,7 +186,7 @@ async fn liquidation_does_not_fire_above_threshold(pool: sqlx::PgPool) {
     );
     seed_and_lock(&pool, &trade).await;
 
-    // current=200 → unrealized=+500000, equity=40k+500k=540k, ratio=540k/60k=9.00 > 1.00
+    // current=200 → unrealized=+500000、equity=40k+60k+500k=600k、ratio=600k/60k=10.0 > 1.00
     let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(200), dec!(200.1)).await;
     let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(200));
 
@@ -228,9 +231,9 @@ async fn live_account_skips_liquidation_judgment(pool: sqlx::PgPool) {
     );
     seed_and_lock(&pool, &trade).await;
 
-    // current=148 → ratio < 1.00 だが live なので skip される
-    let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(148), dec!(148.1)).await;
-    let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(148));
+    // current=145 → paper なら fire 条件だが live なので skip される
+    let ps = make_price_store(Exchange::GmoFx, "USD_JPY", dec!(145), dec!(145.1)).await;
+    let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(145));
 
     let owned = OpenTradeWithAccount {
         trade,
