@@ -578,6 +578,7 @@ impl Trader {
     ///      and close_commission come from a real execution and may be
     ///      non-zero; the flag flags the partial-quantity approximation
     ///      itself (DB row still records `trade.quantity`).
+    ///
     /// Callers should emit an operator-visible alert when this flag is set.
     async fn fill_close_with_stale_recovery(
         &self,
