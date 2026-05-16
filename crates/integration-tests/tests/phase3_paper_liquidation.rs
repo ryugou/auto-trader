@@ -118,9 +118,15 @@ async fn seed_and_lock(pool: &sqlx::PgPool, trade: &Trade) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn liquidation_fires_when_maintenance_drops_below_threshold(pool: sqlx::PgPool) {
-    let account_id =
-        seed_trading_account(&pool, "liq_below", "paper", "gmo_fx", "test_strategy", 100_000)
-            .await;
+    let account_id = seed_trading_account(
+        &pool,
+        "liq_below",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        100_000,
+    )
+    .await;
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -142,15 +148,14 @@ async fn liquidation_fires_when_maintenance_drops_below_threshold(pool: sqlx::Pg
         account_name: Some("liq_below".into()),
         account_type: Some("paper".into()),
     };
-    let targets = auto_trader::liquidation::detect_liquidation_targets(
-        &[owned],
-        &event,
-        &ps,
-        &pool,
-        &levels(),
-        false,
-    )
-    .await;
+    let ctx = auto_trader::liquidation::LiquidationContext {
+        pool: pool.clone(),
+        price_store: ps,
+        exchange_liquidation_levels: std::sync::Arc::new(levels()),
+        live_forces_dry_run: false,
+    };
+    let targets =
+        auto_trader::liquidation::detect_liquidation_targets(&ctx, &[owned], &event).await;
     assert_eq!(targets.len(), 1, "one account should liquidate");
     assert_eq!(targets[0].0, account_id);
     assert_eq!(targets[0].1.len(), 1, "single trade in account");
@@ -158,9 +163,15 @@ async fn liquidation_fires_when_maintenance_drops_below_threshold(pool: sqlx::Pg
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn liquidation_does_not_fire_above_threshold(pool: sqlx::PgPool) {
-    let account_id =
-        seed_trading_account(&pool, "liq_above", "paper", "gmo_fx", "test_strategy", 100_000)
-            .await;
+    let account_id = seed_trading_account(
+        &pool,
+        "liq_above",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        100_000,
+    )
+    .await;
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -181,15 +192,14 @@ async fn liquidation_does_not_fire_above_threshold(pool: sqlx::PgPool) {
         account_name: Some("liq_above".into()),
         account_type: Some("paper".into()),
     };
-    let targets = auto_trader::liquidation::detect_liquidation_targets(
-        &[owned],
-        &event,
-        &ps,
-        &pool,
-        &levels(),
-        false,
-    )
-    .await;
+    let ctx = auto_trader::liquidation::LiquidationContext {
+        pool: pool.clone(),
+        price_store: ps,
+        exchange_liquidation_levels: std::sync::Arc::new(levels()),
+        live_forces_dry_run: false,
+    };
+    let targets =
+        auto_trader::liquidation::detect_liquidation_targets(&ctx, &[owned], &event).await;
     assert!(
         targets.is_empty(),
         "no liquidation when ratio above threshold"
@@ -198,9 +208,15 @@ async fn liquidation_does_not_fire_above_threshold(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn live_account_skips_liquidation_judgment(pool: sqlx::PgPool) {
-    let account_id =
-        seed_trading_account(&pool, "liq_live", "live", "gmo_fx", "test_strategy", 100_000)
-            .await;
+    let account_id = seed_trading_account(
+        &pool,
+        "liq_live",
+        "live",
+        "gmo_fx",
+        "test_strategy",
+        100_000,
+    )
+    .await;
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -221,15 +237,14 @@ async fn live_account_skips_liquidation_judgment(pool: sqlx::PgPool) {
         account_name: Some("liq_live".into()),
         account_type: Some("live".into()),
     };
-    let targets = auto_trader::liquidation::detect_liquidation_targets(
-        &[owned],
-        &event,
-        &ps,
-        &pool,
-        &levels(),
-        false, // live_forces_dry_run=false
-    )
-    .await;
+    let ctx = auto_trader::liquidation::LiquidationContext {
+        pool: pool.clone(),
+        price_store: ps,
+        exchange_liquidation_levels: std::sync::Arc::new(levels()),
+        live_forces_dry_run: false, // live: skip
+    };
+    let targets =
+        auto_trader::liquidation::detect_liquidation_targets(&ctx, &[owned], &event).await;
     assert!(
         targets.is_empty(),
         "live account must not be liquidated by paper logic"
@@ -267,15 +282,14 @@ async fn missing_price_skips_judgment(pool: sqlx::PgPool) {
         account_name: Some("liq_missing_price".into()),
         account_type: Some("paper".into()),
     };
-    let targets = auto_trader::liquidation::detect_liquidation_targets(
-        &[owned],
-        &event,
-        &ps,
-        &pool,
-        &levels(),
-        false,
-    )
-    .await;
+    let ctx = auto_trader::liquidation::LiquidationContext {
+        pool: pool.clone(),
+        price_store: ps,
+        exchange_liquidation_levels: std::sync::Arc::new(levels()),
+        live_forces_dry_run: false,
+    };
+    let targets =
+        auto_trader::liquidation::detect_liquidation_targets(&ctx, &[owned], &event).await;
     assert!(
         targets.is_empty(),
         "missing price must skip judgment (false-positive prevention)"
