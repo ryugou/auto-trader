@@ -162,6 +162,10 @@ pub enum ExitReason {
     /// audit queries; previously written as a raw &str which caused the
     /// TradeRow mapper to bail on unknown strings.
     Reconciled,
+    /// Force-close triggered by paper account の維持率 (maintenance ratio)
+    /// が `liquidation_margin_level` を下回ったため。live 経路では exchange
+    /// 側でロスカットが走るので、本 variant は paper (dry_run) のみ。
+    Liquidation,
 }
 
 impl ExitReason {
@@ -178,6 +182,7 @@ impl ExitReason {
             ExitReason::StrategyIndicatorReversal => "strategy_indicator_reversal",
             ExitReason::StrategyTimeLimit => "strategy_time_limit",
             ExitReason::Reconciled => "reconciled",
+            ExitReason::Liquidation => "liquidation",
         }
     }
 }
@@ -196,6 +201,7 @@ impl std::str::FromStr for ExitReason {
             "strategy_indicator_reversal" => Ok(ExitReason::StrategyIndicatorReversal),
             "strategy_time_limit" => Ok(ExitReason::StrategyTimeLimit),
             "reconciled" => Ok(ExitReason::Reconciled),
+            "liquidation" => Ok(ExitReason::Liquidation),
             other => anyhow::bail!("unknown exit_reason: {other}"),
         }
     }
@@ -424,5 +430,13 @@ mod tests {
         assert_eq!(TradeStatus::Open.as_str(), "open");
         assert_eq!(TradeStatus::Closing.as_str(), "closing");
         assert_eq!(TradeStatus::Closed.as_str(), "closed");
+    }
+
+    #[test]
+    fn exit_reason_liquidation_roundtrips_via_string() {
+        let reason = ExitReason::Liquidation;
+        assert_eq!(reason.as_str(), "liquidation");
+        let parsed: ExitReason = "liquidation".parse().unwrap();
+        assert_eq!(parsed.as_str(), "liquidation");
     }
 }

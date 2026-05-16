@@ -848,6 +848,24 @@ async fn main() -> anyhow::Result<()> {
     let crypto_monitor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
     let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
     let crypto_monitor_handle = tokio::spawn(async move {
+        // SL/TP/TimeLimit と Liquidation 両経路で共通の close ロジックを
+        // ここに一本化する (`closer::close_trade`)。`TradeEvent` 送信や
+        // log を片方だけ忘れることを防ぐ。
+        let close_ctx = auto_trader::closer::CloseContext {
+            pool: crypto_monitor_pool.clone(),
+            apis: crypto_monitor_exchange_apis.clone(),
+            price_store: crypto_monitor_price_store.clone(),
+            notifier: crypto_monitor_notifier.clone(),
+            position_sizer: crypto_monitor_position_sizer.clone(),
+            liquidation_levels: crypto_monitor_exchange_liquidation_levels.clone(),
+            trade_tx: crypto_monitor_trade_tx.clone(),
+        };
+        let liq_ctx = auto_trader::liquidation::LiquidationContext {
+            pool: crypto_monitor_pool.clone(),
+            price_store: crypto_monitor_price_store.clone(),
+            exchange_liquidation_levels: crypto_monitor_exchange_liquidation_levels.clone(),
+            live_forces_dry_run: crypto_monitor_live_forces_dry_run,
+        };
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
             let open_trades =
@@ -860,6 +878,44 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+
+            // Liquidation 判定 (paper のみ): tick の event.exchange と一致する account を
+            // walk して、維持率が threshold を下回ったら同 account の全 trade を順次
+            // ExitReason::Liquidation で close する。SL/TP/TimeLimit 判定の前に走らせ、
+            // 既存 close 経路と排他は acquire_close_lock の natural CAS で成立する。
+            let liq_targets = auto_trader::liquidation::detect_liquidation_targets(
+                &liq_ctx,
+                &open_trades,
+                &event,
+            )
+            .await;
+            for (account_id, trade_ids) in liq_targets {
+                for trade_id in trade_ids {
+                    let owned = match open_trades.iter().find(|t| t.trade.id == trade_id) {
+                        Some(o) => o,
+                        None => continue, // 既に他経路で close 済 (まれ)
+                    };
+                    let account_name = owned
+                        .account_name
+                        .clone()
+                        .unwrap_or_else(|| account_id.to_string());
+                    let account_type = owned
+                        .account_type
+                        .clone()
+                        .unwrap_or_else(|| "paper".to_string());
+                    auto_trader::closer::close_trade(
+                        &close_ctx,
+                        &owned.trade,
+                        account_name,
+                        account_type,
+                        true, // dry_run: detect_liquidation_targets が paper のみ返す
+                        auto_trader_core::types::ExitReason::Liquidation,
+                        current_price,
+                    )
+                    .await;
+                }
+            }
+
             for owned in open_trades {
                 let trade = owned.trade;
                 // Match by exchange + pair so GmoFx trades are monitored against
@@ -920,82 +976,16 @@ async fn main() -> anyhow::Result<()> {
                     exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
                 }
                 if let Some(reason) = exit_reason {
-                    // Live accounts require a real ExchangeApi. Paper/dry_run accounts fill
-                    // from PriceStore and never call API methods, so NullExchangeApi is safe
-                    // when no real implementation exists yet (e.g. GMO Coin FX).
-                    let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
-                        match crypto_monitor_exchange_apis.get(&trade.exchange) {
-                            Some(a) => a.clone(),
-                            None => {
-                                if !dry_run {
-                                    tracing::warn!(
-                                        "no ExchangeApi registered for exchange {:?}; skipping close for live trade {}",
-                                        trade.exchange,
-                                        trade.id
-                                    );
-                                    continue;
-                                }
-                                std::sync::Arc::new(
-                                    auto_trader_market::null_exchange_api::NullExchangeApi,
-                                )
-                            }
-                        };
-                    let liquidation_margin_level =
-                        match auto_trader::startup::liquidation_level_or_log(
-                            &crypto_monitor_exchange_liquidation_levels,
-                            trade.exchange,
-                            || format!("close trade {}", trade.id),
-                        ) {
-                            Some(y) => y,
-                            None => continue,
-                        };
-                    let trader = UnifiedTrader::new(
-                        crypto_monitor_pool.clone(),
-                        trade.exchange,
-                        account_id,
+                    auto_trader::closer::close_trade(
+                        &close_ctx,
+                        &trade,
                         account_name,
-                        api,
-                        crypto_monitor_price_store.clone(),
-                        crypto_monitor_notifier.clone(),
-                        crypto_monitor_position_sizer.clone(),
-                        liquidation_margin_level,
+                        account_type.clone(),
                         dry_run,
-                    );
-                    match trader.close_position(&trade.id.to_string(), reason).await {
-                        Ok(closed_trade) => {
-                            let exit_price = closed_trade.exit_price.unwrap_or(current_price);
-                            tracing::info!(
-                                "position closed: {} {} {:?} at {} ({:?})",
-                                closed_trade.strategy_name,
-                                closed_trade.pair,
-                                closed_trade.direction,
-                                exit_price,
-                                reason
-                            );
-                            if let Err(e) = crypto_monitor_trade_tx
-                                .send(TradeEvent {
-                                    trade: closed_trade,
-                                    action: TradeAction::Closed {
-                                        exit_price,
-                                        exit_reason: reason,
-                                    },
-                                    account_type: Some(account_type.clone()),
-                                })
-                                .await
-                            {
-                                tracing::error!(
-                                    "trade channel send failed for position close: {e}"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Concurrent close losers land here — log at debug.
-                            tracing::debug!(
-                                "close_position skipped/failed for trade {}: {e}",
-                                trade.id
-                            );
-                        }
-                    }
+                        reason,
+                        current_price,
+                    )
+                    .await;
                 }
             }
         }
