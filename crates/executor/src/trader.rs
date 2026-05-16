@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use auto_trader_core::commission;
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
@@ -36,21 +37,29 @@ fn truncate_yen(amount: Decimal) -> Decimal {
     amount.round_dp_with_strategy(0, RoundingStrategy::ToZero)
 }
 
-/// Aggregate a non-empty execution list into (volume-weighted avg price, total size).
+/// Aggregate a non-empty execution list into
+/// (volume-weighted avg price, total size, total commission).
 ///
-/// Used when `poll_executions` timed out but a follow-up `get_executions` call
-/// confirmed the order did fill. Returns an error if the executions are empty
-/// or total size is zero (caller should have guarded against the empty case).
-fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal)> {
-    let total_size: Decimal = execs.iter().map(|e| e.size).sum();
+/// Single-pass fold over `execs` for all three sums. Used by both
+/// `poll_executions` (live happy path) and the post-timeout reconcile path
+/// inside `fill_open` — keeping one definition prevents the three values
+/// from drifting apart.
+///
+/// Returns an error if total size is zero (the caller should have guarded
+/// against the empty-list case so `total_size == 0` only happens with
+/// pathological zero-size executions).
+fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
+    let (total_size, total_notional, total_commission) = execs.iter().fold(
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+        |(s, n, c), e| (s + e.size, n + e.price * e.size, c + e.commission),
+    );
     if total_size.is_zero() {
         anyhow::bail!(
             "aggregate_executions: total size is zero across {} execs",
             execs.len()
         );
     }
-    let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
-    Ok((total_notional / total_size, total_size))
+    Ok((total_notional / total_size, total_size, total_commission))
 }
 
 pub struct Trader {
@@ -166,15 +175,15 @@ impl Trader {
         self
     }
 
-    /// fill_open: signal → 約定価格 + 実数量
+    /// fill_open: signal → 約定価格 + 実数量 + commission
     ///
-    /// - dry_run=true: PriceStore から Long=ask / Short=bid
-    /// - dry_run=false: send_child_order → poll_executions
+    /// - dry_run=true: PriceStore から Long=ask / Short=bid、commission は estimate_open
+    /// - dry_run=false: send_child_order → poll_executions、commission は約定の合計
     async fn fill_open(
         &self,
         signal: &Signal,
         quantity: Decimal,
-    ) -> anyhow::Result<(Decimal, Decimal)> {
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
         if self.dry_run {
             let feed_key = FeedKey::new(self.exchange, signal.pair.clone());
             let (bid, ask) = self
@@ -186,7 +195,9 @@ impl Trader {
                 Direction::Long => ask,
                 Direction::Short => bid,
             };
-            Ok((price, quantity))
+            let commission =
+                commission::estimate(commission::Action::Open, self.exchange, price, quantity);
+            Ok((price, quantity, commission))
         } else {
             let req = self.signal_to_send_child_order(signal, quantity);
             let resp = self.api.send_child_order(req).await?;
@@ -195,7 +206,7 @@ impl Trader {
                 .poll_executions(&order_id, &signal.pair.0, self.poll_timeout)
                 .await
             {
-                Ok((price, qty)) => Ok((price, qty)),
+                Ok((price, qty, commission)) => Ok((price, qty, commission)),
                 Err(poll_err) => {
                     // poll_executions failed — the order may or may not have filled at the exchange.
                     // Consult the exchange before giving up to avoid creating an
@@ -210,14 +221,14 @@ impl Trader {
                         Ok(execs) if !execs.is_empty() => {
                             // Fill did happen — aggregate to get avg price + total size.
                             match aggregate_executions(&execs) {
-                                Ok((avg_price, total_size)) => {
+                                Ok((avg_price, total_size, commission)) => {
                                     tracing::info!(
                                         "open fill reconciled after timeout: order {} filled {} @ {}",
                                         order_id,
                                         total_size,
                                         avg_price
                                     );
-                                    Ok((avg_price, total_size))
+                                    Ok((avg_price, total_size, commission))
                                 }
                                 Err(agg_err) => {
                                     // aggregate failed (e.g. all size=0) — fall through to
@@ -259,18 +270,19 @@ impl Trader {
                                                 .await
                                             {
                                                 Ok(execs) if !execs.is_empty() => {
-                                                    let (avg_price, total_size) =
+                                                    let (avg_price, total_size, commission) =
                                                         aggregate_executions(&execs)?;
-                                                    Ok((avg_price, total_size))
+                                                    Ok((avg_price, total_size, commission))
                                                 }
                                                 _ => {
                                                     // Fall back to order-level data.
+                                                    // commission は execution レベルでしか取得できないので 0。
                                                     if order.average_price > Decimal::ZERO
                                                         && order.executed_size > Decimal::ZERO
                                                     {
                                                         tracing::warn!(
                                                             "open fill: order {} Completed but get_executions empty; \
-                                                             using order-level avg_price={} executed_size={}",
+                                                             using order-level avg_price={} executed_size={}, commission=0",
                                                             order_id,
                                                             order.average_price,
                                                             order.executed_size
@@ -278,6 +290,7 @@ impl Trader {
                                                         Ok((
                                                             order.average_price,
                                                             order.executed_size,
+                                                            Decimal::ZERO,
                                                         ))
                                                     } else {
                                                         Err(anyhow::anyhow!(
@@ -361,11 +374,11 @@ impl Trader {
         }
     }
 
-    /// fill_close: trade → 決済価格
+    /// fill_close: trade → 決済価格 + commission
     ///
-    /// - dry_run=true: PriceStore から Long 決済=bid / Short 決済=ask
-    /// - dry_run=false: 反対売買 send_child_order → poll_executions
-    async fn fill_close(&self, trade: &Trade) -> anyhow::Result<Decimal> {
+    /// - dry_run=true: PriceStore から Long 決済=bid / Short 決済=ask、commission は estimate_close
+    /// - dry_run=false: 反対売買 send_child_order → poll_executions、commission は約定の合計
+    async fn fill_close(&self, trade: &Trade) -> anyhow::Result<(Decimal, Decimal)> {
         if self.dry_run {
             let feed_key = FeedKey::new(self.exchange, trade.pair.clone());
             let (bid, ask) = self
@@ -379,19 +392,25 @@ impl Trader {
                 Direction::Long => bid,
                 Direction::Short => ask,
             };
-            Ok(price)
+            let commission = commission::estimate(
+                commission::Action::Close,
+                self.exchange,
+                price,
+                trade.quantity,
+            );
+            Ok((price, commission))
         } else {
             self.ensure_close_position_id_present(trade)?;
             let req = self.opposite_side_market_order(trade);
             let resp = self.api.send_child_order(req).await?;
-            let (price, _qty) = self
+            let (price, _qty, commission) = self
                 .poll_executions(
                     &resp.child_order_acceptance_id,
                     &trade.pair.0,
                     self.poll_timeout,
                 )
                 .await?;
-            Ok(price)
+            Ok((price, commission))
         }
     }
 
@@ -406,7 +425,7 @@ impl Trader {
         acceptance_id: &str,
         pair_str: &str,
         timeout: Duration,
-    ) -> anyhow::Result<(Decimal, Decimal)> {
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
         let start = Instant::now();
         let mut delay = Duration::from_millis(100);
         loop {
@@ -415,11 +434,13 @@ impl Trader {
             }
             let execs = self.api.get_executions(pair_str, acceptance_id).await?;
             if !execs.is_empty() {
-                let total_size: Decimal = execs.iter().map(|e| e.size).sum();
-                if !total_size.is_zero() {
-                    let total_notional: Decimal = execs.iter().map(|e| e.price * e.size).sum();
-                    let avg = total_notional / total_size;
-                    return Ok((avg, total_size));
+                // Reuse aggregate_executions so size/notional/commission stay
+                // computed in one place. aggregate's zero-size bail is mapped
+                // back to "still polling" — a strictly-zero-size execution
+                // batch is rare (zero-size fills); keep looping instead of
+                // surfacing the aggregate error to the caller.
+                if let Ok(outcome) = aggregate_executions(&execs) {
+                    return Ok(outcome);
                 }
             }
             tokio::time::sleep(delay).await;
@@ -546,14 +567,22 @@ impl Trader {
     /// `trade.quantity`, only the remaining size is closed to prevent over-close
     /// (which would otherwise open an unintended opposite position).
     ///
-    /// Returns `(exit_price, was_approximate)`.  `was_approximate` is `true`
-    /// when the exchange position was already gone and we used a best-effort
-    /// price (PriceStore mid or entry_price fallback). Callers should emit an
-    /// operator-visible alert when this flag is set.
+    /// Returns `(exit_price, close_commission, was_approximate)`.
+    /// `was_approximate = true` is set in two sub-cases:
+    ///   1. Exchange position has fully disappeared (Phase 2 completed before
+    ///      crash): exit_price is a best-effort PriceStore mid / entry_price
+    ///      fallback, and close_commission is 0 because no fresh execution
+    ///      data is available.
+    ///   2. Partial fill before crash (`exchange_size < trade.quantity`): we
+    ///      close only the remaining size via `fill_close_size`, so exit_price
+    ///      and close_commission come from a real execution and may be
+    ///      non-zero; the flag flags the partial-quantity approximation
+    ///      itself (DB row still records `trade.quantity`).
+    /// Callers should emit an operator-visible alert when this flag is set.
     async fn fill_close_with_stale_recovery(
         &self,
         trade: &Trade,
-    ) -> anyhow::Result<(Decimal, bool)> {
+    ) -> anyhow::Result<(Decimal, Decimal, bool)> {
         let positions = self.api.get_positions(&trade.pair.0).await?;
 
         let mut total_exchange_size = Decimal::ZERO;
@@ -596,7 +625,8 @@ impl Trader {
                 trade.id
             );
             let price = self.resolve_stale_exit_price(trade).await?;
-            Ok((price, true))
+            // No fresh execution → commission unknown, fall back to 0.
+            Ok((price, Decimal::ZERO, true))
         } else if total_exchange_size == trade.quantity {
             // Full quantity still open → Phase 2 really failed, re-run it.
             tracing::info!(
@@ -604,8 +634,8 @@ impl Trader {
                 total_exchange_size,
                 trade.id
             );
-            let price = self.fill_close(trade).await?;
-            Ok((price, false))
+            let (price, commission) = self.fill_close(trade).await?;
+            Ok((price, commission, false))
         } else if total_exchange_size < trade.quantity {
             // Partial fill before crash: close only remaining size to avoid
             // over-close which would open an unintended opposite position.
@@ -615,10 +645,10 @@ impl Trader {
                 trade.quantity,
                 total_exchange_size
             );
-            let price = self.fill_close_size(trade, total_exchange_size).await?;
+            let (price, commission) = self.fill_close_size(trade, total_exchange_size).await?;
             // The DB row still records trade.quantity; the already-filled delta was
             // handled in the original Phase 2 before the crash. We approximate here.
-            Ok((price, true))
+            Ok((price, commission, true))
         } else {
             // Exchange size > trade.quantity — invariant violation. A single
             // exchange account per process should never have more than trade.quantity
@@ -639,7 +669,11 @@ impl Trader {
     /// Used by stale recovery when a partial fill was detected: the remaining
     /// exchange position is smaller than `trade.quantity`, so we close only what
     /// the exchange actually holds to prevent over-close / unintended reversal.
-    async fn fill_close_size(&self, trade: &Trade, size: Decimal) -> anyhow::Result<Decimal> {
+    async fn fill_close_size(
+        &self,
+        trade: &Trade,
+        size: Decimal,
+    ) -> anyhow::Result<(Decimal, Decimal)> {
         if self.dry_run {
             // Dry-run: return price from PriceStore regardless of size (same as fill_close).
             return self.fill_close(trade).await;
@@ -660,14 +694,14 @@ impl Trader {
             close_position_id: trade.exchange_position_id.clone(),
         };
         let resp = self.api.send_child_order(req).await?;
-        let (price, _qty) = self
+        let (price, _qty, commission) = self
             .poll_executions(
                 &resp.child_order_acceptance_id,
                 &trade.pair.0,
                 self.poll_timeout,
             )
             .await?;
-        Ok(price)
+        Ok((price, commission))
     }
 
     /// Best-effort exit price for a trade that was closed at the exchange but
@@ -777,8 +811,8 @@ impl OrderExecutor for Trader {
         // between this host and GMO's exchange-side clock.
         let position_cutoff = Utc::now() - chrono::Duration::seconds(1);
 
-        // 3. fill_open() で fill 価格 + 実数量取得
-        let (fill_price, actual_qty) = self.fill_open(signal, quantity).await?;
+        // 3. fill_open() で fill 価格 + 実数量 + commission 取得
+        let (fill_price, actual_qty, open_commission) = self.fill_open(signal, quantity).await?;
 
         // 4. SL/TP を fill_price から逆算
         let stop_loss = match signal.direction {
@@ -857,7 +891,7 @@ impl OrderExecutor for Trader {
             take_profit,
             quantity: actual_qty,
             leverage,
-            fees: Decimal::ZERO,
+            fees: open_commission,
             entry_at,
             exit_at: None,
             pnl_amount: None,
@@ -995,23 +1029,24 @@ impl OrderExecutor for Trader {
         // to a best-effort price. We fire an operator alert after Phase 3 in
         // that case so the PnL approximation is always visible.
         let mut stale_approximate = false;
-        let exit_price_result: anyhow::Result<Decimal> = if !self.dry_run && was_stale_recovery {
+        let exit_result: anyhow::Result<(Decimal, Decimal)> = if !self.dry_run && was_stale_recovery
+        {
             tracing::warn!(
                 "close_position: stale-lock recovery for trade {}; verifying exchange state before Phase 2",
                 trade.id
             );
             match self.fill_close_with_stale_recovery(&trade).await {
-                Ok((price, approximate)) => {
+                Ok((price, commission, approximate)) => {
                     stale_approximate = approximate;
-                    Ok(price)
+                    Ok((price, commission))
                 }
                 Err(e) => Err(e),
             }
         } else {
             self.fill_close(&trade).await
         };
-        let exit_price = match exit_price_result {
-            Ok(price) => price,
+        let (exit_price, close_commission) = match exit_result {
+            Ok(pair) => pair,
             Err(e) => {
                 // Roll back the lock so future close attempts can retry.
                 if let Err(release_err) =
@@ -1053,7 +1088,7 @@ impl OrderExecutor for Trader {
             take_profit: trade.take_profit,
             quantity: trade.quantity,
             leverage: trade.leverage,
-            fees: trade.fees,
+            fees: trade.fees + close_commission,
             entry_at: trade.entry_at,
             exit_at: Some(exit_at),
             pnl_amount: Some(pnl_amount),
