@@ -120,8 +120,18 @@ pub async fn close_trade(
             }
         }
         Err(e) => {
-            // Concurrent close losers land here — log at debug.
-            tracing::debug!("close_position skipped/failed for trade {}: {e}", trade.id);
+            // SL/TP/TimeLimit close failures are mostly concurrent-close losers
+            // (`acquire_close_lock` lost the race) — expected, log at debug.
+            // Liquidation close failures (price unavailable / DB error etc.)
+            // leave the account exposed and must reach operators — log at warn.
+            if matches!(exit_reason, ExitReason::Liquidation) {
+                tracing::warn!(
+                    "liquidation close FAILED for trade {} (account exposed): {e}",
+                    trade.id
+                );
+            } else {
+                tracing::debug!("close_position skipped/failed for trade {}: {e}", trade.id);
+            }
         }
     }
 }

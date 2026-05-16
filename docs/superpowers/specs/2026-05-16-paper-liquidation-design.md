@@ -97,7 +97,10 @@ pub fn compute_maintenance_ratio(
         return None;
     }
     let total_unrealized: Decimal = positions.iter().map(|p| p.unrealized_pnl()).sum();
-    Some((current_balance + total_unrealized) / total_required)
+    // current_balance は margin lock 後の free cash。lock 額 (= total_required)
+    // を加算して initial-balance ベースの正しい equity に戻す。
+    let equity = current_balance + total_required + total_unrealized;
+    Some(equity / total_required)
 }
 ```
 

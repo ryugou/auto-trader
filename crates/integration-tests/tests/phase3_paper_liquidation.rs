@@ -298,3 +298,105 @@ async fn missing_price_skips_judgment(pool: sqlx::PgPool) {
         "missing price must skip judgment (false-positive prevention)"
     );
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn liquidation_returns_all_trades_in_breached_account(pool: sqlx::PgPool) {
+    // 同 account に 2 open trade (USD_JPY + EUR_USD) を持ち、両 pair が大きく
+    // 逆行して維持率が threshold を下回ったとき、戻り値が両 trade_id を含む
+    // ことを確認する。account 単位 close の new contract を guard する test。
+    let account_id = seed_trading_account(
+        &pool,
+        "liq_multi",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        100_000,
+    )
+    .await;
+
+    // trade1: USD_JPY Long, entry=150, qty=5000, lev=25 → required=30k
+    let trade1 = make_trade(
+        account_id,
+        Exchange::GmoFx,
+        "USD_JPY",
+        Direction::Long,
+        dec!(150),
+        dec!(5000),
+        dec!(25),
+    );
+    seed_and_lock(&pool, &trade1).await;
+
+    // trade2: EUR_USD Long, entry=1.10, qty=27272.728 (≈ price=1.1, qty で required≈1200)
+    // ただし price_unit 等の精度確認は本テストではなく、ここでは別 pair に open trade
+    // が同 account にいるという事実だけを表現したい。entry/qty を小さく取り required は
+    // trade1 主体に。required(trade2) = 1.1 * 1000 / 25 = 44 (微小)
+    let trade2 = make_trade(
+        account_id,
+        Exchange::GmoFx,
+        "EUR_USD",
+        Direction::Long,
+        dec!(1.10),
+        dec!(1000),
+        dec!(25),
+    );
+    seed_and_lock(&pool, &trade2).await;
+
+    // balance after both locks ≈ 100000 - 30000 - 44 = 69956
+    // 大きな逆行: USD_JPY current=120 → unrealized = (120-150)*5000 = -150000
+    //              EUR_USD current=1.10 → unrealized = 0
+    // required_total = 30044, unrealized_total = -150000
+    // equity = 69956 + 30044 - 150000 = -50000 → ratio < 0 < 1.0 → fire
+    let feed_key1 = FeedKey::new(Exchange::GmoFx, Pair::new("USD_JPY"));
+    let feed_key2 = FeedKey::new(Exchange::GmoFx, Pair::new("EUR_USD"));
+    let ps = PriceStore::new(vec![feed_key1.clone(), feed_key2.clone()]);
+    ps.update(
+        feed_key1,
+        LatestTick {
+            price: dec!(120),
+            best_bid: Some(dec!(120)),
+            best_ask: Some(dec!(120.1)),
+            ts: Utc::now(),
+        },
+    )
+    .await;
+    ps.update(
+        feed_key2,
+        LatestTick {
+            price: dec!(1.10),
+            best_bid: Some(dec!(1.10)),
+            best_ask: Some(dec!(1.1001)),
+            ts: Utc::now(),
+        },
+    )
+    .await;
+
+    let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(120));
+    let owned1 = OpenTradeWithAccount {
+        trade: trade1.clone(),
+        account_name: Some("liq_multi".into()),
+        account_type: Some("paper".into()),
+    };
+    let owned2 = OpenTradeWithAccount {
+        trade: trade2.clone(),
+        account_name: Some("liq_multi".into()),
+        account_type: Some("paper".into()),
+    };
+    let ctx = auto_trader::liquidation::LiquidationContext {
+        pool: pool.clone(),
+        price_store: ps,
+        exchange_liquidation_levels: std::sync::Arc::new(levels()),
+        live_forces_dry_run: false,
+    };
+    let targets =
+        auto_trader::liquidation::detect_liquidation_targets(&ctx, &[owned1, owned2], &event).await;
+    assert_eq!(targets.len(), 1, "one breached account");
+    assert_eq!(targets[0].0, account_id);
+    let mut returned_ids = targets[0].1.clone();
+    returned_ids.sort();
+    let mut expected_ids = vec![trade1.id, trade2.id];
+    expected_ids.sort();
+    assert_eq!(
+        returned_ids, expected_ids,
+        "breached account must return ALL its open trades for force-close"
+    );
+}
