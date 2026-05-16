@@ -568,11 +568,17 @@ impl Trader {
     /// (which would otherwise open an unintended opposite position).
     ///
     /// Returns `(exit_price, close_commission, was_approximate)`.
-    /// `was_approximate` is `true` when the exchange position was already gone
-    /// and we used a best-effort price (PriceStore mid or entry_price fallback);
-    /// in that case close_commission is 0 because no fresh execution data is
-    /// available. Callers should emit an operator-visible alert when this flag
-    /// is set.
+    /// `was_approximate = true` is set in two sub-cases:
+    ///   1. Exchange position has fully disappeared (Phase 2 completed before
+    ///      crash): exit_price is a best-effort PriceStore mid / entry_price
+    ///      fallback, and close_commission is 0 because no fresh execution
+    ///      data is available.
+    ///   2. Partial fill before crash (`exchange_size < trade.quantity`): we
+    ///      close only the remaining size via `fill_close_size`, so exit_price
+    ///      and close_commission come from a real execution and may be
+    ///      non-zero; the flag flags the partial-quantity approximation
+    ///      itself (DB row still records `trade.quantity`).
+    /// Callers should emit an operator-visible alert when this flag is set.
     async fn fill_close_with_stale_recovery(
         &self,
         trade: &Trade,
