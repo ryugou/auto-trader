@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use auto_trader_core::commission;
 use auto_trader_core::executor::OrderExecutor;
+use auto_trader_core::sfd;
 use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
     ChildOrderState, ChildOrderType, Execution, SendChildOrderRequest, Side,
@@ -1065,6 +1066,28 @@ impl OrderExecutor for Trader {
             }
         };
 
+        // SFD (bitFlyer Crypto CFD) — close 直前に累積を取得して fees に積む。
+        // 取得失敗時は warn + 0 で続行 (close をブロックしない方が運用上
+        // 安全 — SFD 未反映は手動補正可能、close 失敗は liquidation リスク
+        // 直結)。spec: docs/superpowers/specs/2026-05-17-sfd-fees-design.md
+        let sfd_accrued = if self.dry_run {
+            sfd::estimate(self.exchange, exit_price, trade.quantity)
+        } else {
+            match self.api.fetch_close_sfd(&trade.pair.0).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        trade_id = %trade.id,
+                        pair = %trade.pair,
+                        error = %e,
+                        "fetch_close_sfd failed; treating sfd as 0 to avoid blocking close"
+                    );
+                    Decimal::ZERO
+                }
+            }
+        };
+        let total_close_fee = close_commission + sfd_accrued;
+
         // Phase 3: CAS update + ledger in a single transaction.
         // update_trade_closed accepts WHERE status IN ('open', 'closing'),
         // so we (the lock holder, status='closing') will succeed while any
@@ -1089,7 +1112,7 @@ impl OrderExecutor for Trader {
             take_profit: trade.take_profit,
             quantity: trade.quantity,
             leverage: trade.leverage,
-            fees: trade.fees + close_commission,
+            fees: trade.fees + total_close_fee,
             entry_at: trade.entry_at,
             exit_at: Some(exit_at),
             pnl_amount: Some(pnl_amount),
@@ -1116,7 +1139,7 @@ impl OrderExecutor for Trader {
                 exit_at,
                 pnl_amount,
                 exit_reason,
-                trade.fees,
+                closed_trade.fees,
             )
             .await?;
 
