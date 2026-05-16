@@ -1,7 +1,7 @@
 # Paper liquidation (アカウント単位の維持率ロスカット) 設計
 
 - 作成日: 2026-05-16
-- ステータス: 設計完了 (実装は次の plan で着手)
+- ステータス: 実装済 (PR #90) — 本ドキュメントは設計・意思決定の記録として保存
 - 目的: paper=live 監査の残課題 #4 (paper liquidation) を解消。paper 経路でも live と同じ「アカウント維持率が `liquidation_margin_level` を下回ったら同 account の全 open trade を強制決済」挙動を実現する。
 - 関連: PR #86 (GMO FX Private API) / PR #87 (commission) / `memory/feedback_paper_equals_live_in_unified_design.md`
 
