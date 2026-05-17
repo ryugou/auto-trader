@@ -1030,6 +1030,29 @@ impl OrderExecutor for Trader {
         // determines that the exchange position was already gone and falls back
         // to a best-effort price. We fire an operator alert after Phase 3 in
         // that case so the PnL approximation is always visible.
+        // SFD (bitFlyer Crypto CFD) — 必ず fill_close *前* に snapshot する。
+        // close で position が netting されると get_positions の sfd field は
+        // 0/missing になり、close 後に読むと未計上のまま失われる。
+        // 取得失敗時は warn + 0 で続行 (close をブロックしない方が運用上
+        // 安全 — SFD 未反映は手動補正可能、close 失敗は liquidation リスク
+        // 直結)。spec: docs/superpowers/specs/2026-05-17-sfd-fees-design.md
+        let sfd_accrued = if self.dry_run {
+            sfd::estimate(self.exchange, trade.entry_price, trade.quantity)
+        } else {
+            match self.api.fetch_close_sfd(&trade.pair.0).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        trade_id = %trade.id,
+                        pair = %trade.pair,
+                        error = %e,
+                        "fetch_close_sfd failed; treating sfd as 0 to avoid blocking close"
+                    );
+                    Decimal::ZERO
+                }
+            }
+        };
+
         let mut stale_approximate = false;
         let exit_result: anyhow::Result<(Decimal, Decimal)> = if !self.dry_run && was_stale_recovery
         {
@@ -1066,28 +1089,6 @@ impl OrderExecutor for Trader {
             }
         };
 
-        // SFD (bitFlyer Crypto CFD) — close 直前に累積を取得して fees に積む。
-        // 取得失敗時は warn + 0 で続行 (close をブロックしない方が運用上
-        // 安全 — SFD 未反映は手動補正可能、close 失敗は liquidation リスク
-        // 直結)。spec: docs/superpowers/specs/2026-05-17-sfd-fees-design.md
-        let sfd_accrued = if self.dry_run {
-            sfd::estimate(self.exchange, exit_price, trade.quantity)
-        } else {
-            match self.api.fetch_close_sfd(&trade.pair.0).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        trade_id = %trade.id,
-                        pair = %trade.pair,
-                        error = %e,
-                        "fetch_close_sfd failed; treating sfd as 0 to avoid blocking close"
-                    );
-                    Decimal::ZERO
-                }
-            }
-        };
-        let total_close_fee = close_commission + sfd_accrued;
-
         // Phase 3: CAS update + ledger in a single transaction.
         // update_trade_closed accepts WHERE status IN ('open', 'closing'),
         // so we (the lock holder, status='closing') will succeed while any
@@ -1112,7 +1113,7 @@ impl OrderExecutor for Trader {
             take_profit: trade.take_profit,
             quantity: trade.quantity,
             leverage: trade.leverage,
-            fees: trade.fees + total_close_fee,
+            fees: trade.fees + close_commission + sfd_accrued,
             entry_at: trade.entry_at,
             exit_at: Some(exit_at),
             pnl_amount: Some(pnl_amount),

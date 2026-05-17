@@ -116,8 +116,6 @@ impl ExchangeApi for SfdMockApi {
         Ok(None)
     }
 
-    // bitFlyer default: false。trader は resolve_position_id を呼ばない。
-
     async fn fetch_close_sfd(&self, _product_code: &str) -> anyhow::Result<Decimal> {
         match self.sfd {
             Ok(v) => Ok(v),
