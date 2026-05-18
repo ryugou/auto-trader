@@ -481,15 +481,18 @@ pub async fn get_balance_history(
                    )::date AS date
                ),
                daily_delta AS (
-                   -- Only realized P&L events (trade_close + overnight_fee).
+                   -- Only realized P&L events (trade_close + overnight_fee + sfd_fee).
                    -- Margin lock/release are excluded so the chart shows
                    -- the account's true value growth, not the cash dips
                    -- from opening positions.
+                   -- sfd_fee は bitFlyer Crypto CFD の SFD (現物-FX 乖離手数料)
+                   -- accrual。`apply_sfd_fee` で記録される (符号両対応: 払い時
+                   -- amount<0、受取時 amount>0)。
                    SELECT DATE(occurred_at) AS date,
                           SUM(amount) AS daily_net
                    FROM account_events
                    WHERE account_id = $1
-                     AND event_type IN ('trade_close', 'overnight_fee')
+                     AND event_type IN ('trade_close', 'overnight_fee', 'sfd_fee')
                    GROUP BY DATE(occurred_at)
                )
                SELECT

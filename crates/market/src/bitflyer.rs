@@ -50,8 +50,32 @@ pub struct BitflyerMonitor {
     lows_seed: HashMap<String, Vec<Decimal>>,
 }
 
+/// 現物 spot (SFD 計算専用) と判定する product_code。
+/// strategy/candle は mount しないが、PriceStore に tick を流して
+/// SFD accrual job (app/main.rs) が乖離率を計算できるようにする。
+///
+/// **将来 BTC_JPY を strategy 対象にしたい場合**: この const から
+/// `"BTC_JPY"` を削除すれば builder/h1_builders に通常通り mount される
+/// (caller が `pairs: Vec<Pair>` に明示的に BTC_JPY を渡している前提)。
+/// 現状は hardcode で十分 — BTC_JPY を bitFlyer Crypto CFD の戦略対象に
+/// する具体的予定がないため YAGNI (Copilot review round-14 で auto-added
+/// pair の track 化が提案されたが、複雑性追加に見合わないと判断)。
+const SPOT_ONLY_PAIRS: &[&str] = &["BTC_JPY"];
+
+fn is_spot_only(pair: &Pair) -> bool {
+    SPOT_ONLY_PAIRS.contains(&pair.0.as_str())
+}
+
 impl BitflyerMonitor {
     pub fn new(ws_url: &str, pairs: Vec<Pair>, timeframe: &str) -> Self {
+        // FX_BTC_JPY を subscribe するなら BTC_JPY (現物 spot) も自動追加。
+        // SFD (現物-FX 乖離手数料) を bot 側で計算するために必要。
+        let mut pairs = pairs;
+        let has_fx_btc = pairs.iter().any(|p| p.0 == "FX_BTC_JPY");
+        let has_spot_btc = pairs.iter().any(|p| p.0 == "BTC_JPY");
+        if has_fx_btc && !has_spot_btc {
+            pairs.push(Pair::new("BTC_JPY"));
+        }
         Self {
             ws_url: ws_url.to_string(),
             pairs,
@@ -112,6 +136,11 @@ impl BitflyerMonitor {
         // both `builders` and `h1_builders` would emit H1 candles → duplicate events.
         let mut h1_builders: HashMap<String, CandleBuilder> = HashMap::new();
         for pair in &self.pairs {
+            // spot-only pairs (e.g. BTC_JPY for SFD calculation) bypass candle
+            // /strategy mount — they are subscribed to PriceStore only.
+            if is_spot_only(pair) {
+                continue;
+            }
             builders.insert(
                 pair.0.clone(),
                 CandleBuilder::new(pair.clone(), Exchange::BitflyerCfd, self.timeframe.clone()),
@@ -365,10 +394,6 @@ async fn connect_and_stream(
         let ticker = params.message;
         let product_code = &ticker.product_code;
 
-        let Some(builder) = builders.get_mut(product_code) else {
-            continue;
-        };
-
         let price = ticker.ltp;
         let size = ticker.volume;
         let best_bid = Some(ticker.best_bid);
@@ -376,11 +401,11 @@ async fn connect_and_stream(
         let ts =
             chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?.with_timezone(&chrono::Utc);
 
-        // Forward the raw tick to the drain task via try_send (non-blocking).
-        // Drops the tick if the channel is full — acceptable: the drain task
-        // will catch the next tick. Raw ticks carry sub-second wall-clock
-        // timestamps so the 60s freshness threshold is easily met even with
-        // occasional drops.
+        // Forward the raw tick to PriceStore via try_send (non-blocking).
+        // **builder mount の有無に関係なく forward する**: BTC_JPY (現物 spot)
+        // のように strategy/candle は不要だが SFD 計算で
+        // PriceStore.latest_bid_ask が要る pair があるため。
+        // Drain task の channel が満杯なら drop (次の tick で埋まる、許容)。
         if let Err(e) = tick_tx.try_send((
             FeedKey::new(Exchange::BitflyerCfd, Pair::new(product_code)),
             LatestTick {
@@ -392,9 +417,6 @@ async fn connect_and_stream(
         )) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
-                    // Drain task can't keep up; log at debug (not warn) to
-                    // avoid flooding. PriceStore falls behind by 1 tick; not
-                    // fatal.
                     tracing::debug!("bitflyer tick drop: drain channel full");
                 }
                 mpsc::error::TrySendError::Closed(_) => {
@@ -407,6 +429,12 @@ async fn connect_and_stream(
                 }
             }
         }
+
+        let Some(builder) = builders.get_mut(product_code) else {
+            // no candle/strategy mounted (e.g. BTC_JPY spot for SFD only) —
+            // tick already in PriceStore, nothing else to do.
+            continue;
+        };
 
         // --- Primary timeframe (e.g. M5) candle ---
         // on_tick returns completed candle when period boundary is crossed
@@ -494,6 +522,48 @@ mod tests {
     use auto_trader_core::types::{Exchange, Pair};
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
+
+    /// `BitflyerMonitor::new` で FX_BTC_JPY を含む pair リストを渡すと
+    /// 自動的に BTC_JPY (現物 spot, SFD 計算用) が追加されること。
+    #[test]
+    fn new_auto_adds_btc_jpy_when_fx_btc_jpy_is_subscribed() {
+        let mon = BitflyerMonitor::new("ws://test", vec![Pair::new("FX_BTC_JPY")], "M5");
+        let pair_codes: Vec<&str> = mon.pairs.iter().map(|p| p.0.as_str()).collect();
+        assert!(pair_codes.contains(&"FX_BTC_JPY"));
+        assert!(
+            pair_codes.contains(&"BTC_JPY"),
+            "BTC_JPY (spot) must be auto-added for SFD calc, got: {:?}",
+            pair_codes
+        );
+    }
+
+    /// FX_BTC_JPY が含まれない場合は BTC_JPY を追加しない。
+    #[test]
+    fn new_does_not_add_btc_jpy_when_no_fx_btc_jpy() {
+        let mon = BitflyerMonitor::new("ws://test", vec![Pair::new("ETH_JPY")], "M5");
+        let pair_codes: Vec<&str> = mon.pairs.iter().map(|p| p.0.as_str()).collect();
+        assert!(!pair_codes.contains(&"BTC_JPY"));
+    }
+
+    /// 既に BTC_JPY が含まれている場合は二重追加しない。
+    #[test]
+    fn new_does_not_duplicate_btc_jpy_when_already_subscribed() {
+        let mon = BitflyerMonitor::new(
+            "ws://test",
+            vec![Pair::new("FX_BTC_JPY"), Pair::new("BTC_JPY")],
+            "M5",
+        );
+        let btc_count = mon.pairs.iter().filter(|p| p.0 == "BTC_JPY").count();
+        assert_eq!(btc_count, 1, "BTC_JPY must not be duplicated");
+    }
+
+    /// is_spot_only が BTC_JPY を spot-only と判定すること。
+    #[test]
+    fn is_spot_only_classifies_btc_jpy_as_spot() {
+        assert!(is_spot_only(&Pair::new("BTC_JPY")));
+        assert!(!is_spot_only(&Pair::new("FX_BTC_JPY")));
+        assert!(!is_spot_only(&Pair::new("ETH_JPY")));
+    }
 
     /// Verify that a completed M5 candle produces a full indicator_map
     /// and an H1 builder for the same pair correctly tracks progress.

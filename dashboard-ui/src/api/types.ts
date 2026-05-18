@@ -111,7 +111,7 @@ export interface TradesResponse {
 }
 
 export interface TradeEvent {
-  kind: 'open' | 'overnight_fee' | 'close'
+  kind: 'open' | 'overnight_fee' | 'sfd_fee' | 'close'
   occurred_at: string
   price: string | null
   quantity: string | null
