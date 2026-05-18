@@ -1942,7 +1942,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                     let exchange = match exchange_from_str(&pac.exchange) {
                         Some(e) => e,
-                        None => continue,
+                        None => {
+                            tracing::warn!(
+                                "sfd hourly: skipping account {} ({}): unknown exchange '{}'",
+                                pac.name,
+                                pac.id,
+                                pac.exchange
+                            );
+                            continue;
+                        }
                     };
                     if exchange != Exchange::BitflyerCfd {
                         continue;
