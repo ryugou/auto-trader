@@ -66,7 +66,7 @@ async fn paper_bitflyer_10pct_long_pays_hourly_sfd(pool: sqlx::PgPool) {
     assert!(fee > Decimal::ZERO);
 
     let mut tx = pool.begin().await.unwrap();
-    let new_balance = apply_sfd_fee(&mut tx, account_id, trade_id, fee)
+    let new_balance = apply_sfd_fee(&mut tx, account_id, trade_id, fee, Utc::now())
         .await
         .unwrap()
         .expect("Some");
@@ -119,7 +119,7 @@ async fn paper_bitflyer_10pct_short_receives_sfd(pool: sqlx::PgPool) {
     assert!(fee < Decimal::ZERO);
 
     let mut tx = pool.begin().await.unwrap();
-    let new_balance = apply_sfd_fee(&mut tx, account_id, trade_id, fee)
+    let new_balance = apply_sfd_fee(&mut tx, account_id, trade_id, fee, Utc::now())
         .await
         .unwrap()
         .expect("Some");
@@ -152,7 +152,7 @@ async fn apply_sfd_fee_returns_none_when_trade_closed(pool: sqlx::PgPool) {
         .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let result = apply_sfd_fee(&mut tx, account_id, trade_id, dec!(15))
+    let result = apply_sfd_fee(&mut tx, account_id, trade_id, dec!(15), Utc::now())
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -177,7 +177,7 @@ async fn account_event_row_recorded_with_sfd_fee_type(pool: sqlx::PgPool) {
         insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
 
     let mut tx = pool.begin().await.unwrap();
-    apply_sfd_fee(&mut tx, account_id, trade_id, dec!(15))
+    apply_sfd_fee(&mut tx, account_id, trade_id, dec!(15), Utc::now())
         .await
         .unwrap();
     tx.commit().await.unwrap();

@@ -334,17 +334,20 @@ pub async fn apply_overnight_fee(
 ///   3. `trading_accounts.current_balance -= fee_amount`
 ///      (negative amount → balance increases = received SFD)
 ///   4. Insert `account_events` row with `event_type='sfd_fee'`,
-///      `amount = -fee_amount` (outflow when fee positive, inflow when negative)
+///      `amount = -fee_amount` (outflow when fee positive, inflow when negative),
+///      `occurred_at` = caller が渡す **対象 hour の境界 timestamp**
+///      (catch-up loop で複数 hour を 1 tick で apply するとき、全 row が
+///      NOW() で同 timestamp になり daily 集計を歪めるのを防ぐ。
+///      Copilot review round-9 指摘)
 ///
 /// Returns `Ok(Some(new_balance))` when applied, `Ok(None)` when the trade
 /// was no longer open.
-///
-/// `apply_overnight_fee` と同パターン (event_type と符号 両対応の点だけ違う)。
 pub async fn apply_sfd_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
     trade_id: Uuid,
     fee_amount: Decimal,
+    occurred_at: DateTime<Utc>,
 ) -> anyhow::Result<Option<Decimal>> {
     let trade_updated = sqlx::query(
         "UPDATE trades SET fees = fees + $3
@@ -372,13 +375,14 @@ pub async fn apply_sfd_fee(
     .await?;
 
     sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
-           VALUES ($1, $2, 'sfd_fee', $3, $4)"#,
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after, occurred_at)
+           VALUES ($1, $2, 'sfd_fee', $3, $4, $5)"#,
     )
     .bind(account_id)
     .bind(trade_id)
     .bind(-fee_amount)
     .bind(new_balance)
+    .bind(occurred_at)
     .execute(&mut *tx)
     .await?;
 

@@ -1972,10 +1972,15 @@ async fn main() -> anyhow::Result<()> {
                         if fee.is_zero() {
                             continue;
                         }
+                        // occurred_at = この hour 境界の **末尾** (lh + 1h)。
+                        // catch-up で複数 hours を 1 tick で apply するとき、
+                        // 各行を正しい hour に attribution する
+                        // (Copilot round-9 指摘)。
+                        let event_at = lh + chrono::Duration::hours(1);
                         let result = async {
                             let mut tx = sfd_pool.begin().await?;
                             let applied = auto_trader_db::trades::apply_sfd_fee(
-                                &mut tx, pac.id, trade.id, fee,
+                                &mut tx, pac.id, trade.id, fee, event_at,
                             )
                             .await?;
                             tx.commit().await?;
