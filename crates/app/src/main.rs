@@ -1871,10 +1871,9 @@ async fn main() -> anyhow::Result<()> {
             let fx_ba = sfd_price_store.latest_bid_ask(&fx_key).await;
             let spot_ba = sfd_price_store.latest_bid_ask(&spot_key).await;
             let (fx_mid, spot_mid) = match (fx_ba, spot_ba) {
-                (Some((b1, a1)), Some((b2, a2))) => (
-                    (b1 + a1) / Decimal::from(2),
-                    (b2 + a2) / Decimal::from(2),
-                ),
+                (Some((b1, a1)), Some((b2, a2))) => {
+                    ((b1 + a1) / Decimal::from(2), (b2 + a2) / Decimal::from(2))
+                }
                 _ => {
                     tracing::warn!("sfd hourly: missing FX or spot tick, skipping this hour");
                     continue;
@@ -1892,20 +1891,19 @@ async fn main() -> anyhow::Result<()> {
                 if exchange != Exchange::BitflyerCfd {
                     continue;
                 }
-                let open_trades = match auto_trader_db::trades::get_open_trades_by_account(
-                    &sfd_pool, pac.id,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            "sfd hourly: list open trades failed for {}: {e}",
-                            pac.name
-                        );
-                        continue;
-                    }
-                };
+                let open_trades =
+                    match auto_trader_db::trades::get_open_trades_by_account(&sfd_pool, pac.id)
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!(
+                                "sfd hourly: list open trades failed for {}: {e}",
+                                pac.name
+                            );
+                            continue;
+                        }
+                    };
                 for trade in &open_trades {
                     let notional = trade.entry_price * trade.quantity;
                     let fee = sfd::compute_hourly_sfd(sfd::SfdContext {
@@ -1919,10 +1917,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     let result = async {
                         let mut tx = sfd_pool.begin().await?;
-                        let applied = auto_trader_db::trades::apply_sfd_fee(
-                            &mut tx, pac.id, trade.id, fee,
-                        )
-                        .await?;
+                        let applied =
+                            auto_trader_db::trades::apply_sfd_fee(&mut tx, pac.id, trade.id, fee)
+                                .await?;
                         tx.commit().await?;
                         anyhow::Ok(applied)
                     }
@@ -1931,7 +1928,9 @@ async fn main() -> anyhow::Result<()> {
                         Ok(Some(_)) => {
                             tracing::info!(
                                 "sfd applied: trade={} fee={} notional={}",
-                                trade.id, fee, notional
+                                trade.id,
+                                fee,
+                                notional
                             );
                         }
                         Ok(None) => {
