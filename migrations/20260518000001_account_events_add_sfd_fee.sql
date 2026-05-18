@@ -3,7 +3,7 @@
 -- paper account に対して fee 行を記録するため。受け取り SFD では
 -- amount が正、支払 SFD では負 (overnight_fee と同じ符号規約)。
 ALTER TABLE account_events
-    DROP CONSTRAINT account_events_event_type_check;
+    DROP CONSTRAINT IF EXISTS account_events_event_type_check;
 
 ALTER TABLE account_events
     ADD CONSTRAINT account_events_event_type_check

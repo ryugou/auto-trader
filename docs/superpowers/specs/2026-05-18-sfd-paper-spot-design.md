@@ -44,13 +44,15 @@ pub struct SfdContext {
     pub direction: Direction,        // Long / Short
 }
 
-/// bitFlyer Crypto CFD 公式 SFD 階段 (**daily** rate, 絶対値):
-///   |x| < 5%       → 0.00%
-///   5%  ≤ |x| < 10%  → 0.25%
-///   10% ≤ |x| < 15%  → 0.50%
-///   15% ≤ |x| < 20%  → 1.00%
-///   20% ≤ |x|        → 3.00%
-fn sfd_daily_rate(divergence_abs: Decimal) -> Decimal;
+/// bitFlyer Crypto CFD 公式 SFD 階段 (**daily** rate)。
+/// 内部で `.abs()` を取るため呼び出し側は符号を気にせず渡せる
+/// (Copilot review round-3 で pub function の footgun を内部正規化で解消)。
+///   |x| < 5%        → 0.00%
+///   5%  ≤ |x| < 10% → 0.25%
+///   10% ≤ |x| < 15% → 0.50%
+///   15% ≤ |x| < 20% → 1.00%
+///   20% ≤ |x|       → 3.00%
+pub fn sfd_daily_rate(divergence: Decimal) -> Decimal;
 
 /// hourly SFD = notional × (daily_rate / 24) × sign
 ///

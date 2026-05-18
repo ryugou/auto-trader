@@ -93,11 +93,12 @@ git commit -m "feat(db): allow 'sfd_fee' event_type for paper SFD accrual"
     }
 
     #[test]
-    fn sfd_daily_rate_negative_input_treated_as_absolute_should_caller() {
-        // sfd_daily_rate は呼び出し側で abs() を取って渡す前提。
-        // 万一負値が渡ると 0% region と評価される (符号無視)。
-        // このテストは「絶対値が前提」を契約として明示する regression guard。
-        assert_eq!(sfd_daily_rate(dec!(-0.10)), Decimal::ZERO);
+    fn sfd_daily_rate_normalizes_negative_input_via_abs() {
+        // sfd_daily_rate は内部で .abs() を取るため、負値も対応する正の
+        // region と同じ rate を返す (Copilot review round-3 で footgun
+        // 解消、pub function として安全に使える)。
+        assert_eq!(sfd_daily_rate(dec!(-0.10)), dec!(0.005));
+        assert_eq!(sfd_daily_rate(dec!(-0.04)), Decimal::ZERO);
     }
 ```
 
@@ -116,8 +117,9 @@ Expected: FAIL with `cannot find function 'sfd_daily_rate'`.
 ```rust
 /// bitFlyer Crypto CFD 公式 SFD 階段 (**daily** rate)。
 ///
-/// 入力 `divergence_abs` は乖離率の **絶対値** (例: `dec!(0.07)` = 7%)。
-/// 呼び出し側で `.abs()` を取ってから渡すこと。
+/// 入力 `divergence` は乖離率 (例: `dec!(0.07)` = 7%、負値も可)。
+/// 内部で `.abs()` を取るため呼び出し側は符号を気にせず渡せる
+/// (Copilot review round-3 で pub function の footgun を内部正規化で解消)。
 ///
 ///   |x| < 5%        → 0.00%
 ///   5%  ≤ |x| < 10% → 0.25%
@@ -125,16 +127,17 @@ Expected: FAIL with `cannot find function 'sfd_daily_rate'`.
 ///   15% ≤ |x| < 20% → 1.00%
 ///   20% ≤ |x|       → 3.00%
 ///
-/// bitFlyer Crypto CFD 公式 docs に基づく。rate 改定時は本 const を更新。
-pub fn sfd_daily_rate(divergence_abs: Decimal) -> Decimal {
+/// bitFlyer Crypto CFD 公式 docs に基づく。rate 改定時は本関数の階段値を更新。
+pub fn sfd_daily_rate(divergence: Decimal) -> Decimal {
     use rust_decimal_macros::dec;
-    if divergence_abs < dec!(0.05) {
+    let d = divergence.abs();
+    if d < dec!(0.05) {
         Decimal::ZERO
-    } else if divergence_abs < dec!(0.10) {
+    } else if d < dec!(0.10) {
         dec!(0.0025)
-    } else if divergence_abs < dec!(0.15) {
+    } else if d < dec!(0.15) {
         dec!(0.005)
-    } else if divergence_abs < dec!(0.20) {
+    } else if d < dec!(0.20) {
         dec!(0.01)
     } else {
         dec!(0.03)
