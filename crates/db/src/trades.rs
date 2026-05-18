@@ -325,6 +325,66 @@ pub async fn apply_overnight_fee(
     Ok(Some(new_balance))
 }
 
+/// Apply an SFD fee (positive = paper account pays, negative = receives)
+/// for a single trade inside a transaction.
+///
+/// Atomically:
+///   1. CAS on `status='open'` & account_id match (Ok(None) if no row)
+///   2. `trades.fees += fee_amount` (negative amount decreases fees)
+///   3. `trading_accounts.current_balance -= fee_amount`
+///      (negative amount → balance increases = received SFD)
+///   4. Insert `account_events` row with `event_type='sfd_fee'`,
+///      `amount = -fee_amount` (outflow when fee positive, inflow when negative)
+///
+/// Returns `Ok(Some(new_balance))` when applied, `Ok(None)` when the trade
+/// was no longer open.
+///
+/// `apply_overnight_fee` と同パターン (event_type と符号 両対応の点だけ違う)。
+pub async fn apply_sfd_fee(
+    tx: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    trade_id: Uuid,
+    fee_amount: Decimal,
+) -> anyhow::Result<Option<Decimal>> {
+    let trade_updated = sqlx::query(
+        "UPDATE trades SET fees = fees + $3
+         WHERE id = $1 AND account_id = $2 AND status = 'open'",
+    )
+    .bind(trade_id)
+    .bind(account_id)
+    .bind(fee_amount)
+    .execute(&mut *tx)
+    .await?;
+
+    if trade_updated.rows_affected() == 0 {
+        return Ok(None);
+    }
+
+    let new_balance: Decimal = sqlx::query_scalar(
+        r#"UPDATE trading_accounts
+           SET current_balance = current_balance - $2
+           WHERE id = $1
+           RETURNING current_balance"#,
+    )
+    .bind(account_id)
+    .bind(fee_amount)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+           VALUES ($1, $2, 'sfd_fee', $3, $4)"#,
+    )
+    .bind(account_id)
+    .bind(trade_id)
+    .bind(-fee_amount)
+    .bind(new_balance)
+    .execute(&mut *tx)
+    .await?;
+
+    Ok(Some(new_balance))
+}
+
 /// Update a trade to closed state inside the given transaction.
 pub async fn update_trade_closed<'e, E>(
     executor: E,
