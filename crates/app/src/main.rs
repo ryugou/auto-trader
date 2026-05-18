@@ -1851,12 +1851,17 @@ async fn main() -> anyhow::Result<()> {
             if last_hour == Some(current_hour) {
                 continue;
             }
-            last_hour = Some(current_hour);
+            // 注: last_hour 更新は副作用 (accounts list / FX/spot tick 取得)
+            // が **成功して accrual を試みた後** に行う。早期に更新すると
+            // 一時的な DB/tick 不在で skip された hour が永久に失われる
+            // (next tick で current_hour == last_hour になり再試行されない)。
 
             let accounts = match auto_trader_db::trading_accounts::list_all(&sfd_pool).await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::error!("sfd hourly: failed to list trading accounts: {e}");
+                    tracing::error!(
+                        "sfd hourly: failed to list trading accounts (will retry next tick): {e}"
+                    );
                     continue;
                 }
             };
@@ -1875,10 +1880,15 @@ async fn main() -> anyhow::Result<()> {
                     ((b1 + a1) / Decimal::from(2), (b2 + a2) / Decimal::from(2))
                 }
                 _ => {
-                    tracing::warn!("sfd hourly: missing FX or spot tick, skipping this hour");
+                    tracing::warn!(
+                        "sfd hourly: missing FX or spot tick, will retry next minute (last_hour unchanged)"
+                    );
                     continue;
                 }
             };
+
+            // ここまで来たら accrual 可能 → last_hour を進める
+            last_hour = Some(current_hour);
 
             for pac in accounts {
                 if pac.account_type != "paper" {

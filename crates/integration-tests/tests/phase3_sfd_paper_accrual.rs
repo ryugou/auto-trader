@@ -8,41 +8,35 @@ use auto_trader_core::sfd::{SfdContext, compute_hourly_sfd};
 use auto_trader_core::types::Direction;
 use auto_trader_db::trades::{apply_sfd_fee, get_trade_by_id};
 use auto_trader_integration_tests::helpers::db::seed_trading_account;
+use auto_trader_integration_tests::helpers::seed::seed_open_trade;
+use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use uuid::Uuid;
 
-async fn insert_open_trade(
+async fn insert_btc_open_trade(
     pool: &sqlx::PgPool,
-    account_id: Uuid,
-    pair: &str,
+    account_id: uuid::Uuid,
     direction: Direction,
     entry_price: Decimal,
     quantity: Decimal,
-) -> Uuid {
-    let trade_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO trades
-               (id, account_id, strategy_name, pair, exchange, direction,
-                entry_price, stop_loss, take_profit, quantity, leverage,
-                fees, entry_at, status)
-           VALUES ($1, $2, 'test_strat', $3, 'bitflyer_cfd', $4,
-                   $5, $5 - 1, $5 + 1, $6, 2,
-                   0, NOW(), 'open')"#,
-    )
-    .bind(trade_id)
-    .bind(account_id)
-    .bind(pair)
-    .bind(match direction {
+) -> uuid::Uuid {
+    let dir_str = match direction {
         Direction::Long => "long",
         Direction::Short => "short",
-    })
-    .bind(entry_price)
-    .bind(quantity)
-    .execute(pool)
+    };
+    seed_open_trade(
+        pool,
+        account_id,
+        "test_strat",
+        "FX_BTC_JPY",
+        "bitflyer_cfd",
+        dir_str,
+        entry_price,
+        entry_price - dec!(1),
+        quantity,
+        Utc::now(),
+    )
     .await
-    .expect("insert trade");
-    trade_id
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -56,15 +50,8 @@ async fn paper_bitflyer_10pct_long_pays_hourly_sfd(pool: sqlx::PgPool) {
         1_000_000,
     )
     .await;
-    let trade_id = insert_open_trade(
-        &pool,
-        account_id,
-        "FX_BTC_JPY",
-        Direction::Long,
-        dec!(36000),
-        dec!(0.01),
-    )
-    .await;
+    let trade_id =
+        insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
 
     // 10% divergence (FX > spot), Long → 払う
     let fee = compute_hourly_sfd(SfdContext {
@@ -110,15 +97,8 @@ async fn paper_bitflyer_10pct_short_receives_sfd(pool: sqlx::PgPool) {
         1_000_000,
     )
     .await;
-    let trade_id = insert_open_trade(
-        &pool,
-        account_id,
-        "FX_BTC_JPY",
-        Direction::Short,
-        dec!(36000),
-        dec!(0.01),
-    )
-    .await;
+    let trade_id =
+        insert_btc_open_trade(&pool, account_id, Direction::Short, dec!(36000), dec!(0.01)).await;
 
     // 10% divergence (FX > spot), Short → 受け取る
     let fee = compute_hourly_sfd(SfdContext {
@@ -154,15 +134,8 @@ async fn apply_sfd_fee_returns_none_when_trade_closed(pool: sqlx::PgPool) {
         1_000_000,
     )
     .await;
-    let trade_id = insert_open_trade(
-        &pool,
-        account_id,
-        "FX_BTC_JPY",
-        Direction::Long,
-        dec!(36000),
-        dec!(0.01),
-    )
-    .await;
+    let trade_id =
+        insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
     sqlx::query("UPDATE trades SET status='closed' WHERE id=$1")
         .bind(trade_id)
         .execute(&pool)
@@ -191,15 +164,8 @@ async fn account_event_row_recorded_with_sfd_fee_type(pool: sqlx::PgPool) {
         1_000_000,
     )
     .await;
-    let trade_id = insert_open_trade(
-        &pool,
-        account_id,
-        "FX_BTC_JPY",
-        Direction::Long,
-        dec!(36000),
-        dec!(0.01),
-    )
-    .await;
+    let trade_id =
+        insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
 
     let mut tx = pool.begin().await.unwrap();
     apply_sfd_fee(&mut tx, account_id, trade_id, dec!(15))
