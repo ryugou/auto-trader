@@ -1821,6 +1821,131 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: SFD (bitFlyer Crypto CFD) hourly accrual for paper accounts.
+    // bitFlyer's official SFD charges open positions at each hour boundary
+    // based on the spot/FX divergence. Live trades read API-actual SFD via
+    // fetch_close_sfd at close time (PR #91). Paper trades need an in-bot
+    // hourly job to mirror the same accrual; this is that job.
+    let sfd_pool = pool.clone();
+    let sfd_price_store = price_store.clone();
+    let sfd_handle = tokio::spawn(async move {
+        use auto_trader_core::sfd;
+        use auto_trader_market::price_store::FeedKey;
+        use chrono::Timelike as _;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        let mut last_hour: Option<chrono::DateTime<chrono::Utc>> = None;
+        loop {
+            interval.tick().await;
+            let now = chrono::Utc::now();
+            let current_hour = now
+                .date_naive()
+                .and_hms_opt(now.hour(), 0, 0)
+                .expect("hms_opt(now.hour(), 0, 0) is always valid")
+                .and_utc();
+            // First tick after startup: record current_hour, do not apply yet
+            // (避免 mid-hour 部分時間計上)。
+            if last_hour.is_none() {
+                last_hour = Some(current_hour);
+                continue;
+            }
+            if last_hour == Some(current_hour) {
+                continue;
+            }
+            last_hour = Some(current_hour);
+
+            let accounts = match auto_trader_db::trading_accounts::list_all(&sfd_pool).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("sfd hourly: failed to list trading accounts: {e}");
+                    continue;
+                }
+            };
+            let fx_key = FeedKey::new(
+                Exchange::BitflyerCfd,
+                auto_trader_core::types::Pair::new("FX_BTC_JPY"),
+            );
+            let spot_key = FeedKey::new(
+                Exchange::BitflyerCfd,
+                auto_trader_core::types::Pair::new("BTC_JPY"),
+            );
+            let fx_ba = sfd_price_store.latest_bid_ask(&fx_key).await;
+            let spot_ba = sfd_price_store.latest_bid_ask(&spot_key).await;
+            let (fx_mid, spot_mid) = match (fx_ba, spot_ba) {
+                (Some((b1, a1)), Some((b2, a2))) => (
+                    (b1 + a1) / Decimal::from(2),
+                    (b2 + a2) / Decimal::from(2),
+                ),
+                _ => {
+                    tracing::warn!("sfd hourly: missing FX or spot tick, skipping this hour");
+                    continue;
+                }
+            };
+
+            for pac in accounts {
+                if pac.account_type != "paper" {
+                    continue;
+                }
+                let exchange = match exchange_from_str(&pac.exchange) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if exchange != Exchange::BitflyerCfd {
+                    continue;
+                }
+                let open_trades = match auto_trader_db::trades::get_open_trades_by_account(
+                    &sfd_pool, pac.id,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "sfd hourly: list open trades failed for {}: {e}",
+                            pac.name
+                        );
+                        continue;
+                    }
+                };
+                for trade in &open_trades {
+                    let notional = trade.entry_price * trade.quantity;
+                    let fee = sfd::compute_hourly_sfd(sfd::SfdContext {
+                        fx_price: fx_mid,
+                        spot_price: spot_mid,
+                        position_notional: notional,
+                        direction: trade.direction,
+                    });
+                    if fee.is_zero() {
+                        continue;
+                    }
+                    let result = async {
+                        let mut tx = sfd_pool.begin().await?;
+                        let applied = auto_trader_db::trades::apply_sfd_fee(
+                            &mut tx, pac.id, trade.id, fee,
+                        )
+                        .await?;
+                        tx.commit().await?;
+                        anyhow::Ok(applied)
+                    }
+                    .await;
+                    match result {
+                        Ok(Some(_)) => {
+                            tracing::info!(
+                                "sfd applied: trade={} fee={} notional={}",
+                                trade.id, fee, notional
+                            );
+                        }
+                        Ok(None) => {
+                            tracing::debug!("sfd skip: trade {} closed mid-tick", trade.id);
+                        }
+                        Err(e) => {
+                            tracing::error!("sfd apply failed for trade {}: {e}", trade.id);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // REST API server
     let api_state = api::AppState {
         pool: pool.clone(),
@@ -1855,6 +1980,7 @@ async fn main() -> anyhow::Result<()> {
         h.abort();
     }
     overnight_handle.abort();
+    sfd_handle.abort();
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();
