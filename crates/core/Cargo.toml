@@ -17,5 +17,4 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
-[dev-dependencies]
-rust_decimal_macros = "1"
+# dev-dependencies は現状空 (rust_decimal_macros は dependencies に昇格、SFD 計算で使用)

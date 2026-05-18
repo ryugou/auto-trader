@@ -88,7 +88,9 @@ pub fn compute_hourly_sfd(ctx: SfdContext) -> Decimal {
         return Decimal::ZERO;
     }
     let divergence = (ctx.fx_price - ctx.spot_price) / ctx.spot_price;
-    let rate = sfd_daily_rate(divergence.abs());
+    // sfd_daily_rate は内部で .abs() を取るためそのまま渡せる
+    // (round-3 で normalize 内部化 + round-8 で double-normalization 解消)。
+    let rate = sfd_daily_rate(divergence);
     if rate.is_zero() {
         return Decimal::ZERO;
     }
