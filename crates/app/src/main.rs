@@ -1873,6 +1873,25 @@ async fn main() -> anyhow::Result<()> {
                 Exchange::BitflyerCfd,
                 auto_trader_core::types::Pair::new("BTC_JPY"),
             );
+            // Freshness guard: WS が長時間切断した状態だと latest_bid_ask は
+            // 古い tick を返し続けるため、age check で stale を弾く。
+            // SFD は hourly 計算なので 5 分以内 (300s) の tick があれば fresh
+            // と判定 (bitFlyer WS は通常数秒間隔で来る)。
+            const SFD_STALE_THRESHOLD_SECS: u64 = 300;
+            let fx_age = sfd_price_store.last_tick_age_for(&fx_key).await;
+            let spot_age = sfd_price_store.last_tick_age_for(&spot_key).await;
+            let fresh = matches!(fx_age, Some(a) if a <= SFD_STALE_THRESHOLD_SECS)
+                && matches!(spot_age, Some(a) if a <= SFD_STALE_THRESHOLD_SECS);
+            if !fresh {
+                tracing::warn!(
+                    fx_age_secs = ?fx_age,
+                    spot_age_secs = ?spot_age,
+                    "sfd hourly: FX or spot tick stale (>{}s), will retry next minute (last_hour unchanged)",
+                    SFD_STALE_THRESHOLD_SECS
+                );
+                continue;
+            }
+
             let fx_ba = sfd_price_store.latest_bid_ask(&fx_key).await;
             let spot_ba = sfd_price_store.latest_bid_ask(&spot_key).await;
             let (fx_mid, spot_mid) = match (fx_ba, spot_ba) {
@@ -1881,7 +1900,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _ => {
                     tracing::warn!(
-                        "sfd hourly: missing FX or spot tick, will retry next minute (last_hour unchanged)"
+                        "sfd hourly: missing FX or spot bid/ask (tick exists but no best_bid/ask), will retry next minute"
                     );
                     continue;
                 }

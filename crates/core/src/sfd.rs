@@ -10,7 +10,7 @@
 //! エラーで気づける。
 
 use crate::types::{Direction, Exchange};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use rust_decimal_macros::dec;
 
 /// paper 側 SFD を見積もる。現状は全 exchange で 0 を返す。
@@ -68,12 +68,16 @@ pub struct SfdContext {
 /// formula:
 ///   divergence = (fx - spot) / spot
 ///   daily_rate = sfd_daily_rate(|divergence|)
-///   hourly_fee = notional × daily_rate / 24
+///   hourly_fee = truncate_yen(notional × daily_rate / 24)
 ///   sign:
 ///     fx > spot かつ Long  → +fee (払う)
 ///     fx > spot かつ Short → -fee (受け取る)
 ///     fx < spot かつ Long  → -fee (受け取る)
 ///     fx < spot かつ Short → +fee (払う)
+///
+/// 戻り値は **絶対値方向に 0 へ truncate された整数 yen** (ledger
+/// invariant: `trades.fees` / `current_balance` には分数 yen を書かない)。
+/// `executor::trader::truncate_yen` と同じ rounding strategy。
 ///
 /// `spot_price` が 0 / 負の場合は安全弁として `Decimal::ZERO` を返す
 /// (除算エラー回避)。
@@ -86,7 +90,8 @@ pub fn compute_hourly_sfd(ctx: SfdContext) -> Decimal {
     if rate.is_zero() {
         return Decimal::ZERO;
     }
-    let magnitude = ctx.position_notional * rate / Decimal::from(24);
+    let magnitude = (ctx.position_notional * rate / Decimal::from(24))
+        .round_dp_with_strategy(0, RoundingStrategy::ToZero);
     let sign_positive = match (divergence.is_sign_positive(), ctx.direction) {
         (true, Direction::Long) => true,
         (true, Direction::Short) => false,
@@ -159,14 +164,21 @@ mod tests {
         assert_eq!(compute_hourly_sfd(c), Decimal::ZERO);
     }
 
+    /// truncate 込みの hourly SFD (絶対値)。test 各ケースの expected 計算で
+    /// 実装と同じ式を使う = compute_hourly_sfd の rounding 仕様変更に追従しやすい。
+    fn truncated_hourly(notional: Decimal, daily_rate: Decimal) -> Decimal {
+        (notional * daily_rate / dec!(24)).round_dp_with_strategy(0, RoundingStrategy::ToZero)
+    }
+
     #[test]
     fn compute_hourly_sfd_long_pays_when_fx_above_spot() {
-        // FX=110, spot=100 → 乖離 +10% → rate 0.5% (daily), hourly = 0.5%/24
+        // FX=110, spot=100 → 乖離 +10% → daily rate 0.5%, hourly = truncate(notional × 0.5%/24)
+        // notional=100_000 → 100_000 × 0.005 / 24 = 20.833... → truncate = 20
         let c = ctx(dec!(110), dec!(100), dec!(100_000), Direction::Long);
         let fee = compute_hourly_sfd(c);
         assert!(fee > Decimal::ZERO);
-        let expected = dec!(100_000) * dec!(0.005) / dec!(24);
-        assert_eq!(fee, expected);
+        assert_eq!(fee, truncated_hourly(dec!(100_000), dec!(0.005)));
+        assert_eq!(fee, dec!(20)); // explicit invariant
     }
 
     #[test]
@@ -174,8 +186,7 @@ mod tests {
         let c = ctx(dec!(110), dec!(100), dec!(100_000), Direction::Short);
         let fee = compute_hourly_sfd(c);
         assert!(fee < Decimal::ZERO);
-        let expected = -(dec!(100_000) * dec!(0.005) / dec!(24));
-        assert_eq!(fee, expected);
+        assert_eq!(fee, -truncated_hourly(dec!(100_000), dec!(0.005)));
     }
 
     #[test]
@@ -183,8 +194,7 @@ mod tests {
         let c = ctx(dec!(90), dec!(100), dec!(100_000), Direction::Long);
         let fee = compute_hourly_sfd(c);
         assert!(fee < Decimal::ZERO);
-        let expected = -(dec!(100_000) * dec!(0.005) / dec!(24));
-        assert_eq!(fee, expected);
+        assert_eq!(fee, -truncated_hourly(dec!(100_000), dec!(0.005)));
     }
 
     #[test]
@@ -192,8 +202,15 @@ mod tests {
         let c = ctx(dec!(90), dec!(100), dec!(100_000), Direction::Short);
         let fee = compute_hourly_sfd(c);
         assert!(fee > Decimal::ZERO);
-        let expected = dec!(100_000) * dec!(0.005) / dec!(24);
-        assert_eq!(fee, expected);
+        assert_eq!(fee, truncated_hourly(dec!(100_000), dec!(0.005)));
+    }
+
+    #[test]
+    fn compute_hourly_sfd_truncates_fractional_yen_to_zero() {
+        // notional 100 × 0.5% / 24 = 0.0208... → truncate = 0
+        let c = ctx(dec!(110), dec!(100), dec!(100), Direction::Long);
+        let fee = compute_hourly_sfd(c);
+        assert_eq!(fee, Decimal::ZERO);
     }
 
     #[test]

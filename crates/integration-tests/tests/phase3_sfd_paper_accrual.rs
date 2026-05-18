@@ -50,14 +50,17 @@ async fn paper_bitflyer_10pct_long_pays_hourly_sfd(pool: sqlx::PgPool) {
         1_000_000,
     )
     .await;
+    // notional = 3_600_000 × 1 = 3_600_000 → hourly fee (rate 0.005) = 750
+    // truncate を反映した非自明な fee が出る大きさにする (notional=360 だと
+    // 0.075 → truncate 0 になる)。
     let trade_id =
-        insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
+        insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(3_600_000), dec!(1)).await;
 
     // 10% divergence (FX > spot), Long → 払う
     let fee = compute_hourly_sfd(SfdContext {
         fx_price: dec!(110),
         spot_price: dec!(100),
-        position_notional: dec!(36000) * dec!(0.01),
+        position_notional: dec!(3_600_000),
         direction: Direction::Long,
     });
     assert!(fee > Decimal::ZERO);
@@ -97,14 +100,20 @@ async fn paper_bitflyer_10pct_short_receives_sfd(pool: sqlx::PgPool) {
         1_000_000,
     )
     .await;
-    let trade_id =
-        insert_btc_open_trade(&pool, account_id, Direction::Short, dec!(36000), dec!(0.01)).await;
+    let trade_id = insert_btc_open_trade(
+        &pool,
+        account_id,
+        Direction::Short,
+        dec!(3_600_000),
+        dec!(1),
+    )
+    .await;
 
     // 10% divergence (FX > spot), Short → 受け取る
     let fee = compute_hourly_sfd(SfdContext {
         fx_price: dec!(110),
         spot_price: dec!(100),
-        position_notional: dec!(360),
+        position_notional: dec!(3_600_000),
         direction: Direction::Short,
     });
     assert!(fee < Decimal::ZERO);
