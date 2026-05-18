@@ -53,6 +53,13 @@ pub struct BitflyerMonitor {
 /// 現物 spot (SFD 計算専用) と判定する product_code。
 /// strategy/candle は mount しないが、PriceStore に tick を流して
 /// SFD accrual job (app/main.rs) が乖離率を計算できるようにする。
+///
+/// **将来 BTC_JPY を strategy 対象にしたい場合**: この const から
+/// `"BTC_JPY"` を削除すれば builder/h1_builders に通常通り mount される
+/// (caller が `pairs: Vec<Pair>` に明示的に BTC_JPY を渡している前提)。
+/// 現状は hardcode で十分 — BTC_JPY を bitFlyer Crypto CFD の戦略対象に
+/// する具体的予定がないため YAGNI (Copilot review round-14 で auto-added
+/// pair の track 化が提案されたが、複雑性追加に見合わないと判断)。
 const SPOT_ONLY_PAIRS: &[&str] = &["BTC_JPY"];
 
 fn is_spot_only(pair: &Pair) -> bool {
