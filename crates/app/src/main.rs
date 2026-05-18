@@ -1909,7 +1909,7 @@ async fn main() -> anyhow::Result<()> {
             // さらに精緻化: account はあっても open FX_BTC_JPY trade が無ければ
             // tick check 自体不要 (Copilot round-15 指摘)。1 個の集約 query で
             // 全 paper bitFlyer account の open trade 数を確認。
-            let open_target_count: i64 = sqlx::query_scalar(
+            let open_target_count: i64 = match sqlx::query_scalar(
                 r#"SELECT COUNT(*) FROM trades t
                    JOIN trading_accounts a ON a.id = t.account_id
                    WHERE t.pair = 'FX_BTC_JPY' AND t.status = 'open'
@@ -1917,7 +1917,19 @@ async fn main() -> anyhow::Result<()> {
             )
             .fetch_one(&sfd_pool)
             .await
-            .unwrap_or(0);
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    // DB エラー時は 0 扱いしない (Copilot round-16 指摘):
+                    // unwrap_or(0) だと「open trade なし」と誤認して last_hour
+                    // を進めてしまい、その hour の accrual を恒久取りこぼす。
+                    // last_hour 不更新 + continue で次 tick retry。
+                    tracing::error!(
+                        "sfd hourly: open trade count query failed (will retry next tick): {e}"
+                    );
+                    continue;
+                }
+            };
             if open_target_count == 0 {
                 last_hour = Some(current_hour);
                 continue;
