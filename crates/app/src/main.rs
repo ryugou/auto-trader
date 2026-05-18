@@ -2004,6 +2004,12 @@ async fn main() -> anyhow::Result<()> {
                         // 各行を正しい hour に attribution する
                         // (Copilot round-9 指摘)。
                         let event_at = lh + chrono::Duration::hours(1);
+                        // この hour に trade がまだ open していなかったなら
+                        // 課金しない (Copilot round-13 指摘: catch-up で
+                        // retroactive 課金を防ぐ)。
+                        if trade.entry_at > event_at {
+                            continue;
+                        }
                         let result = async {
                             let mut tx = sfd_pool.begin().await?;
                             let applied = auto_trader_db::trades::apply_sfd_fee(

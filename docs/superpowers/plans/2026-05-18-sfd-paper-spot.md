@@ -479,6 +479,7 @@ pub async fn apply_sfd_fee(
     account_id: Uuid,
     trade_id: Uuid,
     fee_amount: Decimal,
+    occurred_at: DateTime<Utc>,
 ) -> anyhow::Result<Option<Decimal>> {
     let trade_updated = sqlx::query(
         "UPDATE trades SET fees = fees + $3
@@ -506,13 +507,14 @@ pub async fn apply_sfd_fee(
     .await?;
 
     sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
-           VALUES ($1, $2, 'sfd_fee', $3, $4)"#,
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after, occurred_at)
+           VALUES ($1, $2, 'sfd_fee', $3, $4, $5)"#,
     )
     .bind(account_id)
     .bind(trade_id)
     .bind(-fee_amount)
     .bind(new_balance)
+    .bind(occurred_at)
     .execute(&mut *tx)
     .await?;
 
