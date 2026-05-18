@@ -101,22 +101,22 @@ mod tests {
             &self,
             _: SendChildOrderRequest,
         ) -> anyhow::Result<SendChildOrderResponse> {
-            unimplemented!()
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
         }
         async fn get_child_orders(&self, _: &str, _: &str) -> anyhow::Result<Vec<ChildOrder>> {
-            unimplemented!()
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
         }
         async fn get_executions(&self, _: &str, _: &str) -> anyhow::Result<Vec<Execution>> {
-            unimplemented!()
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
         }
         async fn get_positions(&self, _: &str) -> anyhow::Result<Vec<ExchangePosition>> {
-            unimplemented!()
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
         }
         async fn get_collateral(&self) -> anyhow::Result<Collateral> {
-            unimplemented!()
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
         }
         async fn cancel_child_order(&self, _: &str, _: &str) -> anyhow::Result<()> {
-            unimplemented!()
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
         }
         async fn resolve_position_id(
             &self,
