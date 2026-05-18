@@ -1875,8 +1875,14 @@ async fn main() -> anyhow::Result<()> {
                 pending = SFD_MAX_CATCH_UP_HOURS;
             }
 
-            // 副作用 (accounts list / FX/spot tick 取得) は **成功して accrual を
-            // 試みる前** に行う。失敗時は last_hour 不更新で次 tick retry。
+            // 副作用 (accounts list / FX/spot tick 取得) は **accrual loop に
+            // 入る前** に行う。これらが失敗したら last_hour 不更新 + continue
+            // で next tick retry (この hour は次の tick で再挑戦できる)。
+            // ただし accrual loop に入った後の per-trade `apply_sfd_fee` 失敗は
+            // **best-effort** (error log のみ、lh は進む) — DB 制約違反等は rare、
+            // SFD は近似手数料、一部 trade の row 漏れは operator 手動補正で
+            // 受容する設計。idempotent retry は scope outside (PR B 共通化で
+            // unique-index ベースの reconciliation を検討)。
 
             let accounts = match auto_trader_db::trading_accounts::list_all(&sfd_pool).await {
                 Ok(v) => v,
