@@ -1893,6 +1893,19 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
             };
+            // 対象 account (paper bitFlyer) の有無を先に check。無ければ
+            // tick check 自体不要 (bitFlyer feed が動いていない環境で毎分
+            // warn + pending 累積を防ぐ)。last_hour を current_hour に進めて
+            // catch-up を空転させない (Copilot round-12 指摘)。
+            let has_paper_bitflyer = accounts.iter().any(|pac| {
+                pac.account_type == "paper"
+                    && exchange_from_str(&pac.exchange) == Some(Exchange::BitflyerCfd)
+            });
+            if !has_paper_bitflyer {
+                last_hour = Some(current_hour);
+                continue;
+            }
+
             let fx_key = FeedKey::new(
                 Exchange::BitflyerCfd,
                 auto_trader_core::types::Pair::new("FX_BTC_JPY"),
