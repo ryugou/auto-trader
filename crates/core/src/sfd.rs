@@ -36,7 +36,7 @@ pub fn estimate(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Deci
 ///   15% ≤ |x| < 20% → 1.00%
 ///   20% ≤ |x|       → 3.00%
 ///
-/// bitFlyer Crypto CFD 公式 docs に基づく。rate 改定時は本 const を更新。
+/// bitFlyer Crypto CFD 公式 docs に基づく。rate 改定時は本関数の階段値を更新。
 pub fn sfd_daily_rate(divergence_abs: Decimal) -> Decimal {
     if divergence_abs < dec!(0.05) {
         Decimal::ZERO
