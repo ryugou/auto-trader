@@ -1906,6 +1906,23 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
 
+            // さらに精緻化: account はあっても open FX_BTC_JPY trade が無ければ
+            // tick check 自体不要 (Copilot round-15 指摘)。1 個の集約 query で
+            // 全 paper bitFlyer account の open trade 数を確認。
+            let open_target_count: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM trades t
+                   JOIN trading_accounts a ON a.id = t.account_id
+                   WHERE t.pair = 'FX_BTC_JPY' AND t.status = 'open'
+                     AND a.account_type = 'paper' AND a.exchange = 'bitflyer_cfd'"#,
+            )
+            .fetch_one(&sfd_pool)
+            .await
+            .unwrap_or(0);
+            if open_target_count == 0 {
+                last_hour = Some(current_hour);
+                continue;
+            }
+
             let fx_key = FeedKey::new(
                 Exchange::BitflyerCfd,
                 auto_trader_core::types::Pair::new("FX_BTC_JPY"),
