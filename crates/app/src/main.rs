@@ -1934,6 +1934,13 @@ async fn main() -> anyhow::Result<()> {
                         }
                     };
                 for trade in &open_trades {
+                    // SFD は bitFlyer Crypto CFD の **FX_BTC_JPY のみ** 課金。
+                    // 万一 paper account に他 product (例: ETH 系) の trade が
+                    // ある場合、BTC spot/FX 乖離率で fee 計算するのは誤り。
+                    // Copilot round-5 指摘の防御フィルタ。
+                    if trade.pair.0 != "FX_BTC_JPY" {
+                        continue;
+                    }
                     let notional = trade.entry_price * trade.quantity;
                     let fee = sfd::compute_hourly_sfd(sfd::SfdContext {
                         fx_price: fx_mid,
