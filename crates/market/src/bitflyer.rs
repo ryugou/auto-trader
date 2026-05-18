@@ -516,6 +516,48 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
 
+    /// `BitflyerMonitor::new` で FX_BTC_JPY を含む pair リストを渡すと
+    /// 自動的に BTC_JPY (現物 spot, SFD 計算用) が追加されること。
+    #[test]
+    fn new_auto_adds_btc_jpy_when_fx_btc_jpy_is_subscribed() {
+        let mon = BitflyerMonitor::new("ws://test", vec![Pair::new("FX_BTC_JPY")], "M5");
+        let pair_codes: Vec<&str> = mon.pairs.iter().map(|p| p.0.as_str()).collect();
+        assert!(pair_codes.contains(&"FX_BTC_JPY"));
+        assert!(
+            pair_codes.contains(&"BTC_JPY"),
+            "BTC_JPY (spot) must be auto-added for SFD calc, got: {:?}",
+            pair_codes
+        );
+    }
+
+    /// FX_BTC_JPY が含まれない場合は BTC_JPY を追加しない。
+    #[test]
+    fn new_does_not_add_btc_jpy_when_no_fx_btc_jpy() {
+        let mon = BitflyerMonitor::new("ws://test", vec![Pair::new("ETH_JPY")], "M5");
+        let pair_codes: Vec<&str> = mon.pairs.iter().map(|p| p.0.as_str()).collect();
+        assert!(!pair_codes.contains(&"BTC_JPY"));
+    }
+
+    /// 既に BTC_JPY が含まれている場合は二重追加しない。
+    #[test]
+    fn new_does_not_duplicate_btc_jpy_when_already_subscribed() {
+        let mon = BitflyerMonitor::new(
+            "ws://test",
+            vec![Pair::new("FX_BTC_JPY"), Pair::new("BTC_JPY")],
+            "M5",
+        );
+        let btc_count = mon.pairs.iter().filter(|p| p.0 == "BTC_JPY").count();
+        assert_eq!(btc_count, 1, "BTC_JPY must not be duplicated");
+    }
+
+    /// is_spot_only が BTC_JPY を spot-only と判定すること。
+    #[test]
+    fn is_spot_only_classifies_btc_jpy_as_spot() {
+        assert!(is_spot_only(&Pair::new("BTC_JPY")));
+        assert!(!is_spot_only(&Pair::new("FX_BTC_JPY")));
+        assert!(!is_spot_only(&Pair::new("ETH_JPY")));
+    }
+
     /// Verify that a completed M5 candle produces a full indicator_map
     /// and an H1 builder for the same pair correctly tracks progress.
     #[test]

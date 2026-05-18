@@ -27,8 +27,9 @@ pub fn estimate(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Deci
 
 /// bitFlyer Crypto CFD 公式 SFD 階段 (**daily** rate)。
 ///
-/// 入力 `divergence_abs` は乖離率の **絶対値** (例: `dec!(0.07)` = 7%)。
-/// 呼び出し側で `.abs()` を取ってから渡すこと (負値は 0% region に落ちる)。
+/// 入力 `divergence` は乖離率 (例: `dec!(0.07)` = 7%、負値も可)。
+/// 内部で `.abs()` を取るため呼び出し側は符号気にせず渡せる
+/// (Copilot round-3 指摘: pub function の footgun を内部正規化で解消)。
 ///
 ///   |x| < 5%        → 0.00%
 ///   5%  ≤ |x| < 10% → 0.25%
@@ -37,14 +38,15 @@ pub fn estimate(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Deci
 ///   20% ≤ |x|       → 3.00%
 ///
 /// bitFlyer Crypto CFD 公式 docs に基づく。rate 改定時は本関数の階段値を更新。
-pub fn sfd_daily_rate(divergence_abs: Decimal) -> Decimal {
-    if divergence_abs < dec!(0.05) {
+pub fn sfd_daily_rate(divergence: Decimal) -> Decimal {
+    let d = divergence.abs();
+    if d < dec!(0.05) {
         Decimal::ZERO
-    } else if divergence_abs < dec!(0.10) {
+    } else if d < dec!(0.10) {
         dec!(0.0025)
-    } else if divergence_abs < dec!(0.15) {
+    } else if d < dec!(0.15) {
         dec!(0.005)
-    } else if divergence_abs < dec!(0.20) {
+    } else if d < dec!(0.20) {
         dec!(0.01)
     } else {
         dec!(0.03)
@@ -143,10 +145,13 @@ mod tests {
     }
 
     #[test]
-    fn sfd_daily_rate_negative_input_treated_as_absolute_should_caller() {
-        // sfd_daily_rate は呼び出し側で abs() を取って渡す前提。
-        // 万一負値が渡ると 0% region と評価される (符号無視)。
-        assert_eq!(sfd_daily_rate(dec!(-0.10)), Decimal::ZERO);
+    fn sfd_daily_rate_normalizes_negative_input_via_abs() {
+        // sfd_daily_rate は内部で .abs() を取るため、負値も対応する正の
+        // region と同じ rate を返す。
+        assert_eq!(sfd_daily_rate(dec!(-0.10)), dec!(0.005));
+        assert_eq!(sfd_daily_rate(dec!(-0.07)), dec!(0.0025));
+        assert_eq!(sfd_daily_rate(dec!(-0.04)), Decimal::ZERO);
+        assert_eq!(sfd_daily_rate(dec!(-0.25)), dec!(0.03));
     }
 
     fn ctx(fx: Decimal, spot: Decimal, notional: Decimal, dir: Direction) -> SfdContext {
