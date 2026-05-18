@@ -70,4 +70,69 @@ pub trait ExchangeApi: Send + Sync {
     fn requires_close_position_id(&self) -> bool {
         false
     }
+
+    /// Accumulated SFD (Swap For Difference, bitFlyer Crypto CFD only) for
+    /// the given product at close time. Default implementation returns 0 —
+    /// only exchanges that charge SFD override.
+    ///
+    /// SFD は bitFlyer Crypto CFD で現物価格と FX 価格の乖離が一定以上の時
+    /// 発生する累積手数料。close 直前に 1 度読んで `Trade.fees` に積む。
+    async fn fetch_close_sfd(&self, _product_code: &str) -> anyhow::Result<Decimal> {
+        Ok(Decimal::ZERO)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitflyer_private::{
+        ChildOrder, Collateral, ExchangePosition, Execution, SendChildOrderRequest,
+        SendChildOrderResponse, Side,
+    };
+    use chrono::{DateTime, Utc};
+
+    /// default fetch_close_sfd 実装が常に Ok(0) を返すことを確認する
+    /// 簡易スタブ。method を override しなければこの挙動になる。
+    struct StubApi;
+
+    #[async_trait]
+    impl ExchangeApi for StubApi {
+        async fn send_child_order(
+            &self,
+            _: SendChildOrderRequest,
+        ) -> anyhow::Result<SendChildOrderResponse> {
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
+        }
+        async fn get_child_orders(&self, _: &str, _: &str) -> anyhow::Result<Vec<ChildOrder>> {
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
+        }
+        async fn get_executions(&self, _: &str, _: &str) -> anyhow::Result<Vec<Execution>> {
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
+        }
+        async fn get_positions(&self, _: &str) -> anyhow::Result<Vec<ExchangePosition>> {
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
+        }
+        async fn get_collateral(&self) -> anyhow::Result<Collateral> {
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
+        }
+        async fn cancel_child_order(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            panic!("not used in default_fetch_close_sfd_returns_zero test")
+        }
+        async fn resolve_position_id(
+            &self,
+            _: &str,
+            _: DateTime<Utc>,
+            _: Side,
+            _: Decimal,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn default_fetch_close_sfd_returns_zero() {
+        let api = StubApi;
+        let sfd = api.fetch_close_sfd("FX_BTC_JPY").await.unwrap();
+        assert_eq!(sfd, Decimal::ZERO);
+    }
 }

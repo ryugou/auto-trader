@@ -244,4 +244,18 @@ async fn live_close_accumulates_commission_on_top_of_open(pool: sqlx::PgPool) {
         dec!(100),
         "close commission accumulates on top of open: 50 + 50 = 100"
     );
+
+    // Regression guard: update_trade_closed must persist commission to DB.
+    // 以前は trade.fees (= open commission only) が渡されており close 時の
+    // commission が DB row に書かれていなかった (in-memory closed_trade だけ
+    // 正しい値、DB は open_commission のまま)。
+    let from_db = auto_trader_db::trades::get_trade_by_id(&pool, closed.id)
+        .await
+        .expect("get_trade_by_id succeeds")
+        .expect("trade row exists");
+    assert_eq!(
+        from_db.fees,
+        dec!(100),
+        "DB row must reflect open + close commission (bug fix regression guard)"
+    );
 }
