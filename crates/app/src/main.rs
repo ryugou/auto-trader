@@ -1832,6 +1832,12 @@ async fn main() -> anyhow::Result<()> {
         use auto_trader_core::sfd;
         use auto_trader_market::price_store::FeedKey;
         use chrono::Timelike as _;
+        // catch-up 上限: WS 切断から復旧時に missed hours を一気に accrual
+        // するが、過大な遡及計算を避けるため 24h で頭打ち。それ以上古い
+        // hours は drop + warn (operator が手動補正)。
+        const SFD_MAX_CATCH_UP_HOURS: i64 = 24;
+        const SFD_STALE_THRESHOLD_SECS: u64 = 300;
+
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let mut last_hour: Option<chrono::DateTime<chrono::Utc>> = None;
         loop {
@@ -1844,17 +1850,33 @@ async fn main() -> anyhow::Result<()> {
                 .and_utc();
             // First tick after startup: record current_hour, do not apply yet
             // (避免 mid-hour 部分時間計上)。
-            if last_hour.is_none() {
+            let Some(mut lh) = last_hour else {
                 last_hour = Some(current_hour);
                 continue;
-            }
-            if last_hour == Some(current_hour) {
+            };
+            // まだ次の hour 境界に達していない
+            if lh + chrono::Duration::hours(1) > current_hour {
                 continue;
             }
-            // 注: last_hour 更新は副作用 (accounts list / FX/spot tick 取得)
-            // が **成功して accrual を試みた後** に行う。早期に更新すると
-            // 一時的な DB/tick 不在で skip された hour が永久に失われる
-            // (next tick で current_hour == last_hour になり再試行されない)。
+
+            // 累積 missed hours を計算。上限超過分は drop。
+            // (Copilot review round-6 で catch-up loop の建設的案を採用)
+            let mut pending = (current_hour - lh).num_hours();
+            if pending > SFD_MAX_CATCH_UP_HOURS {
+                let dropped = pending - SFD_MAX_CATCH_UP_HOURS;
+                tracing::warn!(
+                    missed_hours = pending,
+                    dropped_hours = dropped,
+                    max_catch_up = SFD_MAX_CATCH_UP_HOURS,
+                    "sfd catch-up: too many missed hours (likely long WS outage), \
+                     dropping older accrual; operator should audit balance"
+                );
+                lh = current_hour - chrono::Duration::hours(SFD_MAX_CATCH_UP_HOURS);
+                pending = SFD_MAX_CATCH_UP_HOURS;
+            }
+
+            // 副作用 (accounts list / FX/spot tick 取得) は **成功して accrual を
+            // 試みる前** に行う。失敗時は last_hour 不更新で次 tick retry。
 
             let accounts = match auto_trader_db::trading_accounts::list_all(&sfd_pool).await {
                 Ok(v) => v,
@@ -1875,9 +1897,6 @@ async fn main() -> anyhow::Result<()> {
             );
             // Freshness guard: WS が長時間切断した状態だと latest_bid_ask は
             // 古い tick を返し続けるため、age check で stale を弾く。
-            // SFD は hourly 計算なので 5 分以内 (300s) の tick があれば fresh
-            // と判定 (bitFlyer WS は通常数秒間隔で来る)。
-            const SFD_STALE_THRESHOLD_SECS: u64 = 300;
             let fx_age = sfd_price_store.last_tick_age_for(&fx_key).await;
             let spot_age = sfd_price_store.last_tick_age_for(&spot_key).await;
             let fresh = matches!(fx_age, Some(a) if a <= SFD_STALE_THRESHOLD_SECS)
@@ -1906,78 +1925,84 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // ここまで来たら accrual 可能 → last_hour を進める
-            last_hour = Some(current_hour);
-
-            for pac in accounts {
-                if pac.account_type != "paper" {
-                    continue;
-                }
-                let exchange = match exchange_from_str(&pac.exchange) {
-                    Some(e) => e,
-                    None => continue,
-                };
-                if exchange != Exchange::BitflyerCfd {
-                    continue;
-                }
-                let open_trades =
-                    match auto_trader_db::trades::get_open_trades_by_account(&sfd_pool, pac.id)
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!(
-                                "sfd hourly: list open trades failed for {}: {e}",
-                                pac.name
-                            );
+            // pending hours 分 accrual を順次適用。各 iteration は 1 hour 相当
+            // の fee を全 account/trade に積む。fx/spot mid は現在値で固定
+            // (過去 hours も近似的に同じ rate で計上、paper は近似目的なので
+            // 許容)。
+            for _ in 0..pending {
+                for pac in &accounts {
+                    if pac.account_type != "paper" {
+                        continue;
+                    }
+                    let exchange = match exchange_from_str(&pac.exchange) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    if exchange != Exchange::BitflyerCfd {
+                        continue;
+                    }
+                    let open_trades =
+                        match auto_trader_db::trades::get_open_trades_by_account(&sfd_pool, pac.id)
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::error!(
+                                    "sfd hourly: list open trades failed for {}: {e}",
+                                    pac.name
+                                );
+                                continue;
+                            }
+                        };
+                    for trade in &open_trades {
+                        // SFD は bitFlyer Crypto CFD の **FX_BTC_JPY のみ** 課金。
+                        // 万一 paper account に他 product (例: ETH 系) の trade が
+                        // ある場合、BTC spot/FX 乖離率で fee 計算するのは誤り。
+                        // Copilot round-5 指摘の防御フィルタ。
+                        if trade.pair.0 != "FX_BTC_JPY" {
                             continue;
                         }
-                    };
-                for trade in &open_trades {
-                    // SFD は bitFlyer Crypto CFD の **FX_BTC_JPY のみ** 課金。
-                    // 万一 paper account に他 product (例: ETH 系) の trade が
-                    // ある場合、BTC spot/FX 乖離率で fee 計算するのは誤り。
-                    // Copilot round-5 指摘の防御フィルタ。
-                    if trade.pair.0 != "FX_BTC_JPY" {
-                        continue;
-                    }
-                    let notional = trade.entry_price * trade.quantity;
-                    let fee = sfd::compute_hourly_sfd(sfd::SfdContext {
-                        fx_price: fx_mid,
-                        spot_price: spot_mid,
-                        position_notional: notional,
-                        direction: trade.direction,
-                    });
-                    if fee.is_zero() {
-                        continue;
-                    }
-                    let result = async {
-                        let mut tx = sfd_pool.begin().await?;
-                        let applied =
-                            auto_trader_db::trades::apply_sfd_fee(&mut tx, pac.id, trade.id, fee)
-                                .await?;
-                        tx.commit().await?;
-                        anyhow::Ok(applied)
-                    }
-                    .await;
-                    match result {
-                        Ok(Some(_)) => {
-                            tracing::info!(
-                                "sfd applied: trade={} fee={} notional={}",
-                                trade.id,
-                                fee,
-                                notional
-                            );
+                        let notional = trade.entry_price * trade.quantity;
+                        let fee = sfd::compute_hourly_sfd(sfd::SfdContext {
+                            fx_price: fx_mid,
+                            spot_price: spot_mid,
+                            position_notional: notional,
+                            direction: trade.direction,
+                        });
+                        if fee.is_zero() {
+                            continue;
                         }
-                        Ok(None) => {
-                            tracing::debug!("sfd skip: trade {} closed mid-tick", trade.id);
+                        let result = async {
+                            let mut tx = sfd_pool.begin().await?;
+                            let applied = auto_trader_db::trades::apply_sfd_fee(
+                                &mut tx, pac.id, trade.id, fee,
+                            )
+                            .await?;
+                            tx.commit().await?;
+                            anyhow::Ok(applied)
                         }
-                        Err(e) => {
-                            tracing::error!("sfd apply failed for trade {}: {e}", trade.id);
+                        .await;
+                        match result {
+                            Ok(Some(_)) => {
+                                tracing::info!(
+                                    "sfd applied: trade={} fee={} notional={}",
+                                    trade.id,
+                                    fee,
+                                    notional
+                                );
+                            }
+                            Ok(None) => {
+                                tracing::debug!("sfd skip: trade {} closed mid-tick", trade.id);
+                            }
+                            Err(e) => {
+                                tracing::error!("sfd apply failed for trade {}: {e}", trade.id);
+                            }
                         }
                     }
                 }
+                lh += chrono::Duration::hours(1);
             }
+            last_hour = Some(lh);
         }
     });
 

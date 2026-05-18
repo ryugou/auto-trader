@@ -679,6 +679,7 @@ pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Re
 pub enum TradeEventKind {
     Open,
     OvernightFee,
+    SfdFee,
     Close,
 }
 
@@ -748,17 +749,20 @@ pub async fn get_trade_events(
     });
 
     for row in &event_rows {
-        if row.event_type == "overnight_fee" {
-            events.push(TradeEvent {
-                kind: TradeEventKind::OvernightFee,
-                occurred_at: row.occurred_at,
-                price: None,
-                quantity: None,
-                direction: None,
-                cash_delta: Some(row.amount),
-                pnl_amount: None,
-            });
-        }
+        let kind = match row.event_type.as_str() {
+            "overnight_fee" => TradeEventKind::OvernightFee,
+            "sfd_fee" => TradeEventKind::SfdFee,
+            _ => continue,
+        };
+        events.push(TradeEvent {
+            kind,
+            occurred_at: row.occurred_at,
+            price: None,
+            quantity: None,
+            direction: None,
+            cash_delta: Some(row.amount),
+            pnl_amount: None,
+        });
     }
 
     if let (Some(exit_at), Some(exit_price)) = (trade.exit_at, trade.exit_price) {
