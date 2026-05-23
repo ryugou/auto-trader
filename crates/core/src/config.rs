@@ -48,7 +48,9 @@ pub struct GmoFxConfig {
 }
 
 /// Per-pair × per-direction swap rates for GMO FX (in JPY per lot per day).
-/// signed: positive = paper account receives, negative = pays.
+/// signed: **positive = paper account pays, negative = receives**
+/// (`apply_swap_fee` / `compute_daily_swap` の符号規約と一致。
+///  `fee_amount > 0` で fees 増・balance 減 = paper 払い)。
 /// 1 lot = 10_000 通貨単位 (GMO FX 標準)。
 ///
 /// TOML 例:

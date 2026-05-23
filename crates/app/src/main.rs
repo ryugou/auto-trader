@@ -1780,45 +1780,47 @@ async fn main() -> anyhow::Result<()> {
                     };
                     let mut applied_count: usize = 0;
                     for trade in &open_trades {
-                        // Per-exchange fee 計算 + apply を 1 つの match で
-                        // dispatch (二重 match を避ける、unreachable! は exhaustive
-                        // 上のフィルタ済で到達不能)。
+                        // 1. Fee 計算 + 早期 skip (tx 開く前)。
+                        //    unconfigured pair / zero fee で BEGIN/ROLLBACK の
+                        //    churn を避ける (Copilot review round-1 指摘)。
+                        let fee = match exchange {
+                            Exchange::BitflyerCfd => (trade.entry_price
+                                * trade.quantity
+                                * bitflyer_fee_rate)
+                                .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero),
+                            Exchange::GmoFx => {
+                                let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
+                                else {
+                                    tracing::debug!(
+                                        "gmo swap: no rate for pair {} on trade {}; skip",
+                                        trade.pair,
+                                        trade.id
+                                    );
+                                    continue;
+                                };
+                                auto_trader_core::swap::compute_daily_swap(
+                                    *rate,
+                                    trade.direction,
+                                    trade.quantity,
+                                )
+                            }
+                            Exchange::Oanda => unreachable!("filtered above"),
+                        };
+                        if fee.is_zero() {
+                            continue;
+                        }
+                        // 2. tx 開始 + apply。closed trade は CAS skip で
+                        //    Ok(None) を返す。
                         let result = async {
                             let mut tx = overnight_pool.begin().await?;
                             let applied = match exchange {
                                 Exchange::BitflyerCfd => {
-                                    let fee =
-                                        (trade.entry_price * trade.quantity * bitflyer_fee_rate)
-                                            .round_dp_with_strategy(
-                                                0,
-                                                rust_decimal::RoundingStrategy::ToZero,
-                                            );
-                                    if fee.is_zero() {
-                                        return anyhow::Ok(None);
-                                    }
                                     auto_trader_db::trades::apply_overnight_fee(
                                         &mut tx, pac.id, trade.id, fee,
                                     )
                                     .await?
                                 }
                                 Exchange::GmoFx => {
-                                    let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
-                                    else {
-                                        tracing::debug!(
-                                            "gmo swap: no rate for pair {} on trade {}; skip",
-                                            trade.pair,
-                                            trade.id
-                                        );
-                                        return anyhow::Ok(None);
-                                    };
-                                    let fee = auto_trader_core::swap::compute_daily_swap(
-                                        *rate,
-                                        trade.direction,
-                                        trade.quantity,
-                                    );
-                                    if fee.is_zero() {
-                                        return anyhow::Ok(None);
-                                    }
                                     auto_trader_db::trades::apply_swap_fee(
                                         &mut tx, pac.id, trade.id, fee, event_at,
                                     )
@@ -1836,7 +1838,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                             Ok(None) => {
                                 tracing::debug!(
-                                    "overnight/swap: skipping trade {} — closed or zero fee",
+                                    "overnight/swap: CAS skip for trade {} — closed mid-tick",
                                     trade.id
                                 );
                             }

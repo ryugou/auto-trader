@@ -62,7 +62,8 @@ git commit -m "feat(db): allow 'swap_fee' event_type for paper GMO FX accrual"
 
 ```rust
 /// Per-pair × per-direction swap rates for GMO FX (in JPY per lot per day).
-/// signed: positive = paper account receives, negative = pays.
+/// signed: **positive = paper account pays, negative = receives**
+/// (apply_swap_fee の符号規約と一致)。
 /// 1 lot = 10_000 通貨単位 (GMO FX 標準)。
 ///
 /// TOML 例:

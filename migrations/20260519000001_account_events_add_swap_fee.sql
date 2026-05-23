@@ -1,6 +1,7 @@
 -- account_events.event_type CHECK 制約に 'swap_fee' を追加。
 -- GMO FX paper accrual job が daily swap point を記録するため。
--- 符号両対応 (受取 amount<0、支払い amount>0、apply_sfd_fee と同規約)。
+-- 符号両対応 (apply_*_fee の規約: amount = -fee_amount なので
+--  paper 払い → amount<0、paper 受取 → amount>0、sfd_fee 同規約)。
 ALTER TABLE account_events
     DROP CONSTRAINT IF EXISTS account_events_event_type_check;
 

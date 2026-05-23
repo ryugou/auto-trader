@@ -26,7 +26,8 @@ GMO FX **paper account** でも config 固定 rate ベースで daily swap point
 
 ```rust
 /// Per-pair × per-direction swap rates for GMO FX (in JPY per lot per day).
-/// signed: positive = paper account receives, negative = pays.
+/// signed: **positive = paper account pays, negative = receives**
+/// (apply_swap_fee の符号規約と一致)。
 /// 1 lot = 10,000 通貨単位 (GMO FX 標準)。
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
