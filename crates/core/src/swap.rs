@@ -31,9 +31,10 @@ pub fn estimate(exchange: Exchange) -> Decimal {
 
 /// 1 日分の swap fee (signed) を算出。truncate to whole yen。
 ///
-/// 戻り値は `apply_swap_fee` に渡される値で、その符号規約は:
-///   >0 → paper account 払い (fees 増、balance 減)
-///   <0 → paper account 受取 (fees 減、balance 増)
+/// 戻り値は `apply_swap_fee` に渡される値で、その符号規約は次の通り。
+///
+/// - `> 0` → paper account 払い (fees 増、balance 減)
+/// - `< 0` → paper account 受取 (fees 減、balance 増)
 pub fn compute_daily_swap(
     long_per_lot: Decimal,
     short_per_lot: Decimal,

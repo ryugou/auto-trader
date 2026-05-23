@@ -1731,9 +1731,7 @@ async fn main() -> anyhow::Result<()> {
                     match auto_trader_db::trading_accounts::list_all(&overnight_pool).await {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::error!(
-                                "overnight/swap: failed to list trading accounts: {e}"
-                            );
+                            tracing::error!("overnight/swap: failed to list trading accounts: {e}");
                             last_date = today;
                             continue;
                         }
@@ -1782,13 +1780,10 @@ async fn main() -> anyhow::Result<()> {
                     for trade in &open_trades {
                         // Per-exchange fee calculation.
                         let fee = match exchange {
-                            Exchange::BitflyerCfd => {
-                                (trade.entry_price * trade.quantity * bitflyer_fee_rate)
-                                    .round_dp_with_strategy(
-                                        0,
-                                        rust_decimal::RoundingStrategy::ToZero,
-                                    )
-                            }
+                            Exchange::BitflyerCfd => (trade.entry_price
+                                * trade.quantity
+                                * bitflyer_fee_rate)
+                                .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero),
                             Exchange::GmoFx => {
                                 let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
                                 else {
@@ -1822,10 +1817,12 @@ async fn main() -> anyhow::Result<()> {
                                     )
                                     .await?
                                 }
-                                Exchange::GmoFx => auto_trader_db::trades::apply_swap_fee(
-                                    &mut tx, pac.id, trade.id, fee, event_at,
-                                )
-                                .await?,
+                                Exchange::GmoFx => {
+                                    auto_trader_db::trades::apply_swap_fee(
+                                        &mut tx, pac.id, trade.id, fee, event_at,
+                                    )
+                                    .await?
+                                }
                                 _ => unreachable!("filtered above"),
                             };
                             tx.commit().await?;

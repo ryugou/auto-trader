@@ -557,9 +557,18 @@ EUR_JPY = { long = 80, short = -100 }
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         let rates = &config.gmo_fx.swap.rates;
-        assert_eq!(rates.get("USD_JPY").unwrap().long, rust_decimal_macros::dec!(100));
-        assert_eq!(rates.get("USD_JPY").unwrap().short, rust_decimal_macros::dec!(-120));
-        assert_eq!(rates.get("EUR_JPY").unwrap().long, rust_decimal_macros::dec!(80));
+        assert_eq!(
+            rates.get("USD_JPY").unwrap().long,
+            rust_decimal_macros::dec!(100)
+        );
+        assert_eq!(
+            rates.get("USD_JPY").unwrap().short,
+            rust_decimal_macros::dec!(-120)
+        );
+        assert_eq!(
+            rates.get("EUR_JPY").unwrap().long,
+            rust_decimal_macros::dec!(80)
+        );
         assert!(rates.get("GBP_JPY").is_none());
     }
 
