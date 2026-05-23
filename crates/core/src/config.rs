@@ -34,6 +34,39 @@ pub struct AppConfig {
     /// post-SL margin level does not fall below this threshold.
     #[serde(default)]
     pub exchange_margin: HashMap<String, ExchangeMarginConfig>,
+    /// GMO FX swap rates (TOML key `[gmo_fx.swap]`).
+    /// 未設定なら空 HashMap (該当 pair の swap 計上は 0)。
+    #[serde(default)]
+    pub gmo_fx: GmoFxConfig,
+}
+
+/// GMO FX 用 config (TOML key `[gmo_fx]`)。現状は swap rate のみ。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct GmoFxConfig {
+    pub swap: GmoFxSwapConfig,
+}
+
+/// Per-pair × per-direction swap rates for GMO FX (in JPY per lot per day).
+/// signed: positive = paper account receives, negative = pays.
+/// 1 lot = 10_000 通貨単位 (GMO FX 標準)。
+///
+/// TOML 例:
+/// ```toml
+/// [gmo_fx.swap.rates]
+/// USD_JPY = { long = 100, short = -120 }
+/// EUR_JPY = { long = 80, short = -100 }
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct GmoFxSwapConfig {
+    pub rates: HashMap<String, SwapRateEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct SwapRateEntry {
+    pub long: Decimal,
+    pub short: Decimal,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -502,5 +535,49 @@ crypto = []
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.exchange_margin.is_empty());
+    }
+
+    #[test]
+    fn parses_gmo_fx_swap_section() {
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+
+[gmo_fx.swap.rates]
+USD_JPY = { long = 100, short = -120 }
+EUR_JPY = { long = 80, short = -100 }
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        let rates = &config.gmo_fx.swap.rates;
+        assert_eq!(rates.get("USD_JPY").unwrap().long, rust_decimal_macros::dec!(100));
+        assert_eq!(rates.get("USD_JPY").unwrap().short, rust_decimal_macros::dec!(-120));
+        assert_eq!(rates.get("EUR_JPY").unwrap().long, rust_decimal_macros::dec!(80));
+        assert!(rates.get("GBP_JPY").is_none());
+    }
+
+    #[test]
+    fn gmo_fx_swap_defaults_to_empty_when_missing() {
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.gmo_fx.swap.rates.is_empty());
     }
 }
