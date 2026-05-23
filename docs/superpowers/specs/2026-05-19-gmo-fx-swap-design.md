@@ -16,7 +16,10 @@ GMO FX **paper account** でも config 固定 rate ベースで daily swap point
 - live GMO API から swap 実値を取得する path (上記理由で困難 + spec 上 paper 専用判断)。
 - 3 倍デー (NY 火曜→水曜の roll で 3 日分計上、土日対策) — 最初は 1 倍デーのみ、将来 config 拡張で対応。
 - swap rate の動的取得 (GMO 公式 page scrape, 動的 API): YAGNI。代表値 hardcode で paper 近似十分。
-- PR A で deferred の **restart 跨ぎ persistence** と **apply_*_fee 共通化 refactor**: ここでまとめると PR 肥大化するため別 follow-up PR。
+- PR A で deferred の **restart 跨ぎ persistence**: schema 変更を伴うため別 follow-up PR。
+  - 注: 元 spec では「apply_*_fee 共通化 refactor も別 PR」と記載していたが、本 PR の simplify
+    review で N=3 重複が defer 不能と判断、`apply_fee_inner` を private fn として **本 PR で
+    抽出済** (Reuse W1 対応)。
 
 ## Architecture
 
@@ -227,5 +230,6 @@ for each paper trade:
 ## Future PRs
 
 - 3 倍デー対応 (NY 火曜→水曜 roll の 3 日分計上、土日対策)。config に `weekday_multiplier` table を追加して `compute_daily_swap` を拡張。
-- restart 跨ぎ persistence + apply_*_fee 共通化 refactor (PR A round-17 で deferred)。
+- restart 跨ぎ persistence (PR A round-17 で deferred、schema 変更を要するため別 PR)。
+- (apply_*_fee 共通化 refactor は本 PR で対応済、`apply_fee_inner` 抽出)
 - live swap 反映 (GMO API 仕様確認後、`GmoAccountAssets.total_swap` の delta tracking 等)。

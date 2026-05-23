@@ -1727,15 +1727,20 @@ async fn main() -> anyhow::Result<()> {
             if today != last_date {
                 // Apply overnight/swap fees only to paper accounts (live accounts
                 // pay fees directly to the exchange; we don't deduct them here).
-                let accounts =
-                    match auto_trader_db::trading_accounts::list_all(&overnight_pool).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!("overnight/swap: failed to list trading accounts: {e}");
-                            last_date = today;
-                            continue;
-                        }
-                    };
+                let accounts = match auto_trader_db::trading_accounts::list_all(&overnight_pool)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // last_date 不更新で次 tick (60s 後) に retry。
+                        // ここで last_date = today にすると一時的 DB 障害で
+                        // 丸 1 日 skip してしまう (Copilot round-3 指摘)。
+                        tracing::error!(
+                            "overnight/swap: failed to list trading accounts (will retry next tick): {e}"
+                        );
+                        continue;
+                    }
+                };
                 // event_at = today の UTC midnight 境界 (attribution 用)。
                 let event_at = today
                     .and_hms_opt(0, 0, 0)
