@@ -42,7 +42,7 @@ pub struct SwapRateEntry {
 }
 ```
 
-`AppConfig` に `pub gmo_fx_swap: GmoFxSwapConfig` を追加 (TOML key `[gmo_fx.swap]`):
+`AppConfig` に `pub gmo_fx: GmoFxConfig` を追加 (TOML key `[gmo_fx]`、その下に `swap: GmoFxSwapConfig`):
 
 ```toml
 [gmo_fx.swap.rates]
@@ -69,21 +69,20 @@ pub fn estimate(_exchange: Exchange) -> Decimal {
 /// 1 日分の swap fee (signed) を算出。
 ///
 /// formula:
-///   per_lot = rate.long_per_lot or rate.short_per_lot (direction で分岐)
-///   lots    = quantity / 10_000
+///   per_lot = rate.long or rate.short (direction で分岐)
+///   lots    = quantity / GMO_FX_LOT_SIZE (10_000)
 ///   fee     = truncate_yen(per_lot × lots)
 ///
-/// 戻り値が正なら paper account は **受取** (balance 増・fees 減算)、負なら
-/// **支払い** (balance 減・fees 加算)。`apply_swap_fee` で符号両対応の処理。
+/// 戻り値が正なら paper account は **払い** (fees 増・balance 減)、負なら
+/// **受取** (fees 減・balance 増)。`apply_swap_fee` の符号規約と一致。
 pub fn compute_daily_swap(
-    long_per_lot: Decimal,
-    short_per_lot: Decimal,
+    rate: SwapRateEntry,
     direction: Direction,
     quantity: Decimal,
 ) -> Decimal {
     let per_lot = match direction {
-        Direction::Long => long_per_lot,
-        Direction::Short => short_per_lot,
+        Direction::Long => rate.long,
+        Direction::Short => rate.short,
     };
     let lots = quantity / dec!(10_000);
     (per_lot * lots).round_dp_with_strategy(0, RoundingStrategy::ToZero)

@@ -87,18 +87,10 @@ pub struct SwapRateEntry {
 
 - [ ] **Step 2: Wire into AppConfig**
 
-`crates/core/src/config.rs:7-37` の `AppConfig` struct に追加 (例えば `exchange_margin` の直後):
-
-```rust
-    /// GMO FX swap rates (TOML key `[gmo_fx.swap]`).
-    /// 未設定なら空 HashMap (該当 pair の swap 計上は 0)。
-    #[serde(default)]
-    pub gmo_fx_swap: GmoFxSwapConfig,
-```
-
-ただし TOML の key path は `[gmo_fx.swap]` → Rust 上は `serde(rename = "gmo_fx")` で別 struct 経由か、もしくは flat key で扱う。**確認**: 既存 `[exchange_margin.gmo_fx]` は `exchange_margin: HashMap<String, ExchangeMarginConfig>` で対応している。`[gmo_fx.swap]` も同様に `gmo_fx: GmoFxParent` でラップ。
-
-書き直し:
+`crates/core/src/config.rs:7-37` の `AppConfig` struct に追加 (例えば
+`exchange_margin` の直後)。TOML key path `[gmo_fx.swap]` を Rust 上で扱う
+ため、`gmo_fx: GmoFxConfig` 経由でラップする (既存 `[exchange_margin.gmo_fx]`
+を `exchange_margin: HashMap` で扱う設計と同パターン):
 
 ```rust
 // 既存 AppConfig に追加:
