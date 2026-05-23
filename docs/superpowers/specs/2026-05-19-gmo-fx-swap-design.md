@@ -130,7 +130,7 @@ if exchange == Exchange::GmoFx {
         tracing::debug!("gmo swap: no rate for {} on trade {}, skip", pair_key, trade.id);
         continue;
     };
-    let fee = compute_daily_swap(rate.long, rate.short, trade.direction, trade.quantity);
+    let fee = compute_daily_swap(*rate, trade.direction, trade.quantity);
     if fee.is_zero() { continue; }
     apply_swap_fee(tx, account_id, trade.id, fee, event_at);
 }

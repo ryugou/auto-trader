@@ -198,39 +198,32 @@ git commit -m "feat(core/config): GmoFxConfig with [gmo_fx.swap.rates] section"
 //! swap を計算し、`apply_swap_fee` 経由で `Trade.fees` に積算する。
 //!
 //! formula:
-//!   per_lot = rate.long_per_lot or rate.short_per_lot (direction で分岐)
-//!   lots    = quantity / 10_000  (GMO FX 標準 1 lot = 10,000 通貨単位)
+//!   per_lot = rate.long or rate.short (direction で分岐)
+//!   lots    = quantity / GMO_FX_LOT_SIZE (10_000)
 //!   fee     = truncate_yen(per_lot × lots)
 //!
-//! 戻り値が正なら paper account は **受取** (balance 増・fees 減算)、負なら
-//! **支払い** (balance 減・fees 加算)。`apply_swap_fee` で符号両対応。
+//! sign 規約 (apply_swap_fee と一致):
+//! - `> 0` → paper account 払い (fees 増・balance 減)
+//! - `< 0` → paper account 受取 (fees 減・balance 増)
 
-use crate::types::{Direction, Exchange};
+use crate::config::SwapRateEntry;
+use crate::types::Direction;
 use rust_decimal::{Decimal, RoundingStrategy};
 use rust_decimal_macros::dec;
 
-/// paper 側 swap fee の skeleton。現状は全 exchange 0 を返す。
-/// 実際の swap 計算は config rate を使う `compute_daily_swap` が行う。
-pub fn estimate(exchange: Exchange) -> Decimal {
-    match exchange {
-        Exchange::BitflyerCfd => Decimal::ZERO,
-        Exchange::GmoFx => Decimal::ZERO,
-        Exchange::Oanda => Decimal::ZERO,
-    }
-}
+const GMO_FX_LOT_SIZE: Decimal = dec!(10_000);
 
 /// 1 日分の swap fee (signed) を算出。truncate to whole yen。
 pub fn compute_daily_swap(
-    long_per_lot: Decimal,
-    short_per_lot: Decimal,
+    rate: SwapRateEntry,
     direction: Direction,
     quantity: Decimal,
 ) -> Decimal {
     let per_lot = match direction {
-        Direction::Long => long_per_lot,
-        Direction::Short => short_per_lot,
+        Direction::Long => rate.long,
+        Direction::Short => rate.short,
     };
-    let lots = quantity / dec!(10_000);
+    let lots = quantity / GMO_FX_LOT_SIZE;
     (per_lot * lots).round_dp_with_strategy(0, RoundingStrategy::ToZero)
 }
 
