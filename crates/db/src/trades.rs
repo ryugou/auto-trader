@@ -389,6 +389,62 @@ pub async fn apply_sfd_fee(
     Ok(Some(new_balance))
 }
 
+/// Apply a swap fee (positive = paper account pays, negative = receives)
+/// for a single trade inside a transaction.
+///
+/// `apply_sfd_fee` と同パターン (event_type='swap_fee' の点だけ違う)。
+/// GMO FX paper accrual job が daily で呼び出す。
+///
+/// 符号両対応:
+///   fee_amount > 0 (払い) → trades.fees 増、current_balance 減、event amount = -fee
+///   fee_amount < 0 (受取) → trades.fees 減、current_balance 増、event amount = -fee (= +)
+pub async fn apply_swap_fee(
+    tx: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    trade_id: Uuid,
+    fee_amount: Decimal,
+    occurred_at: DateTime<Utc>,
+) -> anyhow::Result<Option<Decimal>> {
+    let trade_updated = sqlx::query(
+        "UPDATE trades SET fees = fees + $3
+         WHERE id = $1 AND account_id = $2 AND status = 'open'",
+    )
+    .bind(trade_id)
+    .bind(account_id)
+    .bind(fee_amount)
+    .execute(&mut *tx)
+    .await?;
+
+    if trade_updated.rows_affected() == 0 {
+        return Ok(None);
+    }
+
+    let new_balance: Decimal = sqlx::query_scalar(
+        r#"UPDATE trading_accounts
+           SET current_balance = current_balance - $2
+           WHERE id = $1
+           RETURNING current_balance"#,
+    )
+    .bind(account_id)
+    .bind(fee_amount)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after, occurred_at)
+           VALUES ($1, $2, 'swap_fee', $3, $4, $5)"#,
+    )
+    .bind(account_id)
+    .bind(trade_id)
+    .bind(-fee_amount)
+    .bind(new_balance)
+    .bind(occurred_at)
+    .execute(&mut *tx)
+    .await?;
+
+    Ok(Some(new_balance))
+}
+
 /// Update a trade to closed state inside the given transaction.
 pub async fn update_trade_closed<'e, E>(
     executor: E,
@@ -684,6 +740,7 @@ pub enum TradeEventKind {
     Open,
     OvernightFee,
     SfdFee,
+    SwapFee,
     Close,
 }
 
@@ -756,6 +813,7 @@ pub async fn get_trade_events(
         let kind = match row.event_type.as_str() {
             "overnight_fee" => TradeEventKind::OvernightFee,
             "sfd_fee" => TradeEventKind::SfdFee,
+            "swap_fee" => TradeEventKind::SwapFee,
             _ => continue,
         };
         events.push(TradeEvent {
