@@ -9,6 +9,7 @@
 //!   config rate > 0 = paper 払い → fees 増、balance 減
 //!   config rate < 0 = paper 受取 → fees 減、balance 増
 
+use auto_trader_core::config::SwapRateEntry;
 use auto_trader_core::swap::compute_daily_swap;
 use auto_trader_core::types::Direction;
 use auto_trader_db::trades::{apply_swap_fee, get_trade_by_id};
@@ -58,7 +59,11 @@ async fn paper_gmo_long_pays_swap(pool: sqlx::PgPool) {
 
     // config: USD_JPY long = +100 (paper 払い), short = -120 (paper 受取)
     // Long 1 lot → fee = +100 (paper 払い)
-    let fee = compute_daily_swap(dec!(100), dec!(-120), Direction::Long, dec!(10_000));
+    let rate = SwapRateEntry {
+        long: dec!(100),
+        short: dec!(-120),
+    };
+    let fee = compute_daily_swap(rate, Direction::Long, dec!(10_000));
     assert_eq!(fee, dec!(100));
 
     let mut tx = pool.begin().await.unwrap();
@@ -87,7 +92,11 @@ async fn paper_gmo_short_receives_swap(pool: sqlx::PgPool) {
     let trade_id = insert_usdjpy_trade(&pool, account_id, Direction::Short, dec!(10_000)).await;
 
     // Short 1 lot → fee = -120 (paper 受取)
-    let fee = compute_daily_swap(dec!(100), dec!(-120), Direction::Short, dec!(10_000));
+    let rate = SwapRateEntry {
+        long: dec!(100),
+        short: dec!(-120),
+    };
+    let fee = compute_daily_swap(rate, Direction::Short, dec!(10_000));
     assert_eq!(fee, dec!(-120));
 
     let mut tx = pool.begin().await.unwrap();

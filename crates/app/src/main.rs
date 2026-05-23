@@ -1757,9 +1757,11 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                     };
-                    // 対象 exchange のみ処理 (bitFlyer CFD / GMO FX)。
-                    if !matches!(exchange, Exchange::BitflyerCfd | Exchange::GmoFx) {
-                        continue;
+                    // 対象 exchange のみ処理。新 variant 追加時に compile-error
+                    // で気づけるよう exhaustive match。
+                    match exchange {
+                        Exchange::BitflyerCfd | Exchange::GmoFx => {}
+                        Exchange::Oanda => continue,
                     }
                     let open_trades = match auto_trader_db::trades::get_open_trades_by_account(
                         &overnight_pool,
@@ -1776,54 +1778,53 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                     };
-                    let mut total_fee = Decimal::ZERO;
+                    let mut applied_count: usize = 0;
                     for trade in &open_trades {
-                        // Per-exchange fee calculation.
-                        let fee = match exchange {
-                            Exchange::BitflyerCfd => (trade.entry_price
-                                * trade.quantity
-                                * bitflyer_fee_rate)
-                                .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero),
-                            Exchange::GmoFx => {
-                                let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
-                                else {
-                                    tracing::debug!(
-                                        "gmo swap: no rate for pair {} on trade {}; skip",
-                                        trade.pair,
-                                        trade.id
-                                    );
-                                    continue;
-                                };
-                                auto_trader_core::swap::compute_daily_swap(
-                                    rate.long,
-                                    rate.short,
-                                    trade.direction,
-                                    trade.quantity,
-                                )
-                            }
-                            _ => continue,
-                        };
-                        if fee.is_zero() {
-                            continue;
-                        }
-                        // Apply fee atomically (apply_*_fee returns Ok(None) on
-                        // CAS skip when trade closed mid-tick).
+                        // Per-exchange fee 計算 + apply を 1 つの match で
+                        // dispatch (二重 match を避ける、unreachable! は exhaustive
+                        // 上のフィルタ済で到達不能)。
                         let result = async {
                             let mut tx = overnight_pool.begin().await?;
                             let applied = match exchange {
                                 Exchange::BitflyerCfd => {
+                                    let fee =
+                                        (trade.entry_price * trade.quantity * bitflyer_fee_rate)
+                                            .round_dp_with_strategy(
+                                                0,
+                                                rust_decimal::RoundingStrategy::ToZero,
+                                            );
+                                    if fee.is_zero() {
+                                        return anyhow::Ok(None);
+                                    }
                                     auto_trader_db::trades::apply_overnight_fee(
                                         &mut tx, pac.id, trade.id, fee,
                                     )
                                     .await?
                                 }
                                 Exchange::GmoFx => {
+                                    let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
+                                    else {
+                                        tracing::debug!(
+                                            "gmo swap: no rate for pair {} on trade {}; skip",
+                                            trade.pair,
+                                            trade.id
+                                        );
+                                        return anyhow::Ok(None);
+                                    };
+                                    let fee = auto_trader_core::swap::compute_daily_swap(
+                                        *rate,
+                                        trade.direction,
+                                        trade.quantity,
+                                    );
+                                    if fee.is_zero() {
+                                        return anyhow::Ok(None);
+                                    }
                                     auto_trader_db::trades::apply_swap_fee(
                                         &mut tx, pac.id, trade.id, fee, event_at,
                                     )
                                     .await?
                                 }
-                                _ => unreachable!("filtered above"),
+                                Exchange::Oanda => unreachable!("filtered above"),
                             };
                             tx.commit().await?;
                             anyhow::Ok(applied)
@@ -1831,11 +1832,11 @@ async fn main() -> anyhow::Result<()> {
                         .await;
                         match result {
                             Ok(Some(_new_balance)) => {
-                                total_fee += fee;
+                                applied_count += 1;
                             }
                             Ok(None) => {
                                 tracing::debug!(
-                                    "overnight/swap: skipping trade {} — closed before fee tx",
+                                    "overnight/swap: skipping trade {} — closed or zero fee",
                                     trade.id
                                 );
                             }
@@ -1847,11 +1848,11 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-                    if total_fee != Decimal::ZERO {
+                    if applied_count > 0 {
                         tracing::info!(
-                            "overnight/swap applied: {} = {} JPY (exchange={:?})",
+                            "overnight/swap applied: {} trades for {} (exchange={:?})",
+                            applied_count,
                             pac.name,
-                            total_fee,
                             exchange
                         );
                     }

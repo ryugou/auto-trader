@@ -257,32 +257,31 @@ where
     Ok(())
 }
 
-/// Apply an overnight fee for a single trade inside a transaction.
+/// 共通 fee 適用ロジック。`apply_overnight_fee` / `apply_sfd_fee` /
+/// `apply_swap_fee` が thin wrapper として呼ぶ。
 ///
 /// Atomically:
-///   1. Verifies the trade is still `status='open'` and belongs to the
-///      account (CAS via `WHERE id=$1 AND account_id=$2 AND status='open'`).
-///      Returns `Ok(None)` and skips all side effects if the trade has
-///      closed or transitioned to `closing` between the caller's open-list
-///      fetch and this transaction (preventing fee on an already-closed
-///      trade).
-///   2. Deducts `fee_amount` from `trading_accounts.current_balance`
-///   3. Increments `trades.fees` for the given trade
-///   4. Inserts an `account_events` row with `event_type = 'overnight_fee'`
+///   1. CAS on `status='open'` & account_id match (Ok(None) if no row)
+///   2. `trades.fees += fee_amount` (negative amount decreases fees)
+///   3. `trading_accounts.current_balance -= fee_amount`
+///      (negative amount → balance increases = received fee)
+///   4. Insert `account_events` row with given `event_type`,
+///      `amount = -fee_amount` (outflow when fee positive, inflow when negative)
 ///
-/// Returns `Ok(Some(new_balance))` when the fee was applied, `Ok(None)`
-/// when the trade was no longer open and nothing was changed.
-pub async fn apply_overnight_fee(
+/// `occurred_at` が `None` の場合は DB の `DEFAULT NOW()` が入る
+/// (`apply_overnight_fee` の現状動作)。`Some(at)` を渡すと明示 timestamp
+/// (catch-up loop の hour boundary attribution 用、SFD/swap で使用)。
+///
+/// Returns `Ok(Some(new_balance))` when applied, `Ok(None)` when the trade
+/// was no longer open (CAS skip).
+async fn apply_fee_inner(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
     trade_id: Uuid,
     fee_amount: Decimal,
+    event_type: &'static str,
+    occurred_at: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Option<Decimal>> {
-    // 1. Increment fees with CAS — bails out cleanly if the trade is no
-    //    longer open. The UPDATE is the lock; PostgreSQL takes the row
-    //    lock implicitly during the modify, so a concurrent close that
-    //    also writes this row will serialise behind us (and lose the CAS
-    //    if we go first, or vice versa).
     let trade_updated = sqlx::query(
         "UPDATE trades SET fees = fees + $3
          WHERE id = $1 AND account_id = $2 AND status = 'open'",
@@ -294,11 +293,9 @@ pub async fn apply_overnight_fee(
     .await?;
 
     if trade_updated.rows_affected() == 0 {
-        // Trade is closed/closing or not on this account → skip.
         return Ok(None);
     }
 
-    // 2. Deduct from balance (SELECT … FOR UPDATE implicitly via UPDATE)
     let new_balance: Decimal = sqlx::query_scalar(
         r#"UPDATE trading_accounts
            SET current_balance = current_balance - $2
@@ -310,38 +307,55 @@ pub async fn apply_overnight_fee(
     .fetch_one(&mut *tx)
     .await?;
 
-    // 3. Record in account_events (amount is negative to indicate outflow)
-    sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
-           VALUES ($1, $2, 'overnight_fee', $3, $4)"#,
-    )
-    .bind(account_id)
-    .bind(trade_id)
-    .bind(-fee_amount)
-    .bind(new_balance)
-    .execute(&mut *tx)
-    .await?;
+    match occurred_at {
+        Some(at) => {
+            sqlx::query(
+                r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after, occurred_at)
+                   VALUES ($1, $2, $3, $4, $5, $6)"#,
+            )
+            .bind(account_id)
+            .bind(trade_id)
+            .bind(event_type)
+            .bind(-fee_amount)
+            .bind(new_balance)
+            .bind(at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            sqlx::query(
+                r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+            )
+            .bind(account_id)
+            .bind(trade_id)
+            .bind(event_type)
+            .bind(-fee_amount)
+            .bind(new_balance)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
 
     Ok(Some(new_balance))
 }
 
-/// Apply an SFD fee (positive = paper account pays, negative = receives)
-/// for a single trade inside a transaction.
-///
-/// Atomically:
-///   1. CAS on `status='open'` & account_id match (Ok(None) if no row)
-///   2. `trades.fees += fee_amount` (negative amount decreases fees)
-///   3. `trading_accounts.current_balance -= fee_amount`
-///      (negative amount → balance increases = received SFD)
-///   4. Insert `account_events` row with `event_type='sfd_fee'`,
-///      `amount = -fee_amount` (outflow when fee positive, inflow when negative),
-///      `occurred_at` = caller が渡す **対象 hour の境界 timestamp**
-///      (catch-up loop で複数 hour を 1 tick で apply するとき、全 row が
-///      NOW() で同 timestamp になり daily 集計を歪めるのを防ぐ。
-///      Copilot review round-9 指摘)
-///
-/// Returns `Ok(Some(new_balance))` when applied, `Ok(None)` when the trade
-/// was no longer open.
+/// Apply an overnight fee for a single trade. Thin wrapper over
+/// `apply_fee_inner` (event_type='overnight_fee', occurred_at=NOW() via DB
+/// default — daily 1 回 apply のため hour-precision attribution は不要)。
+pub async fn apply_overnight_fee(
+    tx: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    trade_id: Uuid,
+    fee_amount: Decimal,
+) -> anyhow::Result<Option<Decimal>> {
+    apply_fee_inner(tx, account_id, trade_id, fee_amount, "overnight_fee", None).await
+}
+
+/// Apply an SFD fee (positive = paper pays, negative = receives).
+/// Thin wrapper over `apply_fee_inner` (event_type='sfd_fee')。
+/// `occurred_at` は catch-up loop の hour boundary を渡す
+/// (NOW() で同 timestamp になり daily 集計が歪むのを防ぐ、Copilot PR #92 round-9 指摘)。
 pub async fn apply_sfd_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -349,55 +363,20 @@ pub async fn apply_sfd_fee(
     fee_amount: Decimal,
     occurred_at: DateTime<Utc>,
 ) -> anyhow::Result<Option<Decimal>> {
-    let trade_updated = sqlx::query(
-        "UPDATE trades SET fees = fees + $3
-         WHERE id = $1 AND account_id = $2 AND status = 'open'",
+    apply_fee_inner(
+        tx,
+        account_id,
+        trade_id,
+        fee_amount,
+        "sfd_fee",
+        Some(occurred_at),
     )
-    .bind(trade_id)
-    .bind(account_id)
-    .bind(fee_amount)
-    .execute(&mut *tx)
-    .await?;
-
-    if trade_updated.rows_affected() == 0 {
-        return Ok(None);
-    }
-
-    let new_balance: Decimal = sqlx::query_scalar(
-        r#"UPDATE trading_accounts
-           SET current_balance = current_balance - $2
-           WHERE id = $1
-           RETURNING current_balance"#,
-    )
-    .bind(account_id)
-    .bind(fee_amount)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after, occurred_at)
-           VALUES ($1, $2, 'sfd_fee', $3, $4, $5)"#,
-    )
-    .bind(account_id)
-    .bind(trade_id)
-    .bind(-fee_amount)
-    .bind(new_balance)
-    .bind(occurred_at)
-    .execute(&mut *tx)
-    .await?;
-
-    Ok(Some(new_balance))
+    .await
 }
 
-/// Apply a swap fee (positive = paper account pays, negative = receives)
-/// for a single trade inside a transaction.
-///
-/// `apply_sfd_fee` と同パターン (event_type='swap_fee' の点だけ違う)。
-/// GMO FX paper accrual job が daily で呼び出す。
-///
-/// 符号両対応:
-///   fee_amount > 0 (払い) → trades.fees 増、current_balance 減、event amount = -fee
-///   fee_amount < 0 (受取) → trades.fees 減、current_balance 増、event amount = -fee (= +)
+/// Apply a swap fee (positive = paper pays, negative = receives).
+/// Thin wrapper over `apply_fee_inner` (event_type='swap_fee')。
+/// GMO FX paper accrual job が daily で呼ぶ。
 pub async fn apply_swap_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -405,44 +384,15 @@ pub async fn apply_swap_fee(
     fee_amount: Decimal,
     occurred_at: DateTime<Utc>,
 ) -> anyhow::Result<Option<Decimal>> {
-    let trade_updated = sqlx::query(
-        "UPDATE trades SET fees = fees + $3
-         WHERE id = $1 AND account_id = $2 AND status = 'open'",
+    apply_fee_inner(
+        tx,
+        account_id,
+        trade_id,
+        fee_amount,
+        "swap_fee",
+        Some(occurred_at),
     )
-    .bind(trade_id)
-    .bind(account_id)
-    .bind(fee_amount)
-    .execute(&mut *tx)
-    .await?;
-
-    if trade_updated.rows_affected() == 0 {
-        return Ok(None);
-    }
-
-    let new_balance: Decimal = sqlx::query_scalar(
-        r#"UPDATE trading_accounts
-           SET current_balance = current_balance - $2
-           WHERE id = $1
-           RETURNING current_balance"#,
-    )
-    .bind(account_id)
-    .bind(fee_amount)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after, occurred_at)
-           VALUES ($1, $2, 'swap_fee', $3, $4, $5)"#,
-    )
-    .bind(account_id)
-    .bind(trade_id)
-    .bind(-fee_amount)
-    .bind(new_balance)
-    .bind(occurred_at)
-    .execute(&mut *tx)
-    .await?;
-
-    Ok(Some(new_balance))
+    .await
 }
 
 /// Update a trade to closed state inside the given transaction.
