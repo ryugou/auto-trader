@@ -1716,27 +1716,37 @@ async fn main() -> anyhow::Result<()> {
     // outstanding positions across restarts. The account list is re-read from
     // the DB at every tick so REST API changes are reflected immediately.
     let overnight_pool = pool.clone();
+    let swap_config = config.gmo_fx.swap.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
+        let bitflyer_fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
         let mut last_date = chrono::Utc::now().date_naive();
         loop {
             interval.tick().await;
             let today = chrono::Utc::now().date_naive();
             if today != last_date {
-                // Apply overnight fees only to paper accounts (live accounts
+                // Apply overnight/swap fees only to paper accounts (live accounts
                 // pay fees directly to the exchange; we don't deduct them here).
-                let accounts =
-                    match auto_trader_db::trading_accounts::list_all(&overnight_pool).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!("overnight fee: failed to list trading accounts: {e}");
-                            last_date = today;
-                            continue;
-                        }
-                    };
+                let accounts = match auto_trader_db::trading_accounts::list_all(&overnight_pool)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // last_date 不更新で次 tick (60s 後) に retry。
+                        // ここで last_date = today にすると一時的 DB 障害で
+                        // 丸 1 日 skip してしまう (Copilot round-3 指摘)。
+                        tracing::error!(
+                            "overnight/swap: failed to list trading accounts (will retry next tick): {e}"
+                        );
+                        continue;
+                    }
+                };
+                // event_at = today の UTC midnight 境界 (attribution 用)。
+                let event_at = today
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight is always valid")
+                    .and_utc();
                 for pac in accounts {
-                    // Only paper accounts get overnight fees applied in-app.
                     if pac.account_type != "paper" {
                         continue;
                     }
@@ -1744,7 +1754,7 @@ async fn main() -> anyhow::Result<()> {
                         Some(e) => e,
                         None => {
                             tracing::warn!(
-                                "overnight fee: skipping account {} ({}): unknown exchange '{}'",
+                                "overnight/swap: skipping account {} ({}): unknown exchange '{}'",
                                 pac.name,
                                 pac.id,
                                 pac.exchange
@@ -1752,10 +1762,12 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                     };
-                    if exchange != Exchange::BitflyerCfd {
-                        continue;
+                    // 対象 exchange のみ処理。新 variant 追加時に compile-error
+                    // で気づけるよう exhaustive match。
+                    match exchange {
+                        Exchange::BitflyerCfd | Exchange::GmoFx => {}
+                        Exchange::Oanda => continue,
                     }
-                    // Compute fee for each open trade: fee = entry_price * quantity * fee_rate
                     let open_trades = match auto_trader_db::trades::get_open_trades_by_account(
                         &overnight_pool,
                         pac.id,
@@ -1765,55 +1777,91 @@ async fn main() -> anyhow::Result<()> {
                         Ok(v) => v,
                         Err(e) => {
                             tracing::error!(
-                                "overnight fee: failed to list open trades for {}: {e}",
+                                "overnight/swap: failed to list open trades for {}: {e}",
                                 pac.name
                             );
                             continue;
                         }
                     };
-                    let mut total_fee = Decimal::ZERO;
+                    let mut applied_count: usize = 0;
                     for trade in &open_trades {
-                        let fee = (trade.entry_price * trade.quantity * fee_rate)
-                            .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+                        // 1. Fee 計算 + 早期 skip (tx 開く前)。
+                        //    unconfigured pair / zero fee で BEGIN/ROLLBACK の
+                        //    churn を避ける (Copilot review round-1 指摘)。
+                        let fee = match exchange {
+                            Exchange::BitflyerCfd => (trade.entry_price
+                                * trade.quantity
+                                * bitflyer_fee_rate)
+                                .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero),
+                            Exchange::GmoFx => {
+                                let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
+                                else {
+                                    tracing::debug!(
+                                        "gmo swap: no rate for pair {} on trade {}; skip",
+                                        trade.pair,
+                                        trade.id
+                                    );
+                                    continue;
+                                };
+                                auto_trader_core::swap::compute_daily_swap(
+                                    *rate,
+                                    trade.direction,
+                                    trade.quantity,
+                                )
+                            }
+                            Exchange::Oanda => unreachable!("filtered above"),
+                        };
                         if fee.is_zero() {
                             continue;
                         }
-                        // Apply overnight fee atomically: trades.fees CAS +
-                        // balance deduction + account_events insert in one tx.
-                        // apply_overnight_fee returns Ok(None) if the trade
-                        // closed between the open-list fetch above and this
-                        // tx (the CAS on `status='open'` skips it cleanly so
-                        // a closing trade never gets double-charged).
+                        // 2. tx 開始 + apply。closed trade は CAS skip で
+                        //    Ok(None) を返す。
                         let result = async {
                             let mut tx = overnight_pool.begin().await?;
-                            let applied = auto_trader_db::trades::apply_overnight_fee(
-                                &mut tx, pac.id, trade.id, fee,
-                            )
-                            .await?;
+                            let applied = match exchange {
+                                Exchange::BitflyerCfd => {
+                                    auto_trader_db::trades::apply_overnight_fee(
+                                        &mut tx, pac.id, trade.id, fee,
+                                    )
+                                    .await?
+                                }
+                                Exchange::GmoFx => {
+                                    auto_trader_db::trades::apply_swap_fee(
+                                        &mut tx, pac.id, trade.id, fee, event_at,
+                                    )
+                                    .await?
+                                }
+                                Exchange::Oanda => unreachable!("filtered above"),
+                            };
                             tx.commit().await?;
                             anyhow::Ok(applied)
                         }
                         .await;
                         match result {
                             Ok(Some(_new_balance)) => {
-                                total_fee += fee;
+                                applied_count += 1;
                             }
                             Ok(None) => {
                                 tracing::debug!(
-                                    "overnight fee: skipping trade {} — closed before fee tx",
+                                    "overnight/swap: CAS skip for trade {} — closed mid-tick",
                                     trade.id
                                 );
                             }
                             Err(e) => {
                                 tracing::error!(
-                                    "overnight fee: apply_overnight_fee failed for trade {}: {e}",
+                                    "overnight/swap: apply_*_fee failed for trade {}: {e}",
                                     trade.id
                                 );
                             }
                         }
                     }
-                    if total_fee > Decimal::ZERO {
-                        tracing::info!("overnight fee applied: {} = {} JPY", pac.name, total_fee);
+                    if applied_count > 0 {
+                        tracing::info!(
+                            "overnight/swap applied: {} trades for {} (exchange={:?})",
+                            applied_count,
+                            pac.name,
+                            exchange
+                        );
                     }
                 }
                 last_date = today;

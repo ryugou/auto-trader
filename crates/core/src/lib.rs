@@ -6,5 +6,6 @@ pub mod knowledge;
 pub mod margin;
 pub mod sfd;
 pub mod strategy;
+pub mod swap;
 pub mod types;
 pub mod vegapunk_port;

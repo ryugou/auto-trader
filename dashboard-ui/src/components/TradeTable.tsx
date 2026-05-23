@@ -431,6 +431,8 @@ function eventLabel(kind: TradeEvent['kind']): string {
       return 'overnight'
     case 'sfd_fee':
       return 'SFD'
+    case 'swap_fee':
+      return 'swap'
   }
 }
 
@@ -443,6 +445,8 @@ function eventColor(kind: TradeEvent['kind']): string {
     case 'overnight_fee':
       return 'text-gray-500'
     case 'sfd_fee':
+      return 'text-gray-500'
+    case 'swap_fee':
       return 'text-gray-500'
   }
 }
@@ -463,7 +467,7 @@ function formatSignedYen(raw: string | null): string {
 /// knows the data is missing rather than zero.
 function renderCashDelta(ev: TradeEvent) {
   if (ev.cash_delta == null) {
-    if (ev.kind === 'overnight_fee' || ev.kind === 'sfd_fee') {
+    if (ev.kind === 'overnight_fee' || ev.kind === 'sfd_fee' || ev.kind === 'swap_fee') {
       return <span className="text-gray-500">-</span>
     }
     return (
