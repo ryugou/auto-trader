@@ -1640,3 +1640,29 @@ git commit -m "feat(backtest): exchange-aware runner with production sizing, str
 - 意図的スコープ外: cross-currency 換算（EUR_USD 除外で代替）、live ロスカットの bot 執行（取引所執行 + アラートで代替）、板深さスリッページ（bid/ask 約定 + backtest 定率近似で代替）、残高の自動補正（アラートのみ）
 - 型整合: `PositionSizer::new(min_order_sizes, margin_buffer)` は Phase 3 で変更、Phase 4 は builder（`with_price_units`）で拡張のため衝突しない。`StopOrderStatus` / `stop_order_id` / `SystemAlertEvent` の名前は全 Phase で統一
 - 既知の不確実性: bitFlyer 親注文 / GMO closeOrder の正確なフィールド名（Task 4.0 で検証必須）、integration-tests helper の正確な API（各テストタスクで既存ファイルのパターン踏襲を指示済み）
+
+---
+
+## API 検証メモ（Task 4.0 — 2026-07-07 実施）
+
+WebFetch で公式ドキュメントを取得し、Phase 4 のコードで使うフィールド名を照合した結果。
+
+### bitFlyer Lightning API（`https://lightning.bitflyer.com/docs?lang=ja`）— ✅ 全項目確認済み
+
+- **`POST /v1/me/sendparentorder`**: `order_method="SIMPLE"`、`parameters[]` 内は `product_code` / `condition_type="STOP"` / `side` / `size` / **`trigger_price`**（フィールド名一致）。任意で `minute_to_expire` / `time_in_force` を親注文レベルに持てる。レスポンスは **`parent_order_acceptance_id`**（一致）。
+- **`POST /v1/me/cancelparentorder`**: body は `product_code` + `parent_order_acceptance_id`（または `parent_order_id`。両方は不可）。一致。
+- **`GET /v1/me/getparentorder`**: query は `parent_order_id` **または** `parent_order_acceptance_id`（どちらか一方）。レスポンスに `parent_order_id` を含む。**注意**: 公式レスポンスに親注文全体の `state`（ACTIVE/COMPLETED…）フィールドは getparentorder 単体には明示されていない。親注文の状態列挙は `getparentorders`（一覧, `parent_order_state`）側に載る。→ 実装は getparentorder で `parent_order_id` を解決し、`child_order_state` = ACTIVE/COMPLETED/CANCELED/EXPIRED/REJECTED（getchildorders 側の enum、確認済み）で発火判定する方針に寄せた。該当箇所に `// TODO(live-verify)` を付す。
+- **`GET /v1/me/getchildorders`**: query に `product_code` / `parent_order_id` / `child_order_state`（ACTIVE / COMPLETED / CANCELED / EXPIRED / REJECTED）。一致。
+
+### GMO Coin FX API（`https://api.coin.z.com/fxdocs/`）— ⚠️ 一部のみ確認
+
+- **`GET /private/v1/orders`**: query `orderId`（カンマ区切り最大10件）。status enum = **`WAITING` / `ORDERED` / `MODIFYING` / `CANCELED` / `EXECUTED` / `EXPIRED`**（確認済み。`CANCELLING` は本ページには記載なし）。実装は EXECUTED→Executed、ORDERED/WAITING/MODIFYING→Active、CANCELED/EXPIRED→Gone にマップ。
+- **`POST /private/v1/closeOrder`**: ⚠️ 取得ページが JS レンダリングで body 詳細（`executionType="STOP"` 時の `price` / `settlePosition[]{positionId,size}` 形式）まで展開されず**未確認**。plan のフィールド名（`symbol` / `side` / `executionType` / `price` / `size` / `settlePosition`）をベストエフォートで採用し、実装該当箇所に `// TODO(live-verify)` を付した。
+- **`POST /private/v1/cancelOrder`**: body `orderId`（確認済みだが closeOrder 同様ページ詳細は薄い）。`// TODO(live-verify)`。
+- **`GET /private/v1/executions`**: ⚠️ query `orderId` とレスポンス（`price` / `size` / `fee`）は本ページ抜粋に展開されず未確認。GMO 既存実装（`get_executions` 相当）のフィールド規約に合わせ、`// TODO(live-verify)` を付した。
+
+### 結論
+
+- bitFlyer 側は親注文 place/cancel は公式と完全一致。status 判定の親注文 state 取得のみ getchildorders ベースに寄せ、`TODO(live-verify)` 明記。
+- GMO 側は `orders` status enum のみ確定。`closeOrder` / `executions` の body/response フィールドはページ制約で未確認のため plan のベストエフォート名を採用し、コードに `TODO(live-verify)` を明記。運用移行 Stage 1（LIVE_DRY_RUN）で実 API に対して要検証。
+- いずれも **live 経路専用**（paper は影響なし）。mock ベースの統合テストで制御フローは検証済み。実 API フィールドの正しさは Stage 1 検証項目。
