@@ -37,7 +37,8 @@ OANDA API を使った FX 自動売買ツール。短期ルールベース戦略
 ### 通貨ペア
 
 - 動的に追加・変更可能。戦略ごとに対象ペアを設定
-- USD/JPY に限定しない。時間帯による流動性も考慮
+- 時間帯による流動性も考慮
+- **JPY 建てペアに限定**: 口座は全て JPY 建てで、position_sizer / margin は `price × qty` を JPY 金額として扱う。quote 通貨が JPY でないペア（`EUR_USD` 等）は証拠金・維持率を誤算するため、`AppConfig::validate`（`ensure_jpy_quote`）が起動時に拒否する。cross-currency 換算を実装するまでこのガードは外さない
 - **表記の正規化**: 内部表現は OANDA API 形式（`USD_JPY`）で統一する。Vegapunk 投入時やダッシュボード表示時に必要に応じて変換する。DB にも `USD_JPY` 形式で保存する
 
 ## アーキテクチャ
@@ -315,7 +316,7 @@ url = "postgresql://auto-trader:***@db:5432/auto_trader"
 interval_secs = 60
 
 [pairs]
-active = ["USD_JPY", "EUR_USD"]
+active = ["USD_JPY"]
 
 [[strategies]]
 name = "trend_follow_v1"
@@ -328,7 +329,7 @@ params = { ma_short = 20, ma_long = 50, rsi_threshold = 70 }
 name = "swing_llm_v1"
 enabled = true
 mode = "paper"
-pairs = ["USD_JPY", "EUR_USD"]
+pairs = ["USD_JPY"]
 params = { holding_days_max = 14 }
 ```
 

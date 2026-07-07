@@ -517,7 +517,7 @@ fn multi_account_dispatches_to_correct_exchange() {
     assert_eq!(matching_exchanges[0], Exchange::GmoFx);
 
     // A signal for an unknown pair should match nothing
-    let signal_pair = "EUR_USD";
+    let signal_pair = "GBP_JPY";
     let matching_exchanges: Vec<Exchange> = exchange_pairs
         .iter()
         .filter(|(_, pairs)| pairs.contains(signal_pair))

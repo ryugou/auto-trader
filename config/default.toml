@@ -14,7 +14,7 @@ interval_secs = 60
 # backfill_days = 7  # startup時にmax_drawdownを再計算する日数（デフォルト: 7）
 
 [pairs]
-fx = ["USD_JPY", "EUR_USD"]
+fx = ["USD_JPY"]
 crypto = ["FX_BTC_JPY"]
 
 [bitflyer]
@@ -27,10 +27,6 @@ min_order_size = 0.001
 
 [pair_config.USD_JPY]
 price_unit = 0.001
-min_order_size = 1
-
-[pair_config.EUR_USD]
-price_unit = 0.00001
 min_order_size = 1
 
 [exchange_margin.bitflyer_cfd]
@@ -78,7 +74,7 @@ news_sources = [
 name = "swing_llm_v1"
 enabled = false
 mode = "paper"
-pairs = ["USD_JPY", "EUR_USD"]
+pairs = ["USD_JPY"]
 params = { holding_days_max = 14 }
 
 # === Strategy registration ===

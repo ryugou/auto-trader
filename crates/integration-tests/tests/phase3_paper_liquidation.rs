@@ -330,8 +330,8 @@ async fn missing_price_skips_judgment(pool: sqlx::PgPool) {
     );
     seed_and_lock(&pool, &trade).await;
 
-    // PriceStore は EUR_USD だけ持つ → USD_JPY の price 不在
-    let ps = make_price_store(Exchange::GmoFx, "EUR_USD", dec!(1.0), dec!(1.001)).await;
+    // PriceStore は EUR_JPY だけ持つ → USD_JPY の price 不在
+    let ps = make_price_store(Exchange::GmoFx, "EUR_JPY", dec!(160.0), dec!(160.01)).await;
     let event = make_event(Exchange::GmoFx, "USD_JPY", dec!(148));
 
     let owned = OpenTradeWithAccount {
@@ -355,7 +355,7 @@ async fn missing_price_skips_judgment(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn liquidation_returns_all_trades_in_breached_account(pool: sqlx::PgPool) {
-    // 同 account に 2 open trade (USD_JPY + EUR_USD) を持ち、両 pair が大きく
+    // 同 account に 2 open trade (USD_JPY + EUR_JPY) を持ち、両 pair が大きく
     // 逆行して維持率が threshold を下回ったとき、戻り値が両 trade_id を含む
     // ことを確認する。account 単位 close の new contract を guard する test。
     let account_id = seed_trading_account(
@@ -380,28 +380,27 @@ async fn liquidation_returns_all_trades_in_breached_account(pool: sqlx::PgPool) 
     );
     seed_and_lock(&pool, &trade1).await;
 
-    // trade2: EUR_USD Long, entry=1.10, qty=27272.728 (≈ price=1.1, qty で required≈1200)
-    // ただし price_unit 等の精度確認は本テストではなく、ここでは別 pair に open trade
-    // が同 account にいるという事実だけを表現したい。entry/qty を小さく取り required は
-    // trade1 主体に。required(trade2) = 1.1 * 1000 / 25 = 44 (微小)
+    // trade2: EUR_JPY Long, entry=160, qty=1000, lev=25 → required = 160*1000/25 = 6400
+    // ここでは別 pair に open trade が同 account にいるという事実だけを表現したい。
+    // entry==current にして unrealized(trade2)=0 とし、維持率破綻は trade1 主体で起こす。
     let trade2 = make_trade(
         account_id,
         Exchange::GmoFx,
-        "EUR_USD",
+        "EUR_JPY",
         Direction::Long,
-        dec!(1.10),
+        dec!(160),
         dec!(1000),
         dec!(25),
     );
     seed_and_lock(&pool, &trade2).await;
 
-    // balance after both locks ≈ 100000 - 30000 - 44 = 69956
+    // balance after both locks = 100000 - 30000 - 6400 = 63600
     // 大きな逆行: USD_JPY current=120 → unrealized = (120-150)*5000 = -150000
-    //              EUR_USD current=1.10 → unrealized = 0
-    // required_total = 30044, unrealized_total = -150000
-    // equity = 69956 + 30044 - 150000 = -50000 → ratio < 0 < 1.0 → fire
+    //              EUR_JPY current=160 → unrealized = 0
+    // required_total = 36400, unrealized_total = -150000
+    // equity = 63600 + 36400 - 150000 = -50000 → ratio < 0 < 1.0 → fire
     let feed_key1 = FeedKey::new(Exchange::GmoFx, Pair::new("USD_JPY"));
-    let feed_key2 = FeedKey::new(Exchange::GmoFx, Pair::new("EUR_USD"));
+    let feed_key2 = FeedKey::new(Exchange::GmoFx, Pair::new("EUR_JPY"));
     let ps = PriceStore::new(vec![feed_key1.clone(), feed_key2.clone()]);
     ps.update(
         feed_key1,
@@ -416,9 +415,9 @@ async fn liquidation_returns_all_trades_in_breached_account(pool: sqlx::PgPool) 
     ps.update(
         feed_key2,
         LatestTick {
-            price: dec!(1.10),
-            best_bid: Some(dec!(1.10)),
-            best_ask: Some(dec!(1.1001)),
+            price: dec!(160),
+            best_bid: Some(dec!(160)),
+            best_ask: Some(dec!(160.01)),
             ts: Utc::now(),
         },
     )

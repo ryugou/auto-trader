@@ -312,9 +312,9 @@ async fn unknown_pair_routes_nowhere(pool: PgPool) {
     let bitflyer_id = accounts[0].account_id;
     let gmo_id = accounts[1].account_id;
 
-    // EUR_USD is not in the allowed_pairs of either account, so the routing
+    // GBP_JPY is not in the allowed_pairs of either account, so the routing
     // filter must reject it on both sides without ever calling execute.
-    let signal = make_signal("EUR_USD", Direction::Long, "bb_mean_revert_v1");
+    let signal = make_signal("GBP_JPY", Direction::Long, "bb_mean_revert_v1");
     let trades = route_and_execute(&signal, &accounts).await;
 
     assert!(

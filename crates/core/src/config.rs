@@ -211,6 +211,22 @@ impl LiveConfig {
     }
 }
 
+/// 口座は全て JPY 建て。quote 通貨が JPY でないペア (EUR_USD 等) は、
+/// position_sizer / margin が price×qty を JPY 金額として扱う前提と矛盾し
+/// 証拠金・維持率を誤算するため、起動時に拒否する。
+/// cross-currency 換算を実装するまでこのガードを外してはならない。
+fn ensure_jpy_quote(pairs: &[String], section: &str) -> anyhow::Result<()> {
+    for p in pairs {
+        if !p.ends_with("_JPY") {
+            anyhow::bail!(
+                "[{section}] pair '{p}' is not JPY-quoted; \
+                 non-JPY quote pairs are unsupported (margin math assumes price×qty is JPY)"
+            );
+        }
+    }
+    Ok(())
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -227,6 +243,14 @@ impl AppConfig {
         }
         if let Some(risk) = &self.risk {
             risk.validate()?;
+        }
+        ensure_jpy_quote(&self.pairs.fx, "pairs.fx")?;
+        if let Some(crypto) = &self.pairs.crypto {
+            ensure_jpy_quote(crypto, "pairs.crypto")?;
+        }
+        ensure_jpy_quote(&self.pairs.active, "pairs.active")?;
+        for s in &self.strategies {
+            ensure_jpy_quote(&s.pairs, &format!("strategies({})", s.name))?;
         }
         Ok(())
     }
@@ -268,6 +292,59 @@ mod debug_redaction_tests {
         let rendered = format!("{cfg:?}");
         assert!(rendered.contains("api_key: None"));
         assert!(rendered.contains("api_secret: None"));
+    }
+}
+
+#[cfg(test)]
+mod jpy_quote_validation_tests {
+    use super::*;
+
+    fn base_toml(pairs_fx: &str, strategy_pairs: &str) -> String {
+        format!(
+            r#"
+[vegapunk]
+endpoint = "http://localhost:6840"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://localhost/test"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+fx = {pairs_fx}
+crypto = ["FX_BTC_JPY"]
+
+[[strategies]]
+name = "donchian_trend_v1"
+enabled = true
+mode = "paper"
+pairs = {strategy_pairs}
+"#
+        )
+    }
+
+    #[test]
+    fn rejects_non_jpy_quote_pair_in_pairs_fx() {
+        let toml_str = base_toml(r#"["USD_JPY", "EUR_USD"]"#, r#"["USD_JPY"]"#);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("EUR_USD"), "error should name the pair: {err}");
+    }
+
+    #[test]
+    fn rejects_non_jpy_quote_pair_in_strategy_pairs() {
+        let toml_str = base_toml(r#"["USD_JPY"]"#, r#"["EUR_USD"]"#);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_jpy_quote_pairs() {
+        let toml_str = base_toml(r#"["USD_JPY"]"#, r#"["USD_JPY", "FX_BTC_JPY"]"#);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_ok());
     }
 }
 
