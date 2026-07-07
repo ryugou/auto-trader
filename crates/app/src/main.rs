@@ -845,6 +845,7 @@ async fn main() -> anyhow::Result<()> {
         &db_accounts,
         &exchange_apis,
         price_store.clone(),
+        notifier.clone(),
     )
     .await
     .map_err(|e| {
@@ -1893,6 +1894,49 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: 取引所側ストップ注文の発火検知 (Phase 4 / Task 4.6)
+    //
+    // 60 秒間隔で live open trade のうち stop_order_id を持つものを列挙し、
+    // 取引所側ストップが Executed になっていれば SlHit で close する。
+    // close_trade → fill_close の Executed ガードにより二重発注にはならない。
+    let stop_fill_pool = pool.clone();
+    let stop_fill_apis = exchange_apis.clone();
+    let stop_fill_price_store = price_store.clone();
+    let stop_fill_notifier = notifier.clone();
+    let stop_fill_position_sizer = shared_position_sizer.clone();
+    let stop_fill_liquidation_levels = exchange_liquidation_levels.clone();
+    let stop_fill_trade_tx = trade_tx.clone();
+    let stop_fill_live_forces_dry_run = live_forces_dry_run;
+    let stop_fill_handle = tokio::spawn(async move {
+        let close_ctx = auto_trader::closer::CloseContext {
+            pool: stop_fill_pool.clone(),
+            apis: stop_fill_apis.clone(),
+            price_store: stop_fill_price_store.clone(),
+            notifier: stop_fill_notifier.clone(),
+            position_sizer: stop_fill_position_sizer.clone(),
+            liquidation_levels: stop_fill_liquidation_levels.clone(),
+            trade_tx: stop_fill_trade_tx.clone(),
+        };
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let open_trades =
+                match auto_trader_db::trades::list_open_with_account_name(&stop_fill_pool).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("stop-fill detect: failed to list open trades: {e}");
+                        continue;
+                    }
+                };
+            auto_trader::stop_fill::detect_and_close_stop_fills(
+                &close_ctx,
+                &open_trades,
+                stop_fill_live_forces_dry_run,
+            )
+            .await;
+        }
+    });
+
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
     // Since positions now live in the DB, this correctly applies fees to all
@@ -2339,6 +2383,7 @@ async fn main() -> anyhow::Result<()> {
     }
     overnight_handle.abort();
     sfd_handle.abort();
+    stop_fill_handle.abort(); // infinite 60s loop — must abort explicitly
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();

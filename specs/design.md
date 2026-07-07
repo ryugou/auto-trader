@@ -144,6 +144,15 @@ trait OrderExecutor {
 - ヒット時は `OrderExecutor::close_position()` を呼び、TradeEvent（Closed）を emit
 - SL/TP の価格は戦略がシグナル生成時に決定する。executor は判定と決済のみを担当
 
+**取引所側ストップ注文（live の一次防衛、Phase 4）:**
+
+live 口座では、**取引所側の逆指値（ストップ）注文が SL の一次防衛**であり、アプリの tick 監視は二次（バックアップ）として残す。プロセスが死んでいても取引所側で SL が執行される。paper（dry_run）は従来どおりアプリ側シミュレーションが正で、取引所側ストップは置かない。
+
+- **open 時**: `ExchangeApi::place_stop_order`（bitFlyer: `sendparentorder` SIMPLE/STOP、GMO: `closeOrder` executionType=STOP）で SL を発注し、`trades.stop_order_id` に保存する。trigger price は `PositionSizer::round_trigger_price` で取引所 tick に丸める（Long=切り上げ / Short=切り捨て = 早く発火する安全側）。**発注失敗は open を失敗させない**（ポジションは既に成立）。error ログ + `OrderFailed` 通知を出し、`stop_order_id` は NULL のまま（アプリ側 SL 監視が唯一の防衛になる）。
+- **close 時**: 成行 close の前に**必ず `stop_order_status` を確認**する。`Executed` ならその約定価格でクローズ記録し新規注文を出さない（二重発注＝反対ポジション生成を防ぐ）。`Active` なら cancel してから成行。cancel 失敗時は status を再確認し、不明なら close を中断（stale-lock 自己回復に委ねる）。
+- **発火検知ジョブ**: 60 秒間隔で live open trade（`stop_order_id IS NOT NULL`）の `stop_order_status` を確認し、`Executed` なら `closer::close_trade(.., SlHit, ..)` で確定する（fill_close の Executed ガードにより二重発注にならない）。
+- **startup reconcile**: 「DB=open だが取引所に position 無し」の時、`stop_order_id` があれば `stop_order_status` を確認し、`Executed` なら exit_price=約定価格 / exit_reason=`SlHit` / fees に commission 加算で close する（従来の best-effort reconciled より正確）。「DB=open かつ取引所に position あり」で stop が `Gone` の場合は SystemAlert（"stop order lost — position unprotected"）を出す。
+
 **Kill Switch（日次損失ロスカット）:**
 
 口座単位で当日の実現損失が閾値を超えたら、新規エントリーを一定時間停止する安全装置。live 切り替え前提の必須ガード。
