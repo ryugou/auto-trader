@@ -144,6 +144,37 @@ pub async fn update_balance(pool: &PgPool, id: Uuid, new_balance: Decimal) -> an
     Ok(())
 }
 
+/// Kill Switch の halt 状態を読む。halted_until が NULL なら None。
+pub async fn get_halt(
+    pool: &PgPool,
+    id: Uuid,
+) -> anyhow::Result<Option<(DateTime<Utc>, Option<String>)>> {
+    let row: Option<(Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
+        "SELECT halted_until, halt_reason FROM trading_accounts WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(until, reason)| until.map(|u| (u, reason))))
+}
+
+/// Kill Switch を作動させる。解除は halted_until 経過を待つか、運用者が
+/// SQL で halted_until を NULL にする。
+pub async fn set_halt(
+    pool: &PgPool,
+    id: Uuid,
+    until: DateTime<Utc>,
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE trading_accounts SET halted_until = $2, halt_reason = $3 WHERE id = $1")
+        .bind(id)
+        .bind(until)
+        .bind(reason)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CRUD types and functions (for REST API)
 // ---------------------------------------------------------------------------
@@ -511,6 +542,38 @@ mod tests {
         create_account(&pool, &live_req("oanda"))
             .await
             .expect("different exchange should succeed");
+    }
+
+    /// Kill Switch halt state round-trips: None initially, then the stored
+    /// (until, reason) after `set_halt`.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn set_and_get_halt_roundtrip(pool: sqlx::PgPool) {
+        use chrono::TimeZone;
+        let account = list_all(&pool)
+            .await
+            .expect("list accounts")
+            .into_iter()
+            .next()
+            .expect("migrations seed at least one account");
+
+        assert!(
+            get_halt(&pool, account.id).await.unwrap().is_none(),
+            "no halt set initially"
+        );
+
+        let until = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 8, 0, 0, 0)
+            .unwrap();
+        set_halt(&pool, account.id, until, "daily loss limit")
+            .await
+            .expect("set_halt");
+
+        let (got_until, got_reason) = get_halt(&pool, account.id)
+            .await
+            .expect("get_halt")
+            .expect("halt should be set");
+        assert_eq!(got_until, until);
+        assert_eq!(got_reason.as_deref(), Some("daily loss limit"));
     }
 
     /// An unknown exchange name must be rejected before reaching the DB.
