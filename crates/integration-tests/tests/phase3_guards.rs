@@ -15,6 +15,7 @@ use auto_trader_integration_tests::helpers::seed;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::null_exchange_api::NullExchangeApi;
 use chrono::Utc;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 // =========================================================================
@@ -140,6 +141,149 @@ async fn position_dedup_detects_existing_open_trade(pool: sqlx::PgPool) {
     .expect("query should succeed");
 
     assert_eq!(other_count, 0, "different pair should have 0 open trades");
+}
+
+// =========================================================================
+// 3.71: Kill Switch (daily loss) — composed behavior
+// =========================================================================
+//
+// The entry-path wiring lives inside a large `tokio::spawn` loop in
+// `main.rs` and isn't unit-testable in isolation. These tests exercise the
+// exact composition main.rs performs — `realized_net_since` over a closed
+// trade dated today (JST), `jst_day_start`, `eval_daily_loss`, and the
+// `set_halt` / `get_halt` round trip — against a seeded DB, plus the
+// halted-account skip.
+
+use auto_trader_db::trades::realized_net_since;
+use auto_trader_db::trading_accounts::{get_account, get_halt, set_halt};
+use auto_trader_executor::risk_gate::{GateDecision, eval_daily_loss, jst_day_start};
+
+/// Mirror of the entry-path kill switch in `main.rs`. Returns `true` when the
+/// account is halted for this signal (either already-halted or newly halted).
+async fn kill_switch_check(
+    pool: &sqlx::PgPool,
+    account_id: uuid::Uuid,
+    limit_pct: Decimal,
+) -> bool {
+    let now = Utc::now();
+    // 1. Already halted?
+    match get_halt(pool, account_id).await.expect("get_halt") {
+        Some((until, _)) if until > now => return true,
+        _ => {}
+    }
+    // 2. Daily loss eval.
+    let day_start = jst_day_start(now);
+    let day_net = realized_net_since(pool, account_id, day_start)
+        .await
+        .expect("realized_net_since");
+    let account = get_account(pool, account_id)
+        .await
+        .expect("get_account")
+        .expect("account exists");
+    let day_start_balance = account.current_balance - day_net;
+    match eval_daily_loss(day_net, day_start_balance, limit_pct) {
+        GateDecision::Reject(_) => {
+            let until = now + chrono::Duration::hours(24);
+            set_halt(pool, account_id, until, "daily loss limit")
+                .await
+                .expect("set_halt");
+            true
+        }
+        GateDecision::Pass => false,
+    }
+}
+
+/// 当日実現損失が開始残高の 6% (>5% 上限) の口座は halt され、以降の signal は
+/// halt により skip される。
+#[sqlx::test(migrations = "../../migrations")]
+async fn kill_switch_halts_on_daily_loss_over_limit(pool: sqlx::PgPool) {
+    // start balance 100_000; a -6% (-6000) realized loss today leaves
+    // current_balance = 94_000.
+    let account_id = seed_trading_account(
+        &pool,
+        "kill_switch_over",
+        "paper",
+        "gmo_fx",
+        "bb_mean_revert_v1",
+        94_000,
+    )
+    .await;
+    seed::seed_closed_trade(
+        &pool,
+        account_id,
+        "bb_mean_revert_v1",
+        "USD_JPY",
+        "gmo_fx",
+        "long",
+        dec!(150),
+        dec!(149),
+        dec!(-6000), // pnl_amount
+        dec!(1),
+        dec!(0), // fees
+        Utc::now(),
+        Utc::now(),
+    )
+    .await;
+
+    // No halt initially.
+    assert!(
+        get_halt(&pool, account_id).await.unwrap().is_none(),
+        "no halt before the switch fires"
+    );
+
+    // First signal: the switch fires and sets the halt.
+    let halted = kill_switch_check(&pool, account_id, dec!(0.05)).await;
+    assert!(halted, "6% loss should trip the kill switch");
+
+    // halted_until is set to a future time.
+    let (until, _) = get_halt(&pool, account_id)
+        .await
+        .unwrap()
+        .expect("halt should be set");
+    assert!(until > Utc::now(), "halted_until should be in the future");
+
+    // Second signal is skipped because the account is halted.
+    let halted_again = kill_switch_check(&pool, account_id, dec!(0.05)).await;
+    assert!(halted_again, "second signal skipped due to existing halt");
+}
+
+/// 当日実現損失が開始残高の 4% (<5% 上限) の口座は halt されず、entry を許可する。
+#[sqlx::test(migrations = "../../migrations")]
+async fn kill_switch_allows_entry_within_limit(pool: sqlx::PgPool) {
+    // start balance 100_000; a -4% (-4000) realized loss leaves
+    // current_balance = 96_000.
+    let account_id = seed_trading_account(
+        &pool,
+        "kill_switch_under",
+        "paper",
+        "gmo_fx",
+        "bb_mean_revert_v1",
+        96_000,
+    )
+    .await;
+    seed::seed_closed_trade(
+        &pool,
+        account_id,
+        "bb_mean_revert_v1",
+        "USD_JPY",
+        "gmo_fx",
+        "long",
+        dec!(150),
+        dec!(149),
+        dec!(-4000),
+        dec!(1),
+        dec!(0),
+        Utc::now(),
+        Utc::now(),
+    )
+    .await;
+
+    let halted = kill_switch_check(&pool, account_id, dec!(0.05)).await;
+    assert!(!halted, "4% loss is below the 5% limit; entry allowed");
+    assert!(
+        get_halt(&pool, account_id).await.unwrap().is_none(),
+        "no halt should be set for a sub-limit loss"
+    );
 }
 
 // =========================================================================

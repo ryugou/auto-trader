@@ -644,6 +644,15 @@ async fn main() -> anyhow::Result<()> {
         .map(|r| r.price_freshness_secs)
         .unwrap_or(60);
 
+    // Kill Switch (daily-loss) parameters. Defaults mirror RiskConfig's serde
+    // defaults so a missing [risk] section still gives a sane 5% / 24h switch.
+    let daily_loss_limit_pct: Decimal = config
+        .risk
+        .as_ref()
+        .map(|r| r.daily_loss_limit_pct)
+        .unwrap_or_else(|| Decimal::new(5, 2));
+    let halt_hours: u64 = config.risk.as_ref().map(|r| r.halt_hours).unwrap_or(24);
+
     // Build the market-feed registry — one entry per exchange that is
     // configured and has credentials. Adding a new exchange's price feed
     // = impl MarketFeed for NewFeed + insert here.
@@ -1282,6 +1291,8 @@ async fn main() -> anyhow::Result<()> {
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
+    let executor_daily_loss_limit_pct = daily_loss_limit_pct;
+    let executor_halt_hours = halt_hours;
     let knowledge_store_exec = knowledge_store.clone();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1344,6 +1355,111 @@ async fn main() -> anyhow::Result<()> {
                     );
                     continue;
                 }
+
+                // Kill Switch: 既に halt 中の口座は新規エントリーを拒否する。
+                // get_halt が失敗した場合は fail-closed で skip する
+                // (損失上限判定ができない口座に発注させない)。
+                let now = chrono::Utc::now();
+                match auto_trader_db::trading_accounts::get_halt(&executor_pool, pac.id).await {
+                    Ok(Some((until, reason))) if until > now => {
+                        tracing::warn!(
+                            "kill switch: skipping entry for account {} ({}); halted until {until} ({})",
+                            pac.name,
+                            pac.id,
+                            reason.as_deref().unwrap_or("no reason")
+                        );
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            "kill switch: get_halt failed for account {} ({}): {e} — skipping (fail-closed)",
+                            pac.name,
+                            pac.id
+                        );
+                        continue;
+                    }
+                }
+
+                // Kill Switch: 当日 (JST) の実現損益を集計し、開始残高比で日次損失
+                // 上限に達していたら halt をセットして新規エントリーを止める。
+                let day_start = auto_trader_executor::risk_gate::jst_day_start(now);
+                let day_net = match auto_trader_db::trades::realized_net_since(
+                    &executor_pool,
+                    pac.id,
+                    day_start,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "kill switch: realized_net_since failed for account {} ({}): {e} — skipping (fail-closed)",
+                            pac.name,
+                            pac.id
+                        );
+                        continue;
+                    }
+                };
+                // 開始残高 = 現在残高 - 当日実現損益。current_balance は当日の実現
+                // 損益を織り込んだ後の値なので、これを引くと当日開始時点の残高になる。
+                let day_start_balance = pac.current_balance - day_net;
+                if let auto_trader_executor::risk_gate::GateDecision::Reject(reason) =
+                    auto_trader_executor::risk_gate::eval_daily_loss(
+                        day_net,
+                        day_start_balance,
+                        executor_daily_loss_limit_pct,
+                    )
+                {
+                    let until = now + chrono::Duration::hours(executor_halt_hours as i64);
+                    let halt_reason = format!(
+                        "daily loss limit: day_net={day_net} start_balance={day_start_balance} limit_pct={executor_daily_loss_limit_pct}"
+                    );
+                    tracing::warn!(
+                        "kill switch: HALT account {} ({}) until {until}: {halt_reason} ({:?})",
+                        pac.name,
+                        pac.id,
+                        reason
+                    );
+                    if let Err(e) = auto_trader_db::trading_accounts::set_halt(
+                        &executor_pool,
+                        pac.id,
+                        until,
+                        &halt_reason,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "kill switch: set_halt failed for account {} ({}): {e}",
+                            pac.name,
+                            pac.id
+                        );
+                    }
+                    // Slack 通知 (fire-and-forget)。
+                    let notifier = executor_notifier.clone();
+                    let account_name = pac.name.clone();
+                    let strategy_name = signal.strategy_name.clone();
+                    let pair = signal.pair.clone();
+                    let notify_reason = halt_reason.clone();
+                    tokio::spawn(async move {
+                        let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                            auto_trader_notify::OrderFailedEvent {
+                                account_name,
+                                exchange,
+                                strategy_name,
+                                pair,
+                                reason: format!(
+                                    "Kill Switch 発火 (新規エントリー停止): {notify_reason}"
+                                ),
+                            },
+                        );
+                        if let Err(e) = notifier.send(ev).await {
+                            tracing::warn!("kill switch: notify send failed: {e}");
+                        }
+                    });
+                    continue;
+                }
+
                 let dry_run = auto_trader::startup::effective_dry_run(
                     &pac.account_type,
                     executor_live_forces_dry_run,

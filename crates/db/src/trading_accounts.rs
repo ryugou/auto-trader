@@ -149,12 +149,11 @@ pub async fn get_halt(
     pool: &PgPool,
     id: Uuid,
 ) -> anyhow::Result<Option<(DateTime<Utc>, Option<String>)>> {
-    let row: Option<(Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
-        "SELECT halted_until, halt_reason FROM trading_accounts WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(Option<DateTime<Utc>>, Option<String>)> =
+        sqlx::query_as("SELECT halted_until, halt_reason FROM trading_accounts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
     Ok(row.and_then(|(until, reason)| until.map(|u| (u, reason))))
 }
 
@@ -561,9 +560,7 @@ mod tests {
             "no halt set initially"
         );
 
-        let until = chrono::Utc
-            .with_ymd_and_hms(2026, 7, 8, 0, 0, 0)
-            .unwrap();
+        let until = chrono::Utc.with_ymd_and_hms(2026, 7, 8, 0, 0, 0).unwrap();
         set_halt(&pool, account.id, until, "daily loss limit")
             .await
             .expect("set_halt");

@@ -144,6 +144,22 @@ trait OrderExecutor {
 - ヒット時は `OrderExecutor::close_position()` を呼び、TradeEvent（Closed）を emit
 - SL/TP の価格は戦略がシグナル生成時に決定する。executor は判定と決済のみを担当
 
+**Kill Switch（日次損失ロスカット）:**
+
+口座単位で当日の実現損失が閾値を超えたら、新規エントリーを一定時間停止する安全装置。live 切り替え前提の必須ガード。
+
+- **日次区切りは JST**: `risk_gate::jst_day_start(now)` が JST (UTC+9) の当日 00:00 を UTC で返す。集計はこの境界以降のクローズトレードのみ対象。
+- **実現ベース**: `trades::realized_net_since(account_id, since)` が `SUM(pnl_amount - fees)`（`status='closed'` かつ `exit_at >= since`）を返す。オープンポジションの含み損は含まない。
+- **判定は pure 関数**: `risk_gate::eval_daily_loss(day_net, day_start_balance, limit_pct)`。`day_net <= -(day_start_balance × limit_pct)` で Reject。`day_start_balance = current_balance - day_net`（現在残高は当日実現損益を織り込み済みのため差し引いて開始残高を復元）。`day_start_balance <= 0` は判定不能で Pass。
+- **設定** (`[risk]`): `daily_loss_limit_pct`（デフォルト 0.05 = 5%、`(0,1)` の範囲でバリデーション）、`halt_hours`（デフォルト 24、`> 0`）。
+- **fail-closed**: エントリー経路（`main.rs` の signal executor）で、`get_halt` / `realized_net_since` が失敗した場合はその口座の signal を skip する（損失判定できない口座に発注させない）。
+- **発火時**: `trading_accounts.halted_until` を `now + halt_hours` に、`halt_reason` を理由文字列にセットし、Slack へ `OrderFailed` 通知（fire-and-forget）を出して signal を skip。`halted_until` が未来の間、新規エントリーは全て拒否される。
+- **close は常に許可**: halt は新規エントリーのみを止める。既存ポジションの SL/TP・維持率・戦略 exit によるクローズはブロックしない。
+- **手動解除**: `halted_until` の経過を待つか、運用者が SQL で解除する。
+  ```sql
+  UPDATE trading_accounts SET halted_until = NULL WHERE name = '<account_name>';
+  ```
+
 ### macro-analyst
 
 Phase 0 では最小構成:
