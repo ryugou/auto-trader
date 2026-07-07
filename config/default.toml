@@ -130,6 +130,8 @@ pairs = ["FX_BTC_JPY", "USD_JPY"]
 # 全アカウント共通のガードレール。
 [risk]
 price_freshness_secs = 60  # price tick がこの秒数より古ければ新規発注禁止
+daily_loss_limit_pct = 0.05  # Kill Switch: 当日実現損失が開始残高の5%で24h新規停止
+halt_hours = 24
 
 # === Live execution ===
 # dry_run が true の間は発注手前で no-op 通知のみ。
