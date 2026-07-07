@@ -19,7 +19,7 @@ use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
     ChildOrderState, ChildOrderType, Execution, SendChildOrderRequest, Side,
 };
-use auto_trader_market::exchange_api::ExchangeApi;
+use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
 use auto_trader_market::price_store::{FeedKey, PriceStore};
 use auto_trader_notify::{
     Notifier, NotifyEvent, OrderFailedEvent, OrderFilledEvent, PositionClosedEvent,
@@ -375,6 +375,58 @@ impl Trader {
         }
     }
 
+    /// 取引所側ストップ注文が置かれている場合、成行 close の前に必ず状態確認。
+    ///
+    /// `Executed` の時はその約定価格/手数料を `Ok(Some((price, commission)))`
+    /// で返す。呼び出し側はこれをそのままクローズ記録に使い、**新規注文を
+    /// 出さない** (成行を重ねると反対ポジションが立つ)。
+    ///
+    /// `Active` の時は cancel してから `Ok(None)` (成行 close に進んでよい)。
+    /// cancel 失敗は執行との race の可能性があるので status を再確認し、
+    /// Executed ならその約定を返す。それでも不明なら close を中断 (`Err`) —
+    /// stale-lock 自己回復に委ねる (二重クローズ回避)。
+    ///
+    /// `Gone` の時は既に無い (取消/失効) ので `Ok(None)` で成行 close に進む。
+    ///
+    /// stop_order_id が無い (paper / 発注失敗) 場合は即 `Ok(None)`。
+    async fn stop_guard_before_close(
+        &self,
+        trade: &Trade,
+    ) -> anyhow::Result<Option<(Decimal, Decimal)>> {
+        let Some(stop_id) = &trade.stop_order_id else {
+            return Ok(None);
+        };
+        match self.api.stop_order_status(&trade.pair.0, stop_id).await {
+            Ok(StopOrderStatus::Executed { price, commission }) => {
+                tracing::info!(
+                    "close: stop order {stop_id} already executed at {price}; recording without new order"
+                );
+                Ok(Some((price, commission)))
+            }
+            Ok(StopOrderStatus::Active) => {
+                if let Err(cancel_err) = self.api.cancel_stop_order(&trade.pair.0, stop_id).await {
+                    if let Ok(StopOrderStatus::Executed { price, commission }) =
+                        self.api.stop_order_status(&trade.pair.0, stop_id).await
+                    {
+                        return Ok(Some((price, commission)));
+                    }
+                    anyhow::bail!(
+                        "cancel_stop_order failed for {stop_id} and status unclear: {cancel_err}; \
+                         aborting close to avoid double-close"
+                    );
+                }
+                Ok(None)
+            }
+            Ok(StopOrderStatus::Gone) => {
+                tracing::warn!("close: stop order {stop_id} already gone (canceled/expired)");
+                Ok(None)
+            }
+            Err(e) => {
+                anyhow::bail!("stop_order_status failed for {stop_id}: {e}; aborting close");
+            }
+        }
+    }
+
     /// fill_close: trade → 決済価格 + commission
     ///
     /// - dry_run=true: PriceStore から Long 決済=bid / Short 決済=ask、commission は estimate_close
@@ -401,6 +453,11 @@ impl Trader {
             );
             Ok((price, commission))
         } else {
+            // 取引所側ストップが Executed 済みなら、その約定でクローズ記録して
+            // 新規注文を出さない (二重クローズ回避)。Active なら cancel 済み。
+            if let Some(fill) = self.stop_guard_before_close(trade).await? {
+                return Ok(fill);
+            }
             self.ensure_close_position_id_present(trade)?;
             let req = self.opposite_side_market_order(trade);
             let resp = self.api.send_child_order(req).await?;
@@ -680,6 +737,11 @@ impl Trader {
             // Dry-run: return price from PriceStore regardless of size (same as fill_close).
             return self.fill_close(trade).await;
         }
+        // stale 復旧の部分クローズでも、取引所側ストップの状態を先に確認する。
+        // Executed 済みなら新規注文を出さずその約定でクローズ記録する。
+        if let Some(fill) = self.stop_guard_before_close(trade).await? {
+            return Ok(fill);
+        }
         self.ensure_close_position_id_present(trade)?;
         let side = match trade.direction {
             Direction::Long => Side::Sell,
@@ -880,6 +942,57 @@ impl OrderExecutor for Trader {
             });
         }
 
+        // 取引所側 SL ストップ注文 (live のみ)。失敗しても open は成立させる —
+        // ポジションは既に立っており、アプリ側 SL 監視がバックアップとして働く。
+        // 失敗は critical 通知して運用者に知らせる。
+        let stop_order_id = if self.dry_run {
+            None
+        } else {
+            let close_side = match signal.direction {
+                Direction::Long => Side::Sell,
+                Direction::Short => Side::Buy,
+            };
+            let trigger =
+                self.position_sizer
+                    .round_trigger_price(&signal.pair, stop_loss, signal.direction);
+            match self
+                .api
+                .place_stop_order(
+                    &signal.pair.0,
+                    close_side,
+                    actual_qty,
+                    trigger,
+                    exchange_position_id.as_deref(),
+                )
+                .await
+            {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::error!(
+                        "place_stop_order failed for {} — position is UNPROTECTED at the exchange \
+                         (app-side SL monitoring is the only stop): {e}",
+                        signal.pair
+                    );
+                    let notifier = self.notifier.clone();
+                    let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
+                        account_name: self.account_name.clone(),
+                        exchange: self.exchange,
+                        strategy_name: signal.strategy_name.clone(),
+                        pair: signal.pair.clone(),
+                        reason: format!(
+                            "exchange-side stop order FAILED (position unprotected if app dies): {e}"
+                        ),
+                    });
+                    tokio::spawn(async move {
+                        if let Err(e) = notifier.send(ev).await {
+                            tracing::warn!("stop-order-failure alert send failed: {e}");
+                        }
+                    });
+                    None
+                }
+            }
+        };
+
         let trade = Trade {
             id: Uuid::new_v4(),
             account_id: self.account_id,
@@ -901,8 +1014,7 @@ impl OrderExecutor for Trader {
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
             exchange_position_id,
-            // Task 4.5 で place_stop_order の結果に差し替える。
-            stop_order_id: None,
+            stop_order_id,
         };
 
         // 6. DB 操作 (1 トランザクション)

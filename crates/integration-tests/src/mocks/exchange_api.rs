@@ -4,17 +4,18 @@
 //! Failure injection (`with_failures`) makes the first N calls return an error
 //! before falling through to the configured response.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use auto_trader_market::bitflyer_private::{
     ChildOrder, Collateral, ExchangePosition, Execution, SendChildOrderRequest,
-    SendChildOrderResponse,
+    SendChildOrderResponse, Side,
 };
-use auto_trader_market::exchange_api::ExchangeApi;
+use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
 
 // ---------------------------------------------------------------------------
 // CallCounter — tracks per-method invocation counts
@@ -29,6 +30,20 @@ pub struct CallCounters {
     pub get_positions: AtomicU32,
     pub get_collateral: AtomicU32,
     pub cancel_child_order: AtomicU32,
+    pub place_stop_order: AtomicU32,
+    pub cancel_stop_order: AtomicU32,
+    pub stop_order_status: AtomicU32,
+}
+
+/// Recorded arguments for a single `place_stop_order` invocation. Tests assert
+/// the trader placed the stop with the rounded trigger price / close side.
+#[derive(Debug, Clone)]
+pub struct StopOrderCall {
+    pub product_code: String,
+    pub close_side: Side,
+    pub size: Decimal,
+    pub trigger_price: Decimal,
+    pub position_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +94,11 @@ pub struct MockExchangeApi {
     get_positions_cfg: MethodConfig<Vec<ExchangePosition>>,
     get_collateral_cfg: MethodConfig<Collateral>,
     cancel_child_order_cfg: MethodConfig<()>,
+    place_stop_order_cfg: MethodConfig<String>,
+    cancel_stop_order_cfg: MethodConfig<()>,
+    stop_order_status_cfg: MethodConfig<StopOrderStatus>,
+    /// Recorded `place_stop_order` args (in call order).
+    pub place_stop_calls: Arc<Mutex<Vec<StopOrderCall>>>,
     pub counters: Arc<CallCounters>,
 }
 
@@ -144,6 +164,52 @@ impl ExchangeApi for MockExchangeApi {
     ) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    async fn place_stop_order(
+        &self,
+        product_code: &str,
+        close_side: Side,
+        size: Decimal,
+        trigger_price: Decimal,
+        position_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.counters
+            .place_stop_order
+            .fetch_add(1, Ordering::SeqCst);
+        self.place_stop_calls
+            .lock()
+            .expect("place_stop_calls mutex poisoned")
+            .push(StopOrderCall {
+                product_code: product_code.to_string(),
+                close_side,
+                size,
+                trigger_price,
+                position_id: position_id.map(|s| s.to_string()),
+            });
+        self.place_stop_order_cfg.try_respond()
+    }
+
+    async fn cancel_stop_order(
+        &self,
+        _product_code: &str,
+        _stop_order_id: &str,
+    ) -> anyhow::Result<()> {
+        self.counters
+            .cancel_stop_order
+            .fetch_add(1, Ordering::SeqCst);
+        self.cancel_stop_order_cfg.try_respond()
+    }
+
+    async fn stop_order_status(
+        &self,
+        _product_code: &str,
+        _stop_order_id: &str,
+    ) -> anyhow::Result<StopOrderStatus> {
+        self.counters
+            .stop_order_status
+            .fetch_add(1, Ordering::SeqCst);
+        self.stop_order_status_cfg.try_respond()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +226,8 @@ pub struct MockExchangeApiBuilder {
     get_executions_resp: Vec<Execution>,
     get_positions_resp: Vec<ExchangePosition>,
     get_collateral_resp: Collateral,
+    place_stop_order_resp: String,
+    stop_order_status_resp: StopOrderStatus,
     failures: Vec<(String, u32)>,
 }
 
@@ -178,8 +246,21 @@ impl MockExchangeApiBuilder {
                 require_collateral: dec!(0),
                 keep_rate: dec!(0),
             },
+            place_stop_order_resp: "mock-stop-001".to_string(),
+            // 既定は Active: close 経路が cancel → 成行 close に進む。
+            stop_order_status_resp: StopOrderStatus::Active,
             failures: vec![],
         }
+    }
+
+    pub fn with_place_stop_order_response(mut self, id: impl Into<String>) -> Self {
+        self.place_stop_order_resp = id.into();
+        self
+    }
+
+    pub fn with_stop_order_status_response(mut self, status: StopOrderStatus) -> Self {
+        self.stop_order_status_resp = status;
+        self
     }
 
     pub fn with_send_child_order_response(mut self, resp: SendChildOrderResponse) -> Self {
@@ -211,7 +292,8 @@ impl MockExchangeApiBuilder {
     ///
     /// `method` must be one of: `"send_child_order"`, `"get_child_orders"`,
     /// `"get_executions"`, `"get_positions"`, `"get_collateral"`,
-    /// `"cancel_child_order"`.
+    /// `"cancel_child_order"`, `"place_stop_order"`, `"cancel_stop_order"`,
+    /// `"stop_order_status"`.
     pub fn with_failures(mut self, method: &str, count: u32) -> Self {
         self.failures.push((method.to_string(), count));
         self
@@ -224,6 +306,9 @@ impl MockExchangeApiBuilder {
         let mut get_positions_cfg = MethodConfig::new(self.get_positions_resp);
         let mut get_collateral_cfg = MethodConfig::new(self.get_collateral_resp);
         let mut cancel_child_order_cfg = MethodConfig::new(());
+        let mut place_stop_order_cfg = MethodConfig::new(self.place_stop_order_resp);
+        let mut cancel_stop_order_cfg = MethodConfig::new(());
+        let mut stop_order_status_cfg = MethodConfig::new(self.stop_order_status_resp);
 
         for (method, count) in &self.failures {
             match method.as_str() {
@@ -245,6 +330,15 @@ impl MockExchangeApiBuilder {
                 "cancel_child_order" => {
                     cancel_child_order_cfg = cancel_child_order_cfg.with_failures(*count);
                 }
+                "place_stop_order" => {
+                    place_stop_order_cfg = place_stop_order_cfg.with_failures(*count);
+                }
+                "cancel_stop_order" => {
+                    cancel_stop_order_cfg = cancel_stop_order_cfg.with_failures(*count);
+                }
+                "stop_order_status" => {
+                    stop_order_status_cfg = stop_order_status_cfg.with_failures(*count);
+                }
                 other => panic!("MockExchangeApiBuilder: unknown method '{other}'"),
             }
         }
@@ -256,6 +350,10 @@ impl MockExchangeApiBuilder {
             get_positions_cfg,
             get_collateral_cfg,
             cancel_child_order_cfg,
+            place_stop_order_cfg,
+            cancel_stop_order_cfg,
+            stop_order_status_cfg,
+            place_stop_calls: Arc::new(Mutex::new(Vec::new())),
             counters: Arc::new(CallCounters::default()),
         })
     }
