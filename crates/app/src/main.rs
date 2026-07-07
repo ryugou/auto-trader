@@ -884,6 +884,11 @@ async fn main() -> anyhow::Result<()> {
             exchange_liquidation_levels: crypto_monitor_exchange_liquidation_levels.clone(),
             live_forces_dry_run: crypto_monitor_live_forces_dry_run,
         };
+        // live 維持率アラートの rate limiter。(account_id, level) ごとに
+        // 直近送信時刻を保持し、30 分に 1 回だけ Slack 通知する。tick ループの
+        // 外で保持することで tick 間で状態を引き継ぐ。
+        let mut margin_alert_last: HashMap<(uuid::Uuid, &'static str), std::time::Instant> =
+            HashMap::new();
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
             let open_trades =
@@ -932,6 +937,44 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await;
                 }
+            }
+
+            // Live 維持率アラート (close はしない): tick の event.exchange と
+            // 一致する live account を walk して、維持率が warn/critical 帯に
+            // 入ったら運用者へ通知する。live のロスカット執行は取引所の責務
+            // なので bot は接近を知らせるだけ。(account, level) ごと 30 分に 1 回。
+            let margin_alerts =
+                auto_trader::margin_alert::detect_margin_alerts(&liq_ctx, &open_trades, &event)
+                    .await;
+            for alert in margin_alerts {
+                let key = (alert.account_id, alert.level.as_str());
+                let now = std::time::Instant::now();
+                let should_send = margin_alert_last.get(&key).is_none_or(|last| {
+                    now.duration_since(*last) > std::time::Duration::from_secs(1800)
+                });
+                if !should_send {
+                    continue;
+                }
+                margin_alert_last.insert(key, now);
+                let ev = auto_trader_notify::NotifyEvent::SystemAlert(
+                    auto_trader_notify::SystemAlertEvent {
+                        title: format!("margin {}", alert.level.as_str()),
+                        account_name: alert.account_name.clone(),
+                        exchange: event.exchange,
+                        body: format!(
+                            "maintenance ratio {} approaching liquidation level {} \
+                             (live account — exchange will liquidate below threshold)",
+                            alert.ratio.round_dp(4),
+                            alert.threshold
+                        ),
+                    },
+                );
+                let notifier = crypto_monitor_notifier.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = notifier.send(ev).await {
+                        tracing::warn!("margin alert notify failed: {e}");
+                    }
+                });
             }
 
             for owned in open_trades {

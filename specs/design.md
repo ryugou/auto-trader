@@ -160,6 +160,24 @@ trait OrderExecutor {
   UPDATE trading_accounts SET halted_until = NULL WHERE name = '<account_name>';
   ```
 
+**サイジング安全バッファ:**
+
+`PositionSizer` は各取引所のロスカット閾値 `Y` に安全バッファ `buffer` を上乗せしてサイジングする。
+
+- 式: `max_alloc = 1 / (Y + buffer + leverage × stop_loss_pct)`、`risk_alloc = min(max_alloc, allocation_pct)`。
+- `buffer` (`[risk].sizing_margin_buffer`、デフォルト 0.10、`>= 0` でバリデーション) は、スリッページ・週末ギャップ・SL 発動遅延で実現損失が SL 価格を超過しても、維持率がロスカット閾値まで即落ちしないための余裕。`buffer = 0` なら従来どおり `Y` ちょうどを狙う。
+
+**維持率アラート（live / paper の非対称）:**
+
+維持率（`compute_maintenance_ratio` = 純資産 / 必要証拠金合計）に対する対応は口座種別で分かれる。
+
+- **paper**: `liquidation.rs::detect_liquidation_targets` が維持率 `< Y`（取引所ロスカット閾値）で全 trade を bot 側から force-close する（模擬取引なので執行主体が bot）。
+- **live**: `margin_alert.rs::detect_margin_alerts` が **アラートのみ**。close は一切しない — live のロスカット執行は取引所の責務であり、bot は接近を運用者に知らせるだけ。
+  - **warn**: 維持率 `< Y × 1.3`
+  - **critical**: 維持率 `< Y × 1.1`
+  - crypto monitor tick で判定し、`NotifyEvent::SystemAlert` で Slack 通知。`(account, level)` ごと 30 分に 1 回のレート制限。
+  - **注意**: ここで使う残高は DB 管理値であり、取引所実残高とはドリフトしうる（残高ドリフト検知は別 Phase）。
+
 ### macro-analyst
 
 Phase 0 では最小構成:

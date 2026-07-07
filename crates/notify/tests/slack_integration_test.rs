@@ -87,7 +87,10 @@ async fn notifier_posts_system_alert_with_title() {
     let text = body["text"]
         .as_str()
         .expect("body must have a string `text` field");
-    assert!(text.contains("margin critical"), "text missing title: {text}");
+    assert!(
+        text.contains("margin critical"),
+        "text missing title: {text}"
+    );
     assert!(text.contains("本番"), "text missing account_name: {text}");
     assert!(text.contains("gmo_fx"), "text missing exchange: {text}");
 }
