@@ -579,6 +579,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // GMO swap rate 表の鮮度チェック (起動時 1 回、ログのみ)。
+    // Slack 通知は日次ジョブ (overnight/swap) に任せる — 起動のたびに
+    // Slack が鳴るのを避けるため。
+    {
+        let has_gmo_paper_accounts = db_accounts
+            .iter()
+            .any(|a| a.exchange == "gmo_fx" && a.account_type == "paper");
+        if let Some(body) = auto_trader::swap_freshness::swap_freshness_alert(
+            &config.gmo_fx.swap,
+            chrono::Utc::now().date_naive(),
+            has_gmo_paper_accounts,
+        ) {
+            tracing::warn!("swap freshness (startup): {body}");
+        }
+    }
+
     // `LIVE_DRY_RUN` env overrides `[live].dry_run` config.
     // Trim whitespace and lowercase before matching so " True\n" is valid.
     // Unknown values fall back to [live].dry_run and emit a warning.
@@ -1999,6 +2015,7 @@ async fn main() -> anyhow::Result<()> {
     // the DB at every tick so REST API changes are reflected immediately.
     let overnight_pool = pool.clone();
     let swap_config = config.gmo_fx.swap.clone();
+    let overnight_notifier = notifier.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let bitflyer_fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
@@ -2023,6 +2040,31 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+                // swap rate 表の鮮度チェック (1 日 1 回、fee 適用と同時)。
+                let has_gmo_paper = accounts
+                    .iter()
+                    .any(|a| a.exchange == "gmo_fx" && a.account_type == "paper");
+                if let Some(body) = auto_trader::swap_freshness::swap_freshness_alert(
+                    &swap_config,
+                    today,
+                    has_gmo_paper,
+                ) {
+                    let ev = auto_trader_notify::NotifyEvent::SystemAlert(
+                        auto_trader_notify::SystemAlertEvent {
+                            title: "swap rates freshness".to_string(),
+                            account_name: "(config)".to_string(),
+                            exchange: auto_trader_core::types::Exchange::GmoFx,
+                            body,
+                        },
+                    );
+                    let notifier = overnight_notifier.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = notifier.send(ev).await {
+                            tracing::warn!("swap freshness alert send failed: {e}");
+                        }
+                    });
+                }
+
                 // event_at = today の UTC midnight 境界 (attribution 用)。
                 let event_at = today
                     .and_hms_opt(0, 0, 0)

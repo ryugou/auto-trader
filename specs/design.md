@@ -197,6 +197,15 @@ bot は `current_balance` を DB 台帳（`initial + Σpnl − Σfees`）で管�
 - **アラートのみ・自動補正しない**: 台帳の不変条件 `current_balance = initial + Σpnl − Σfees` を壊さないため、bot は乖離を運用者に知らせるだけで残高を書き換えない。補正（入出金・スワップ履歴の突き合わせ、必要なら `initial_balance` 調整 SQL）は運用者判断。
 - `NotifyEvent::SystemAlert`（title=`"balance drift"`）で通知。送信は main.rs 側で fire-and-forget（送信失敗は warn のみ、起動をブロックしない）。
 
+**GMO スワップレート鮮度チェック（config 手入力値の staleness 検知）:**
+
+GMO FX のスワップポイントは GMO が日次公表する配布値で API 取得手段が無い（`api.coin.z.com/fxdocs` で確認済み）。そのため `config/default.toml` の `[gmo_fx.swap.rates]` は運用者が公式スワップカレンダーを見て手入力する代表値であり、放置すると金利環境の変化で古くなる。
+
+- **判定**: `is_swap_rates_stale`（`crates/core/src/swap.rs`、pure 関数）が `[gmo_fx.swap].updated_on` から `max_age_days`（デフォルト 35 日）を超えたら stale と判定する。`swap_freshness_alert`（`crates/app/src/swap_freshness.rs`）がこれと「rates 未設定なのに GMO paper 口座が存在する」を合わせてアラート文言を組み立てる。
+- **起動時**: 1 回判定して `tracing::warn!` にログするのみ（Slack は鳴らさない — 起動のたびに通知が飛ぶのを避けるため）。
+- **日次**: overnight/swap ジョブ（`main.rs`、UTC 日付が変わるたびに 1 回）が fee 適用と同じタイミングで判定し、`NotifyEvent::SystemAlert`（title=`"swap rates freshness"`）で Slack に通知する。
+- **GMO スワップレート更新（月次）**: GMO 公式のスワップカレンダーを確認し、`config/default.toml` の `[gmo_fx.swap.rates]` と `updated_on` を更新する。放置すると `updated_on + max_age_days` 超過で日次 SystemAlert が出る。スワップは API で取得できない公表値のため手動更新が唯一の手段。
+
 ### macro-analyst
 
 Phase 0 では最小構成:

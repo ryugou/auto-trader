@@ -11,5 +11,6 @@ pub mod regime;
 pub mod startup;
 pub mod startup_reconcile;
 pub mod stop_fill;
+pub mod swap_freshness;
 pub mod weekly_batch;
 pub mod wilson;
