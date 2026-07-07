@@ -70,7 +70,7 @@ pub async fn detect_liquidation_targets(
             .first()
             .and_then(|t| t.account_type.as_deref())
             .unwrap_or("paper");
-        let dry_run = account_type == "paper" || ctx.live_forces_dry_run;
+        let dry_run = crate::startup::effective_dry_run(account_type, ctx.live_forces_dry_run);
         if !dry_run {
             continue;
         }

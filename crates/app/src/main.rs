@@ -943,7 +943,10 @@ async fn main() -> anyhow::Result<()> {
                 // [live].enabled=false blocks NEW live orders only, not existing-position
                 // close paths. A position opened when enabled=true must remain closable
                 // even after the operator toggles enabled=false for safety reasons.
-                let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
+                let dry_run = auto_trader::startup::effective_dry_run(
+                    &account_type,
+                    crypto_monitor_live_forces_dry_run,
+                );
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
                 // when the wall clock passes the deadline. Tagged with
@@ -1181,7 +1184,8 @@ async fn main() -> anyhow::Result<()> {
             // [live].enabled=false blocks NEW live orders only, not existing-position
             // close paths. A position opened when enabled=true must remain closable
             // even after the operator toggles enabled=false for safety reasons.
-            let dry_run = account_type == "paper" || exit_live_forces_dry_run;
+            let dry_run =
+                auto_trader::startup::effective_dry_run(&account_type, exit_live_forces_dry_run);
             // Live accounts require a real ExchangeApi. Paper/dry_run accounts fill
             // from PriceStore and never call API methods, so a NullExchangeApi stub
             // is safe when no real implementation exists yet (e.g. GMO Coin FX).
@@ -1340,7 +1344,10 @@ async fn main() -> anyhow::Result<()> {
                     );
                     continue;
                 }
-                let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
+                let dry_run = auto_trader::startup::effective_dry_run(
+                    &pac.account_type,
+                    executor_live_forces_dry_run,
+                );
                 // Registry lookup — live accounts require a real ExchangeApi.
                 // Paper/dry_run accounts fill from PriceStore and never call
                 // API methods, so a NullExchangeApi stub is safe to use when
