@@ -1,4 +1,4 @@
-use auto_trader_core::types::Pair;
+use auto_trader_core::types::{Direction, Pair};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
@@ -31,6 +31,10 @@ pub struct PositionSizer {
     /// スリッページ・週末ギャップ・SL 発動遅延で実現損失が SL 価格を
     /// 超過しても、維持率がロスカット閾値まで即落ちしないための余裕。
     margin_buffer: Decimal,
+    /// 取引所側 SL ストップ注文の trigger price を丸める tick 単位
+    /// (`pair_config.price_unit`)。空なら丸めなし (`round_trigger_price` は
+    /// 入力値をそのまま返す)。builder `with_price_units` で注入する。
+    price_units: HashMap<Pair, Decimal>,
 }
 
 impl PositionSizer {
@@ -38,7 +42,37 @@ impl PositionSizer {
         Self {
             min_order_sizes,
             margin_buffer,
+            price_units: HashMap::new(),
         }
+    }
+
+    /// SL trigger price 丸め用の tick 単位を注入する builder。
+    pub fn with_price_units(mut self, price_units: HashMap<Pair, Decimal>) -> Self {
+        self.price_units = price_units;
+        self
+    }
+
+    /// SL trigger price を取引所 tick (`pair_config.price_unit`) に丸める。
+    /// Long の SL は下側にあるので「早く発火する側」= 切り上げ (ceil)、
+    /// Short の SL は上側なので切り捨て (floor)。丸め方向を誤ると SL 価格を
+    /// わずかに超えた損失で発火することになる。
+    /// tick 未設定 (0 以下) の pair は丸めずそのまま返す。
+    pub fn round_trigger_price(
+        &self,
+        pair: &Pair,
+        price: Decimal,
+        direction: Direction,
+    ) -> Decimal {
+        let unit = self.price_units.get(pair).copied().unwrap_or(Decimal::ZERO);
+        if unit <= Decimal::ZERO {
+            return price;
+        }
+        let steps = price / unit;
+        let rounded = match direction {
+            Direction::Long => steps.ceil(),
+            Direction::Short => steps.floor(),
+        };
+        rounded * unit
     }
 
     /// Compute the trade quantity. Returns None when the result would
@@ -115,8 +149,39 @@ impl PositionSizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::Pair;
+    use auto_trader_core::types::{Direction, Pair};
     use rust_decimal_macros::dec;
+
+    /// Long の SL trigger は切り上げ (早く発火する側 = 損失が小さい側)、
+    /// Short は切り捨て。
+    #[test]
+    fn trigger_price_rounds_to_safe_side() {
+        let mut min_sizes = HashMap::new();
+        min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
+        let mut units = HashMap::new();
+        units.insert(Pair::new("USD_JPY"), dec!(0.001));
+        let sizer = PositionSizer::new(min_sizes, dec!(0.10)).with_price_units(units);
+        // Long SL 156.78912 → 156.790 (ceil to 0.001)
+        assert_eq!(
+            sizer.round_trigger_price(&Pair::new("USD_JPY"), dec!(156.78912), Direction::Long),
+            dec!(156.790)
+        );
+        // Short SL 156.78912 → 156.789 (floor)
+        assert_eq!(
+            sizer.round_trigger_price(&Pair::new("USD_JPY"), dec!(156.78912), Direction::Short),
+            dec!(156.789)
+        );
+    }
+
+    /// tick 未設定の pair は丸めずそのまま返す。
+    #[test]
+    fn trigger_price_unrounded_when_no_unit_configured() {
+        let sizer = PositionSizer::new(HashMap::new(), Decimal::ZERO);
+        assert_eq!(
+            sizer.round_trigger_price(&Pair::new("USD_JPY"), dec!(156.78912), Direction::Long),
+            dec!(156.78912)
+        );
+    }
 
     fn btc_sizer() -> PositionSizer {
         let mut min_sizes = HashMap::new();

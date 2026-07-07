@@ -639,10 +639,18 @@ async fn main() -> anyhow::Result<()> {
             .iter()
             .map(|(k, v)| (Pair::new(k), v.min_order_size))
             .collect();
-        Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
-            min_order_sizes,
-            sizing_margin_buffer,
-        ))
+        // 取引所側 SL ストップ注文の trigger price 丸め用 tick (price_unit)。
+        let price_units: HashMap<Pair, Decimal> = pair_configs
+            .iter()
+            .map(|(k, v)| (Pair::new(k), v.price_unit))
+            .collect();
+        Arc::new(
+            auto_trader_executor::position_sizer::PositionSizer::new(
+                min_order_sizes,
+                sizing_margin_buffer,
+            )
+            .with_price_units(price_units),
+        )
     };
 
     // Freshness threshold for entry signals. Only the price_freshness_secs
