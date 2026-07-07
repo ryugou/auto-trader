@@ -41,9 +41,8 @@ pub async fn detect_and_close_stop_fills(
         .filter(|t| is_stop_detection_target(t, live_forces_dry_run))
     {
         let trade = &owned.trade;
-        let stop_id = match &trade.stop_order_id {
-            Some(id) => id,
-            None => continue, // filter で除外済みだが型上のガード
+        let Some(stop_id) = &trade.stop_order_id else {
+            continue;
         };
         let api = match ctx.apis.get(&trade.exchange) {
             Some(a) => a.clone(),

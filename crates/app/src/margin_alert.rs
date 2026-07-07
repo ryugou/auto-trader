@@ -4,8 +4,7 @@
 //! 注意: ここで使う残高は DB 管理値であり、取引所実残高とはドリフトしうる。
 
 use auto_trader_core::event::PriceEvent;
-use auto_trader_core::margin::{OpenPosition, compute_maintenance_ratio};
-use auto_trader_core::types::Direction;
+use auto_trader_core::margin::compute_maintenance_ratio;
 use auto_trader_db::trades::OpenTradeWithAccount;
 use auto_trader_market::price_store::FeedKey;
 use rust_decimal::Decimal;
@@ -13,6 +12,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::liquidation::LiquidationContext;
+use crate::positions::build_close_side_positions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertLevel {
@@ -120,45 +120,18 @@ pub async fn detect_margin_alerts(
 
         // OpenPosition vec を組む。price 不在の trade があったら account 判定 skip
         // (false-positive alert を避ける、保守的)。
-        let mut positions = Vec::with_capacity(trades_in_account.len());
-        let mut skip_account = false;
-        for owned in &trades_in_account {
-            let trade = &owned.trade;
-            let feed_key = FeedKey::new(trade.exchange, trade.pair.clone());
-            let bid_ask = if let Some(cached) = price_cache.get(&feed_key) {
-                *cached
-            } else {
-                let v = ctx.price_store.latest_bid_ask(&feed_key).await;
-                price_cache.insert(feed_key.clone(), v);
-                v
-            };
-            let current_price = match bid_ask {
-                Some((bid, ask)) => match trade.direction {
-                    // close-side bid/ask: Long close=bid, Short close=ask
-                    Direction::Long => bid,
-                    Direction::Short => ask,
-                },
-                None => {
-                    tracing::warn!(
-                        "margin_alert: no price for {:?} {} — skipping account {account_id}",
-                        trade.exchange,
-                        trade.pair
-                    );
-                    skip_account = true;
-                    break;
-                }
-            };
-            positions.push(OpenPosition {
-                direction: trade.direction,
-                entry_price: trade.entry_price,
-                current_price,
-                quantity: trade.quantity,
-                leverage: trade.leverage,
-            });
-        }
-        if skip_account {
-            continue;
-        }
+        let ctx_label = format!("margin_alert: account {account_id}");
+        let positions = match build_close_side_positions(
+            trades_in_account.iter().map(|owned| &owned.trade),
+            &ctx.price_store,
+            &mut price_cache,
+            &ctx_label,
+        )
+        .await
+        {
+            Some(p) => p,
+            None => continue,
+        };
 
         // 維持率計算
         let ratio = match compute_maintenance_ratio(account.current_balance, &positions) {

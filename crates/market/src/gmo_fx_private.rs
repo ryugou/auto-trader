@@ -25,7 +25,7 @@ use crate::bitflyer_private::{
     ChildOrder, ChildOrderState, ChildOrderType, Collateral, ExchangePosition, Execution,
     SendChildOrderRequest, SendChildOrderResponse, Side,
 };
-use crate::exchange_api::{ExchangeApi, StopOrderStatus};
+use crate::exchange_api::{ExchangeApi, StopOrderStatus, weighted_avg_fills};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -649,14 +649,14 @@ impl ExchangeApi for GmoFxPrivateApi {
                 let epath = format!("/v1/executions?orderId={stop_order_id}");
                 let execs: GmoListResponse<GmoExecution> =
                     self.signed_request(Method::GET, &epath, None).await?;
-                let total_size: Decimal = execs.list.iter().map(|e| e.size).sum();
                 let total_fee: Decimal = execs.list.iter().map(|e| e.fee).sum();
-                let price = if total_size > Decimal::ZERO {
-                    execs.list.iter().map(|e| e.price * e.size).sum::<Decimal>() / total_size
-                } else {
-                    // 約定明細が空でも EXECUTED なら order.price を fallback。
-                    order.price
-                };
+                let price =
+                    match weighted_avg_fills(execs.list.iter().map(|e| (e.price, e.size, e.fee))) {
+                        Ok((avg_price, _total_size, _total_fee)) => avg_price,
+                        // 約定明細が空 (もしくは size 合計 0) でも EXECUTED なら
+                        // order.price を fallback。
+                        Err(_) => order.price,
+                    };
                 Ok(StopOrderStatus::Executed {
                     price,
                     commission: total_fee,

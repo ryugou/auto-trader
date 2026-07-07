@@ -15,13 +15,14 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use auto_trader_core::margin::OpenPosition;
-use auto_trader_core::types::{Direction, Exchange};
+use auto_trader_core::types::Exchange;
 use auto_trader_market::exchange_api::ExchangeApi;
-use auto_trader_market::price_store::{FeedKey, PriceStore};
+use auto_trader_market::price_store::PriceStore;
 use auto_trader_notify::SystemAlertEvent;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
+
+use crate::positions::build_close_side_positions;
 
 /// ドリフト判定。閾値 = max(取引所 equity の 1%, 500 円)。
 pub fn is_drift(exchange_equity: Decimal, bot_equity: Decimal) -> bool {
@@ -63,7 +64,10 @@ pub async fn check_live_accounts(ctx: &BalanceDriftContext) -> Vec<SystemAlertEv
 
     let mut alerts = Vec::new();
 
-    for account in accounts.into_iter().filter(|a| a.account_type == "live") {
+    for account in accounts
+        .into_iter()
+        .filter(|a| !crate::startup::effective_dry_run(&a.account_type, ctx.live_forces_dry_run))
+    {
         let exchange = match Exchange::from_str(&account.exchange) {
             Ok(x) => x,
             Err(e) => {
@@ -117,38 +121,18 @@ pub async fn check_live_accounts(ctx: &BalanceDriftContext) -> Vec<SystemAlertEv
                 }
             };
 
-        let mut positions = Vec::with_capacity(open_trades.len());
-        let mut skip_account = false;
-        for trade in &open_trades {
-            let feed_key = FeedKey::new(trade.exchange, trade.pair.clone());
-            let current_price = match ctx.price_store.latest_bid_ask(&feed_key).await {
-                Some((bid, ask)) => match trade.direction {
-                    // close-side: Long は bid で決済, Short は ask で決済。
-                    Direction::Long => bid,
-                    Direction::Short => ask,
-                },
-                None => {
-                    tracing::warn!(
-                        "balance drift: no price for {:?} {} — skipping account {}",
-                        trade.exchange,
-                        trade.pair,
-                        account.name
-                    );
-                    skip_account = true;
-                    break;
-                }
-            };
-            positions.push(OpenPosition {
-                direction: trade.direction,
-                entry_price: trade.entry_price,
-                current_price,
-                quantity: trade.quantity,
-                leverage: trade.leverage,
-            });
-        }
-        if skip_account {
-            continue;
-        }
+        let ctx_label = format!("balance drift: account {}", account.name);
+        let positions = match build_close_side_positions(
+            open_trades.iter(),
+            &ctx.price_store,
+            &mut HashMap::new(),
+            &ctx_label,
+        )
+        .await
+        {
+            Some(p) => p,
+            None => continue,
+        };
 
         let required: Decimal = positions.iter().map(|p| p.required_margin()).sum();
         let unrealized: Decimal = positions.iter().map(|p| p.unrealized_pnl()).sum();

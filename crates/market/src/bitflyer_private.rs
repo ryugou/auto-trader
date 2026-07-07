@@ -7,7 +7,7 @@
 //! (Trade, Signal 等) への変換は呼び出し側 (`LiveTrader` in PR 3)
 //! が担う。
 
-use crate::exchange_api::StopOrderStatus;
+use crate::exchange_api::{StopOrderStatus, weighted_avg_fills};
 use hmac::{Hmac, Mac};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -752,14 +752,12 @@ impl BitflyerPrivateApi {
 /// `StopOrderStatus::Executed { price, commission }` に畳むために使う。
 /// `trader.rs::aggregate_executions` と同形 (size 加重平均 + commission 合計)。
 fn weighted_avg_executions(execs: &[Execution]) -> (Decimal, Decimal) {
-    let total_size: Decimal = execs.iter().map(|e| e.size).sum();
-    let total_commission: Decimal = execs.iter().map(|e| e.commission).sum();
-    let price = if total_size > Decimal::ZERO {
-        execs.iter().map(|e| e.price * e.size).sum::<Decimal>() / total_size
-    } else {
-        Decimal::ZERO
-    };
-    (price, total_commission)
+    match weighted_avg_fills(execs.iter().map(|e| (e.price, e.size, e.commission))) {
+        Ok((price, _total_size, total_commission)) => (price, total_commission),
+        // total size <= 0 (empty list or pathological zero-size executions):
+        // preserve the original fallback of price=0 while still summing commission.
+        Err(_) => (Decimal::ZERO, execs.iter().map(|e| e.commission).sum()),
+    }
 }
 
 /// `ExchangeApi` trait implementation — thin delegation layer.

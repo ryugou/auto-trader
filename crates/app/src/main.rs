@@ -32,6 +32,25 @@ fn exchange_from_str(s: &str) -> Option<Exchange> {
     s.parse().ok()
 }
 
+/// SystemAlert 群を fire-and-forget で送る (送信失敗は warn のみ)。
+/// 起動時 one-shot / 毎時 task の両方から呼ぶ (balance drift dispatch)。
+fn spawn_system_alerts(
+    notifier: &Arc<Notifier>,
+    alerts: Vec<auto_trader_notify::SystemAlertEvent>,
+) {
+    for ev in alerts {
+        let notifier = notifier.clone();
+        tokio::spawn(async move {
+            if let Err(e) = notifier
+                .send(auto_trader_notify::NotifyEvent::SystemAlert(ev))
+                .await
+            {
+                tracing::warn!("system alert send failed: {e}");
+            }
+        });
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -643,13 +662,10 @@ async fn main() -> anyhow::Result<()> {
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
     // signal dispatch) was wasting per-iteration allocations + hashing.
     // Safety buffer added on top of each exchange's liquidation margin level
-    // when sizing (max_alloc = 1 / (Y + buffer + L×s)). Mirrors RiskConfig's
-    // serde default (0.10) so a missing [risk] section still keeps slack.
-    let sizing_margin_buffer: Decimal = config
-        .risk
-        .as_ref()
-        .map(|r| r.sizing_margin_buffer)
-        .unwrap_or_else(|| Decimal::new(10, 2));
+    // when sizing (max_alloc = 1 / (Y + buffer + L×s)). `RiskConfig::default()`
+    // mirrors the serde defaults so a missing [risk] section still keeps slack.
+    let risk = config.risk.clone().unwrap_or_default();
+    let sizing_margin_buffer: Decimal = risk.sizing_margin_buffer;
     let shared_position_sizer: Arc<auto_trader_executor::position_sizer::PositionSizer> = {
         let min_order_sizes: HashMap<Pair, Decimal> = pair_configs
             .iter()
@@ -671,20 +687,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Freshness threshold for entry signals. Only the price_freshness_secs
     // field from RiskConfig is used post-revert.
-    let price_freshness_secs: u64 = config
-        .risk
-        .as_ref()
-        .map(|r| r.price_freshness_secs)
-        .unwrap_or(60);
+    let price_freshness_secs: u64 = risk.price_freshness_secs;
 
-    // Kill Switch (daily-loss) parameters. Defaults mirror RiskConfig's serde
-    // defaults so a missing [risk] section still gives a sane 5% / 24h switch.
-    let daily_loss_limit_pct: Decimal = config
-        .risk
-        .as_ref()
-        .map(|r| r.daily_loss_limit_pct)
-        .unwrap_or_else(|| Decimal::new(5, 2));
-    let halt_hours: u64 = config.risk.as_ref().map(|r| r.halt_hours).unwrap_or(24);
+    // Kill Switch (daily-loss) parameters. `RiskConfig::default()` mirrors the
+    // serde defaults so a missing [risk] section still gives a sane 5% / 24h switch.
+    let daily_loss_limit_pct: Decimal = risk.daily_loss_limit_pct;
+    let halt_hours: u64 = risk.halt_hours;
 
     // Build the market-feed registry — one entry per exchange that is
     // configured and has credentials. Adding a new exchange's price feed
@@ -880,15 +888,7 @@ async fn main() -> anyhow::Result<()> {
             live_forces_dry_run,
         };
         let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
-        for ev in alerts {
-            let notifier = notifier.clone();
-            let ev = auto_trader_notify::NotifyEvent::SystemAlert(ev);
-            tokio::spawn(async move {
-                if let Err(e) = notifier.send(ev).await {
-                    tracing::warn!("startup balance drift notify failed: {e}");
-                }
-            });
-        }
+        spawn_system_alerts(&notifier, alerts);
     }
 
     // FX position monitor removed: FX paper trading is currently disabled.
@@ -1996,15 +1996,7 @@ async fn main() -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
-            for ev in alerts {
-                let notifier = drift_notifier.clone();
-                let ev = auto_trader_notify::NotifyEvent::SystemAlert(ev);
-                tokio::spawn(async move {
-                    if let Err(e) = notifier.send(ev).await {
-                        tracing::warn!("balance drift notify failed: {e}");
-                    }
-                });
-            }
+            spawn_system_alerts(&drift_notifier, alerts);
         }
     });
 

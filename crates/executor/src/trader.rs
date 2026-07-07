@@ -19,7 +19,7 @@ use auto_trader_core::types::*;
 use auto_trader_market::bitflyer_private::{
     ChildOrderState, ChildOrderType, Execution, SendChildOrderRequest, Side,
 };
-use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
+use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus, weighted_avg_fills};
 use auto_trader_market::price_store::{FeedKey, PriceStore};
 use auto_trader_notify::{
     Notifier, NotifyEvent, OrderFailedEvent, OrderFilledEvent, PositionClosedEvent,
@@ -50,17 +50,8 @@ fn truncate_yen(amount: Decimal) -> Decimal {
 /// against the empty-list case so `total_size == 0` only happens with
 /// pathological zero-size executions).
 fn aggregate_executions(execs: &[Execution]) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
-    let (total_size, total_notional, total_commission) = execs.iter().fold(
-        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
-        |(s, n, c), e| (s + e.size, n + e.price * e.size, c + e.commission),
-    );
-    if total_size.is_zero() {
-        anyhow::bail!(
-            "aggregate_executions: total size is zero across {} execs",
-            execs.len()
-        );
-    }
-    Ok((total_notional / total_size, total_size, total_commission))
+    weighted_avg_fills(execs.iter().map(|e| (e.price, e.size, e.commission)))
+        .map_err(|e| anyhow::anyhow!("aggregate_executions over {} execs: {e}", execs.len()))
 }
 
 pub struct Trader {

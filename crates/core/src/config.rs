@@ -256,6 +256,23 @@ fn default_sizing_margin_buffer() -> Decimal {
     Decimal::new(10, 2) // 0.10
 }
 
+/// `[risk]` セクション自体が config に無い時 (`AppConfig::risk == None`) の
+/// フォールバック値。各 field の serde default 関数と厳密に一致させること
+/// (`price_freshness_secs` のみ serde default が無いため 60 を直接指定 —
+/// `main.rs` が長らく使っていたハードコード値と同じ)。
+/// `risk_config_default_matches_serde_defaults` テストで serde 側との
+/// 一致を保証する。
+impl Default for RiskConfig {
+    fn default() -> Self {
+        Self {
+            price_freshness_secs: 60,
+            daily_loss_limit_pct: default_daily_loss_limit_pct(),
+            halt_hours: default_halt_hours(),
+            sizing_margin_buffer: default_sizing_margin_buffer(),
+        }
+    }
+}
+
 impl RiskConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.price_freshness_secs == 0 {
@@ -643,6 +660,47 @@ price_freshness_secs = 60
         assert_eq!(risk.daily_loss_limit_pct, rust_decimal_macros::dec!(0.05));
         assert_eq!(risk.halt_hours, 24);
         risk.validate().unwrap();
+    }
+
+    #[test]
+    fn risk_config_default_matches_serde_defaults() {
+        // `RiskConfig::default()` (config.risk == None のフォールバック) は
+        // 各 field の serde default 関数と一致していなければならない。
+        // price_freshness_secs のみ serde default が無いため、[risk] に
+        // 明示指定した TOML との一致で確認する。
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://u:p@localhost/auto_trader"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+active = ["USD_JPY"]
+
+[risk]
+price_freshness_secs = 60
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let from_serde = cfg.risk.expect("risk section should parse");
+        let default = RiskConfig::default();
+        assert_eq!(
+            default.price_freshness_secs,
+            from_serde.price_freshness_secs
+        );
+        assert_eq!(
+            default.daily_loss_limit_pct,
+            from_serde.daily_loss_limit_pct
+        );
+        assert_eq!(default.halt_hours, from_serde.halt_hours);
+        assert_eq!(
+            default.sizing_margin_buffer,
+            from_serde.sizing_margin_buffer
+        );
     }
 
     #[test]
