@@ -194,6 +194,7 @@ async fn seed_open_trade(
         status: TradeStatus::Open,
         max_hold_until: None,
         exchange_position_id,
+        stop_order_id: None,
     };
     auto_trader_db::trades::insert_trade(pool, &trade)
         .await

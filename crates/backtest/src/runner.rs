@@ -73,6 +73,7 @@ impl SimTrader {
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
             exchange_position_id: None,
+            stop_order_id: None,
         };
         self.positions.insert(trade.id, trade.clone());
         trade

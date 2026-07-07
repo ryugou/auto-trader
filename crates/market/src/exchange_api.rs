@@ -16,6 +16,17 @@ use crate::bitflyer_private::{
 };
 use rust_decimal::Decimal;
 
+/// 取引所側ストップ (逆指値) 注文の状態。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StopOrderStatus {
+    /// まだ発火していない
+    Active,
+    /// 発火して約定済み。price は加重平均約定価格。
+    Executed { price: Decimal, commission: Decimal },
+    /// キャンセル / 失効 / 拒否 (もはや存在しない)
+    Gone,
+}
+
 #[async_trait]
 pub trait ExchangeApi: Send + Sync {
     async fn send_child_order(
@@ -79,6 +90,39 @@ pub trait ExchangeApi: Send + Sync {
     /// 発生する累積手数料。close 直前に 1 度読んで `Trade.fees` に積む。
     async fn fetch_close_sfd(&self, _product_code: &str) -> anyhow::Result<Decimal> {
         Ok(Decimal::ZERO)
+    }
+
+    /// SL ストップ注文を置く。戻り値は取引所発行の注文 ID。
+    /// `position_id` は GMO のように close 対象 position の指定が必要な
+    /// 取引所で Some、bitFlyer (netting) では None。
+    ///
+    /// デフォルトは bail — dry_run / 未対応取引所からは呼ばれない設計であり、
+    /// 呼ばれたら即座に露見させる。bitFlyer / GMO のみ override する。
+    async fn place_stop_order(
+        &self,
+        _product_code: &str,
+        _close_side: Side,
+        _size: Decimal,
+        _trigger_price: Decimal,
+        _position_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("place_stop_order not supported on this exchange")
+    }
+
+    async fn cancel_stop_order(
+        &self,
+        _product_code: &str,
+        _stop_order_id: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("cancel_stop_order not supported on this exchange")
+    }
+
+    async fn stop_order_status(
+        &self,
+        _product_code: &str,
+        _stop_order_id: &str,
+    ) -> anyhow::Result<StopOrderStatus> {
+        anyhow::bail!("stop_order_status not supported on this exchange")
     }
 }
 

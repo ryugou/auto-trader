@@ -37,11 +37,11 @@ where
                 entry_price, exit_price, stop_loss, take_profit,
                 quantity, leverage, fees, entry_at, exit_at,
                 pnl_amount, exit_reason, status, max_hold_until,
-                exchange_position_id)
+                exchange_position_id, stop_order_id)
            VALUES ($1, $2, $3, $4, $5, $6,
                    $7, $8, $9, $10,
                    $11, $12, $13, $14, $15,
-                   $16, $17, $18, $19, $20)"#,
+                   $16, $17, $18, $19, $20, $21)"#,
     )
     .bind(trade.id)
     .bind(trade.account_id)
@@ -63,6 +63,7 @@ where
     .bind(status)
     .bind(trade.max_hold_until)
     .bind(&trade.exchange_position_id)
+    .bind(&trade.stop_order_id)
     .execute(executor)
     .await?;
     Ok(())
@@ -128,7 +129,8 @@ where
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE id = $1 AND account_id = $2 AND status = 'open'"#,
     )
@@ -216,7 +218,7 @@ pub async fn acquire_close_lock(
                      trades.fees, trades.account_id,
                      trades.entry_at, trades.exit_at, trades.pnl_amount,
                      trades.exit_reason, trades.status, trades.created_at, trades.max_hold_until,
-                     trades.exchange_position_id,
+                     trades.exchange_position_id, trades.stop_order_id,
                      pre.old_closing_started_at"#,
     )
     .bind(trade_id)
@@ -496,7 +498,8 @@ pub async fn list_open_or_closing_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE account_id = $1 AND status IN ('open', 'closing')
            ORDER BY entry_at DESC"#,
@@ -527,7 +530,8 @@ pub async fn close_trade_reconciled(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE id = $1 AND status IN ('open', 'closing')"#,
     )
@@ -583,7 +587,8 @@ pub async fn get_open_trades_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE account_id = $1 AND status = 'open'
            ORDER BY entry_at DESC"#,
@@ -604,7 +609,8 @@ pub async fn get_open_trades(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
     )
@@ -621,7 +627,8 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE id = $1"#,
     )
@@ -651,6 +658,7 @@ pub async fn get_open_trade_with_account(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until, t.exchange_position_id,
+                  t.stop_order_id,
                   ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
@@ -842,6 +850,7 @@ pub async fn list_open_with_account_name_for_pair(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until, t.exchange_position_id,
+                  t.stop_order_id,
                   ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
@@ -880,6 +889,7 @@ pub async fn list_open_with_account_name(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until, t.exchange_position_id,
+                  t.stop_order_id,
                   ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
@@ -928,6 +938,7 @@ struct TradeRow {
     created_at: DateTime<Utc>,
     max_hold_until: Option<DateTime<Utc>>,
     exchange_position_id: Option<String>,
+    stop_order_id: Option<String>,
 }
 
 impl TryFrom<TradeRow> for Trade {
@@ -963,6 +974,7 @@ impl TryFrom<TradeRow> for Trade {
             status,
             max_hold_until: r.max_hold_until,
             exchange_position_id: r.exchange_position_id,
+            stop_order_id: r.stop_order_id,
         })
     }
 }
@@ -1012,7 +1024,7 @@ pub async fn list_trades(
         "SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price, \
          stop_loss, take_profit, quantity, leverage, fees, account_id, \
          entry_at, exit_at, pnl_amount, exit_reason, status, created_at, max_hold_until, \
-         exchange_position_id \
+         exchange_position_id, stop_order_id \
          FROM trades WHERE 1=1",
     );
     apply_filters(&mut select_qb, from_ts, to_ts);

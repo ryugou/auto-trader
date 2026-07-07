@@ -901,6 +901,8 @@ impl OrderExecutor for Trader {
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
             exchange_position_id,
+            // Task 4.5 で place_stop_order の結果に差し替える。
+            stop_order_id: None,
         };
 
         // 6. DB 操作 (1 トランザクション)
@@ -1129,6 +1131,7 @@ impl OrderExecutor for Trader {
             status: TradeStatus::Closed,
             max_hold_until: trade.max_hold_until,
             exchange_position_id: trade.exchange_position_id.clone(),
+            stop_order_id: trade.stop_order_id.clone(),
         };
 
         // CRITICAL: Phase 2 (exchange fill) succeeded. If this Phase 3 DB tx

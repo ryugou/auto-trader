@@ -100,6 +100,7 @@ fn make_trade(
         status: TradeStatus::Open,
         max_hold_until: None,
         exchange_position_id: None,
+        stop_order_id: None,
     }
 }
 

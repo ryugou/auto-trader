@@ -577,6 +577,7 @@ fn enriched_ingest_format_trade_open() {
         status: TradeStatus::Open,
         max_hold_until: None,
         exchange_position_id: None,
+        stop_order_id: None,
     };
 
     let mut indicators = HashMap::new();
@@ -630,6 +631,7 @@ fn enriched_ingest_format_trade_close() {
         status: TradeStatus::Closed,
         max_hold_until: None,
         exchange_position_id: None,
+        stop_order_id: None,
     };
 
     let entry_indicators = serde_json::json!({

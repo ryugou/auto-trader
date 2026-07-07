@@ -296,6 +296,13 @@ pub struct Trade {
     /// (bitFlyer) and for paper trades.
     #[serde(default)]
     pub exchange_position_id: Option<String>,
+    /// 取引所側 SL ストップ (逆指値) 注文の ID。live open 成功時に
+    /// `ExchangeApi::place_stop_order` が返す値 (bitFlyer:
+    /// parent_order_acceptance_id, GMO: closeOrder の orderId)。close 時は
+    /// 成行の前にこの ID で状態確認する。`None` は paper (dry_run) か、
+    /// live でストップ注文の発注に失敗した (position 無防備) ケース。
+    #[serde(default)]
+    pub stop_order_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
