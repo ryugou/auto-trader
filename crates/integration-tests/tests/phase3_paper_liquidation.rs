@@ -497,6 +497,7 @@ async fn close_trade_with_liquidation_reason_persists_and_emits_event(pool: sqlx
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         min_sizes,
+        rust_decimal::Decimal::ZERO,
     ));
     let notifier = Arc::new(auto_trader_notify::Notifier::new_disabled());
 

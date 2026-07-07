@@ -626,6 +626,14 @@ async fn main() -> anyhow::Result<()> {
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
     // signal dispatch) was wasting per-iteration allocations + hashing.
+    // Safety buffer added on top of each exchange's liquidation margin level
+    // when sizing (max_alloc = 1 / (Y + buffer + L×s)). Mirrors RiskConfig's
+    // serde default (0.10) so a missing [risk] section still keeps slack.
+    let sizing_margin_buffer: Decimal = config
+        .risk
+        .as_ref()
+        .map(|r| r.sizing_margin_buffer)
+        .unwrap_or_else(|| Decimal::new(10, 2));
     let shared_position_sizer: Arc<auto_trader_executor::position_sizer::PositionSizer> = {
         let min_order_sizes: HashMap<Pair, Decimal> = pair_configs
             .iter()
@@ -633,6 +641,7 @@ async fn main() -> anyhow::Result<()> {
             .collect();
         Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
             min_order_sizes,
+            sizing_margin_buffer,
         ))
     };
 

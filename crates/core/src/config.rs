@@ -190,6 +190,10 @@ pub struct RiskConfig {
     /// Kill Switch 発火後に新規エントリーを止める時間 (時間単位)。
     #[serde(default = "default_halt_hours")]
     pub halt_hours: u64,
+    /// PositionSizer が各取引所のロスカット閾値 Y に上乗せする安全バッファ。
+    /// max_alloc = 1 / (Y + buffer + L×s)。0 なら Y ちょうどを狙う。
+    #[serde(default = "default_sizing_margin_buffer")]
+    pub sizing_margin_buffer: Decimal,
 }
 
 fn default_daily_loss_limit_pct() -> Decimal {
@@ -198,6 +202,10 @@ fn default_daily_loss_limit_pct() -> Decimal {
 
 fn default_halt_hours() -> u64 {
     24
+}
+
+fn default_sizing_margin_buffer() -> Decimal {
+    Decimal::new(10, 2) // 0.10
 }
 
 impl RiskConfig {
@@ -210,6 +218,9 @@ impl RiskConfig {
         }
         if self.halt_hours == 0 {
             anyhow::bail!("[risk].halt_hours must be > 0");
+        }
+        if self.sizing_margin_buffer < Decimal::ZERO {
+            anyhow::bail!("[risk].sizing_margin_buffer must be >= 0");
         }
         Ok(())
     }
@@ -552,6 +563,7 @@ price_freshness_secs = 60
             price_freshness_secs: 0,
             daily_loss_limit_pct: rust_decimal_macros::dec!(0.05),
             halt_hours: 24,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
         };
         assert!(r.validate().is_err());
     }
@@ -590,12 +602,14 @@ price_freshness_secs = 60
             price_freshness_secs: 60,
             daily_loss_limit_pct: rust_decimal_macros::dec!(1),
             halt_hours: 24,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
         };
         assert!(too_big.validate().is_err());
         let zero = crate::config::RiskConfig {
             price_freshness_secs: 60,
             daily_loss_limit_pct: rust_decimal_macros::dec!(0),
             halt_hours: 24,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
         };
         assert!(zero.validate().is_err());
     }
@@ -606,6 +620,7 @@ price_freshness_secs = 60
             price_freshness_secs: 60,
             daily_loss_limit_pct: rust_decimal_macros::dec!(0.05),
             halt_hours: 0,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
         };
         assert!(r.validate().is_err());
     }

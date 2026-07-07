@@ -7,30 +7,38 @@ use std::collections::HashMap;
 /// Sizing strategy: **invest the maximum amount that keeps the post-SL
 /// margin level at or above the broker's liquidation threshold**.
 ///
-///   max_alloc = 1 / (Y + leverage × stop_loss_pct)
+///   max_alloc = 1 / (Y + buffer + leverage × stop_loss_pct)
 ///   risk_alloc = min(max_alloc, allocation_pct)
 ///
 /// `Y` is the broker's liquidation margin level threshold supplied by the
 /// caller (resolved per-exchange from `[exchange_margin.<name>]` config).
+/// `buffer` (`margin_buffer`) is an extra safety margin added on top of `Y`.
 /// At `risk_alloc = max_alloc`, an idealised fill at the SL price closes the
-/// position with margin level exactly Y. Real-world slippage, weekend gaps,
-/// or SL-trigger latency can push the realised loss past the SL price and
-/// drop margin level below Y; this sizer does not include a buffer for those
-/// cases. If post-SL slippage tolerance is required, callers should size
-/// against a tighter Y (or a separate buffered threshold).
+/// position with margin level exactly `Y + buffer`. Real-world slippage,
+/// weekend gaps, or SL-trigger latency can push the realised loss past the SL
+/// price; the buffer keeps the resulting margin level from immediately
+/// dropping to the liquidation threshold. With `buffer = 0` the sizer targets
+/// exactly `Y` (no slack) — the pre-buffer behaviour.
 ///
-/// Example: bitflyer_cfd (Y=0.5, lev=2), SL=2%
-///   max_alloc = 1 / (0.5 + 0.04) = 1.85 → capped at allocation_pct (1.0)
+/// Example: bitflyer_cfd (Y=0.5, lev=2), SL=2%, buffer=0.10
+///   max_alloc = 1 / (0.5 + 0.10 + 0.04) = 1.5625 → capped at allocation_pct (1.0)
 ///
-/// Example: gmo_fx (Y=1.0, lev=10), SL=2%
-///   max_alloc = 1 / (1.0 + 0.2) = 0.833 → 83.3% of balance as margin
+/// Example: gmo_fx (Y=1.0, lev=10), SL=2%, buffer=0.10
+///   max_alloc = 1 / (1.0 + 0.10 + 0.2) = 0.769 → 76.9% of balance as margin
 pub struct PositionSizer {
     min_order_sizes: HashMap<Pair, Decimal>,
+    /// Y に上乗せする安全バッファ。max_alloc = 1 / (Y + buffer + L×s)。
+    /// スリッページ・週末ギャップ・SL 発動遅延で実現損失が SL 価格を
+    /// 超過しても、維持率がロスカット閾値まで即落ちしないための余裕。
+    margin_buffer: Decimal,
 }
 
 impl PositionSizer {
-    pub fn new(min_order_sizes: HashMap<Pair, Decimal>) -> Self {
-        Self { min_order_sizes }
+    pub fn new(min_order_sizes: HashMap<Pair, Decimal>, margin_buffer: Decimal) -> Self {
+        Self {
+            min_order_sizes,
+            margin_buffer,
+        }
     }
 
     /// Compute the trade quantity. Returns None when the result would
@@ -77,7 +85,8 @@ impl PositionSizer {
 
         // SL ヒット時の維持率 = (1 - L × a × s) / a ≥ Y を解いて
         //   a ≤ 1 / (Y + L × s)
-        let max_alloc = Decimal::ONE / (liquidation_margin_level + leverage * stop_loss_pct);
+        let y_eff = liquidation_margin_level + self.margin_buffer;
+        let max_alloc = Decimal::ONE / (y_eff + leverage * stop_loss_pct);
         let risk_alloc = max_alloc.min(allocation_pct);
 
         // Mechanical sizing: apply leverage and risk-adjusted allocation, divide by price.
@@ -112,13 +121,13 @@ mod tests {
     fn btc_sizer() -> PositionSizer {
         let mut min_sizes = HashMap::new();
         min_sizes.insert(Pair::new("FX_BTC_JPY"), dec!(0.001));
-        PositionSizer::new(min_sizes)
+        PositionSizer::new(min_sizes, Decimal::ZERO)
     }
 
     fn fx_sizer() -> PositionSizer {
         let mut min_sizes = HashMap::new();
         min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-        PositionSizer::new(min_sizes)
+        PositionSizer::new(min_sizes, Decimal::ZERO)
     }
 
     /// gmo_fx (Y=1.0) lev=10, SL=2%, balance=30,000円: max_alloc = 1/(1.0+0.2) = 0.8333...
@@ -151,6 +160,26 @@ mod tests {
             dec!(1.00),
         );
         assert_eq!(qty, Some(dec!(1819)));
+    }
+
+    /// buffer=0.10: gmo_fx (Y=1.0) lev=10, SL=2% →
+    /// max_alloc = 1/(1.0+0.10+0.2) = 0.7692...
+    /// 30,000 × 10 × 0.7692 / 157 = 1469.9... → 1469 (min_lot=1)
+    #[test]
+    fn margin_buffer_tightens_allocation() {
+        let mut min_sizes = HashMap::new();
+        min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
+        let sizer = PositionSizer::new(min_sizes, dec!(0.10));
+        let qty = sizer.calculate_quantity(
+            &Pair::new("USD_JPY"),
+            dec!(30000),
+            dec!(157),
+            dec!(10),
+            dec!(1.0),
+            dec!(0.02),
+            dec!(1.00),
+        );
+        assert_eq!(qty, Some(dec!(1469)));
     }
 
     /// bitflyer_cfd (Y=0.5) lev=2, SL=2%: max_alloc = 1/(0.5+0.04) ≈ 1.85 → cap at allocation_pct=1.0.

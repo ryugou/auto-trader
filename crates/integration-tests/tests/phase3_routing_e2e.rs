@@ -119,7 +119,7 @@ async fn build_two_account_fanout(pool: PgPool) -> Vec<RoutedAccount> {
     let mut min_sizes: HashMap<Pair, Decimal> = HashMap::new();
     min_sizes.insert(bitflyer_pair.clone(), dec!(0.001));
     min_sizes.insert(gmo_pair.clone(), dec!(1));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let notifier = Arc::new(Notifier::new_disabled());
 
     let bitflyer_account_id = seed_trading_account(

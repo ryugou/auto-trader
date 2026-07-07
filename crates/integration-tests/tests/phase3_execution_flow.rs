@@ -72,7 +72,7 @@ fn make_signal(pair: &str, direction: Direction) -> Signal {
 fn usd_jpy_sizer() -> Arc<PositionSizer> {
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-    Arc::new(PositionSizer::new(min_sizes))
+    Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO))
 }
 
 // =========================================================================
