@@ -25,7 +25,7 @@ use crate::bitflyer_private::{
     ChildOrder, ChildOrderState, ChildOrderType, Collateral, ExchangePosition, Execution,
     SendChildOrderRequest, SendChildOrderResponse, Side,
 };
-use crate::exchange_api::ExchangeApi;
+use crate::exchange_api::{ExchangeApi, StopOrderStatus};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -100,6 +100,22 @@ pub(crate) struct GmoCloseRequest {
     pub symbol: String,
     pub side: GmoSide,
     pub execution_type: GmoExecutionType,
+    pub settle_position: Vec<GmoSettlePosition>,
+}
+
+/// `POST /private/v1/closeOrder` (STOP) リクエスト本体。
+///
+/// TODO(live-verify): STOP closeOrder の正確な body 形 (top-level `size` の
+/// 要否、`price` の桁規約) を公式 doc / 実 API で確認する (Task 4.0 で
+/// closeOrder の body 詳細は JS レンダリングにより未確認)。MARKET closeOrder と
+/// 同形 + `price` を採用。price の tick 丸めは PositionSizer 側で完了済み。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GmoStopCloseRequest {
+    pub symbol: String,
+    pub side: GmoSide,
+    pub execution_type: GmoExecutionType, // STOP
+    pub price: String,
     pub settle_position: Vec<GmoSettlePosition>,
 }
 
@@ -555,6 +571,102 @@ impl ExchangeApi for GmoFxPrivateApi {
     fn requires_close_position_id(&self) -> bool {
         true
     }
+
+    /// `POST /private/v1/closeOrder` (executionType=STOP) で SL ストップを置く。
+    /// GMO は netting なので `position_id` (settlePosition) が必須。None なら bail。
+    async fn place_stop_order(
+        &self,
+        product_code: &str,
+        close_side: Side,
+        size: Decimal,
+        trigger_price: Decimal,
+        position_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let position_id_str = position_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "GMO FX place_stop_order requires a position_id (netting close); got None"
+            )
+        })?;
+        let position_id: u64 = position_id_str.parse().with_context(|| {
+            format!("place_stop_order: position_id is not a u64: {position_id_str}")
+        })?;
+        let body = GmoStopCloseRequest {
+            symbol: product_code.to_string(),
+            side: side_to_gmo(close_side),
+            execution_type: GmoExecutionType::Stop,
+            price: trigger_price.to_string(),
+            settle_position: vec![GmoSettlePosition {
+                position_id,
+                size: size.to_string(),
+            }],
+        };
+        let body_val = serde_json::to_value(&body)?;
+        let data: GmoOrderResponseData = self
+            .signed_request(Method::POST, "/v1/closeOrder", Some(&body_val))
+            .await?;
+        Ok(data.root_order_id.to_string())
+    }
+
+    /// `POST /private/v1/cancelOrder` `{ "orderId": <int> }`。
+    /// 「既に約定済み」を示すエラーはそのまま Err で返す (呼び出し側が
+    /// status を再確認する契約 — Task 4.5 の close ガード)。
+    async fn cancel_stop_order(
+        &self,
+        _product_code: &str,
+        stop_order_id: &str,
+    ) -> anyhow::Result<()> {
+        let order_id: u64 = stop_order_id
+            .parse()
+            .with_context(|| format!("cancel_stop_order: id is not a u64: {stop_order_id}"))?;
+        let body = serde_json::json!({ "orderId": order_id });
+        let _: serde_json::Value = self
+            .signed_request(Method::POST, "/v1/cancelOrder", Some(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// `GET /private/v1/orders?orderId=...` の status で状態判定。
+    /// EXECUTED → `/v1/executions` を加重平均して `Executed`。
+    /// WAITING/ORDERED/MODIFYING/CANCELLING → `Active`。
+    /// CANCELED/EXPIRED/REJECTED または一覧空 → `Gone`。
+    ///
+    /// TODO(live-verify): `/v1/executions` のレスポンス (price/size/fee) は
+    /// Task 4.0 で未確認 (JS レンダリング)。GMO 既存 `get_executions` の
+    /// フィールド規約 (`GmoExecution`) に合わせているが実 API で最終確認する。
+    async fn stop_order_status(
+        &self,
+        _product_code: &str,
+        stop_order_id: &str,
+    ) -> anyhow::Result<StopOrderStatus> {
+        let path = format!("/v1/orders?orderId={stop_order_id}");
+        let data: GmoListResponse<GmoOrder> = self.signed_request(Method::GET, &path, None).await?;
+        let Some(order) = data.list.into_iter().next() else {
+            // GMO は失効/取消済み注文を /orders から落とす。
+            return Ok(StopOrderStatus::Gone);
+        };
+        match order.status.as_str() {
+            "EXECUTED" => {
+                let epath = format!("/v1/executions?orderId={stop_order_id}");
+                let execs: GmoListResponse<GmoExecution> =
+                    self.signed_request(Method::GET, &epath, None).await?;
+                let total_size: Decimal = execs.list.iter().map(|e| e.size).sum();
+                let total_fee: Decimal = execs.list.iter().map(|e| e.fee).sum();
+                let price = if total_size > Decimal::ZERO {
+                    execs.list.iter().map(|e| e.price * e.size).sum::<Decimal>() / total_size
+                } else {
+                    // 約定明細が空でも EXECUTED なら order.price を fallback。
+                    order.price
+                };
+                Ok(StopOrderStatus::Executed {
+                    price,
+                    commission: total_fee,
+                })
+            }
+            "CANCELED" | "EXPIRED" | "REJECTED" => Ok(StopOrderStatus::Gone),
+            // WAITING / ORDERED / MODIFYING / CANCELLING → まだ有効。
+            _ => Ok(StopOrderStatus::Active),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -922,5 +1034,162 @@ mod tests {
         assert_eq!(gmo_status_to_state("REJECTED"), ChildOrderState::Rejected);
         assert_eq!(gmo_status_to_state("ORDERED"), ChildOrderState::Active);
         assert_eq!(gmo_status_to_state("WAITING"), ChildOrderState::Active);
+    }
+
+    // --- Task 4.3: STOP close-order (place/cancel/status) ---
+
+    #[test]
+    fn stop_close_request_serializes_stop_price_and_settle_position() {
+        let req = GmoStopCloseRequest {
+            symbol: "USD_JPY".into(),
+            side: GmoSide::Sell,
+            execution_type: GmoExecutionType::Stop,
+            price: "156.500".into(),
+            settle_position: vec![GmoSettlePosition {
+                position_id: 123456,
+                size: "1592".into(),
+            }],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["symbol"], "USD_JPY");
+        assert_eq!(json["side"], "SELL");
+        assert_eq!(json["executionType"], "STOP");
+        assert_eq!(json["price"], "156.500");
+        assert_eq!(json["settlePosition"][0]["positionId"], 123456);
+        assert_eq!(json["settlePosition"][0]["size"], "1592");
+    }
+
+    #[tokio::test]
+    async fn place_stop_order_posts_close_order_stop_and_returns_order_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/private/v1/closeOrder"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0, "data": { "rootOrderId": 778899 }
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        let id = api
+            .place_stop_order(
+                "USD_JPY",
+                Side::Sell,
+                dec!(1592),
+                dec!(156.500),
+                Some("123456"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(id, "778899");
+    }
+
+    #[tokio::test]
+    async fn place_stop_order_without_position_id_bails() {
+        let api = GmoFxPrivateApi::new("k".into(), "s".into());
+        let err = api
+            .place_stop_order("USD_JPY", Side::Sell, dec!(1592), dec!(156.5), None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("position_id"),
+            "should mention position_id: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_stop_order_posts_cancel_order() {
+        let server = MockServer::start().await;
+        // GMO cancelOrder は成功時 data に orderId を返す (cancel_child_order と
+        // 同じ signed_request 契約: data が null だと bail する)。
+        Mock::given(method("POST"))
+            .and(path("/private/v1/cancelOrder"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0, "data": 778899
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        api.cancel_stop_order("USD_JPY", "778899").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_order_status_active_for_ordered() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/private/v1/orders"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "data": { "list": [{
+                    "orderId": 778899, "symbol": "USD_JPY", "side": "SELL",
+                    "executionType": "STOP", "size": "1592", "executedSize": "0",
+                    "price": "156.500", "status": "ORDERED",
+                    "timestamp": "2026-07-07T00:00:00Z"
+                }] }
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        let status = api.stop_order_status("USD_JPY", "778899").await.unwrap();
+        assert_eq!(status, StopOrderStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn stop_order_status_gone_for_empty_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/private/v1/orders"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0, "data": { "list": [] }
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        let status = api.stop_order_status("USD_JPY", "778899").await.unwrap();
+        assert_eq!(status, StopOrderStatus::Gone);
+    }
+
+    #[tokio::test]
+    async fn stop_order_status_executed_aggregates_executions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/private/v1/orders"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "data": { "list": [{
+                    "orderId": 778899, "symbol": "USD_JPY", "side": "SELL",
+                    "executionType": "STOP", "size": "1592", "executedSize": "1592",
+                    "price": "156.500", "status": "EXECUTED",
+                    "timestamp": "2026-07-07T00:00:00Z"
+                }] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/private/v1/executions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "data": { "list": [
+                    { "executionId": 1, "orderId": 778899, "positionId": 123456,
+                      "symbol": "USD_JPY", "side": "SELL", "settleType": "CLOSE",
+                      "size": "796", "price": "156.510", "lossGain": "0", "fee": "3",
+                      "timestamp": "2026-07-07T00:00:00Z" },
+                    { "executionId": 2, "orderId": 778899, "positionId": 123456,
+                      "symbol": "USD_JPY", "side": "SELL", "settleType": "CLOSE",
+                      "size": "796", "price": "156.490", "lossGain": "0", "fee": "3",
+                      "timestamp": "2026-07-07T00:00:01Z" }
+                ] }
+            })))
+            .mount(&server)
+            .await;
+        let api = GmoFxPrivateApi::new("k".into(), "s".into()).with_api_url(server.uri());
+        let status = api.stop_order_status("USD_JPY", "778899").await.unwrap();
+        match status {
+            StopOrderStatus::Executed { price, commission } => {
+                // (156.510*796 + 156.490*796) / 1592 = 156.500
+                assert_eq!(price, dec!(156.500));
+                assert_eq!(commission, dec!(6));
+            }
+            other => panic!("expected Executed, got {other:?}"),
+        }
     }
 }
