@@ -413,3 +413,146 @@ async fn rate_limit_waits_when_bucket_empty() {
         elapsed
     );
 }
+
+// ---------------------------------------------------------------------------
+// 親注文 (SIMPLE/STOP) — 取引所側 SL ストップ注文 (Task 4.2)
+// ---------------------------------------------------------------------------
+
+use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
+use wiremock::matchers::body_string_contains;
+
+#[tokio::test]
+async fn place_stop_order_posts_simple_stop_parent_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/me/sendparentorder"))
+        .and(header_exists("ACCESS-SIGN"))
+        .and(body_string_contains(r#""order_method":"SIMPLE""#))
+        .and(body_string_contains(r#""condition_type":"STOP""#))
+        .and(body_string_contains(r#""side":"SELL""#))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"parent_order_acceptance_id":"JRF20260707-000000-000000"}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    // trait 経由で place_stop_order を叩く (Trader が使う経路)。
+    let id = api
+        .place_stop_order("FX_BTC_JPY", Side::Sell, dec!(0.004), dec!(12250000), None)
+        .await
+        .expect("place_stop_order should succeed");
+    assert_eq!(id, "JRF20260707-000000-000000");
+}
+
+#[tokio::test]
+async fn cancel_stop_order_posts_to_cancelparentorder() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/me/cancelparentorder"))
+        .and(body_string_contains(
+            r#""parent_order_acceptance_id":"JRF20260707-000000-000000""#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    api.cancel_stop_order("FX_BTC_JPY", "JRF20260707-000000-000000")
+        .await
+        .expect("cancel_stop_order should succeed");
+}
+
+#[tokio::test]
+async fn stop_order_status_active_when_parent_active() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getparentorder"))
+        .and(query_param(
+            "parent_order_acceptance_id",
+            "JRF20260707-000000-000000",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"parent_order_id":"JCP20260707-000000-111111","parent_order_state":"ACTIVE"}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let status = api
+        .stop_order_status("FX_BTC_JPY", "JRF20260707-000000-000000")
+        .await
+        .expect("stop_order_status should succeed");
+    assert_eq!(status, StopOrderStatus::Active);
+}
+
+#[tokio::test]
+async fn stop_order_status_executed_aggregates_child_executions() {
+    let server = MockServer::start().await;
+    // hop 1: getparentorder → COMPLETED + parent_order_id
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getparentorder"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"parent_order_id":"JCP20260707-000000-111111","parent_order_state":"COMPLETED"}"#,
+        ))
+        .mount(&server)
+        .await;
+    // hop 2: getchildorders?parent_order_id → 発火した子注文
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getchildorders"))
+        .and(query_param("parent_order_id", "JCP20260707-000000-111111"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{
+                "id": 1,
+                "child_order_id": "JOR20260707-000000-222222",
+                "product_code": "FX_BTC_JPY",
+                "side": "SELL",
+                "child_order_type": "MARKET",
+                "price": "0",
+                "average_price": "12240000",
+                "size": "0.004",
+                "child_order_state": "COMPLETED",
+                "expire_date": "2026-07-14T00:00:00",
+                "child_order_date": "2026-07-07T00:00:00",
+                "child_order_acceptance_id": "JRF20260707-000000-333333",
+                "outstanding_size": "0",
+                "cancel_size": "0",
+                "executed_size": "0.004",
+                "total_commission": "0"
+            }]"#,
+        ))
+        .mount(&server)
+        .await;
+    // hop 3: getexecutions → 約定明細 (加重平均で価格を作る)
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getexecutions"))
+        .and(query_param(
+            "child_order_acceptance_id",
+            "JRF20260707-000000-333333",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[
+                {"id":1,"child_order_id":"JOR20260707-000000-222222","side":"SELL","price":"12250000","size":"0.002","commission":"1","exec_date":"2026-07-07T00:00:00","child_order_acceptance_id":"JRF20260707-000000-333333"},
+                {"id":2,"child_order_id":"JOR20260707-000000-222222","side":"SELL","price":"12230000","size":"0.002","commission":"1","exec_date":"2026-07-07T00:00:01","child_order_acceptance_id":"JRF20260707-000000-333333"}
+            ]"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let status = api
+        .stop_order_status("FX_BTC_JPY", "JRF20260707-000000-000000")
+        .await
+        .expect("stop_order_status should succeed");
+    match status {
+        StopOrderStatus::Executed { price, commission } => {
+            // 加重平均: (12250000*0.002 + 12230000*0.002) / 0.004 = 12240000
+            assert_eq!(price, dec!(12240000));
+            assert_eq!(commission, dec!(2));
+        }
+        other => panic!("expected Executed, got {other:?}"),
+    }
+}

@@ -7,6 +7,7 @@
 //! (Trade, Signal 等) への変換は呼び出し側 (`LiveTrader` in PR 3)
 //! が担う。
 
+use crate::exchange_api::StopOrderStatus;
 use hmac::{Hmac, Mac};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,59 @@ pub enum TimeInForce {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendChildOrderResponse {
     pub child_order_acceptance_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// 親注文 (SIMPLE/STOP) — 取引所側 SL ストップ注文 (Task 4.2)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/me/sendparentorder` の `parameters[]` 個別要素 (SIMPLE/STOP)。
+///
+/// TODO(live-verify): trigger_price / condition_type / size のフィールド名は
+/// 公式 doc (`https://lightning.bitflyer.com/docs?lang=ja`) で確認済み
+/// (Task 4.0)。live 発注前に実 API レスポンスで最終確認する。
+#[derive(Debug, Serialize)]
+struct ParentOrderParameter {
+    product_code: String,
+    condition_type: &'static str, // "STOP"
+    side: Side,
+    size: Decimal,
+    trigger_price: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct SendParentOrderRequest {
+    order_method: &'static str, // "SIMPLE"
+    parameters: Vec<ParentOrderParameter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendParentOrderResponse {
+    parent_order_acceptance_id: String,
+}
+
+/// 親注文の状態 (`getparentorder` / `getparentorders` の `parent_order_state`)。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+enum ParentOrderState {
+    Active,
+    Completed,
+    Canceled,
+    Expired,
+    Rejected,
+}
+
+/// `GET /v1/me/getparentorder?parent_order_acceptance_id=...` レスポンス。
+///
+/// TODO(live-verify): singular endpoint が `parent_order_state` を返すか要確認。
+/// 返さない場合は None となり、発火判定を `getchildorders(parent_order_id)` の
+/// 約定済み child 有無で行う fallback ロジックに落ちる (下記 `stop_order_status`)。
+/// 公式 doc 上 `parent_order_state` は複数形 `getparentorders` 一覧側に載る。
+#[derive(Debug, Deserialize)]
+struct GetParentOrderResponse {
+    parent_order_id: String,
+    #[serde(default)]
+    parent_order_state: Option<ParentOrderState>,
 }
 
 /// `GET /v1/me/getchildorders` 個別要素。
@@ -549,6 +603,163 @@ impl BitflyerPrivateApi {
             .await?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // 親注文 (SIMPLE/STOP) — 取引所側 SL ストップ注文 (Task 4.2)
+    // -----------------------------------------------------------------------
+
+    /// `POST /v1/me/sendparentorder` — SIMPLE/STOP 親注文で SL を置く。
+    /// 戻り値は `parent_order_acceptance_id` (取引所発行の注文 ID)。
+    pub async fn send_parent_order_stop(
+        &self,
+        product_code: &str,
+        close_side: Side,
+        size: Decimal,
+        trigger_price: Decimal,
+    ) -> Result<String, BitflyerApiError> {
+        let req = SendParentOrderRequest {
+            order_method: "SIMPLE",
+            parameters: vec![ParentOrderParameter {
+                product_code: product_code.to_string(),
+                condition_type: "STOP",
+                side: close_side,
+                size,
+                trigger_price,
+            }],
+        };
+        let body = serde_json::to_string(&req)
+            .map_err(|e| BitflyerApiError::InvalidResponse(format!("serialize: {e}")))?;
+        let text = self
+            .request("POST", "/v1/me/sendparentorder", &body)
+            .await?;
+        let resp: SendParentOrderResponse = serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })?;
+        Ok(resp.parent_order_acceptance_id)
+    }
+
+    /// `POST /v1/me/cancelparentorder` — 未発火の親注文をキャンセルする。
+    pub async fn cancel_parent_order(
+        &self,
+        product_code: &str,
+        parent_order_acceptance_id: &str,
+    ) -> Result<(), BitflyerApiError> {
+        #[derive(Serialize)]
+        struct CancelParentRequest<'a> {
+            product_code: &'a str,
+            parent_order_acceptance_id: &'a str,
+        }
+        let body = serde_json::to_string(&CancelParentRequest {
+            product_code,
+            parent_order_acceptance_id,
+        })
+        .map_err(|e| BitflyerApiError::InvalidResponse(format!("serialize: {e}")))?;
+        let _ = self
+            .request("POST", "/v1/me/cancelparentorder", &body)
+            .await?;
+        Ok(())
+    }
+
+    /// `GET /v1/me/getparentorder?parent_order_acceptance_id=...` — 親注文詳細。
+    async fn get_parent_order(
+        &self,
+        parent_order_acceptance_id: &str,
+    ) -> Result<GetParentOrderResponse, BitflyerApiError> {
+        let path = format!(
+            "/v1/me/getparentorder?parent_order_acceptance_id={}",
+            url_encode(parent_order_acceptance_id),
+        );
+        let text = self.request("GET", &path, "").await?;
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
+    }
+
+    /// `GET /v1/me/getchildorders?product_code=...&parent_order_id=...` —
+    /// 親注文が発火して生成された子注文を取得する。
+    async fn get_child_orders_by_parent(
+        &self,
+        product_code: &str,
+        parent_order_id: &str,
+    ) -> Result<Vec<ChildOrder>, BitflyerApiError> {
+        let path = format!(
+            "/v1/me/getchildorders?product_code={}&parent_order_id={}",
+            url_encode(product_code),
+            url_encode(parent_order_id),
+        );
+        let text = self.request("GET", &path, "").await?;
+        serde_json::from_str(&text).map_err(|e| {
+            BitflyerApiError::InvalidResponse(format!("parse: {e}: {}", truncate_body(&text)))
+        })
+    }
+
+    /// 取引所側ストップ注文の状態を返す。
+    ///
+    /// 1. `getparentorder` で存在確認 + `parent_order_id` / state 取得。
+    ///    404 / OrderNotFound → `Gone`。
+    /// 2. state == ACTIVE → `Active`。
+    /// 3. state == COMPLETED (発火) → `getchildorders(parent_order_id)` で
+    ///    約定済み child を取得し、`get_executions` の加重平均で `Executed`。
+    /// 4. state == CANCELED / EXPIRED / REJECTED → `Gone`。
+    /// 5. state が取得できない (None) → child 有無で発火判定にフォールバック。
+    pub async fn stop_order_status(
+        &self,
+        product_code: &str,
+        parent_order_acceptance_id: &str,
+    ) -> Result<StopOrderStatus, BitflyerApiError> {
+        let parent = match self.get_parent_order(parent_order_acceptance_id).await {
+            Ok(p) => p,
+            // 存在しない親注文 → もはや無い。
+            Err(BitflyerApiError::OrderNotFound(_)) => return Ok(StopOrderStatus::Gone),
+            Err(e) => return Err(e),
+        };
+
+        match parent.parent_order_state {
+            Some(ParentOrderState::Active) => Ok(StopOrderStatus::Active),
+            Some(ParentOrderState::Canceled)
+            | Some(ParentOrderState::Expired)
+            | Some(ParentOrderState::Rejected) => Ok(StopOrderStatus::Gone),
+            // COMPLETED (発火済み) または state 不明 → 約定 child を探す。
+            Some(ParentOrderState::Completed) | None => {
+                let children = self
+                    .get_child_orders_by_parent(product_code, &parent.parent_order_id)
+                    .await?;
+                let executed_child = children.iter().find(|c| c.executed_size > Decimal::ZERO);
+                match executed_child {
+                    Some(child) => {
+                        let execs = self
+                            .get_executions(product_code, &child.child_order_acceptance_id)
+                            .await?;
+                        let (price, commission) = weighted_avg_executions(&execs);
+                        Ok(StopOrderStatus::Executed { price, commission })
+                    }
+                    // COMPLETED だが約定 child 無し = 取消/失効相当。
+                    // state 不明で child も無い = まだ未発火とみなし Active。
+                    None => Ok(if parent.parent_order_state.is_none() {
+                        StopOrderStatus::Active
+                    } else {
+                        StopOrderStatus::Gone
+                    }),
+                }
+            }
+        }
+    }
+}
+
+/// 約定リストの加重平均約定価格と手数料合計を返す。
+///
+/// `stop_order_status` が発火した child order の約定 (`get_executions`) を
+/// `StopOrderStatus::Executed { price, commission }` に畳むために使う。
+/// `trader.rs::aggregate_executions` と同形 (size 加重平均 + commission 合計)。
+fn weighted_avg_executions(execs: &[Execution]) -> (Decimal, Decimal) {
+    let total_size: Decimal = execs.iter().map(|e| e.size).sum();
+    let total_commission: Decimal = execs.iter().map(|e| e.commission).sum();
+    let price = if total_size > Decimal::ZERO {
+        execs.iter().map(|e| e.price * e.size).sum::<Decimal>() / total_size
+    } else {
+        Decimal::ZERO
+    };
+    (price, total_commission)
 }
 
 /// `ExchangeApi` trait implementation — thin delegation layer.
@@ -623,6 +834,40 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
 
     async fn fetch_close_sfd(&self, product_code: &str) -> anyhow::Result<Decimal> {
         self.fetch_close_sfd(product_code)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    /// bitFlyer は netting なので `position_id` は無視する。
+    async fn place_stop_order(
+        &self,
+        product_code: &str,
+        close_side: Side,
+        size: Decimal,
+        trigger_price: Decimal,
+        _position_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.send_parent_order_stop(product_code, close_side, size, trigger_price)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn cancel_stop_order(
+        &self,
+        product_code: &str,
+        stop_order_id: &str,
+    ) -> anyhow::Result<()> {
+        self.cancel_parent_order(product_code, stop_order_id)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn stop_order_status(
+        &self,
+        product_code: &str,
+        stop_order_id: &str,
+    ) -> anyhow::Result<StopOrderStatus> {
+        self.stop_order_status(product_code, stop_order_id)
             .await
             .map_err(anyhow::Error::from)
     }
