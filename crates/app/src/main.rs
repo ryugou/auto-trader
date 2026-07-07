@@ -854,6 +854,27 @@ async fn main() -> anyhow::Result<()> {
         )
     })?;
 
+    // Startup one-shot: live 口座の残高ドリフトを 1 回照合し、あればアラート
+    // (Phase 5)。起動をブロックしない (自動補正はしない — 台帳不変条件を守る)。
+    {
+        let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
+            pool: pool.clone(),
+            price_store: price_store.clone(),
+            apis: exchange_apis.clone(),
+            live_forces_dry_run,
+        };
+        let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
+        for ev in alerts {
+            let notifier = notifier.clone();
+            let ev = auto_trader_notify::NotifyEvent::SystemAlert(ev);
+            tokio::spawn(async move {
+                if let Err(e) = notifier.send(ev).await {
+                    tracing::warn!("startup balance drift notify failed: {e}");
+                }
+            });
+        }
+    }
+
     // FX position monitor removed: FX paper trading is currently disabled.
     // Drain the forwarded FX price channel so senders do not block.
     let mut price_monitor_rx = price_monitor_rx;
@@ -1937,6 +1958,40 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: live 残高ドリフト検知 (Phase 5)
+    //
+    // 3600 秒間隔で live 口座の bot equity (DB 台帳) と取引所報告 equity を
+    // 照合し、乖離が閾値 (max(1%, ¥500)) を超えたら Slack にアラートする。
+    // **自動補正はしない** — 台帳不変条件 current_balance = initial + Σpnl − Σfees
+    // を守り、補正は運用者判断に委ねる。
+    let drift_pool = pool.clone();
+    let drift_price_store = price_store.clone();
+    let drift_apis = exchange_apis.clone();
+    let drift_notifier = notifier.clone();
+    let drift_live_forces_dry_run = live_forces_dry_run;
+    let balance_drift_handle = tokio::spawn(async move {
+        let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
+            pool: drift_pool.clone(),
+            price_store: drift_price_store.clone(),
+            apis: drift_apis.clone(),
+            live_forces_dry_run: drift_live_forces_dry_run,
+        };
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
+            for ev in alerts {
+                let notifier = drift_notifier.clone();
+                let ev = auto_trader_notify::NotifyEvent::SystemAlert(ev);
+                tokio::spawn(async move {
+                    if let Err(e) = notifier.send(ev).await {
+                        tracing::warn!("balance drift notify failed: {e}");
+                    }
+                });
+            }
+        }
+    });
+
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
     // Since positions now live in the DB, this correctly applies fees to all
@@ -2384,6 +2439,7 @@ async fn main() -> anyhow::Result<()> {
     overnight_handle.abort();
     sfd_handle.abort();
     stop_fill_handle.abort(); // infinite 60s loop — must abort explicitly
+    balance_drift_handle.abort(); // infinite 3600s loop — must abort explicitly
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();

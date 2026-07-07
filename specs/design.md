@@ -185,7 +185,17 @@ live 口座では、**取引所側の逆指値（ストップ）注文が SL の
   - **warn**: 維持率 `< Y × 1.3`
   - **critical**: 維持率 `< Y × 1.1`
   - crypto monitor tick で判定し、`NotifyEvent::SystemAlert` で Slack 通知。`(account, level)` ごと 30 分に 1 回のレート制限。
-  - **注意**: ここで使う残高は DB 管理値であり、取引所実残高とはドリフトしうる（残高ドリフト検知は別 Phase）。
+  - **注意**: ここで使う残高は DB 管理値であり、取引所実残高とはドリフトしうる（残高ドリフト検知は下記 Phase 5）。
+
+**残高ドリフト検知（live のみ、Phase 5）:**
+
+bot は `current_balance` を DB 台帳（`initial + Σpnl − Σfees`）で管理するが、live では swap/SFD/手数料を取引所が直接徴収するため、取引所の実残高と徐々に乖離する。この乖離を **起動時（`startup_reconcile` 直後の one-shot）＋毎時（3600 秒間隔ジョブ）** に検知して Slack 警告する（`balance_drift::check_live_accounts`）。
+
+- **対象**: `account_type == "live"` の口座のみ。`LIVE_DRY_RUN` 強制時（`live_forces_dry_run == true`）は取引所残高が動かないため判定を skip する。
+- **比較**: `exchange_equity = get_collateral().collateral + open_position_pnl` と `bot_equity = current_balance + Σrequired_margin + Σunrealized_pnl`（`compute_maintenance_ratio` の純資産 numerator と同じ式）。bot 側 open position は `liquidation.rs` と同様に PriceStore の close-side bid/ask（Long=bid / Short=ask）で組む。価格が無い trade がある口座は skip（warn）。
+- **閾値**: `is_drift` は乖離が `max(取引所 equity の 1%, ¥500)` を超えたら真（pure 関数）。
+- **アラートのみ・自動補正しない**: 台帳の不変条件 `current_balance = initial + Σpnl − Σfees` を壊さないため、bot は乖離を運用者に知らせるだけで残高を書き換えない。補正（入出金・スワップ履歴の突き合わせ、必要なら `initial_balance` 調整 SQL）は運用者判断。
+- `NotifyEvent::SystemAlert`（title=`"balance drift"`）で通知。送信は main.rs 側で fire-and-forget（送信失敗は warn のみ、起動をブロックしない）。
 
 ### macro-analyst
 
