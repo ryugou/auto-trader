@@ -61,10 +61,58 @@ pub struct GmoFxConfig {
 /// USD_JPY = { long = 100, short = -120 }
 /// EUR_JPY = { long = 80, short = -100 }
 /// ```
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GmoFxSwapConfig {
     pub rates: HashMap<String, SwapRateEntry>,
+    /// rates を最後に GMO 公表スワップカレンダーと突合した日 ("YYYY-MM-DD")。
+    /// rates が非空なら必須 (validate で強制)。
+    pub updated_on: Option<String>,
+    /// updated_on からこの日数を超えたら staleness アラート。
+    #[serde(default = "default_swap_max_age_days")]
+    pub max_age_days: u32,
+}
+
+fn default_swap_max_age_days() -> u32 {
+    35 // 月次更新運用 + 猶予
+}
+
+impl Default for GmoFxSwapConfig {
+    fn default() -> Self {
+        Self {
+            rates: HashMap::new(),
+            updated_on: None,
+            max_age_days: default_swap_max_age_days(),
+        }
+    }
+}
+
+impl GmoFxSwapConfig {
+    /// updated_on を NaiveDate として返す。rates 非空なのに未設定/不正なら Err。
+    pub fn parsed_updated_on(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
+        match &self.updated_on {
+            None => Ok(None),
+            Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(Some)
+                .map_err(|e| {
+                    anyhow::anyhow!("[gmo_fx.swap].updated_on '{s}' is not YYYY-MM-DD: {e}")
+                }),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let parsed = self.parsed_updated_on()?;
+        if !self.rates.is_empty() && parsed.is_none() {
+            anyhow::bail!(
+                "[gmo_fx.swap].updated_on is required when rates are set \
+                 (staleness tracking needs a reference date)"
+            );
+        }
+        if self.max_age_days == 0 {
+            anyhow::bail!("[gmo_fx.swap].max_age_days must be > 0");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -283,6 +331,7 @@ impl AppConfig {
         for s in &self.strategies {
             ensure_jpy_quote(&s.pairs, &format!("strategies({})", s.name))?;
         }
+        self.gmo_fx.swap.validate()?;
         Ok(())
     }
 }
@@ -723,6 +772,9 @@ interval_secs = 60
 fx = []
 crypto = []
 
+[gmo_fx.swap]
+updated_on = "2026-07-07"
+
 [gmo_fx.swap.rates]
 USD_JPY = { long = 100, short = -120 }
 EUR_JPY = { long = 80, short = -100 }
@@ -760,5 +812,73 @@ crypto = []
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.gmo_fx.swap.rates.is_empty());
+    }
+
+    #[test]
+    fn swap_rates_without_updated_on_fail_validation() {
+        // rates があるのに updated_on 無し → 起動拒否 (鮮度管理の起点が無い)
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+
+[gmo_fx.swap.rates]
+USD_JPY = { long = 100, short = -120 }
+EUR_JPY = { long = 80, short = -100 }
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn swap_updated_on_must_be_valid_date() {
+        // updated_on = "not-a-date" → 起動拒否
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+
+[gmo_fx.swap]
+updated_on = "not-a-date"
+
+[gmo_fx.swap.rates]
+USD_JPY = { long = 100, short = -120 }
+EUR_JPY = { long = 80, short = -100 }
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn empty_rates_do_not_require_updated_on() {
+        // [gmo_fx.swap] 自体が無い既存 config は従来どおり valid
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_ok());
     }
 }
