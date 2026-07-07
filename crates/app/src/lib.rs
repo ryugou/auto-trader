@@ -1,4 +1,5 @@
 pub mod api;
+pub mod balance_drift;
 pub mod closer;
 pub mod enriched_ingest;
 pub mod knowledge;
