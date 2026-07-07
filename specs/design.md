@@ -235,6 +235,14 @@ Phase 0 では最小構成:
 - 明らかにダメな戦略の足切りが目的。作り込みは不要
 - **スイング戦略のバックテストは Phase 0 対象外**。on_macro_update に依存する戦略は過去マクロデータの再生が必要になるため、まずは短期ルールベース戦略のバックテストのみ対応する。スイング戦略の検証はリアルタイムのペーパートレードで行う
 
+**runner の近代化（Phase 6）:** `BacktestRunner::run` は本番トレードと整合する形に更新済み。
+
+- **exchange パラメータ化**: candle 取得の取引所は引数 `exchange: Exchange`（`bitflyer_cfd` / `gmo_fx`）で指定する。以前の `"oanda"` ハードコードは撤去。`SimTrader` も渡された取引所を持つ。
+- **本番同一サイジング**: エントリー数量は本番と同じ `PositionSizer::calculate_quantity`（no-liquidation 上限 + `margin_buffer`）で決める。以前の `quantity = 1` プレースホルダは撤去。サイザーが `None` を返した場合は発注不成立として `execution_failures` にカウントする（バックテストでは `margin_buffer = 0` を使い、生の上限で評価するのが既定）。
+- **PnL は数量ベース**: `pnl_amount = truncate_toward_zero((exit − entry) × quantity)`。本番 `trader.rs` の `truncate_yen(price_diff × quantity)` と一致。以前の `price_diff × leverage`（数量を無視するバグ）は撤去し、回帰テストでガードする。
+- **戦略 exit の再生**: 固定 SL/TP チェックに加え、各 candle で `strategy.on_open_positions(&[Position], &event)` を呼び、トレーリングストップ等の動的 exit を再生する。
+- **スプレッド近似の限界**: 各約定に定率 `spread_pct` を不利側（買いは高く・売りは安く）へ適用する一次近似のみ。**板深さ・実スプレッド変動・スリッページはモデル化していない**ため、薄い/速い相場では live 約定より楽観的な結果になる。
+
 ### dashboard
 
 - axum で REST API を提供
