@@ -649,18 +649,17 @@ impl ExchangeApi for GmoFxPrivateApi {
                 let epath = format!("/v1/executions?orderId={stop_order_id}");
                 let execs: GmoListResponse<GmoExecution> =
                     self.signed_request(Method::GET, &epath, None).await?;
-                let total_fee: Decimal = execs.list.iter().map(|e| e.fee).sum();
-                let price =
+                let (price, commission) =
                     match weighted_avg_fills(execs.list.iter().map(|e| (e.price, e.size, e.fee))) {
-                        Ok((avg_price, _total_size, _total_fee)) => avg_price,
+                        // ハッピーパスは weighted_avg_fills が返す fee 合計をそのまま
+                        // 使う (集約を 1 箇所に保ち、execs の二重走査を避ける)。
+                        Ok((avg_price, _total_size, total_fee)) => (avg_price, total_fee),
                         // 約定明細が空 (もしくは size 合計 0) でも EXECUTED なら
-                        // order.price を fallback。
-                        Err(_) => order.price,
+                        // order.price を fallback。fee は weighted_avg_fills が
+                        // bail したこの経路でのみ直接集計する。
+                        Err(_) => (order.price, execs.list.iter().map(|e| e.fee).sum()),
                     };
-                Ok(StopOrderStatus::Executed {
-                    price,
-                    commission: total_fee,
-                })
+                Ok(StopOrderStatus::Executed { price, commission })
             }
             "CANCELED" | "EXPIRED" | "REJECTED" => Ok(StopOrderStatus::Gone),
             // WAITING / ORDERED / MODIFYING / CANCELLING → まだ有効。
