@@ -71,7 +71,7 @@ impl PipelineHarness {
 
         let mut min_sizes: HashMap<Pair, Decimal> = HashMap::new();
         min_sizes.insert(pair.clone(), cfg.min_order_size);
-        let sizer = Arc::new(PositionSizer::new(min_sizes));
+        let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
 
         let api: Arc<dyn auto_trader_market::exchange_api::ExchangeApi> = Arc::new(NullExchangeApi);
         let notifier = Arc::new(Notifier::new_disabled());

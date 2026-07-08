@@ -58,6 +58,44 @@ async fn notifier_posts_text_payload_to_slack_url() {
 }
 
 #[tokio::test]
+async fn notifier_posts_system_alert_with_title() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let notifier = Notifier::new(Some(server.uri()));
+    let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
+        title: "margin critical".into(),
+        account_name: "本番".into(),
+        exchange: Exchange::GmoFx,
+        body: "maintenance ratio 0.54 approaching liquidation level 1.00".into(),
+    });
+
+    notifier
+        .send(ev)
+        .await
+        .expect("send should succeed against 200");
+
+    let received: Vec<Request> = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    let text = body["text"]
+        .as_str()
+        .expect("body must have a string `text` field");
+    assert!(
+        text.contains("margin critical"),
+        "text missing title: {text}"
+    );
+    assert!(text.contains("本番"), "text missing account_name: {text}");
+    assert!(text.contains("gmo_fx"), "text missing exchange: {text}");
+}
+
+#[tokio::test]
 async fn notifier_returns_error_on_5xx() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -107,6 +107,7 @@ fn build_live_trader(
     let notifier = Arc::new(Notifier::new(None));
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
+        rust_decimal::Decimal::ZERO,
     ));
     Trader::new(
         pool,
@@ -135,6 +136,7 @@ fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceSt
     let notifier = Arc::new(Notifier::new(None));
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
+        rust_decimal::Decimal::ZERO,
     ));
     Trader::new(
         pool,
@@ -178,6 +180,7 @@ async fn seed_open_trade(
         status: TradeStatus::Open,
         max_hold_until: None,
         exchange_position_id: None,
+        stop_order_id: None,
     };
     sqlx::query(
         r#"INSERT INTO trades

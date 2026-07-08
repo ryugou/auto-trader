@@ -157,6 +157,14 @@ impl BitflyerMonitor {
         let mut closes_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.closes_seed);
         let mut highs_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.highs_seed);
         let mut lows_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.lows_seed);
+        // H1-native indicator history, kept separate from the primary (M5) maps
+        // so that H1 PriceEvents carry indicators computed from H1 candles
+        // rather than M5-derived values. There is no warmup seed for H1 (the
+        // caller only supplies primary-timeframe history), so these accumulate
+        // from live ticks.
+        let mut closes_map_h1: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut highs_map_h1: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut lows_map_h1: HashMap<String, Vec<Decimal>> = HashMap::new();
         for (pair, closes) in &closes_map {
             tracing::info!(
                 "bitflyer warmup: seeded {} {} closes for {}",
@@ -193,6 +201,9 @@ impl BitflyerMonitor {
                 &mut closes_map,
                 &mut highs_map,
                 &mut lows_map,
+                &mut closes_map_h1,
+                &mut highs_map_h1,
+                &mut lows_map_h1,
                 &self.timeframe,
             )
             .await
@@ -336,6 +347,9 @@ async fn connect_and_stream(
     closes_map: &mut HashMap<String, Vec<Decimal>>,
     highs_map: &mut HashMap<String, Vec<Decimal>>,
     lows_map: &mut HashMap<String, Vec<Decimal>>,
+    closes_map_h1: &mut HashMap<String, Vec<Decimal>>,
+    highs_map_h1: &mut HashMap<String, Vec<Decimal>>,
+    lows_map_h1: &mut HashMap<String, Vec<Decimal>>,
     primary_timeframe: &str,
 ) -> anyhow::Result<()> {
     let (ws, _) = connect_async(ws_url).await?;
@@ -469,31 +483,25 @@ async fn connect_and_stream(
                 {
                     tracing::warn!("failed to save H1 crypto candle: {e}");
                 }
-                // Carry forward primary-timeframe indicators with a dynamic prefix
-                // (e.g. "m5_") onto H1 events. This namespacing lets analytics
-                // distinguish the source timeframe while H1-triggered trades retain
-                // ATR/ADX/regime context for entry_indicators persistence without
-                // mislabeling them as H1-native indicators.
-                // Uses the per-pair cache so indicators are available even when the
-                // primary candle did not complete on this same tick.
-                let h1_indicators = latest_indicators
-                    .get(product_code)
-                    .map(|ind| {
-                        let mut combined = ind.clone(); // unprefixed originals (backward compat)
-                        for (key, value) in ind {
-                            // Add prefixed duplicates for timeframe disambiguation in analytics
-                            combined.insert(format!("{primary_tf_prefix}_{key}"), *value);
-                        }
-                        combined
-                    })
-                    .unwrap_or_default();
-                let h1_event = PriceEvent {
-                    pair: h1_candle.pair.clone(),
-                    exchange: Exchange::BitflyerCfd,
-                    timestamp: h1_candle.timestamp,
-                    candle: h1_candle,
-                    indicators: h1_indicators,
-                };
+                // H1 events carry H1-NATIVE indicators: compute the unprefixed
+                // adx_14 / atr_percentile / etc. from the H1 history maps so that
+                // H1-triggered strategies' entry_indicators and regime
+                // classification reflect the H1 timeframe. (Before this change the
+                // unprefixed values were M5-derived, mislabeling weekly_batch's
+                // regime-bucketed Wilson analysis by timeframe.)
+                let (mut h1_event, _h1_indicators) =
+                    emit_candle_event(h1_candle, closes_map_h1, highs_map_h1, lows_map_h1, true);
+                // Primary-timeframe (M5) indicators remain available but ONLY
+                // under a `{prefix}_` namespace (e.g. "m5_adx_14") for analytics
+                // — never unprefixed. Uses the per-pair cache so they are present
+                // even when the primary candle did not complete on this same tick.
+                if let Some(m5) = latest_indicators.get(product_code) {
+                    for (key, value) in m5 {
+                        h1_event
+                            .indicators
+                            .insert(format!("{primary_tf_prefix}_{key}"), *value);
+                    }
+                }
                 if price_tx.send(h1_event).await.is_err() {
                     tracing::info!("price channel closed, stopping bitflyer monitor");
                     return Ok(());
@@ -609,6 +617,111 @@ mod tests {
         assert!(
             event.indicators.contains_key("sma_20"),
             "sma_20 must be in indicator map"
+        );
+    }
+
+    /// H1 events must carry H1-NATIVE unprefixed indicators, with M5-derived
+    /// values only under the `m5_` prefix. Build two divergent histories (a
+    /// strong M5 uptrend vs. a choppy H1 series) so ADX differs between them,
+    /// then reproduce the emission path: emit the H1 event from the H1 maps and
+    /// attach M5 indicators prefixed. The bare `adx_14` must equal the H1-native
+    /// value and differ from `m5_adx_14`.
+    #[test]
+    fn h1_event_carries_h1_native_indicators_not_m5() {
+        let pair = Pair::new("FX_BTC_JPY");
+        let code = "FX_BTC_JPY".to_string();
+
+        // --- M5 history: strong monotonic uptrend → high ADX ---
+        let mut m5_closes: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut m5_highs: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut m5_lows: HashMap<String, Vec<Decimal>> = HashMap::new();
+        {
+            let c = m5_closes.entry(code.clone()).or_default();
+            let h = m5_highs.entry(code.clone()).or_default();
+            let l = m5_lows.entry(code.clone()).or_default();
+            for i in 0..40u64 {
+                let base = Decimal::from(10_000_000u64 + i * 20_000);
+                c.push(base);
+                h.push(base + dec!(3000));
+                l.push(base - dec!(3000));
+            }
+        }
+        let m5_candle = auto_trader_core::types::Candle {
+            pair: pair.clone(),
+            exchange: Exchange::BitflyerCfd,
+            timeframe: "M5".to_string(),
+            open: dec!(10_800_000),
+            high: dec!(10_823_000),
+            low: dec!(10_817_000),
+            close: dec!(10_820_000),
+            volume: Some(10),
+            best_bid: None,
+            best_ask: None,
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 0, 5, 0).unwrap(),
+        };
+        let (_m5_event, m5_indicators) =
+            emit_candle_event(m5_candle, &mut m5_closes, &mut m5_highs, &mut m5_lows, true);
+
+        // --- H1 history: choppy oscillation → low ADX (differs from M5) ---
+        let mut h1_closes: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut h1_highs: HashMap<String, Vec<Decimal>> = HashMap::new();
+        let mut h1_lows: HashMap<String, Vec<Decimal>> = HashMap::new();
+        {
+            let c = h1_closes.entry(code.clone()).or_default();
+            let h = h1_highs.entry(code.clone()).or_default();
+            let l = h1_lows.entry(code.clone()).or_default();
+            for i in 0..40u64 {
+                let osc = if i % 2 == 0 { 50_000 } else { 0 };
+                let base = Decimal::from(10_000_000u64 + osc);
+                c.push(base);
+                h.push(base + dec!(3000));
+                l.push(base - dec!(3000));
+            }
+        }
+        let h1_candle = auto_trader_core::types::Candle {
+            pair: pair.clone(),
+            exchange: Exchange::BitflyerCfd,
+            timeframe: "H1".to_string(),
+            open: dec!(10_000_000),
+            high: dec!(10_053_000),
+            low: dec!(9_997_000),
+            close: dec!(10_050_000),
+            volume: Some(10),
+            best_bid: None,
+            best_ask: None,
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 1, 0, 0).unwrap(),
+        };
+
+        // Reproduce the emission path from connect_and_stream's H1 block.
+        let (mut h1_event, _h1_ind) =
+            emit_candle_event(h1_candle, &mut h1_closes, &mut h1_highs, &mut h1_lows, true);
+        for (key, value) in &m5_indicators {
+            h1_event.indicators.insert(format!("m5_{key}"), *value);
+        }
+
+        let h1_native_adx = *h1_event
+            .indicators
+            .get("adx_14")
+            .expect("H1 event must carry a bare adx_14");
+        let m5_adx_prefixed = *h1_event
+            .indicators
+            .get("m5_adx_14")
+            .expect("H1 event must also carry m5_adx_14 (prefixed)");
+        let m5_native = *m5_indicators
+            .get("adx_14")
+            .expect("M5 map must have adx_14");
+
+        assert_eq!(h1_event.candle.timeframe, "H1");
+        // The prefixed value is exactly the M5-derived ADX.
+        assert_eq!(
+            m5_adx_prefixed, m5_native,
+            "m5_adx_14 must equal the M5-native ADX"
+        );
+        // The bare adx_14 is the H1-native value and differs from the M5 value
+        // (the two histories diverge, so their ADX cannot coincide).
+        assert_ne!(
+            h1_native_adx, m5_adx_prefixed,
+            "bare adx_14 must be H1-native, not the M5 value"
         );
     }
 

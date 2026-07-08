@@ -37,11 +37,11 @@ where
                 entry_price, exit_price, stop_loss, take_profit,
                 quantity, leverage, fees, entry_at, exit_at,
                 pnl_amount, exit_reason, status, max_hold_until,
-                exchange_position_id)
+                exchange_position_id, stop_order_id)
            VALUES ($1, $2, $3, $4, $5, $6,
                    $7, $8, $9, $10,
                    $11, $12, $13, $14, $15,
-                   $16, $17, $18, $19, $20)"#,
+                   $16, $17, $18, $19, $20, $21)"#,
     )
     .bind(trade.id)
     .bind(trade.account_id)
@@ -63,6 +63,7 @@ where
     .bind(status)
     .bind(trade.max_hold_until)
     .bind(&trade.exchange_position_id)
+    .bind(&trade.stop_order_id)
     .execute(executor)
     .await?;
     Ok(())
@@ -128,7 +129,8 @@ where
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE id = $1 AND account_id = $2 AND status = 'open'"#,
     )
@@ -216,7 +218,7 @@ pub async fn acquire_close_lock(
                      trades.fees, trades.account_id,
                      trades.entry_at, trades.exit_at, trades.pnl_amount,
                      trades.exit_reason, trades.status, trades.created_at, trades.max_hold_until,
-                     trades.exchange_position_id,
+                     trades.exchange_position_id, trades.stop_order_id,
                      pre.old_closing_started_at"#,
     )
     .bind(trade_id)
@@ -496,7 +498,8 @@ pub async fn list_open_or_closing_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE account_id = $1 AND status IN ('open', 'closing')
            ORDER BY entry_at DESC"#,
@@ -527,7 +530,8 @@ pub async fn close_trade_reconciled(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE id = $1 AND status IN ('open', 'closing')"#,
     )
@@ -583,7 +587,8 @@ pub async fn get_open_trades_by_account(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE account_id = $1 AND status = 'open'
            ORDER BY entry_at DESC"#,
@@ -604,7 +609,8 @@ pub async fn get_open_trades(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE strategy_name = $1 AND pair = $2 AND status = 'open'"#,
     )
@@ -621,7 +627,8 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
                   entry_at, exit_at, pnl_amount,
-                  exit_reason, status, created_at, max_hold_until, exchange_position_id
+                  exit_reason, status, created_at, max_hold_until, exchange_position_id,
+                  stop_order_id
            FROM trades
            WHERE id = $1"#,
     )
@@ -651,6 +658,7 @@ pub async fn get_open_trade_with_account(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until, t.exchange_position_id,
+                  t.stop_order_id,
                   ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
@@ -681,6 +689,24 @@ pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Re
         anyhow::bail!("trade {id} not found when adding fees");
     }
     Ok(())
+}
+
+/// account の `since` 以降にクローズした trade の実現損益合計 (pnl_amount - fees)。
+/// Kill Switch の日次損失判定に使う。open 中の含み損は含まない (実現ベース)。
+pub async fn realized_net_since(
+    pool: &PgPool,
+    account_id: Uuid,
+    since: DateTime<Utc>,
+) -> anyhow::Result<Decimal> {
+    let row: (Option<Decimal>,) = sqlx::query_as(
+        "SELECT SUM(pnl_amount - fees) FROM trades \
+         WHERE account_id = $1 AND status = 'closed' AND exit_at >= $2",
+    )
+    .bind(account_id)
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0.unwrap_or(Decimal::ZERO))
 }
 
 /// Discriminator for `TradeEvent` rows.
@@ -824,6 +850,7 @@ pub async fn list_open_with_account_name_for_pair(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until, t.exchange_position_id,
+                  t.stop_order_id,
                   ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
@@ -862,6 +889,7 @@ pub async fn list_open_with_account_name(
                   t.stop_loss, t.take_profit, t.quantity, t.leverage, t.fees, t.account_id,
                   t.entry_at, t.exit_at, t.pnl_amount,
                   t.exit_reason, t.status, t.created_at, t.max_hold_until, t.exchange_position_id,
+                  t.stop_order_id,
                   ta.name AS account_name, ta.account_type AS account_type
            FROM trades t
            LEFT JOIN trading_accounts ta ON t.account_id = ta.id
@@ -910,6 +938,7 @@ struct TradeRow {
     created_at: DateTime<Utc>,
     max_hold_until: Option<DateTime<Utc>>,
     exchange_position_id: Option<String>,
+    stop_order_id: Option<String>,
 }
 
 impl TryFrom<TradeRow> for Trade {
@@ -945,6 +974,7 @@ impl TryFrom<TradeRow> for Trade {
             status,
             max_hold_until: r.max_hold_until,
             exchange_position_id: r.exchange_position_id,
+            stop_order_id: r.stop_order_id,
         })
     }
 }
@@ -994,7 +1024,7 @@ pub async fn list_trades(
         "SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price, \
          stop_loss, take_profit, quantity, leverage, fees, account_id, \
          entry_at, exit_at, pnl_amount, exit_reason, status, created_at, max_hold_until, \
-         exchange_position_id \
+         exchange_position_id, stop_order_id \
          FROM trades WHERE 1=1",
     );
     apply_filters(&mut select_qb, from_ts, to_ts);
@@ -1016,4 +1046,130 @@ pub async fn list_trades(
     let total: i64 = count_qb.build_query_scalar::<i64>().fetch_one(pool).await?;
 
     Ok((trades, total))
+}
+
+#[cfg(test)]
+mod realized_net_since_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use rust_decimal_macros::dec;
+
+    /// Insert a minimal trade row via direct SQL. `exit_at`/`pnl_amount`
+    /// are set only for closed trades.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_test_trade(
+        pool: &PgPool,
+        account_id: Uuid,
+        strategy_name: &str,
+        status: &str,
+        entry_at: DateTime<Utc>,
+        exit_at: Option<DateTime<Utc>>,
+        pnl_amount: Option<Decimal>,
+        fees: Decimal,
+    ) {
+        sqlx::query(
+            r#"INSERT INTO trades
+                   (id, account_id, strategy_name, pair, exchange, direction,
+                    entry_price, quantity, leverage, fees, stop_loss,
+                    entry_at, exit_at, pnl_amount, status)
+               VALUES ($1, $2, $3, 'FX_BTC_JPY', 'bitflyer_cfd', 'long',
+                       100, 0.01, 2, $4, 90,
+                       $5, $6, $7, $8)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(account_id)
+        .bind(strategy_name)
+        .bind(fees)
+        .bind(entry_at)
+        .bind(exit_at)
+        .bind(pnl_amount)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert test trade");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn realized_net_since_sums_closed_trades_and_excludes_boundary(pool: sqlx::PgPool) {
+        let account = crate::trading_accounts::list_all(&pool)
+            .await
+            .expect("list accounts")
+            .into_iter()
+            .next()
+            .expect("migrations seed at least one account");
+        let strategy = account.strategy.clone();
+
+        let since = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+
+        // Two closed trades AT/AFTER `since` — counted.
+        // A: pnl 1000 - fees 100 = 900
+        insert_test_trade(
+            &pool,
+            account.id,
+            &strategy,
+            "closed",
+            Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap(),
+            Some(Utc.with_ymd_and_hms(2026, 7, 5, 12, 0, 0).unwrap()),
+            Some(dec!(1000)),
+            dec!(100),
+        )
+        .await;
+        // B: pnl -300 - fees 50 = -350
+        insert_test_trade(
+            &pool,
+            account.id,
+            &strategy,
+            "closed",
+            Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap(),
+            Some(Utc.with_ymd_and_hms(2026, 7, 6, 12, 0, 0).unwrap()),
+            Some(dec!(-300)),
+            dec!(50),
+        )
+        .await;
+        // C: closed BEFORE `since` — excluded (boundary).
+        insert_test_trade(
+            &pool,
+            account.id,
+            &strategy,
+            "closed",
+            Utc.with_ymd_and_hms(2026, 6, 30, 0, 0, 0).unwrap(),
+            Some(Utc.with_ymd_and_hms(2026, 6, 30, 23, 59, 59).unwrap()),
+            Some(dec!(99999)),
+            dec!(0),
+        )
+        .await;
+        // D: still open — excluded (status filter).
+        insert_test_trade(
+            &pool,
+            account.id,
+            &strategy,
+            "open",
+            Utc.with_ymd_and_hms(2026, 7, 7, 0, 0, 0).unwrap(),
+            None,
+            None,
+            dec!(0),
+        )
+        .await;
+
+        let net = realized_net_since(&pool, account.id, since)
+            .await
+            .expect("realized_net_since");
+        // 900 + (-350) = 550
+        assert_eq!(net, dec!(550), "only closed trades at/after `since` count");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn realized_net_since_zero_when_no_trades(pool: sqlx::PgPool) {
+        let account = crate::trading_accounts::list_all(&pool)
+            .await
+            .expect("list accounts")
+            .into_iter()
+            .next()
+            .expect("migrations seed at least one account");
+        let since = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let net = realized_net_since(&pool, account.id, since)
+            .await
+            .expect("realized_net_since");
+        assert_eq!(net, Decimal::ZERO);
+    }
 }

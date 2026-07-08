@@ -1,9 +1,12 @@
 use crate::report::BacktestReport;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
-use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};
+use auto_trader_core::types::{
+    Direction, Exchange, ExitReason, Pair, Position, Trade, TradeStatus,
+};
+use auto_trader_executor::position_sizer::PositionSizer;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -16,34 +19,85 @@ const BACKTEST_ACCOUNT_ID: Uuid = Uuid::nil();
 /// DB-backed. Backtests run fully in-memory on historical candles and do not
 /// (and should not) touch persistent storage.
 ///
-/// NOTE: Currently supports **FX backtests only**. SimTrader has no explicit
-/// `quantity` and no overnight-fee model, so crypto strategies that rely on
-/// position sizing or swap fees will not produce accurate results. Crypto
-/// backtest support is deferred to a future iteration.
+/// Sizing, PnL and exchange now mirror production:
+/// - quantity is computed by the same [`PositionSizer`] the live trader uses
+///   (so backtests reflect the real no-liquidation allocation cap + margin
+///   buffer), not a `Decimal::ONE` placeholder;
+/// - `pnl_amount = (price_diff × quantity)` truncated toward zero to whole yen,
+///   matching `trader.rs` (`truncate_yen`) — the old `price_diff × leverage`
+///   formula ignored quantity and produced meaningless PnL;
+/// - the exchange is passed in, not hardcoded.
+///
+/// SPREAD / SLIPPAGE: a flat `spread_pct` is applied unfavorably to every entry
+/// and exit fill (buy higher, sell lower) as a first-order transaction-cost
+/// approximation. **Real bid/ask spread variation and order-book depth /
+/// slippage are NOT modeled** — candles carry no book data. Results are
+/// therefore optimistic relative to live fills in thin or fast markets.
 struct SimTrader {
     exchange: Exchange,
     leverage: Decimal,
     balance: Decimal,
+    /// Flat per-side spread as a fraction of price, applied unfavorably to
+    /// every fill. See struct doc for modeling limits.
+    spread_pct: Decimal,
     positions: HashMap<Uuid, Trade>,
 }
 
 impl SimTrader {
-    fn new(exchange: Exchange, initial_balance: Decimal, leverage: Decimal) -> Self {
+    fn new(
+        exchange: Exchange,
+        initial_balance: Decimal,
+        leverage: Decimal,
+        spread_pct: Decimal,
+    ) -> Self {
         Self {
             exchange,
             leverage,
             balance: initial_balance,
+            spread_pct,
             positions: HashMap::new(),
         }
     }
 
+    /// Adjust a raw price by the flat spread, in the direction that is
+    /// unfavorable to the trader for the given fill side.
+    ///
+    /// - Buying (opening a Long / closing a Short) fills *higher*.
+    /// - Selling (opening a Short / closing a Long) fills *lower*.
+    fn apply_spread(&self, price: Decimal, is_buy: bool) -> Decimal {
+        if is_buy {
+            price * (Decimal::ONE + self.spread_pct)
+        } else {
+            price * (Decimal::ONE - self.spread_pct)
+        }
+    }
+
+    /// Open a position sized with the production [`PositionSizer`].
+    /// Returns `None` when the sizer rejects the trade (insufficient balance /
+    /// below min order size) — the caller counts this as an execution failure.
     fn open(
         &mut self,
         signal: &auto_trader_core::types::Signal,
-        entry_price: Decimal,
+        raw_price: Decimal,
+        sizer: &PositionSizer,
+        liquidation_margin_level: Decimal,
         now: DateTime<Utc>,
-    ) -> Trade {
-        // Compute SL/TP from the actual candle close price passed by the caller.
+    ) -> Option<Trade> {
+        // Entry fills unfavorably: a Long buys higher, a Short sells lower.
+        let entry_price = self.apply_spread(raw_price, matches!(signal.direction, Direction::Long));
+
+        // Production sizing: same sizer / cap / buffer as the live trader.
+        let quantity = sizer.calculate_quantity(
+            &signal.pair,
+            self.balance,
+            entry_price,
+            self.leverage,
+            signal.allocation_pct,
+            signal.stop_loss_pct,
+            liquidation_margin_level,
+        )?;
+
+        // SL/TP from the actual (spread-adjusted) fill price.
         let stop_loss = match signal.direction {
             Direction::Long => entry_price * (Decimal::ONE - signal.stop_loss_pct),
             Direction::Short => entry_price * (Decimal::ONE + signal.stop_loss_pct),
@@ -63,7 +117,7 @@ impl SimTrader {
             exit_price: None,
             stop_loss,
             take_profit,
-            quantity: Decimal::ONE, // placeholder — backtest doesn't size
+            quantity,
             leverage: self.leverage,
             fees: Decimal::ZERO,
             entry_at: now,
@@ -73,9 +127,10 @@ impl SimTrader {
             status: TradeStatus::Open,
             max_hold_until: signal.max_hold_until,
             exchange_position_id: None,
+            stop_order_id: None,
         };
         self.positions.insert(trade.id, trade.clone());
-        trade
+        Some(trade)
     }
 
     fn open_positions(&self) -> Vec<Trade> {
@@ -86,7 +141,7 @@ impl SimTrader {
         &mut self,
         id: Uuid,
         reason: ExitReason,
-        exit_price: Decimal,
+        raw_exit_price: Decimal,
         now: DateTime<Utc>,
     ) -> anyhow::Result<Trade> {
         let mut trade = self
@@ -94,12 +149,22 @@ impl SimTrader {
             .remove(&id)
             .ok_or_else(|| anyhow::anyhow!("position {id} not found"))?;
 
+        // Exit fills unfavorably: closing a Long sells lower, closing a Short
+        // buys higher.
+        let exit_price =
+            self.apply_spread(raw_exit_price, matches!(trade.direction, Direction::Short));
+
         let price_diff = match trade.direction {
             Direction::Long => exit_price - trade.entry_price,
             Direction::Short => trade.entry_price - exit_price,
         };
 
-        let pnl_amount = price_diff * self.leverage;
+        // Quantity-based PnL, truncated toward zero to whole yen — identical to
+        // production `trader.rs` (`truncate_yen(price_diff * trade.quantity)`).
+        // The previous `price_diff * leverage` formula ignored quantity and was
+        // a bug; the qty-based identity is guarded by a regression test.
+        let pnl_amount =
+            (price_diff * trade.quantity).round_dp_with_strategy(0, RoundingStrategy::ToZero);
 
         trade.exit_price = Some(exit_price);
         trade.exit_at = Some(now);
@@ -125,30 +190,51 @@ impl BacktestRunner {
         Self { pool }
     }
 
+    /// Replay historical candles for `exchange`/`pair`/`timeframe` through a
+    /// strategy, sizing every entry with the production [`PositionSizer`] and
+    /// replaying the strategy's own dynamic exits (`on_open_positions`) in
+    /// addition to fixed SL/TP.
+    ///
+    /// `spread_pct` is a flat per-side transaction-cost approximation applied
+    /// unfavorably to every fill; see [`SimTrader`] for its modeling limits
+    /// (no order-book depth / real spread variation).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         strategy: &mut dyn Strategy,
+        exchange: Exchange,
         pair: &Pair,
         timeframe: &str,
         initial_balance: Decimal,
         leverage: Decimal,
+        sizer: &PositionSizer,
+        liquidation_margin_level: Decimal,
+        spread_pct: Decimal,
     ) -> anyhow::Result<BacktestReport> {
-        // Load candles from DB — get_candles returns DESC order, reverse for chronological.
-        // NOTE: exchange is hardcoded to "oanda" here. The backtest runner currently only
-        // supports OANDA FX pairs. To support other FX exchanges (gmo_fx) the
-        // runner would need an exchange parameter passed down from the caller.
-        let mut candles =
-            auto_trader_db::candles::get_candles(&self.pool, "oanda", &pair.0, timeframe, 10000)
-                .await?;
+        // Load candles from DB — get_candles returns DESC order, reverse for
+        // chronological. Exchange is now a parameter (was hardcoded "oanda").
+        let mut candles = auto_trader_db::candles::get_candles(
+            &self.pool,
+            exchange.as_str(),
+            &pair.0,
+            timeframe,
+            10000,
+        )
+        .await?;
         candles.reverse(); // chronological order
 
         if candles.is_empty() {
-            anyhow::bail!("no candle data for {} {}", pair, timeframe);
+            anyhow::bail!(
+                "no candle data for {} {} {}",
+                exchange.as_str(),
+                pair,
+                timeframe
+            );
         }
 
-        let mut trader = SimTrader::new(Exchange::Oanda, initial_balance, leverage);
+        let mut trader = SimTrader::new(exchange, initial_balance, leverage, spread_pct);
         let mut trades: Vec<Trade> = Vec::new();
-        let execution_failures: usize = 0;
+        let mut execution_failures: usize = 0;
 
         // Replay candles chronologically
         for (i, candle) in candles.iter().enumerate() {
@@ -167,13 +253,13 @@ impl BacktestRunner {
 
             let event = PriceEvent {
                 pair: pair.clone(),
-                exchange: Exchange::Oanda,
+                exchange,
                 candle: candle.clone(),
                 indicators,
                 timestamp: candle.timestamp,
             };
 
-            // Check SL/TP on open positions
+            // 1) Fixed SL/TP on open positions
             let open = trader.open_positions();
             for t in open {
                 if t.pair != *pair {
@@ -205,7 +291,7 @@ impl BacktestRunner {
                 }
             }
 
-            // Run strategy
+            // 2) New entry signal
             if let Some(signal) = strategy.on_price(&event).await {
                 // Check 1-pair-1-position per strategy
                 let open = trader.open_positions();
@@ -213,9 +299,35 @@ impl BacktestRunner {
                     .iter()
                     .any(|t| t.strategy_name == signal.strategy_name && t.pair == signal.pair);
                 if !has_pos {
-                    let trade = trader.open(&signal, candle.close, candle.timestamp);
-                    trades.push(trade);
+                    match trader.open(
+                        &signal,
+                        candle.close,
+                        sizer,
+                        liquidation_margin_level,
+                        candle.timestamp,
+                    ) {
+                        Some(trade) => trades.push(trade),
+                        None => execution_failures += 1,
+                    }
                 }
+            }
+
+            // 3) Strategy-driven dynamic exits (trailing stops, reversals, …).
+            // Signature is `on_open_positions(&[Position], &PriceEvent)`.
+            let open_positions: Vec<Position> = trader
+                .open_positions()
+                .into_iter()
+                .map(|trade| Position { trade })
+                .collect();
+            let exit_signals = strategy.on_open_positions(&open_positions, &event).await;
+            for exit in exit_signals {
+                let closed = trader.close(
+                    exit.trade_id,
+                    exit.reason.to_exit_reason(),
+                    exit.close_price,
+                    candle.timestamp,
+                )?;
+                trades.push(closed);
             }
         }
 

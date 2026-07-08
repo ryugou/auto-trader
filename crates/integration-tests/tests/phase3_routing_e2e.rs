@@ -119,7 +119,7 @@ async fn build_two_account_fanout(pool: PgPool) -> Vec<RoutedAccount> {
     let mut min_sizes: HashMap<Pair, Decimal> = HashMap::new();
     min_sizes.insert(bitflyer_pair.clone(), dec!(0.001));
     min_sizes.insert(gmo_pair.clone(), dec!(1));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let notifier = Arc::new(Notifier::new_disabled());
 
     let bitflyer_account_id = seed_trading_account(
@@ -312,9 +312,9 @@ async fn unknown_pair_routes_nowhere(pool: PgPool) {
     let bitflyer_id = accounts[0].account_id;
     let gmo_id = accounts[1].account_id;
 
-    // EUR_USD is not in the allowed_pairs of either account, so the routing
+    // GBP_JPY is not in the allowed_pairs of either account, so the routing
     // filter must reject it on both sides without ever calling execute.
-    let signal = make_signal("EUR_USD", Direction::Long, "bb_mean_revert_v1");
+    let signal = make_signal("GBP_JPY", Direction::Long, "bb_mean_revert_v1");
     let trades = route_and_execute(&signal, &accounts).await;
 
     assert!(

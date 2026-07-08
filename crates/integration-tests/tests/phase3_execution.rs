@@ -26,7 +26,7 @@ use uuid::Uuid;
 fn btc_sizer() -> PositionSizer {
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("FX_BTC_JPY"), dec!(0.001));
-    PositionSizer::new(min_sizes)
+    PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO)
 }
 
 /// PositionSizer 正常: balance=100000, entry=15M, leverage=2, allocation=1.0, SL=2%, Y=0.5
@@ -125,7 +125,7 @@ async fn make_dry_run_trader(
     // min_order_sizes: 対象ペアの min_lot を十分小さくして sizer が通るようにする
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
 
     let api = MockExchangeApiBuilder::new().build();
     let notifier = Arc::new(Notifier::new_disabled());

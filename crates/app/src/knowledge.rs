@@ -201,6 +201,7 @@ mod tests {
             exit_reason: None,
             max_hold_until: None,
             exchange_position_id: None,
+            stop_order_id: None,
         }
     }
 

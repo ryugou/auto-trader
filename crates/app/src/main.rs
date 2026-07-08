@@ -32,6 +32,25 @@ fn exchange_from_str(s: &str) -> Option<Exchange> {
     s.parse().ok()
 }
 
+/// SystemAlert 群を fire-and-forget で送る (送信失敗は warn のみ)。
+/// 起動時 one-shot / 毎時 task の両方から呼ぶ (balance drift dispatch)。
+fn spawn_system_alerts(
+    notifier: &Arc<Notifier>,
+    alerts: Vec<auto_trader_notify::SystemAlertEvent>,
+) {
+    for ev in alerts {
+        let notifier = notifier.clone();
+        tokio::spawn(async move {
+            if let Err(e) = notifier
+                .send(auto_trader_notify::NotifyEvent::SystemAlert(ev))
+                .await
+            {
+                tracing::warn!("system alert send failed: {e}");
+            }
+        });
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -579,6 +598,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // GMO swap rate 表の鮮度チェック (起動時 1 回、ログのみ)。
+    // Slack 通知は日次ジョブ (overnight/swap) に任せる — 起動のたびに
+    // Slack が鳴るのを避けるため。
+    {
+        let has_gmo_paper_accounts = db_accounts
+            .iter()
+            .any(|a| a.exchange == "gmo_fx" && a.account_type == "paper");
+        if let Some(body) = auto_trader::swap_freshness::swap_freshness_alert(
+            &config.gmo_fx.swap,
+            chrono::Utc::now().date_naive(),
+            has_gmo_paper_accounts,
+        ) {
+            tracing::warn!("swap freshness (startup): {body}");
+        }
+    }
+
     // `LIVE_DRY_RUN` env overrides `[live].dry_run` config.
     // Trim whitespace and lowercase before matching so " True\n" is valid.
     // Unknown values fall back to [live].dry_run and emit a warning.
@@ -626,23 +661,38 @@ async fn main() -> anyhow::Result<()> {
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
     // signal dispatch) was wasting per-iteration allocations + hashing.
+    // Safety buffer added on top of each exchange's liquidation margin level
+    // when sizing (max_alloc = 1 / (Y + buffer + L×s)). `RiskConfig::default()`
+    // mirrors the serde defaults so a missing [risk] section still keeps slack.
+    let risk = config.risk.clone().unwrap_or_default();
+    let sizing_margin_buffer: Decimal = risk.sizing_margin_buffer;
     let shared_position_sizer: Arc<auto_trader_executor::position_sizer::PositionSizer> = {
         let min_order_sizes: HashMap<Pair, Decimal> = pair_configs
             .iter()
             .map(|(k, v)| (Pair::new(k), v.min_order_size))
             .collect();
-        Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
-            min_order_sizes,
-        ))
+        // 取引所側 SL ストップ注文の trigger price 丸め用 tick (price_unit)。
+        let price_units: HashMap<Pair, Decimal> = pair_configs
+            .iter()
+            .map(|(k, v)| (Pair::new(k), v.price_unit))
+            .collect();
+        Arc::new(
+            auto_trader_executor::position_sizer::PositionSizer::new(
+                min_order_sizes,
+                sizing_margin_buffer,
+            )
+            .with_price_units(price_units),
+        )
     };
 
     // Freshness threshold for entry signals. Only the price_freshness_secs
     // field from RiskConfig is used post-revert.
-    let price_freshness_secs: u64 = config
-        .risk
-        .as_ref()
-        .map(|r| r.price_freshness_secs)
-        .unwrap_or(60);
+    let price_freshness_secs: u64 = risk.price_freshness_secs;
+
+    // Kill Switch (daily-loss) parameters. `RiskConfig::default()` mirrors the
+    // serde defaults so a missing [risk] section still gives a sane 5% / 24h switch.
+    let daily_loss_limit_pct: Decimal = risk.daily_loss_limit_pct;
+    let halt_hours: u64 = risk.halt_hours;
 
     // Build the market-feed registry — one entry per exchange that is
     // configured and has credentials. Adding a new exchange's price feed
@@ -819,6 +869,7 @@ async fn main() -> anyhow::Result<()> {
         &db_accounts,
         &exchange_apis,
         price_store.clone(),
+        notifier.clone(),
     )
     .await
     .map_err(|e| {
@@ -826,6 +877,19 @@ async fn main() -> anyhow::Result<()> {
             "startup reconcile failed: {e}; refusing to start with potentially inconsistent state"
         )
     })?;
+
+    // Startup one-shot: live 口座の残高ドリフトを 1 回照合し、あればアラート
+    // (Phase 5)。起動をブロックしない (自動補正はしない — 台帳不変条件を守る)。
+    {
+        let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
+            pool: pool.clone(),
+            price_store: price_store.clone(),
+            apis: exchange_apis.clone(),
+            live_forces_dry_run,
+        };
+        let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
+        spawn_system_alerts(&notifier, alerts);
+    }
 
     // FX position monitor removed: FX paper trading is currently disabled.
     // Drain the forwarded FX price channel so senders do not block.
@@ -866,6 +930,11 @@ async fn main() -> anyhow::Result<()> {
             exchange_liquidation_levels: crypto_monitor_exchange_liquidation_levels.clone(),
             live_forces_dry_run: crypto_monitor_live_forces_dry_run,
         };
+        // live 維持率アラートの rate limiter。(account_id, level) ごとに
+        // 直近送信時刻を保持し、30 分に 1 回だけ Slack 通知する。tick ループの
+        // 外で保持することで tick 間で状態を引き継ぐ。
+        let mut margin_alert_last: HashMap<(uuid::Uuid, &'static str), std::time::Instant> =
+            HashMap::new();
         while let Some(event) = crypto_price_rx.recv().await {
             let current_price = event.candle.close;
             let open_trades =
@@ -916,6 +985,44 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // Live 維持率アラート (close はしない): tick の event.exchange と
+            // 一致する live account を walk して、維持率が warn/critical 帯に
+            // 入ったら運用者へ通知する。live のロスカット執行は取引所の責務
+            // なので bot は接近を知らせるだけ。(account, level) ごと 30 分に 1 回。
+            let margin_alerts =
+                auto_trader::margin_alert::detect_margin_alerts(&liq_ctx, &open_trades, &event)
+                    .await;
+            for alert in margin_alerts {
+                let key = (alert.account_id, alert.level.as_str());
+                let now = std::time::Instant::now();
+                let should_send = margin_alert_last.get(&key).is_none_or(|last| {
+                    now.duration_since(*last) > std::time::Duration::from_secs(1800)
+                });
+                if !should_send {
+                    continue;
+                }
+                margin_alert_last.insert(key, now);
+                let ev = auto_trader_notify::NotifyEvent::SystemAlert(
+                    auto_trader_notify::SystemAlertEvent {
+                        title: format!("margin {}", alert.level.as_str()),
+                        account_name: alert.account_name.clone(),
+                        exchange: event.exchange,
+                        body: format!(
+                            "maintenance ratio {} approaching liquidation level {} \
+                             (live account — exchange will liquidate below threshold)",
+                            alert.ratio.round_dp(4),
+                            alert.threshold
+                        ),
+                    },
+                );
+                let notifier = crypto_monitor_notifier.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = notifier.send(ev).await {
+                        tracing::warn!("margin alert notify failed: {e}");
+                    }
+                });
+            }
+
             for owned in open_trades {
                 let trade = owned.trade;
                 // Match by exchange + pair so GmoFx trades are monitored against
@@ -943,7 +1050,10 @@ async fn main() -> anyhow::Result<()> {
                 // [live].enabled=false blocks NEW live orders only, not existing-position
                 // close paths. A position opened when enabled=true must remain closable
                 // even after the operator toggles enabled=false for safety reasons.
-                let dry_run = account_type == "paper" || crypto_monitor_live_forces_dry_run;
+                let dry_run = auto_trader::startup::effective_dry_run(
+                    &account_type,
+                    crypto_monitor_live_forces_dry_run,
+                );
                 // Time-based fail-safe — strategies that wrote a
                 // `max_hold_until` get force-closed at the current price
                 // when the wall clock passes the deadline. Tagged with
@@ -1181,7 +1291,8 @@ async fn main() -> anyhow::Result<()> {
             // [live].enabled=false blocks NEW live orders only, not existing-position
             // close paths. A position opened when enabled=true must remain closable
             // even after the operator toggles enabled=false for safety reasons.
-            let dry_run = account_type == "paper" || exit_live_forces_dry_run;
+            let dry_run =
+                auto_trader::startup::effective_dry_run(&account_type, exit_live_forces_dry_run);
             // Live accounts require a real ExchangeApi. Paper/dry_run accounts fill
             // from PriceStore and never call API methods, so a NullExchangeApi stub
             // is safe when no real implementation exists yet (e.g. GMO Coin FX).
@@ -1278,6 +1389,8 @@ async fn main() -> anyhow::Result<()> {
     let executor_live_forces_dry_run = live_forces_dry_run;
     let executor_live_enabled = live_enabled;
     let executor_price_freshness_secs = price_freshness_secs;
+    let executor_daily_loss_limit_pct = daily_loss_limit_pct;
+    let executor_halt_hours = halt_hours;
     let knowledge_store_exec = knowledge_store.clone();
     let executor_handle = tokio::spawn(async move {
         while let Some(signal_event) = signal_rx.recv().await {
@@ -1340,7 +1453,115 @@ async fn main() -> anyhow::Result<()> {
                     );
                     continue;
                 }
-                let dry_run = pac.account_type == "paper" || executor_live_forces_dry_run;
+
+                // Kill Switch: 既に halt 中の口座は新規エントリーを拒否する。
+                // get_halt が失敗した場合は fail-closed で skip する
+                // (損失上限判定ができない口座に発注させない)。
+                let now = chrono::Utc::now();
+                match auto_trader_db::trading_accounts::get_halt(&executor_pool, pac.id).await {
+                    Ok(Some((until, reason))) if until > now => {
+                        tracing::warn!(
+                            "kill switch: skipping entry for account {} ({}); halted until {until} ({})",
+                            pac.name,
+                            pac.id,
+                            reason.as_deref().unwrap_or("no reason")
+                        );
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            "kill switch: get_halt failed for account {} ({}): {e} — skipping (fail-closed)",
+                            pac.name,
+                            pac.id
+                        );
+                        continue;
+                    }
+                }
+
+                // Kill Switch: 当日 (JST) の実現損益を集計し、開始残高比で日次損失
+                // 上限に達していたら halt をセットして新規エントリーを止める。
+                let day_start = auto_trader_executor::risk_gate::jst_day_start(now);
+                let day_net = match auto_trader_db::trades::realized_net_since(
+                    &executor_pool,
+                    pac.id,
+                    day_start,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "kill switch: realized_net_since failed for account {} ({}): {e} — skipping (fail-closed)",
+                            pac.name,
+                            pac.id
+                        );
+                        continue;
+                    }
+                };
+                // 開始残高 = 現在残高 - 当日実現損益。current_balance は当日の実現
+                // 損益を織り込んだ後の値なので、これを引くと当日開始時点の残高になる。
+                let day_start_balance = pac.current_balance - day_net;
+                if let auto_trader_executor::risk_gate::GateDecision::Reject(reason) =
+                    auto_trader_executor::risk_gate::eval_daily_loss(
+                        day_net,
+                        day_start_balance,
+                        executor_daily_loss_limit_pct,
+                    )
+                {
+                    let until = now + chrono::Duration::hours(executor_halt_hours as i64);
+                    let halt_reason = format!(
+                        "daily loss limit: day_net={day_net} start_balance={day_start_balance} limit_pct={executor_daily_loss_limit_pct}"
+                    );
+                    tracing::warn!(
+                        "kill switch: HALT account {} ({}) until {until}: {halt_reason} ({:?})",
+                        pac.name,
+                        pac.id,
+                        reason
+                    );
+                    if let Err(e) = auto_trader_db::trading_accounts::set_halt(
+                        &executor_pool,
+                        pac.id,
+                        until,
+                        &halt_reason,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "kill switch: set_halt failed for account {} ({}): {e}",
+                            pac.name,
+                            pac.id
+                        );
+                    }
+                    // Slack 通知 (fire-and-forget)。
+                    let notifier = executor_notifier.clone();
+                    let account_name = pac.name.clone();
+                    let strategy_name = signal.strategy_name.clone();
+                    let pair = signal.pair.clone();
+                    let notify_reason = halt_reason.clone();
+                    tokio::spawn(async move {
+                        let ev = auto_trader_notify::NotifyEvent::OrderFailed(
+                            auto_trader_notify::OrderFailedEvent {
+                                account_name,
+                                exchange,
+                                strategy_name,
+                                pair,
+                                reason: format!(
+                                    "Kill Switch 発火 (新規エントリー停止): {notify_reason}"
+                                ),
+                            },
+                        );
+                        if let Err(e) = notifier.send(ev).await {
+                            tracing::warn!("kill switch: notify send failed: {e}");
+                        }
+                    });
+                    continue;
+                }
+
+                let dry_run = auto_trader::startup::effective_dry_run(
+                    &pac.account_type,
+                    executor_live_forces_dry_run,
+                );
                 // Registry lookup — live accounts require a real ExchangeApi.
                 // Paper/dry_run accounts fill from PriceStore and never call
                 // API methods, so a NullExchangeApi stub is safe to use when
@@ -1710,6 +1931,75 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: 取引所側ストップ注文の発火検知 (Phase 4 / Task 4.6)
+    //
+    // 60 秒間隔で live open trade のうち stop_order_id を持つものを列挙し、
+    // 取引所側ストップが Executed になっていれば SlHit で close する。
+    // close_trade → fill_close の Executed ガードにより二重発注にはならない。
+    let stop_fill_pool = pool.clone();
+    let stop_fill_apis = exchange_apis.clone();
+    let stop_fill_price_store = price_store.clone();
+    let stop_fill_notifier = notifier.clone();
+    let stop_fill_position_sizer = shared_position_sizer.clone();
+    let stop_fill_liquidation_levels = exchange_liquidation_levels.clone();
+    let stop_fill_trade_tx = trade_tx.clone();
+    let stop_fill_live_forces_dry_run = live_forces_dry_run;
+    let stop_fill_handle = tokio::spawn(async move {
+        let close_ctx = auto_trader::closer::CloseContext {
+            pool: stop_fill_pool.clone(),
+            apis: stop_fill_apis.clone(),
+            price_store: stop_fill_price_store.clone(),
+            notifier: stop_fill_notifier.clone(),
+            position_sizer: stop_fill_position_sizer.clone(),
+            liquidation_levels: stop_fill_liquidation_levels.clone(),
+            trade_tx: stop_fill_trade_tx.clone(),
+        };
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let open_trades =
+                match auto_trader_db::trades::list_open_with_account_name(&stop_fill_pool).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("stop-fill detect: failed to list open trades: {e}");
+                        continue;
+                    }
+                };
+            auto_trader::stop_fill::detect_and_close_stop_fills(
+                &close_ctx,
+                &open_trades,
+                stop_fill_live_forces_dry_run,
+            )
+            .await;
+        }
+    });
+
+    // Task: live 残高ドリフト検知 (Phase 5)
+    //
+    // 3600 秒間隔で live 口座の bot equity (DB 台帳) と取引所報告 equity を
+    // 照合し、乖離が閾値 (max(1%, ¥500)) を超えたら Slack にアラートする。
+    // **自動補正はしない** — 台帳不変条件 current_balance = initial + Σpnl − Σfees
+    // を守り、補正は運用者判断に委ねる。
+    let drift_pool = pool.clone();
+    let drift_price_store = price_store.clone();
+    let drift_apis = exchange_apis.clone();
+    let drift_notifier = notifier.clone();
+    let drift_live_forces_dry_run = live_forces_dry_run;
+    let balance_drift_handle = tokio::spawn(async move {
+        let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
+            pool: drift_pool.clone(),
+            price_store: drift_price_store.clone(),
+            apis: drift_apis.clone(),
+            live_forces_dry_run: drift_live_forces_dry_run,
+        };
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
+            spawn_system_alerts(&drift_notifier, alerts);
+        }
+    });
+
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
     // Since positions now live in the DB, this correctly applies fees to all
@@ -1717,6 +2007,7 @@ async fn main() -> anyhow::Result<()> {
     // the DB at every tick so REST API changes are reflected immediately.
     let overnight_pool = pool.clone();
     let swap_config = config.gmo_fx.swap.clone();
+    let overnight_notifier = notifier.clone();
     let overnight_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         let bitflyer_fee_rate = Decimal::new(4, 4); // 0.0004 = 0.04%
@@ -1741,6 +2032,31 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+                // swap rate 表の鮮度チェック (1 日 1 回、fee 適用と同時)。
+                let has_gmo_paper = accounts
+                    .iter()
+                    .any(|a| a.exchange == "gmo_fx" && a.account_type == "paper");
+                if let Some(body) = auto_trader::swap_freshness::swap_freshness_alert(
+                    &swap_config,
+                    today,
+                    has_gmo_paper,
+                ) {
+                    let ev = auto_trader_notify::NotifyEvent::SystemAlert(
+                        auto_trader_notify::SystemAlertEvent {
+                            title: "swap rates freshness".to_string(),
+                            account_name: "(config)".to_string(),
+                            exchange: auto_trader_core::types::Exchange::GmoFx,
+                            body,
+                        },
+                    );
+                    let notifier = overnight_notifier.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = notifier.send(ev).await {
+                            tracing::warn!("swap freshness alert send failed: {e}");
+                        }
+                    });
+                }
+
                 // event_at = today の UTC midnight 境界 (attribution 用)。
                 let event_at = today
                     .and_hms_opt(0, 0, 0)
@@ -2156,6 +2472,8 @@ async fn main() -> anyhow::Result<()> {
     }
     overnight_handle.abort();
     sfd_handle.abort();
+    stop_fill_handle.abort(); // infinite 60s loop — must abort explicitly
+    balance_drift_handle.abort(); // infinite 3600s loop — must abort explicitly
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();

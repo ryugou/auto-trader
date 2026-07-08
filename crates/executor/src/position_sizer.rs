@@ -1,4 +1,4 @@
-use auto_trader_core::types::Pair;
+use auto_trader_core::types::{Direction, Pair};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
@@ -7,30 +7,72 @@ use std::collections::HashMap;
 /// Sizing strategy: **invest the maximum amount that keeps the post-SL
 /// margin level at or above the broker's liquidation threshold**.
 ///
-///   max_alloc = 1 / (Y + leverage × stop_loss_pct)
+///   max_alloc = 1 / (Y + buffer + leverage × stop_loss_pct)
 ///   risk_alloc = min(max_alloc, allocation_pct)
 ///
 /// `Y` is the broker's liquidation margin level threshold supplied by the
 /// caller (resolved per-exchange from `[exchange_margin.<name>]` config).
+/// `buffer` (`margin_buffer`) is an extra safety margin added on top of `Y`.
 /// At `risk_alloc = max_alloc`, an idealised fill at the SL price closes the
-/// position with margin level exactly Y. Real-world slippage, weekend gaps,
-/// or SL-trigger latency can push the realised loss past the SL price and
-/// drop margin level below Y; this sizer does not include a buffer for those
-/// cases. If post-SL slippage tolerance is required, callers should size
-/// against a tighter Y (or a separate buffered threshold).
+/// position with margin level exactly `Y + buffer`. Real-world slippage,
+/// weekend gaps, or SL-trigger latency can push the realised loss past the SL
+/// price; the buffer keeps the resulting margin level from immediately
+/// dropping to the liquidation threshold. With `buffer = 0` the sizer targets
+/// exactly `Y` (no slack) — the pre-buffer behaviour.
 ///
-/// Example: bitflyer_cfd (Y=0.5, lev=2), SL=2%
-///   max_alloc = 1 / (0.5 + 0.04) = 1.85 → capped at allocation_pct (1.0)
+/// Example: bitflyer_cfd (Y=0.5, lev=2), SL=2%, buffer=0.10
+///   max_alloc = 1 / (0.5 + 0.10 + 0.04) = 1.5625 → capped at allocation_pct (1.0)
 ///
-/// Example: gmo_fx (Y=1.0, lev=10), SL=2%
-///   max_alloc = 1 / (1.0 + 0.2) = 0.833 → 83.3% of balance as margin
+/// Example: gmo_fx (Y=1.0, lev=10), SL=2%, buffer=0.10
+///   max_alloc = 1 / (1.0 + 0.10 + 0.2) = 0.769 → 76.9% of balance as margin
 pub struct PositionSizer {
     min_order_sizes: HashMap<Pair, Decimal>,
+    /// Y に上乗せする安全バッファ。max_alloc = 1 / (Y + buffer + L×s)。
+    /// スリッページ・週末ギャップ・SL 発動遅延で実現損失が SL 価格を
+    /// 超過しても、維持率がロスカット閾値まで即落ちしないための余裕。
+    margin_buffer: Decimal,
+    /// 取引所側 SL ストップ注文の trigger price を丸める tick 単位
+    /// (`pair_config.price_unit`)。空なら丸めなし (`round_trigger_price` は
+    /// 入力値をそのまま返す)。builder `with_price_units` で注入する。
+    price_units: HashMap<Pair, Decimal>,
 }
 
 impl PositionSizer {
-    pub fn new(min_order_sizes: HashMap<Pair, Decimal>) -> Self {
-        Self { min_order_sizes }
+    pub fn new(min_order_sizes: HashMap<Pair, Decimal>, margin_buffer: Decimal) -> Self {
+        Self {
+            min_order_sizes,
+            margin_buffer,
+            price_units: HashMap::new(),
+        }
+    }
+
+    /// SL trigger price 丸め用の tick 単位を注入する builder。
+    pub fn with_price_units(mut self, price_units: HashMap<Pair, Decimal>) -> Self {
+        self.price_units = price_units;
+        self
+    }
+
+    /// SL trigger price を取引所 tick (`pair_config.price_unit`) に丸める。
+    /// Long の SL は下側にあるので「早く発火する側」= 切り上げ (ceil)、
+    /// Short の SL は上側なので切り捨て (floor)。丸め方向を誤ると SL 価格を
+    /// わずかに超えた損失で発火することになる。
+    /// tick 未設定 (0 以下) の pair は丸めずそのまま返す。
+    pub fn round_trigger_price(
+        &self,
+        pair: &Pair,
+        price: Decimal,
+        direction: Direction,
+    ) -> Decimal {
+        let unit = self.price_units.get(pair).copied().unwrap_or(Decimal::ZERO);
+        if unit <= Decimal::ZERO {
+            return price;
+        }
+        let steps = price / unit;
+        let rounded = match direction {
+            Direction::Long => steps.ceil(),
+            Direction::Short => steps.floor(),
+        };
+        rounded * unit
     }
 
     /// Compute the trade quantity. Returns None when the result would
@@ -77,7 +119,8 @@ impl PositionSizer {
 
         // SL ヒット時の維持率 = (1 - L × a × s) / a ≥ Y を解いて
         //   a ≤ 1 / (Y + L × s)
-        let max_alloc = Decimal::ONE / (liquidation_margin_level + leverage * stop_loss_pct);
+        let y_eff = liquidation_margin_level + self.margin_buffer;
+        let max_alloc = Decimal::ONE / (y_eff + leverage * stop_loss_pct);
         let risk_alloc = max_alloc.min(allocation_pct);
 
         // Mechanical sizing: apply leverage and risk-adjusted allocation, divide by price.
@@ -106,19 +149,50 @@ impl PositionSizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auto_trader_core::types::Pair;
+    use auto_trader_core::types::{Direction, Pair};
     use rust_decimal_macros::dec;
+
+    /// Long の SL trigger は切り上げ (早く発火する側 = 損失が小さい側)、
+    /// Short は切り捨て。
+    #[test]
+    fn trigger_price_rounds_to_safe_side() {
+        let mut min_sizes = HashMap::new();
+        min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
+        let mut units = HashMap::new();
+        units.insert(Pair::new("USD_JPY"), dec!(0.001));
+        let sizer = PositionSizer::new(min_sizes, dec!(0.10)).with_price_units(units);
+        // Long SL 156.78912 → 156.790 (ceil to 0.001)
+        assert_eq!(
+            sizer.round_trigger_price(&Pair::new("USD_JPY"), dec!(156.78912), Direction::Long),
+            dec!(156.790)
+        );
+        // Short SL 156.78912 → 156.789 (floor)
+        assert_eq!(
+            sizer.round_trigger_price(&Pair::new("USD_JPY"), dec!(156.78912), Direction::Short),
+            dec!(156.789)
+        );
+    }
+
+    /// tick 未設定の pair は丸めずそのまま返す。
+    #[test]
+    fn trigger_price_unrounded_when_no_unit_configured() {
+        let sizer = PositionSizer::new(HashMap::new(), Decimal::ZERO);
+        assert_eq!(
+            sizer.round_trigger_price(&Pair::new("USD_JPY"), dec!(156.78912), Direction::Long),
+            dec!(156.78912)
+        );
+    }
 
     fn btc_sizer() -> PositionSizer {
         let mut min_sizes = HashMap::new();
         min_sizes.insert(Pair::new("FX_BTC_JPY"), dec!(0.001));
-        PositionSizer::new(min_sizes)
+        PositionSizer::new(min_sizes, Decimal::ZERO)
     }
 
     fn fx_sizer() -> PositionSizer {
         let mut min_sizes = HashMap::new();
         min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-        PositionSizer::new(min_sizes)
+        PositionSizer::new(min_sizes, Decimal::ZERO)
     }
 
     /// gmo_fx (Y=1.0) lev=10, SL=2%, balance=30,000円: max_alloc = 1/(1.0+0.2) = 0.8333...
@@ -151,6 +225,26 @@ mod tests {
             dec!(1.00),
         );
         assert_eq!(qty, Some(dec!(1819)));
+    }
+
+    /// buffer=0.10: gmo_fx (Y=1.0) lev=10, SL=2% →
+    /// max_alloc = 1/(1.0+0.10+0.2) = 0.7692...
+    /// 30,000 × 10 × 0.7692 / 157 = 1469.9... → 1469 (min_lot=1)
+    #[test]
+    fn margin_buffer_tightens_allocation() {
+        let mut min_sizes = HashMap::new();
+        min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
+        let sizer = PositionSizer::new(min_sizes, dec!(0.10));
+        let qty = sizer.calculate_quantity(
+            &Pair::new("USD_JPY"),
+            dec!(30000),
+            dec!(157),
+            dec!(10),
+            dec!(1.0),
+            dec!(0.02),
+            dec!(1.00),
+        );
+        assert_eq!(qty, Some(dec!(1469)));
     }
 
     /// bitflyer_cfd (Y=0.5) lev=2, SL=2%: max_alloc = 1/(0.5+0.04) ≈ 1.85 → cap at allocation_pct=1.0.
