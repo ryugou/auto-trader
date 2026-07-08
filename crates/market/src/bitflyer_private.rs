@@ -873,7 +873,12 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
         product_code: &str,
         stop_order_id: &str,
     ) -> anyhow::Result<StopOrderStatus> {
-        self.stop_order_status(product_code, stop_order_id)
+        // Dispatch explicitly to the inherent method: it shares this trait
+        // method's name, so `self.stop_order_status(..)` reads as (and would
+        // silently become) a recursive call if the inherent method were ever
+        // removed. The sibling delegations call differently-named inherent
+        // methods, so only this one needs disambiguation.
+        BitflyerPrivateApi::stop_order_status(self, product_code, stop_order_id)
             .await
             .map_err(anyhow::Error::from)
     }
