@@ -4,6 +4,7 @@
 //! Failure injection (`with_failures`) makes the first N calls return an error
 //! before falling through to the configured response.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -97,6 +98,11 @@ pub struct MockExchangeApi {
     place_stop_order_cfg: MethodConfig<String>,
     cancel_stop_order_cfg: MethodConfig<()>,
     stop_order_status_cfg: MethodConfig<StopOrderStatus>,
+    /// Per-call `stop_order_status` overrides. When non-empty, each call pops
+    /// the front element; once drained, falls back to `stop_order_status_cfg`.
+    /// Lets tests drive multi-step recovery (e.g. Active → Gone across a
+    /// failed cancel).
+    stop_order_status_seq: Arc<Mutex<VecDeque<StopOrderStatus>>>,
     /// Recorded `place_stop_order` args (in call order).
     pub place_stop_calls: Arc<Mutex<Vec<StopOrderCall>>>,
     pub counters: Arc<CallCounters>,
@@ -208,6 +214,14 @@ impl ExchangeApi for MockExchangeApi {
         self.counters
             .stop_order_status
             .fetch_add(1, Ordering::SeqCst);
+        if let Some(next) = self
+            .stop_order_status_seq
+            .lock()
+            .expect("stop_order_status_seq mutex poisoned")
+            .pop_front()
+        {
+            return Ok(next);
+        }
         self.stop_order_status_cfg.try_respond()
     }
 }
@@ -228,6 +242,7 @@ pub struct MockExchangeApiBuilder {
     get_collateral_resp: Collateral,
     place_stop_order_resp: String,
     stop_order_status_resp: StopOrderStatus,
+    stop_order_status_seq: Vec<StopOrderStatus>,
     failures: Vec<(String, u32)>,
 }
 
@@ -249,8 +264,17 @@ impl MockExchangeApiBuilder {
             place_stop_order_resp: "mock-stop-001".to_string(),
             // 既定は Active: close 経路が cancel → 成行 close に進む。
             stop_order_status_resp: StopOrderStatus::Active,
+            stop_order_status_seq: vec![],
             failures: vec![],
         }
+    }
+
+    /// Drive `stop_order_status` through an explicit per-call sequence. Once the
+    /// sequence is drained, later calls fall back to the single response set by
+    /// [`with_stop_order_status_response`](Self::with_stop_order_status_response).
+    pub fn with_stop_order_status_sequence(mut self, seq: Vec<StopOrderStatus>) -> Self {
+        self.stop_order_status_seq = seq;
+        self
     }
 
     pub fn with_place_stop_order_response(mut self, id: impl Into<String>) -> Self {
@@ -353,6 +377,7 @@ impl MockExchangeApiBuilder {
             place_stop_order_cfg,
             cancel_stop_order_cfg,
             stop_order_status_cfg,
+            stop_order_status_seq: Arc::new(Mutex::new(self.stop_order_status_seq.into())),
             place_stop_calls: Arc::new(Mutex::new(Vec::new())),
             counters: Arc::new(CallCounters::default()),
         })

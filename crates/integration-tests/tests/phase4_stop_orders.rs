@@ -242,6 +242,82 @@ async fn close_cancels_active_stop_then_market_closes(pool: sqlx::PgPool) {
 }
 
 // =========================================================================
+// Test 2b: cancel_stop_order errors but the stop is then Gone → the market
+// close proceeds (no active stop can fire, so no double-close risk). Guards
+// the Copilot round-4 fix that turned an unconditional bail into "Gone → proceed".
+// =========================================================================
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn close_proceeds_when_cancel_errors_but_stop_gone(pool: sqlx::PgPool) {
+    let exchange = Exchange::GmoFx;
+    let account_id = seed_trading_account(
+        &pool,
+        "stop_cancel_err_gone",
+        "paper",
+        "gmo_fx",
+        "test_strategy",
+        1_000_000,
+    )
+    .await;
+    let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
+
+    let api = MockExchangeApiBuilder::new()
+        .with_send_child_order_response(SendChildOrderResponse {
+            child_order_acceptance_id: "ord-001".to_string(),
+        })
+        .with_get_executions_response(one_exec("ord-001", dec!(150), dec!(1000)))
+        .with_place_stop_order_response("gmo-stop-1")
+        // close 時の stop_order_status: 1回目 Active (cancel を試みる) →
+        // cancel が失敗 → 2回目 Gone (もう発火し得ない) → 成行 close に進む。
+        .with_stop_order_status_sequence(vec![StopOrderStatus::Active, StopOrderStatus::Gone])
+        .with_failures("cancel_stop_order", 1)
+        .build();
+    let counters = api.counters.clone();
+
+    let trader = Trader::new(
+        pool.clone(),
+        exchange,
+        account_id,
+        "stop_cancel_err_gone".to_string(),
+        api,
+        price_store,
+        Arc::new(Notifier::new_disabled()),
+        usd_jpy_sizer_with_tick(),
+        dec!(1.00),
+        false,
+    )
+    .with_poll_timeout(Duration::from_secs(5));
+
+    let signal = make_signal("USD_JPY", Direction::Long);
+    let trade = trader.execute(&signal).await.expect("open should succeed");
+
+    counters.send_child_order.store(0, Ordering::SeqCst);
+    counters.stop_order_status.store(0, Ordering::SeqCst);
+    counters.cancel_stop_order.store(0, Ordering::SeqCst);
+
+    let closed = trader
+        .close_position(&trade.id.to_string(), ExitReason::Manual)
+        .await
+        .expect("close should proceed despite the cancel error (stop is Gone)");
+
+    assert_eq!(
+        counters.cancel_stop_order.load(Ordering::SeqCst),
+        1,
+        "cancel is attempted once (and fails)"
+    );
+    assert!(
+        counters.stop_order_status.load(Ordering::SeqCst) >= 2,
+        "status is re-checked after the cancel error"
+    );
+    assert!(
+        counters.send_child_order.load(Ordering::SeqCst) >= 1,
+        "market close proceeds because the stop is Gone (not aborted)"
+    );
+    assert_eq!(closed.status, TradeStatus::Closed);
+    assert_eq!(closed.exit_price, Some(dec!(150)));
+}
+
+// =========================================================================
 // Test 3: an already-Executed stop closes at the stop fill, no new order
 // =========================================================================
 

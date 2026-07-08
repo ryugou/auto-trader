@@ -396,15 +396,28 @@ impl Trader {
             }
             Ok(StopOrderStatus::Active) => {
                 if let Err(cancel_err) = self.api.cancel_stop_order(&trade.pair.0, stop_id).await {
-                    if let Ok(StopOrderStatus::Executed { price, commission }) =
-                        self.api.stop_order_status(&trade.pair.0, stop_id).await
-                    {
-                        return Ok(Some((price, commission)));
+                    // cancel がエラー → ストップの真の状態が不明。再確認する。
+                    match self.api.stop_order_status(&trade.pair.0, stop_id).await {
+                        // cancel エラーの裏で発火していた → その約定で記録し新規注文なし。
+                        Ok(StopOrderStatus::Executed { price, commission }) => {
+                            return Ok(Some((price, commission)));
+                        }
+                        // 既に消滅 (cancel は実際は成功、または取消/失効済み) → 発火し得る
+                        // active なストップは無いので成行クローズを進めて安全。
+                        Ok(StopOrderStatus::Gone) => {
+                            tracing::warn!(
+                                "close: cancel_stop_order errored ({cancel_err}) but stop {stop_id} \
+                                 is now Gone; proceeding with market close"
+                            );
+                        }
+                        // まだ active、または状態取得自体が失敗 → 二重クローズを排除できない。中断。
+                        _ => {
+                            anyhow::bail!(
+                                "cancel_stop_order failed for {stop_id} and status still active/unclear: \
+                                 {cancel_err}; aborting close to avoid double-close"
+                            );
+                        }
                     }
-                    anyhow::bail!(
-                        "cancel_stop_order failed for {stop_id} and status unclear: {cancel_err}; \
-                         aborting close to avoid double-close"
-                    );
                 }
                 Ok(None)
             }

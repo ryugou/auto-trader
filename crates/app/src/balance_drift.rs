@@ -122,10 +122,13 @@ pub async fn check_live_accounts(ctx: &BalanceDriftContext) -> Vec<SystemAlertEv
             };
 
         let ctx_label = format!("balance drift: account {}", account.name);
+        // one-shot 呼び出しなので cache は使い回さない。liquidation.rs /
+        // margin_alert.rs と同じく名前付きローカルで持つ。
+        let mut price_cache = HashMap::new();
         let positions = match build_close_side_positions(
             open_trades.iter(),
             &ctx.price_store,
-            &mut HashMap::new(),
+            &mut price_cache,
             &ctx_label,
         )
         .await
