@@ -556,3 +556,68 @@ async fn stop_order_status_executed_aggregates_child_executions() {
         other => panic!("expected Executed, got {other:?}"),
     }
 }
+
+/// Regression: child は約定済み (executed_size > 0) だが get_executions が空を
+/// 返す一時遅延ケース。price=0 を捏造せず child.average_price にフォールバック
+/// することを確認する (0 円決済 → 偽 PnL 事故の防止)。
+#[tokio::test]
+async fn stop_order_status_falls_back_to_average_price_when_executions_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getparentorder"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"parent_order_id":"JCP20260707-000000-111111","parent_order_state":"COMPLETED"}"#,
+        ))
+        .mount(&server)
+        .await;
+    // child は約定済み (executed_size=0.004, average_price=12240000)
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getchildorders"))
+        .and(query_param("parent_order_id", "JCP20260707-000000-111111"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{
+                "id": 1,
+                "child_order_id": "JOR20260707-000000-222222",
+                "product_code": "FX_BTC_JPY",
+                "side": "SELL",
+                "child_order_type": "MARKET",
+                "price": "0",
+                "average_price": "12240000",
+                "size": "0.004",
+                "child_order_state": "COMPLETED",
+                "expire_date": "2026-07-14T00:00:00",
+                "child_order_date": "2026-07-07T00:00:00",
+                "child_order_acceptance_id": "JRF20260707-000000-333333",
+                "outstanding_size": "0",
+                "cancel_size": "0",
+                "executed_size": "0.004",
+                "total_commission": "0"
+            }]"#,
+        ))
+        .mount(&server)
+        .await;
+    // get_executions は空 (一時遅延) を返す
+    Mock::given(method("GET"))
+        .and(path("/v1/me/getexecutions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&server)
+        .await;
+
+    let api = client_for(&server);
+    let status = api
+        .stop_order_status("FX_BTC_JPY", "JRF20260707-000000-000000")
+        .await
+        .expect("stop_order_status should succeed");
+    match status {
+        StopOrderStatus::Executed { price, commission } => {
+            // price=0 ではなく child.average_price にフォールバック
+            assert_eq!(
+                price,
+                dec!(12240000),
+                "must fall back to average_price, not 0"
+            );
+            assert_eq!(commission, dec!(0));
+        }
+        other => panic!("expected Executed with average_price fallback, got {other:?}"),
+    }
+}

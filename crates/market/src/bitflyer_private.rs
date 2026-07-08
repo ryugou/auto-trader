@@ -730,7 +730,29 @@ impl BitflyerPrivateApi {
                         let execs = self
                             .get_executions(product_code, &child.child_order_acceptance_id)
                             .await?;
-                        let (price, commission) = weighted_avg_executions(&execs);
+                        let (price, commission) = match weighted_avg_fills(
+                            execs.iter().map(|e| (e.price, e.size, e.commission)),
+                        ) {
+                            Ok((p, _size, comm)) => (p, comm),
+                            // child は約定済み (executed_size > 0) なのに get_executions
+                            // が空/ゼロサイズ = executions エンドポイントの一時遅延
+                            // (open 経路 trader.rs も同じラグを扱う)。child 自身が報告する
+                            // average_price にフォールバックする。commission は order
+                            // レベルでは取れないので 0。**price=0 を捏造しない**
+                            // (0 円決済 → 偽の巨額 PnL を台帳に書く事故を防ぐ)。
+                            Err(_) if child.average_price > Decimal::ZERO => {
+                                (child.average_price, Decimal::ZERO)
+                            }
+                            // average_price も無い = 価格データ皆無。close を中断して
+                            // stale-lock 自己回復に委ねる (近似価格でも捏造しない)。
+                            Err(e) => {
+                                return Err(BitflyerApiError::InvalidResponse(format!(
+                                    "stop parent {parent_order_acceptance_id}: child {} filled \
+                                     (executed_size={}) but no execution data and no average_price: {e}",
+                                    child.child_order_acceptance_id, child.executed_size
+                                )));
+                            }
+                        };
                         Ok(StopOrderStatus::Executed { price, commission })
                     }
                     // COMPLETED だが約定 child 無し = 取消/失効相当。
@@ -743,20 +765,6 @@ impl BitflyerPrivateApi {
                 }
             }
         }
-    }
-}
-
-/// 約定リストの加重平均約定価格と手数料合計を返す。
-///
-/// `stop_order_status` が発火した child order の約定 (`get_executions`) を
-/// `StopOrderStatus::Executed { price, commission }` に畳むために使う。
-/// `trader.rs::aggregate_executions` と同形 (size 加重平均 + commission 合計)。
-fn weighted_avg_executions(execs: &[Execution]) -> (Decimal, Decimal) {
-    match weighted_avg_fills(execs.iter().map(|e| (e.price, e.size, e.commission))) {
-        Ok((price, _total_size, total_commission)) => (price, total_commission),
-        // total size <= 0 (empty list or pathological zero-size executions):
-        // preserve the original fallback of price=0 while still summing commission.
-        Err(_) => (Decimal::ZERO, execs.iter().map(|e| e.commission).sum()),
     }
 }
 
