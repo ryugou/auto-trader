@@ -140,6 +140,12 @@ enabled = true
 mode = "paper"
 pairs = ["FX_BTC_JPY", "USD_JPY"]
 
+[[strategies]]
+name = "fx_new_v1"
+enabled = true
+mode = "paper"
+pairs = ["USD_JPY"]
+
 # Trading accounts are managed in the database (trading_accounts table).
 # Initial accounts are seeded by migration. Use the REST API to manage:
 #   GET    /api/trading-accounts

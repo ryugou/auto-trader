@@ -69,6 +69,7 @@ pub struct TradingAccount {
     pub leverage: Decimal,
     pub currency: String,
     pub created_at: DateTime<Utc>,
+    pub active: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -83,6 +84,7 @@ struct AccountRow {
     leverage: Decimal,
     currency: String,
     created_at: DateTime<Utc>,
+    active: bool,
 }
 
 impl From<AccountRow> for TradingAccount {
@@ -98,12 +100,13 @@ impl From<AccountRow> for TradingAccount {
             leverage: r.leverage,
             currency: r.currency,
             created_at: r.created_at,
+            active: r.active,
         }
     }
 }
 
 const ACCOUNT_COLUMNS: &str = "id, name, account_type, exchange, strategy, \
-                                initial_balance, current_balance, leverage, currency, created_at";
+                                initial_balance, current_balance, leverage, currency, created_at, active";
 
 /// Fetch a single account by id (alias for `get_account`).
 pub async fn get(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<TradingAccount>> {
@@ -121,10 +124,15 @@ pub async fn get_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Tradi
     Ok(row.map(TradingAccount::from))
 }
 
-/// List all accounts ordered by created_at.
+/// List only active accounts (`active = TRUE`), ordered by created_at ascending.
+///
+/// Inactive (retired) accounts are excluded, so callers that iterate this list
+/// (overnight swap, SFD, startup reconcile, balance drift, etc.) never handle
+/// open trades that remain on a retired account. `get` / `get_account` return
+/// an account regardless of its `active` flag.
 pub async fn list_all(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     let rows = sqlx::query_as::<_, AccountRow>(&format!(
-        "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts ORDER BY created_at ASC"
+        "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts WHERE active ORDER BY created_at ASC"
     ))
     .fetch_all(pool)
     .await?;
@@ -513,6 +521,68 @@ mod tests {
             strategy: "bb_mean_revert_v1".to_string(),
             account_type: "live".to_string(),
             currency: "JPY".to_string(),
+        }
+    }
+
+    /// `list_all` must hide retired accounts while `get` still returns them.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_all_excludes_inactive_accounts(pool: sqlx::PgPool) {
+        let retired_id = list_all(&pool)
+            .await
+            .expect("list accounts")
+            .first()
+            .expect("migrations seed at least one active account")
+            .id;
+
+        sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
+            .bind(retired_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate account");
+
+        let listed = list_all(&pool).await.expect("list accounts after retire");
+        assert!(
+            listed.iter().all(|a| a.id != retired_id),
+            "inactive account {retired_id} must not appear in list_all"
+        );
+        let fetched = get(&pool, retired_id)
+            .await
+            .expect("get account")
+            .expect("get returns inactive accounts");
+        assert!(!fetched.active, "fetched account must be inactive");
+    }
+
+    /// The FX-new migration retires the legacy FX accounts and seeds `FX新`.
+    /// Legacy ids (031/032) are not seeded by every migration history, so they
+    /// are only asserted when present.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn migration_retires_legacy_fx_accounts_and_seeds_fx_new(pool: sqlx::PgPool) {
+        let listed = list_all(&pool).await.expect("list accounts");
+        let fx_new_id = Uuid::parse_str("a0000000-0000-0000-0000-000000000040").unwrap();
+
+        let fx_new = listed
+            .iter()
+            .find(|a| a.id == fx_new_id)
+            .expect("FX新 account is seeded and active");
+        assert_eq!(fx_new.name, "FX新");
+        assert_eq!(fx_new.strategy, "fx_new_v1");
+        assert_eq!(fx_new.exchange, "gmo_fx");
+        assert_eq!(fx_new.account_type, "paper");
+        assert_eq!(fx_new.leverage, dec!(10));
+        assert!(fx_new.active);
+
+        for legacy in [
+            "a0000000-0000-0000-0000-000000000031",
+            "a0000000-0000-0000-0000-000000000032",
+        ] {
+            let id = Uuid::parse_str(legacy).unwrap();
+            assert!(
+                listed.iter().all(|a| a.id != id),
+                "legacy account {id} must not be listed"
+            );
+            if let Some(account) = get(&pool, id).await.expect("get legacy account") {
+                assert!(!account.active, "legacy account {id} must be inactive");
+            }
         }
     }
 
