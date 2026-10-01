@@ -10,7 +10,9 @@
 pub mod benchmark;
 pub mod config;
 pub mod data;
+pub mod engine;
 pub mod error;
+pub mod eval;
 pub mod fetch;
 pub mod indicators;
 pub mod script;
