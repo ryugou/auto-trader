@@ -11,4 +11,6 @@ pub mod config;
 pub mod data;
 pub mod error;
 pub mod fetch;
+pub mod indicators;
+pub mod series;
 pub mod types;
