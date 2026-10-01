@@ -189,7 +189,7 @@ CREATE TABLE sim_candles (
 ```rhai
 fn params() {
     #{
-        entry: #{ min: 10, max: 60, step: 2, default: 20 },
+        entry: #{ min: 10, max: 60, step: 2, "default": 20 },
     }
 }
 
@@ -208,7 +208,7 @@ fn on_bar(ctx, p) {
 - サイズは 32 KiB 以下とする。
 - 引数 0 個の `params` と、引数 2 個の `on_bar` が定義されている。判定は `ast.iter_functions()` の関数名と引数の数で行う。
 - トップレベルに書かれた関数定義以外の文は、実行しない。
-- `params()` は、パラメータ名から `#{min, max, step, default}` へのマップを返す。パラメータがない場合は `#{}` を返す。
+- `params()` は、パラメータ名から `#{min, max, step, "default"}` へのマップを返す。パラメータがない場合は `#{}` を返す。`default` は Rhai の予約語のため、キーは引用符付きの `"default"` で書く。
 - 4 つの値は、パラメータごとにすべて整数またはすべて小数とする。
 - `min <= default <= max`、`step > 0`、パラメータ数は 12 以下とする。
 - `default` は `min + k × step`（`k` は 0 以上の整数）と一致する。小数の場合は `1e-9` の差を許容する。
@@ -252,6 +252,7 @@ fn on_bar(ctx, p) {
 - エンジンは `Engine::new_raw()` を基点とし、`ArithmeticPackage`、`LogicPackage`、`BasicMathPackage`、`BasicIteratorPackage`、`BasicArrayPackage`、`BasicMapPackage`、`BasicStringPackage` だけを登録する。`LanguageCorePackage`、`BasicTimePackage`、`BasicFnPackage`、`BasicBlobPackage`、`DebuggingPackage` は登録しない。
 - モジュールの解決には `DummyModuleResolver` を設定し、`import` を失敗させる。
 - `print` と `debug` のハンドラは設定しない。
+- `eval` は `Engine::disable_symbol("eval")` で無効にする。
 - 上限: `on_bar` 1 回あたりの演算数は `max_operations_per_bar`、1 回のシミュレーションの演算数の合計は `max_operations_per_run`、呼び出しの深さは 16、文字列長は 4,096、配列長は 1,024、マップの要素数は 256 とする。
 - 演算数の合計は、`Engine::on_progress` が渡す呼び出しごとの累計を、シミュレーションごとの合計へ加算して数える。合計が上限を超えたら、その呼び出しを打ち切る。1 回のシミュレーションは 1 つのスレッド上で最初から最後まで実行する。
 

@@ -7,10 +7,12 @@
 //! このファイルはモジュール宣言だけを行う。各モジュールの責務は実装計画の
 //! File Structure 表のとおり。
 
+pub mod benchmark;
 pub mod config;
 pub mod data;
 pub mod error;
 pub mod fetch;
 pub mod indicators;
+pub mod script;
 pub mod series;
 pub mod types;
