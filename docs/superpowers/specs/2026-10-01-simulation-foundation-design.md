@@ -37,7 +37,7 @@
 | `sweep` | パラメータの列挙、並列実行 | `engine`、`eval`、`rayon` |
 | `store` | `sim_scripts`、`sim_batches`、`sim_runs` の読み書き | `sqlx` |
 
-追加する外部依存は `rhai`（1 系、`sync` feature）、`rayon`（1 系）、`rand`（0.9 系）、`rand_chacha`（0.9 系）とする。`sha2` は workspace の既存定義（`sha2 = { workspace = true }`）を使う。
+追加する外部依存は `rhai`（1 系、`sync` feature）、`rayon`（1 系）、`rand`（0.9 系）、`rand_chacha`（0.9 系）、`clap`（4 系、`derive` feature）とする。`sha2` は workspace の既存定義（`sha2 = { workspace = true }`）を使う。
 
 `Dockerfile` のビルド行を `cargo build --release --bin auto-trader --bin auto-trader-sim` に変更し、`auto-trader-sim` を `/usr/local/bin/auto-trader-sim` に配置する。コンテナの既定コマンドは変更しない。
 
