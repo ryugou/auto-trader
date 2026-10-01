@@ -9,6 +9,21 @@ schema = "fx-trading"
 [database]
 url = "postgresql://auto-trader:auto-trader@localhost:15432/auto_trader"
 
+# === auto-trader-sim ===
+# シミュレーション基盤 (crates/sim) 専用の設定。auto-trader (売買プロセス) は
+# このセクションを読まない。auto-trader-sim は [database].url と [sim] だけを
+# 読み、他のセクションは無視する。
+# 正本: docs/superpowers/specs/2026-10-01-simulation-foundation-design.md 4 章
+[sim]
+gmo_public_base_url = "https://forex-api.coin.z.com/public"
+warmup_bars = 3000
+protective_stop_pips = 100
+thetas_pips = [20, 50, 100]
+jobs = 1
+max_operations_per_bar = 200000
+max_operations_per_run = 1000000000
+indicator_cache_mb = 512
+
 [monitor]
 interval_secs = 60
 # backfill_days = 7  # startup時にmax_drawdownを再計算する日数（デフォルト: 7）

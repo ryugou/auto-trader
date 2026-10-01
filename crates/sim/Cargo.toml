@@ -1,0 +1,38 @@
+[package]
+name = "auto-trader-sim"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "auto_trader_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "auto-trader-sim"
+path = "src/main.rs"
+
+[dependencies]
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rhai = { workspace = true }
+rayon = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+auto-trader-market = { workspace = true }
