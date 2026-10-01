@@ -17,4 +17,6 @@ pub mod fetch;
 pub mod indicators;
 pub mod script;
 pub mod series;
+pub mod store;
+pub mod sweep;
 pub mod types;
