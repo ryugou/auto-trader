@@ -8,6 +8,7 @@
 //! File Structure 表のとおり。
 
 pub mod benchmark;
+pub mod cli;
 pub mod config;
 pub mod data;
 pub mod engine;
