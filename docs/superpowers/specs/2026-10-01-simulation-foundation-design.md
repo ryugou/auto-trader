@@ -487,7 +487,7 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 
 2〜5 は、開発機で、ローカルの DB コンテナに対して `cargo run --release -p auto-trader-sim --` で実行する。事前に `migrate` を実行する。
 
-1. 14 章のテスト、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets` がすべて通る。
+1. `./scripts/test-all.sh` が `ALL GREEN` で終了する。14 章のテストはこのスクリプトの実行対象に含める。
 2. `backfill --from 2023-10-28 --to <実行日の前日>` が終了コード 0 で完了し、`sim_candles` に 200,000 本以上の足が保存される。
 3. `benchmark`（`--from`、`--to` を省略）が、`thetas_pips` の各値について波の数、理論値、実質上限を出力する。
 4. `crates/sim/scripts/donchian_sar.rhai`（8.1 のスクリプト）を `run`（`--from`、`--to` を省略）し、結果が保存される。所要時間の目標は 5 秒以内とする。超えた場合、実装者は仕様を変えずに測定値を報告する。
