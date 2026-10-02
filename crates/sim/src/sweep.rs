@@ -291,6 +291,20 @@ pub fn run_one(
     }
 }
 
+/// `run_sweep_with_hook` の `mpsc::sync_channel` に設定する容量。
+///
+/// 受信側（`on_result`）の処理が遅い場合に、完了済みだがまだ `on_result` に渡していない
+/// `RunRecord` がメモリに無制限に溜まり続けることを防ぐため、容量を上限付きにする。
+/// 容量をワーカー数と同じ値にするのは、滞留しうる件数の上限を「チャネルに溜まる分
+/// （最大で容量）＋ 送信待ちでブロックされているワーカーの分（最大で `jobs`）」の
+/// 合計、すなわち `jobs` に比例する値に抑えるため（`--max-runs` をどれだけ大きくしても
+/// 滞留の上限は並列度にしか依存しない）。`jobs` よりかなり小さくすると、各ワーカーが
+/// 送信のたびにブロックしやすくなり並列実行の意味が薄れる。`jobs` より大きくしても、
+/// 滞留しうる件数の上限が増えるだけで得られる利点がない。
+fn channel_capacity(jobs: usize) -> usize {
+    jobs
+}
+
 /// `indices` の各組み合わせを `jobs` 本のスレッドで並列に実行し、完了したものから
 /// `on_result` を直列に呼ぶ（spec 11 章: 実行は `jobs` 本のスレッドで並列に行う）。
 ///
@@ -305,7 +319,8 @@ pub fn run_one(
 /// 常に同じ結果になる。spec 9.2 章）。`jobs` が 0 の場合は 1 として扱う。
 ///
 /// 引数 8 個は計画 Task 8 Interfaces 節で定められた公開 API そのものであり、分割すると
-/// 呼び出し元(Task 9 の CLI)との契約が変わるため減らさない。
+/// 呼び出し元(Task 9 の CLI)との契約が変わるため減らさない。本体は `run_sweep_with_hook`
+/// に委譲し、計測用フックには no-op を渡すだけの薄いラッパーにする。
 #[allow(clippy::too_many_arguments)]
 pub fn run_sweep(
     dataset: &Arc<Dataset>,
@@ -316,6 +331,35 @@ pub fn run_sweep(
     indices: &[u128],
     jobs: usize,
     on_result: &mut (dyn FnMut(RunRecord) -> Result<(), SimError> + Send),
+) -> Result<(), SimError> {
+    run_sweep_with_hook(
+        dataset,
+        host,
+        script,
+        benchmarks,
+        cfg,
+        indices,
+        jobs,
+        on_result,
+        &|| {},
+    )
+}
+
+/// `run_sweep` の実体。`on_worker_complete` はワーカーが `run_one` を完了し、その結果を
+/// チャネルへ送る直前に呼ばれる。これは「完了済みだが `on_result` にまだ渡っていない
+/// 件数」をテストから計測するための非公開の経路であり、公開 API（`run_sweep`）の契約には
+/// 現れない（本番経路の `run_sweep` は no-op を渡すので挙動は変わらない）。
+#[allow(clippy::too_many_arguments)]
+fn run_sweep_with_hook(
+    dataset: &Arc<Dataset>,
+    host: &ScriptHost,
+    script: &CompiledScript,
+    benchmarks: &[Benchmark],
+    cfg: &SimConfig,
+    indices: &[u128],
+    jobs: usize,
+    on_result: &mut (dyn FnMut(RunRecord) -> Result<(), SimError> + Send),
+    on_worker_complete: &(dyn Fn() + Sync),
 ) -> Result<(), SimError> {
     if indices.is_empty() {
         return Ok(());
@@ -332,9 +376,17 @@ pub fn run_sweep(
     });
     let panicked = AtomicBool::new(false);
     let first_panic: Mutex<Option<(u128, String)>> = Mutex::new(None);
-    let (tx, rx) = mpsc::channel::<RunRecord>();
+    // 容量ありチャネル（channel_capacity のコメントを参照）。容量を超えて送ろうとした
+    // ワーカーは、受信側が1件取り出して空きができるまで send でブロックする。
+    let (tx, rx) = mpsc::sync_channel::<RunRecord>(channel_capacity(jobs));
 
     std::thread::scope(|scope| {
+        // rx をこのクロージャへ move する(参照キャプチャのままにしない)。on_result が panic
+        // すると thread::scope は panic を伝える前に全ワーカーの join を待つが、rx が関数
+        // フレームに残っていると誰も受信しないため、バッファ満杯で send 待ちのワーカーが
+        // 永久にブロックしてハングする。move しておけばクロージャの unwind で rx が drop され、
+        // send が Err を返してワーカーが break し、join が完了して panic が呼び出し元へ伝わる。
+        let rx = rx;
         for _ in 0..jobs {
             let tx = tx.clone();
             let queue = &queue;
@@ -363,6 +415,7 @@ pub fn run_sweep(
                     }));
                     match result {
                         Ok(record) => {
+                            on_worker_complete();
                             if tx.send(record).is_err() {
                                 // receiver が既に処理を終えてドロップしている(通常は
                                 // 起こらないが、安全のため送信失敗時はこのワーカーも抜ける)。
@@ -398,7 +451,10 @@ pub fn run_sweep(
                     received += 1;
                     // final_err が Some の間は、既に走っていたワーカーが送ってくる残りの
                     // 結果を on_result に渡さずに読み捨てる(「以後 on_result を呼ばない」
-                    // という契約を、既着手の実行の完了を待たずに満たすため)。
+                    // という契約を、既着手の実行の完了を待たずに満たすため)。容量ありの
+                    // チャネルでは、ここで受信をやめるとバッファが埋まったまま send 待ちの
+                    // ワーカーが永久にブロックする(デッドロック)。読み捨てを続けることで、
+                    // cancelled 済みのワーカーが新規着手せず終了するまで送信を受け止め切る。
                     if final_err.is_some() {
                         continue;
                     }
@@ -435,6 +491,8 @@ pub fn run_sweep(
 mod tests {
     use super::*;
     use crate::types::{Bar, M5_SECS};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     fn int_spec(name: &str, min: f64, max: f64, step: f64, default: f64) -> ParamSpec {
         ParamSpec {
@@ -939,31 +997,39 @@ mod tests {
 
     #[test]
     fn a_panicking_worker_is_reported_as_batch_failed_with_index_and_message() {
-        let cfg = SimConfig::default();
-        let host = ScriptHost::new(&cfg);
-        let mut script = host
-            .compile("fn params() { #{} }\nfn on_bar(ctx, p) { 0 }\n")
-            .expect("valid script");
-        // step=0 の Int は登録検証(spec 8.1)を通らない値で、candidate_count の 0 除算により
-        // combination_at が panic する。ワーカー panic を決定的に誘発するための細工。
-        script.params.push(int_spec("bad", 0.0, 10.0, 0.0, 0.0));
-        let dataset = deterministic_dataset(10);
-        let benchmarks: Vec<Benchmark> = Vec::new();
-        let indices = vec![7u128];
-
+        // 容量ありチャネルでもワーカーの panic 後にハングしないことを確認する。
+        // cargo test にデフォルトのタイムアウトは無いため、実行を別スレッドに乗せて
+        // recv_timeout で待ち、ハングした場合はテスト自身が timeout で失敗する。
         for jobs in [1usize, 4] {
-            let result = run_sweep(
-                &dataset,
-                &host,
-                &script,
-                &benchmarks,
-                &cfg,
-                &indices,
-                jobs,
-                &mut |_record| Ok(()),
-            );
-            match result {
-                Err(SimError::BatchFailed(message)) => {
+            let (done_tx, done_rx) = mpsc::channel::<Result<(), SimError>>();
+            std::thread::spawn(move || {
+                let cfg = SimConfig::default();
+                let host = ScriptHost::new(&cfg);
+                let mut script = host
+                    .compile("fn params() { #{} }\nfn on_bar(ctx, p) { 0 }\n")
+                    .expect("valid script");
+                // step=0 の Int は登録検証(spec 8.1)を通らない値で、candidate_count の 0 除算により
+                // combination_at が panic する。ワーカー panic を決定的に誘発するための細工。
+                script.params.push(int_spec("bad", 0.0, 10.0, 0.0, 0.0));
+                let dataset = deterministic_dataset(10);
+                let benchmarks: Vec<Benchmark> = Vec::new();
+                let indices = vec![7u128];
+
+                let result = run_sweep(
+                    &dataset,
+                    &host,
+                    &script,
+                    &benchmarks,
+                    &cfg,
+                    &indices,
+                    jobs,
+                    &mut |_record| Ok(()),
+                );
+                let _ = done_tx.send(result);
+            });
+
+            match done_rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Err(SimError::BatchFailed(message))) => {
                     assert!(
                         message.contains("combination index 7"),
                         "jobs={jobs}: missing index in {message:?}"
@@ -973,8 +1039,245 @@ mod tests {
                         "jobs={jobs}: missing panic message in {message:?}"
                     );
                 }
-                other => panic!("jobs={jobs}: expected Err(BatchFailed), got {other:?}"),
+                Ok(other) => panic!("jobs={jobs}: expected Err(BatchFailed), got {other:?}"),
+                Err(_) => panic!(
+                    "jobs={jobs}: run_sweep did not return within 10s; it likely deadlocked \
+                     on the bounded channel after a worker panicked"
+                ),
             }
+        }
+    }
+
+    #[test]
+    fn completed_but_unhandled_results_stay_bounded_when_on_result_is_slow() {
+        // 受信側(on_result、実運用では DB 保存)が遅いとき、「run_one を完了したが
+        // まだ on_result に渡していない」件数(滞留)が無制限に増えないことを確認する。
+        // 容量なしチャネルだと、ワーカーは受信側を待たずに送り続けられるため、この
+        // 滞留が実行件数近くまで膨らむ(このテストを無制限チャネルの実装に対して
+        // 実行すると、後段の assert! が失敗することで確認できる)。
+        let cfg = SimConfig::default();
+        let host = ScriptHost::new(&cfg);
+        let script = donchian_sar_script(&host);
+        let dataset = deterministic_dataset(400);
+        let benchmarks: Vec<Benchmark> = Vec::new();
+        let jobs = 2usize;
+        // entry: min=10,max=60,step=2 -> 26 candidates。max_runs=20 < 26 なので
+        // サンプリングが働き、indices.len() == 20 になる。
+        let indices = select_indices(&script.params, 20, 42).unwrap();
+        assert_eq!(indices.len(), 20);
+
+        let completed = AtomicUsize::new(0);
+        let handed = AtomicUsize::new(0);
+        let max_gap = AtomicUsize::new(0);
+        let monitor_done = AtomicBool::new(false);
+        let on_worker_complete = || {
+            completed.fetch_add(1, Ordering::SeqCst);
+        };
+
+        let result = std::thread::scope(|scope| {
+            // completed と handed の差を on_result の sleep 中も含めて高頻度に観測する。
+            // on_result の呼び出し境界だけで観測すると、呼び出しの合間(sleep 中)に
+            // 積み上がる滞留を見逃すため、別スレッドでポーリングして最大値を記録する。
+            scope.spawn(|| {
+                while !monitor_done.load(Ordering::SeqCst) {
+                    let gap = completed
+                        .load(Ordering::SeqCst)
+                        .saturating_sub(handed.load(Ordering::SeqCst));
+                    max_gap.fetch_max(gap, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            });
+
+            let result = run_sweep_with_hook(
+                &dataset,
+                &host,
+                &script,
+                &benchmarks,
+                &cfg,
+                &indices,
+                jobs,
+                &mut |_record| {
+                    handed.fetch_add(1, Ordering::SeqCst);
+                    // DB 保存など、受信側がシミュレーション本体より遅いケースを模す。
+                    std::thread::sleep(Duration::from_millis(30));
+                    Ok(())
+                },
+                &on_worker_complete,
+            );
+            monitor_done.store(true, Ordering::SeqCst);
+            result
+        });
+
+        result.expect("run_sweep_with_hook must succeed");
+        assert_eq!(completed.load(Ordering::SeqCst), 20);
+        assert_eq!(handed.load(Ordering::SeqCst), 20);
+
+        let capacity = channel_capacity(jobs);
+        let observed_max_gap = max_gap.load(Ordering::SeqCst);
+        // 上限は capacity + jobs + 1。main が rx.recv() で1件取り出してから handed を
+        // 加算するまでの間に、send 待ちから解放されたワーカーが次の1件を完了させると、
+        // 理論上の滞留は capacity + jobs + 1 に達しうる(プリエンプション次第で起きる)。
+        let bound = capacity + jobs + 1;
+        assert!(
+            observed_max_gap <= bound,
+            "backlog of completed-but-unhandled results grew to {observed_max_gap}, which \
+             exceeds capacity({capacity}) + jobs({jobs}) + 1; unprocessed RunRecords are \
+             accumulating in memory faster than the slow consumer can drain them"
+        );
+    }
+
+    #[test]
+    fn run_sweep_returns_the_on_result_error_without_hanging_when_the_consumer_is_slow() {
+        // on_result が途中で Err を返した後も、main 側は容量ありチャネルでブロックして
+        // いるはずの残りのワーカーの送信を読み捨て続ける必要がある(読み捨てずに受信を
+        // 止めると、バッファが埋まったまま送信待ちのワーカーが永久にブロックしてハング
+        // する)。cargo test にデフォルトのタイムアウトは無いため、実行を別スレッドに
+        // 乗せて recv_timeout で待ち、ハングした場合はテスト自身が timeout で失敗する。
+        let (done_tx, done_rx) = mpsc::channel::<(Result<(), SimError>, usize)>();
+        std::thread::spawn(move || {
+            let cfg = SimConfig::default();
+            let host = ScriptHost::new(&cfg);
+            let script = donchian_sar_script(&host);
+            let dataset = deterministic_dataset(400);
+            let benchmarks: Vec<Benchmark> = Vec::new();
+            let indices = select_indices(&script.params, 20, 42).unwrap();
+            assert_eq!(indices.len(), 20);
+
+            let mut calls = 0usize;
+            let result = run_sweep(
+                &dataset,
+                &host,
+                &script,
+                &benchmarks,
+                &cfg,
+                &indices,
+                2,
+                &mut |_record| {
+                    calls += 1;
+                    // DB 保存など、受信側がシミュレーション本体より遅いケースを模す。
+                    std::thread::sleep(Duration::from_millis(20));
+                    if calls == 3 {
+                        Err(SimError::Args("stop after 3".to_string()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            // 呼び出しスレッドの外から結果と呼び出し回数の両方を検証したいので、
+            // タプルにして main テストスレッドへ送る。
+            let _ = done_tx.send((result, calls));
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok((Err(SimError::Args(message)), calls)) => {
+                assert_eq!(message, "stop after 3");
+                assert_eq!(
+                    calls, 3,
+                    "on_result must not be called at all once it has returned Err, \
+                     got {calls} calls"
+                );
+            }
+            Ok((other, calls)) => panic!(
+                "expected Err(SimError::Args(\"stop after 3\")), got {other:?} after {calls} calls"
+            ),
+            Err(_) => panic!(
+                "run_sweep did not return within 10s; it likely deadlocked on the bounded \
+                 channel after on_result returned Err"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_panicking_on_result_propagates_without_hanging() {
+        // on_result(main スレッド側)が panic したとき、thread::scope は panic を伝える前に
+        // 全ワーカーの join を待つ。rx が scope の外に残っていると、バッファ満杯で send 待ちの
+        // ワーカーが永久にブロックしてハングする。rx を scope のクロージャへ move していれば、
+        // unwind で rx が drop され send が Err を返してワーカーが抜け、panic が伝播する。
+        // 終了通知の送信端は panic すると送信されずに drop される(Disconnected になる)。
+        //
+        // 「チャネルが満杯 かつ 全ワーカーが送信待ちでブロックされている」飽和状態で panic
+        // させることで、panic 後の残ジョブ数やタイミングに依存せず、rx を move しない退行が
+        // 確実にハングとして現れる。固定時間の sleep ではこの状態を作れたことを保証できない
+        // ため、完了件数という状態そのもので待つ。
+        // completed は on_worker_complete(send 直前に呼ばれる)の総呼び出し回数。main が
+        // on_result 内で止まっている間に到達し得る最大値は次の合計で、これに達した時点で
+        // 飽和状態が成立する:
+        //   1        : main が recv 済みで on_result が保持中の 1 件
+        //   capacity : バッファに積まれた件数(満杯)
+        //   jobs     : 各ワーカーが 1 件ずつ保持して send 待ちの件数
+        let jobs = 2usize;
+        let capacity = channel_capacity(jobs);
+        let threshold = 1 + capacity + jobs;
+
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let cfg = SimConfig::default();
+            let host = ScriptHost::new(&cfg);
+            let script = donchian_sar_script(&host);
+            let dataset = deterministic_dataset(400);
+            let benchmarks: Vec<Benchmark> = Vec::new();
+            // threshold 件を完了させるのに十分な件数を投入する。
+            let indices = select_indices(&script.params, 20, 42).unwrap();
+            assert_eq!(indices.len(), 20);
+            assert!(
+                indices.len() > threshold,
+                "need more jobs ({}) than threshold ({threshold}) to reach saturation",
+                indices.len()
+            );
+
+            let completed = AtomicUsize::new(0);
+            let on_worker_complete = || {
+                completed.fetch_add(1, Ordering::SeqCst);
+            };
+
+            let _ = run_sweep_with_hook(
+                &dataset,
+                &host,
+                &script,
+                &benchmarks,
+                &cfg,
+                &indices,
+                jobs,
+                &mut |_record| {
+                    let deadline = Duration::from_secs(5);
+                    let start = std::time::Instant::now();
+                    while completed.load(Ordering::SeqCst) < threshold {
+                        let elapsed = start.elapsed();
+                        if elapsed >= deadline {
+                            let got = completed.load(Ordering::SeqCst);
+                            panic!(
+                                "timed out after {elapsed:?} waiting for {threshold} \
+                                 completions (1 held + capacity={capacity} + jobs={jobs}) \
+                                 to fill the channel and block all workers on send; only \
+                                 {got} completed, so the full-buffer/all-workers-blocked \
+                                 state was never reached"
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    panic!("on_result boom");
+                },
+                &on_worker_complete,
+            );
+            let _ = done_tx.send(());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "run_sweep did not return within 10s; it deadlocked after on_result panicked \
+                 (workers blocked on a full channel whose receiver was never dropped)"
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let payload = handle
+                    .join()
+                    .expect_err("the sweep thread must have panicked");
+                let message = panic_message(payload.as_ref());
+                assert!(
+                    message.contains("on_result boom"),
+                    "unexpected panic payload: {message:?}"
+                );
+            }
+            Ok(()) => panic!("the on_result panic was not propagated out of run_sweep"),
         }
     }
 
