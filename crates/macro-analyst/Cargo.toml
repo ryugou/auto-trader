@@ -2,6 +2,7 @@
 name = "auto-trader-macro-analyst"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 auto-trader-core = { workspace = true }
