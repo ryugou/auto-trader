@@ -339,6 +339,15 @@ pub struct BackfillReport {
     pub failed: Vec<String>,
 }
 
+/// GMO 公開 API の KLine エンドポイントが受け付ける最も古い `date`(spec 13 章)。
+///
+/// これより前の日付を渡すと API は空の失敗応答を返し続けるだけなので、`cli::run_backfill`
+/// は DB 接続より前にこの値で `--from` を検証し、`retry_delays`(2s/4s/8s)を無駄に
+/// 消費させない。値は `fetch.rs` のこの 1 箇所だけで定義し、他の場所に日付を直書きしない。
+pub fn gmo_kline_min_date() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2023, 10, 28).expect("2023-10-28 is a valid calendar date")
+}
+
 /// `from` から `to` までの各日付(両端を含む)について BID/ASK を取得し、
 /// 結合・検証して `sim_candles` へ保存する(spec 5.2 章)。
 ///
@@ -750,6 +759,14 @@ mod tests {
     }
 
     // ---- 取得規則の既定値 (spec 5.2) ----
+
+    #[test]
+    fn gmo_kline_min_date_is_2023_10_28() {
+        assert_eq!(
+            gmo_kline_min_date(),
+            NaiveDate::from_ymd_opt(2023, 10, 28).unwrap()
+        );
+    }
 
     #[test]
     fn new_client_uses_one_second_interval_and_2_4_8_second_retries() {

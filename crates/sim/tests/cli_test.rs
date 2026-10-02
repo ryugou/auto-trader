@@ -22,6 +22,7 @@ use auto_trader_sim::cli::{self, Cli, Command, SaveRunFn};
 use auto_trader_sim::config::SimConfig;
 use auto_trader_sim::data;
 use auto_trader_sim::error::SimError;
+use auto_trader_sim::fetch;
 use auto_trader_sim::script::{ParamSet, ScriptHost};
 use auto_trader_sim::series::Dataset;
 use auto_trader_sim::sweep::{self, RunRecord};
@@ -1009,6 +1010,54 @@ async fn backfill_with_from_after_to_fails_with_an_argument_error_before_connect
     assert!(
         log.contains("--from must not be after --to"),
         "expected the argument-validation error message in the logs, got: {log}"
+    );
+    assert!(
+        !log.contains("failed to connect to database"),
+        "argument validation must happen before any DB connection attempt, got: {log}"
+    );
+}
+
+// spec 13 章: `--from` が GMO kline API の受け付ける最も古い日付(2023-10-28)より前の場合、
+// 日付ごとに再試行(2s/4s/8s)を繰り返して失敗し続ける前に、引数の誤りとして DB 接続より前に
+// 拒否しなければならない。判定方法は `backfill_with_from_after_to_fails_with_an_argument_error_
+// before_connecting_to_the_database` と同じ: 接続できない database_url を渡し、(a) 終了コード
+// 1、(b) 引数エラーがログに出ること、(c) DB 接続を一度も試みていないことを確認する。
+#[tokio::test]
+async fn backfill_with_from_before_the_gmo_kline_min_date_fails_with_an_argument_error_before_connecting_to_the_database()
+ {
+    let min_date = fetch::gmo_kline_min_date();
+    let config_path = write_config(
+        "backfill-before-min-date",
+        "postgres://127.0.0.1:1/unreachable",
+        "",
+    );
+    let cli = Cli {
+        command: Command::Backfill {
+            from: min_date
+                .pred_opt()
+                .expect("gmo_kline_min_date is not NaiveDate::MIN"),
+            to: min_date,
+            json: false,
+        },
+    };
+
+    let writer = CapturingWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer.clone())
+        .with_ansi(false)
+        .finish();
+    let code = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        cli::run_with_config_path(cli, &config_path).await
+    };
+    std::fs::remove_file(&config_path).ok();
+
+    assert_eq!(code, 1);
+    let log = writer.contents();
+    assert!(
+        log.contains(&min_date.to_string()),
+        "expected the argument-validation error message to mention the oldest accepted date \
+         ({min_date}), got: {log}"
     );
     assert!(
         !log.contains("failed to connect to database"),

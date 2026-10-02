@@ -509,13 +509,17 @@ fn sweep_batch_config_json(sim: &SimConfig, max_runs: usize, seed: u64) -> serde
     value
 }
 
-/// `--jobs`(省略時は設定値)を実行件数以下に丸める。spec 11 章は「実行は `jobs` 本の
-/// スレッドで並列に行う」としているが、実行件数より多いスレッドを作っても、余った分は
-/// 即座に空振りして終了するだけなので、ここで実行件数以下に丸める。`run_count == 0` では
-/// `1` を返す(`select_indices` はパラメータが 0 個でも 1 件を返すため実際には起こらないが、
-/// 呼び出し側が 0 スレッドで動かす事態を避けるための下限)。
-fn effective_jobs(requested: usize, run_count: usize) -> usize {
-    requested.min(run_count.max(1))
+/// `--jobs`(省略時は設定値)を実行環境・実行件数に合わせて丸める(spec 11 章: 「スレッド数
+/// は、`jobs`、実行件数、実行環境で利用可能な並列数(`std::thread::available_parallelism`)
+/// のうち最小の値とし、1 を下回らない」)。
+///
+/// `requested`・`run_count` のどちらも実行件数・設定値から来る値で上限がないため、
+/// `available` で頭打ちにしないと(例: `--max-runs 1000000 --jobs 1000000`)
+/// `run_sweep` が実行環境のコア数を大きく超える OS スレッドを作ろうとして panic しうる。
+/// `available` は呼び出し側が `std::thread::available_parallelism()` から求めて渡す
+/// (取得失敗時は呼び出し側が WARN を出して `1` を渡す契約)。
+fn effective_jobs(requested: usize, run_count: usize, available: usize) -> usize {
+    requested.min(run_count).min(available).max(1)
 }
 
 fn format_utc_rfc3339(epoch_secs: i64) -> String {
@@ -579,6 +583,17 @@ async fn run_backfill(
     // 引数の誤りは DB 接続前に判定する(計画 Task 9: 引数の検証 → DB 接続)。
     if from > to {
         tracing::error!(from = %from, to = %to, "--from must not be after --to");
+        return 1;
+    }
+    let min_date = fetch::gmo_kline_min_date();
+    if from < min_date {
+        // この日付より前は GMO API が空の失敗応答を返し続けるだけで、日付ごとに
+        // retry_delays(2s/4s/8s)を無駄に消費する(spec 13 章)。DB 接続前に拒否する。
+        let message = format!(
+            "--from={from} is earlier than the oldest date the GMO kline API accepts \
+             ({min_date}); pass --from {min_date} or a later date"
+        );
+        tracing::error!(from = %from, min_date = %min_date, "{message}");
         return 1;
     }
     let prepared = match prepare(config_path).await {
@@ -1181,13 +1196,27 @@ pub async fn run_sweep_cmd_with_hooks(
     };
 
     let requested_jobs = jobs_override.unwrap_or(prepared.sim.jobs);
-    let jobs = effective_jobs(requested_jobs, indices_len);
+    // `available_parallelism()` の失敗(例: サンドボックス環境でのリソース問い合わせ拒否)は
+    // 実行自体を止める理由にならないため、WARN に落として `1`(spec 11 章の下限)で進める。
+    let available = match std::thread::available_parallelism() {
+        Ok(n) => n.get(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to determine available_parallelism; assuming 1 for --jobs clamping"
+            );
+            1
+        }
+    };
+    let jobs = effective_jobs(requested_jobs, indices_len, available);
     if jobs < requested_jobs {
         tracing::info!(
             requested_jobs,
             run_count = indices_len,
+            available,
             jobs,
-            "clamping --jobs down to the number of runs to avoid spawning unused worker threads"
+            "clamping --jobs down to the minimum of the requested value, the run count, and \
+             available_parallelism to avoid spawning unused or oversubscribed worker threads"
         );
     }
     let dataset = std::sync::Arc::new(dataset);
@@ -1828,22 +1857,32 @@ mod tests {
     }
 
     #[test]
-    fn effective_jobs_keeps_the_requested_value_when_it_is_below_the_run_count() {
-        assert_eq!(effective_jobs(2, 5), 2);
+    fn effective_jobs_keeps_the_requested_value_when_it_is_the_smallest() {
+        assert_eq!(effective_jobs(2, 10, 8), 2);
     }
 
     #[test]
-    fn effective_jobs_keeps_the_requested_value_when_it_equals_the_run_count() {
-        assert_eq!(effective_jobs(5, 5), 5);
+    fn effective_jobs_clamps_to_available_parallelism_when_it_is_the_smallest() {
+        assert_eq!(effective_jobs(16, 10, 8), 8);
     }
 
     #[test]
-    fn effective_jobs_clamps_down_to_the_run_count_when_the_requested_value_is_larger() {
-        assert_eq!(effective_jobs(64, 3), 3);
+    fn effective_jobs_clamps_to_the_run_count_when_it_is_the_smallest() {
+        assert_eq!(effective_jobs(16, 3, 8), 3);
+    }
+
+    #[test]
+    fn effective_jobs_returns_one_when_requested_is_zero() {
+        assert_eq!(effective_jobs(0, 5, 8), 1);
     }
 
     #[test]
     fn effective_jobs_returns_one_when_the_run_count_is_zero() {
-        assert_eq!(effective_jobs(4, 0), 1);
+        assert_eq!(effective_jobs(4, 0, 8), 1);
+    }
+
+    #[test]
+    fn effective_jobs_returns_one_when_available_parallelism_is_zero() {
+        assert_eq!(effective_jobs(4, 10, 0), 1);
     }
 }

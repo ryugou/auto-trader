@@ -396,15 +396,16 @@ pub fn run_sweep(
             match rx.recv() {
                 Ok(record) => {
                     received += 1;
-                    if final_err.is_none()
-                        && let Err(e) = on_result(record)
-                    {
-                        final_err = Some(e);
-                        queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled = true;
-                    }
                     // final_err が Some の間は、既に走っていたワーカーが送ってくる残りの
                     // 結果を on_result に渡さずに読み捨てる(「以後 on_result を呼ばない」
                     // という契約を、既着手の実行の完了を待たずに満たすため)。
+                    if final_err.is_some() {
+                        continue;
+                    }
+                    if let Err(e) = on_result(record) {
+                        final_err = Some(e);
+                        queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled = true;
+                    }
                 }
                 Err(_) => {
                     // 全ワーカーが終了してチャンネルが閉じた(cancel か panic による早期終了)。

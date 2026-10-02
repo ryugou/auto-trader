@@ -358,7 +358,7 @@ fn on_bar(ctx, p) {
 - 組み合わせには、パラメータ名の辞書順に並べた混合基数の添字を付ける。辞書順で最後のパラメータを最下位の桁とする。全組み合わせ数は桁あふれを検査する演算で求める。全組み合わせ数が 2^63 を超えるスクリプトの探索は、引数の誤りとして拒否し、パラメータの範囲を狭めるか刻みを粗くするよう求めるメッセージを出す。
 - 全組み合わせ数が `max_runs` 以下なら全件を実行する。
 - 全組み合わせ数が `max_runs` を超える場合は、`default` の組み合わせを必ず含める。残りは、`default` の添字を除いた添字の列から、`rand::seq::index::sample(&mut ChaCha8Rng::seed_from_u64(seed), 全組み合わせ数 - 1, max_runs - 1)` で抽出する。
-- 実行は `jobs` 本のスレッドで並列に行う。
+- 実行は `jobs` 本のスレッドで並列に行う。スレッド数は、`jobs`、実行件数、実行環境で利用可能な並列数（`std::thread::available_parallelism`）のうち最小の値とし、1 を下回らない。
 
 ## 12. 保存
 
@@ -447,7 +447,7 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 | サブコマンド | 引数 | 動作 |
 | --- | --- | --- |
 | `migrate` | なし | `migrations/` のマイグレーションを適用する |
-| `backfill` | `--from`、`--to` | 5.2 の取得を、`from` から `to` までの各日付（両端を含む）について行う。日付は API の `date` としてそのまま渡す |
+| `backfill` | `--from`、`--to` | 5.2 の取得を、`from` から `to` までの各日付（両端を含む）について行う。日付は API の `date` としてそのまま渡す。`from` が 2023-10-28（API が受け付ける最も古い日付）より前の場合は、引数の誤りとする |
 | `benchmark` | `--from`、`--to` | `thetas_pips` の各値について、波の数、理論値、実質上限を出力する |
 | `run` | `--script <path>`、`--params <json>`、`--from`、`--to` | スクリプトを登録し、シミュレーションを 1 回実行して保存し、指標と所要時間を出力する |
 | `sweep` | `--script <path>`、`--from`、`--to`、`--max-runs <n>`、`--seed <n>`、`--jobs <n>` | 11 章の探索を実行して保存し、`total_pips` の上位 10 件と所要時間を出力する |
