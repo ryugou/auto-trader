@@ -147,7 +147,7 @@ CREATE TABLE sim_candles (
 
 キャッシュ:
 
-- `(時間足, 指標, period, 丸めた mult)` をキーとして系列全体を計算し、同じデータを使う複数のシミュレーションで共有する。1 つのキーの計算は 1 度だけ行う。
+- `(時間足, 指標, period, 丸めた mult)` をキーとして系列全体を計算し、同じデータを使う複数のシミュレーションで共有する。キャッシュに保持されている間、同じキーの計算は 1 度だけ行う。同時に要求された場合も 1 回にまとめる。破棄されたキーが再び要求された場合は、再計算する。
 - 1 回のシミュレーションが要求できるキーの種類は 64 までとする。65 種類目を要求した時点で実行時エラーとする。この判定は、そのキーが既にキャッシュにあるかどうかに依存しない。
 - キャッシュの合計サイズが `indicator_cache_mb` を超えたら、最後に使われてから最も時間がたった系列から破棄する。破棄は速度にだけ影響し、結果には影響しない。
 
@@ -189,7 +189,7 @@ CREATE TABLE sim_candles (
 ```rhai
 fn params() {
     #{
-        entry: #{ min: 10, max: 60, step: 2, default: 20 },
+        entry: #{ min: 10, max: 60, step: 2, "default": 20 },
     }
 }
 
@@ -208,7 +208,7 @@ fn on_bar(ctx, p) {
 - サイズは 32 KiB 以下とする。
 - 引数 0 個の `params` と、引数 2 個の `on_bar` が定義されている。判定は `ast.iter_functions()` の関数名と引数の数で行う。
 - トップレベルに書かれた関数定義以外の文は、実行しない。
-- `params()` は、パラメータ名から `#{min, max, step, default}` へのマップを返す。パラメータがない場合は `#{}` を返す。
+- `params()` は、パラメータ名から `#{min, max, step, "default"}` へのマップを返す。パラメータがない場合は `#{}` を返す。`default` は Rhai の予約語のため、キーは引用符付きの `"default"` で書く。
 - 4 つの値は、パラメータごとにすべて整数またはすべて小数とする。
 - `min <= default <= max`、`step > 0`、パラメータ数は 12 以下とする。
 - `default` は `min + k × step`（`k` は 0 以上の整数）と一致する。小数の場合は `1e-9` の差を許容する。
@@ -252,6 +252,7 @@ fn on_bar(ctx, p) {
 - エンジンは `Engine::new_raw()` を基点とし、`ArithmeticPackage`、`LogicPackage`、`BasicMathPackage`、`BasicIteratorPackage`、`BasicArrayPackage`、`BasicMapPackage`、`BasicStringPackage` だけを登録する。`LanguageCorePackage`、`BasicTimePackage`、`BasicFnPackage`、`BasicBlobPackage`、`DebuggingPackage` は登録しない。
 - モジュールの解決には `DummyModuleResolver` を設定し、`import` を失敗させる。
 - `print` と `debug` のハンドラは設定しない。
+- `eval` は `Engine::disable_symbol("eval")` で無効にする。
 - 上限: `on_bar` 1 回あたりの演算数は `max_operations_per_bar`、1 回のシミュレーションの演算数の合計は `max_operations_per_run`、呼び出しの深さは 16、文字列長は 4,096、配列長は 1,024、マップの要素数は 256 とする。
 - 演算数の合計は、`Engine::on_progress` が渡す呼び出しごとの累計を、シミュレーションごとの合計へ加算して数える。合計が上限を超えたら、その呼び出しを打ち切る。1 回のシミュレーションは 1 つのスレッド上で最初から最後まで実行する。
 
@@ -354,10 +355,10 @@ fn on_bar(ctx, p) {
 1 つのスクリプトについて、`params()` の範囲から組み合わせを作り、それぞれをシミュレーションする。
 
 - 各パラメータの候補値は `min + k × step`（`k` は 0 以上の整数）のうち `max` 以下のものとする。小数の場合は `max + 1e-9` 以下と判定する。
-- 組み合わせには、パラメータ名の辞書順に並べた混合基数の添字を付ける。辞書順で最後のパラメータを最下位の桁とする。全組み合わせ数は `u128` の飽和演算で求め、2^63 を上限とする。
+- 組み合わせには、パラメータ名の辞書順に並べた混合基数の添字を付ける。辞書順で最後のパラメータを最下位の桁とする。全組み合わせ数は桁あふれを検査する演算で求める。全組み合わせ数が 2^63 を超えるスクリプトの探索は、引数の誤りとして拒否し、パラメータの範囲を狭めるか刻みを粗くするよう求めるメッセージを出す。
 - 全組み合わせ数が `max_runs` 以下なら全件を実行する。
 - 全組み合わせ数が `max_runs` を超える場合は、`default` の組み合わせを必ず含める。残りは、`default` の添字を除いた添字の列から、`rand::seq::index::sample(&mut ChaCha8Rng::seed_from_u64(seed), 全組み合わせ数 - 1, max_runs - 1)` で抽出する。
-- 実行は `jobs` 本のスレッドで並列に行う。
+- 実行は `jobs` 本のスレッドで並列に行う。スレッド数は、`jobs`、実行件数、実行環境で利用可能な並列数（`std::thread::available_parallelism`）のうち最小の値とし、1 を下回らない。
 
 ## 12. 保存
 
@@ -446,7 +447,7 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 | サブコマンド | 引数 | 動作 |
 | --- | --- | --- |
 | `migrate` | なし | `migrations/` のマイグレーションを適用する |
-| `backfill` | `--from`、`--to` | 5.2 の取得を、`from` から `to` までの各日付（両端を含む）について行う。日付は API の `date` としてそのまま渡す |
+| `backfill` | `--from`、`--to` | 5.2 の取得を、`from` から `to` までの各日付（両端を含む）について行う。日付は API の `date` としてそのまま渡す。`from` が 2023-10-28（API が受け付ける最も古い日付）より前の場合は、引数の誤りとする |
 | `benchmark` | `--from`、`--to` | `thetas_pips` の各値について、波の数、理論値、実質上限を出力する |
 | `run` | `--script <path>`、`--params <json>`、`--from`、`--to` | スクリプトを登録し、シミュレーションを 1 回実行して保存し、指標と所要時間を出力する |
 | `sweep` | `--script <path>`、`--from`、`--to`、`--max-runs <n>`、`--seed <n>`、`--jobs <n>` | 11 章の探索を実行して保存し、`total_pips` の上位 10 件と所要時間を出力する |

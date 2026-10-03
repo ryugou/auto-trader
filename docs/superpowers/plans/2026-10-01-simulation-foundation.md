@@ -554,10 +554,10 @@ pub fn evaluate(eval_bars: &[Bar], outcome: &SimOutcome, benchmarks: &[Benchmark
 ```rust
 // sweep.rs
 pub fn candidate_count(spec: &ParamSpec) -> u64;
-pub fn total_combinations(specs: &[ParamSpec]) -> u128;            // 飽和演算、上限 2^63。パラメータ 0 個なら 1
-pub fn default_index(specs: &[ParamSpec]) -> u128;
+pub fn total_combinations(specs: &[ParamSpec]) -> Result<u128, SimError>; // 桁あふれを検査する。2^63 を超えたら SimError::Args。パラメータ 0 個なら 1
+pub fn default_index(specs: &[ParamSpec]) -> Result<u128, SimError>;        // total_combinations と同じ検査を行う
 pub fn combination_at(specs: &[ParamSpec], index: u128) -> ParamSet;
-pub fn select_indices(specs: &[ParamSpec], max_runs: usize, seed: u64) -> Vec<u128>; // 先頭は default_index
+pub fn select_indices(specs: &[ParamSpec], max_runs: usize, seed: u64) -> Result<Vec<u128>, SimError>; // 先頭は default_index。total_combinations と同じ検査を行う
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRecord { pub params: ParamSet, pub status: RunStatus, pub metrics: Option<Metrics> }
@@ -589,7 +589,7 @@ pub fn params_json(params: &ParamSet) -> serde_json::Value;
   - パラメータ 0 個で `total_combinations == 1`、`combination_at(&[], 0)` が空の `ParamSet` になる。
   - 2 パラメータ（`a` が 3 個、`b` が 4 個）で `total == 12`。`combination_at` の添字 0 が両方 `min`、添字 1 が `b` だけ 1 つ進み、添字 4 が `a` が 1 つ進んだ値になる（辞書順で最後のパラメータが最下位の桁）。
   - `default_index` が `default_params()` と同じ組み合わせを指す。
-  - 12 個のパラメータがそれぞれ 1001 個の候補を持つ場合に、`total_combinations` が `1 << 63` で頭打ちになり、panic しない。
+  - 12 個のパラメータがそれぞれ 1001 個の候補を持つ場合と、12 個の小数パラメータがそれぞれ 10001 個の候補を持つ場合（積が `u128` を超える）に、`total_combinations`、`default_index`、`select_indices` が panic せず `SimError::Args` を返す。9 個のパラメータがそれぞれ 128 個の候補を持つ場合（積がちょうど 2^63）は成功し、そこへ候補 2 個のパラメータを 1 つ足した場合（積が 2^64）は `SimError::Args` になる。
 - [ ] **Step 2:** 抽出の失敗するテストを書く。
   - `total <= max_runs` で、全添字が 1 回ずつ返る。先頭が `default_index` である。
   - `total = 27`、`max_runs = 26` で、26 件が返り、重複がなく、先頭が `default_index` である。

@@ -12,6 +12,7 @@ members = [
     "crates/backtest",
     "crates/notify",
     "crates/integration-tests",
+    "crates/sim",
 ]
 
 [workspace.package]
@@ -54,12 +55,20 @@ auto-trader-vegapunk = { path = "crates/vegapunk-client" }
 auto-trader-macro-analyst = { path = "crates/macro-analyst" }
 auto-trader-backtest = { path = "crates/backtest" }
 auto-trader-notify = { path = "crates/notify" }
+auto-trader-sim = { path = "crates/sim" }
 
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 governor = "0.6"
 urlencoding = "2"
+
+# sim crate (crates/sim, package auto-trader-sim)
+rhai = { version = "1", features = ["sync"] }
+rayon = "1"
+rand = "0.9"
+rand_chacha = "0.9"
+clap = { version = "4", features = ["derive"] }
 
 # test helpers (reserved for PR 2+)
 wiremock = "0.6"
