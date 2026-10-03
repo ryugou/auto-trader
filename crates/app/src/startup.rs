@@ -309,6 +309,17 @@ pub async fn register_strategies(
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
+            name if name.starts_with("fx_new") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::fx_new::FxNewV1::new(
+                        sc.name.clone(),
+                        pairs,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
             other => {
                 tracing::warn!("unknown strategy: {other}, skipping");
             }
