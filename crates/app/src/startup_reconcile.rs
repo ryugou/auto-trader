@@ -10,8 +10,9 @@
 
 use auto_trader_core::types::{Direction, ExitReason};
 use auto_trader_db::trades;
-use auto_trader_market::exchange_api::ExchangeApi;
+use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
 use auto_trader_market::price_store::{FeedKey, PriceStore};
+use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ pub async fn reconcile_live_accounts_at_startup(
     accounts: &[auto_trader_db::trading_accounts::TradingAccount],
     apis: &HashMap<auto_trader_core::types::Exchange, Arc<dyn ExchangeApi>>,
     price_store: Arc<PriceStore>,
+    notifier: Arc<Notifier>,
 ) -> anyhow::Result<()> {
     for account in accounts.iter().filter(|a| a.account_type == "live") {
         let exchange: auto_trader_core::types::Exchange =
@@ -43,7 +45,7 @@ pub async fn reconcile_live_accounts_at_startup(
             );
         };
 
-        reconcile_one_account(pool, account, api.as_ref(), &price_store).await?;
+        reconcile_one_account(pool, account, api.as_ref(), &price_store, &notifier).await?;
     }
     Ok(())
 }
@@ -87,6 +89,7 @@ async fn reconcile_one_account(
     account: &auto_trader_db::trading_accounts::TradingAccount,
     api: &dyn ExchangeApi,
     price_store: &PriceStore,
+    notifier: &Notifier,
 ) -> anyhow::Result<()> {
     let db_trades = trades::list_open_or_closing_by_account(pool, account.id).await?;
     if db_trades.is_empty() {
@@ -189,22 +192,85 @@ async fn reconcile_one_account(
         for trade in trades {
             match (trade.status.as_str(), exchange_has_matching) {
                 ("open", true) => {
-                    tracing::info!(
-                        "startup reconcile: trade {} consistent (DB=open, exchange=open)",
-                        trade.id
-                    );
+                    // 正常ケース。ただし stop_order_id があるのに取引所側で
+                    // 消えている (Gone) 場合、ポジションは無防備なので運用者に
+                    // SystemAlert を出す (Phase 4 / Task 4.6)。
+                    if let Some(stop_id) = &trade.stop_order_id {
+                        match api.stop_order_status(&trade.pair.0, stop_id).await {
+                            Ok(StopOrderStatus::Gone) => {
+                                tracing::error!(
+                                    "startup reconcile: trade {} has an open position but its stop \
+                                     order {stop_id} is GONE — position is UNPROTECTED",
+                                    trade.id
+                                );
+                                let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
+                                    title: "stop order lost".to_string(),
+                                    account_name: account.name.clone(),
+                                    exchange: trade.exchange,
+                                    body: format!(
+                                        "trade {} on {} has an open exchange position but its SL \
+                                         stop order ({stop_id}) is gone (canceled/expired). The \
+                                         position is unprotected — replace the stop or close manually.",
+                                        trade.id, trade.pair
+                                    ),
+                                });
+                                if let Err(e) = notifier.send(ev).await {
+                                    tracing::warn!("stop-order-lost alert send failed: {e}");
+                                }
+                            }
+                            Ok(_) => {
+                                tracing::info!(
+                                    "startup reconcile: trade {} consistent (DB=open, exchange=open, stop present)",
+                                    trade.id
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "startup reconcile: stop_order_status failed for trade {}: {e}",
+                                    trade.id
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::info!(
+                            "startup reconcile: trade {} consistent (DB=open, exchange=open)",
+                            trade.id
+                        );
+                    }
                 }
                 ("open", false) => {
-                    tracing::warn!(
-                        "startup reconcile: trade {} DB=open but exchange has no matching position; \
-                         closing with best-effort exit price",
-                        trade.id
-                    );
-                    tracing::warn!(
-                        "startup reconcile: trade {} force-closed (reason=orphan)",
-                        trade.id
-                    );
-                    force_close_db_only(pool, trade, price_store).await?;
+                    // 取引所に position が無い。stop_order_id があれば、まず
+                    // 取引所側ストップが Executed になっていないか確認する。
+                    // Executed なら正確な約定価格/手数料で SlHit close する
+                    // (従来の best-effort reconciled より正確)。
+                    if let Some((price, commission)) = stop_executed_fill(api, trade).await {
+                        tracing::info!(
+                            "startup reconcile: trade {} closed by exchange stop at {price}; \
+                             recording as sl_hit",
+                            trade.id
+                        );
+                        close_reconciled_with(pool, trade, price, ExitReason::SlHit, commission)
+                            .await?;
+                    } else {
+                        tracing::warn!(
+                            "startup reconcile: trade {} DB=open but exchange has no matching position; \
+                             closing with best-effort exit price",
+                            trade.id
+                        );
+                        tracing::warn!(
+                            "startup reconcile: trade {} force-closed (reason=orphan)",
+                            trade.id
+                        );
+                        let exit_price = best_effort_exit_price(price_store, trade).await;
+                        close_reconciled_with(
+                            pool,
+                            trade,
+                            exit_price,
+                            ExitReason::Reconciled,
+                            Decimal::ZERO,
+                        )
+                        .await?;
+                    }
                 }
                 ("closing", true) => {
                     tracing::warn!(
@@ -225,7 +291,15 @@ async fn reconcile_one_account(
                         "startup reconcile: trade {} force-closed (reason=phase3)",
                         trade.id
                     );
-                    force_close_db_only(pool, trade, price_store).await?;
+                    let exit_price = best_effort_exit_price(price_store, trade).await;
+                    close_reconciled_with(
+                        pool,
+                        trade,
+                        exit_price,
+                        ExitReason::Reconciled,
+                        Decimal::ZERO,
+                    )
+                    .await?;
                 }
                 (other, _) => {
                     // Should never happen — list_open_or_closing_by_account filters to
@@ -242,14 +316,13 @@ async fn reconcile_one_account(
     Ok(())
 }
 
-async fn force_close_db_only(
-    pool: &PgPool,
-    trade: &auto_trader_core::types::Trade,
+/// Best-effort exit price: PriceStore mid, fallback to entry_price.
+async fn best_effort_exit_price(
     price_store: &PriceStore,
-) -> anyhow::Result<()> {
-    // Best-effort exit price: PriceStore mid, fallback to entry_price.
+    trade: &auto_trader_core::types::Trade,
+) -> Decimal {
     let feed_key = FeedKey::new(trade.exchange, trade.pair.clone());
-    let exit_price = match price_store.latest_bid_ask(&feed_key).await {
+    match price_store.latest_bid_ask(&feed_key).await {
         Some((bid, ask)) => (bid + ask) / Decimal::from(2),
         None => {
             tracing::warn!(
@@ -261,8 +334,38 @@ async fn force_close_db_only(
             );
             trade.entry_price
         }
-    };
+    }
+}
 
+/// 取引所側ストップの状態を確認し、`Executed` なら `(約定価格, 手数料)` を返す。
+/// それ以外 (Active / Gone / stop_order_id 無し / API エラー) は `None`。
+async fn stop_executed_fill(
+    api: &dyn ExchangeApi,
+    trade: &auto_trader_core::types::Trade,
+) -> Option<(Decimal, Decimal)> {
+    let stop_id = trade.stop_order_id.as_ref()?;
+    match api.stop_order_status(&trade.pair.0, stop_id).await {
+        Ok(StopOrderStatus::Executed { price, commission }) => Some((price, commission)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                "startup reconcile: stop_order_status failed for trade {}: {e}",
+                trade.id
+            );
+            None
+        }
+    }
+}
+
+/// `trade` を確定した exit_price / exit_reason で close する共通ルーチン。
+/// `extra_fees` は取引所側ストップ約定の手数料など、close 時に fees へ積む額。
+async fn close_reconciled_with(
+    pool: &PgPool,
+    trade: &auto_trader_core::types::Trade,
+    exit_price: Decimal,
+    exit_reason: ExitReason,
+    extra_fees: Decimal,
+) -> anyhow::Result<()> {
     let pnl = match trade.direction {
         Direction::Long => (exit_price - trade.entry_price) * trade.quantity,
         Direction::Short => (trade.entry_price - exit_price) * trade.quantity,
@@ -270,7 +373,12 @@ async fn force_close_db_only(
     // Truncate pnl to whole yen.
     let pnl = pnl.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
 
-    trades::close_trade_reconciled(pool, trade.id, exit_price, pnl, ExitReason::Reconciled).await?;
+    // 取引所側ストップ約定の手数料を fees に積む (正確な台帳記録)。
+    if extra_fees != Decimal::ZERO {
+        trades::add_fees(pool, trade.id, extra_fees).await?;
+    }
+
+    trades::close_trade_reconciled(pool, trade.id, exit_price, pnl, exit_reason).await?;
 
     // Update daily_summary so the reconciled close is reflected in
     // aggregated stats — the normal close path goes through the trade
@@ -392,14 +500,16 @@ mod reconcile_tests {
     // MockExchangeApi
     // -----------------------------------------------------------------------
 
-    /// Minimal mock for `ExchangeApi`. Only `get_positions` is implemented;
-    /// all other methods panic (reconciler never calls them).
+    /// Minimal mock for `ExchangeApi`. `get_positions` + `stop_order_status`
+    /// are implemented; all other methods panic (reconciler never calls them).
     struct MockExchangeApi {
         /// Map from pair → positions to return once get_positions_failures is
         /// exhausted.
         positions: HashMap<String, Vec<ExchangePosition>>,
         /// How many times `get_positions` should fail before succeeding.
         get_positions_failures_remaining: AtomicU32,
+        /// Response for `stop_order_status` (None → method bails).
+        stop_status: Option<StopOrderStatus>,
     }
 
     impl MockExchangeApi {
@@ -407,8 +517,24 @@ mod reconcile_tests {
             Arc::new(Self {
                 positions,
                 get_positions_failures_remaining: AtomicU32::new(failures),
+                stop_status: None,
             })
         }
+
+        fn new_with_stop(
+            positions: HashMap<String, Vec<ExchangePosition>>,
+            stop_status: StopOrderStatus,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                positions,
+                get_positions_failures_remaining: AtomicU32::new(0),
+                stop_status: Some(stop_status),
+            })
+        }
+    }
+
+    fn test_notifier() -> Arc<Notifier> {
+        Arc::new(Notifier::new_disabled())
     }
 
     #[async_trait]
@@ -474,6 +600,16 @@ mod reconcile_tests {
         ) -> anyhow::Result<Option<String>> {
             Ok(None)
         }
+
+        async fn stop_order_status(
+            &self,
+            _product_code: &str,
+            _stop_order_id: &str,
+        ) -> anyhow::Result<StopOrderStatus> {
+            self.stop_status
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("MockExchangeApi: stop_status not configured"))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -534,6 +670,7 @@ mod reconcile_tests {
             status: TradeStatus::Open,
             max_hold_until: None,
             exchange_position_id: None,
+            stop_order_id: None,
         };
         sqlx::query(
             r#"INSERT INTO trades
@@ -568,6 +705,23 @@ mod reconcile_tests {
         .execute(pool)
         .await
         .expect("seed_open_trade failed");
+        trade
+    }
+
+    /// seed_open_trade then set its `stop_order_id` (exchange-side SL present).
+    async fn seed_open_trade_with_stop(
+        pool: &PgPool,
+        account_id: Uuid,
+        stop_order_id: &str,
+    ) -> Trade {
+        let mut trade = seed_open_trade(pool, account_id).await;
+        sqlx::query("UPDATE trades SET stop_order_id = $1 WHERE id = $2")
+            .bind(stop_order_id)
+            .bind(trade.id)
+            .execute(pool)
+            .await
+            .expect("set stop_order_id failed");
+        trade.stop_order_id = Some(stop_order_id.to_string());
         trade
     }
 
@@ -615,7 +769,7 @@ mod reconcile_tests {
         let apis = build_apis(api);
         let price_store = empty_price_store();
 
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store)
+        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
             .await
             .expect("reconcile must succeed");
 
@@ -647,7 +801,7 @@ mod reconcile_tests {
         let apis = build_apis(api);
         let price_store = empty_price_store();
 
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store)
+        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
             .await
             .expect("reconcile must succeed");
 
@@ -669,6 +823,57 @@ mod reconcile_tests {
             exit_reason, "reconciled",
             "exit_reason must be 'reconciled' for startup-reconcile force-close"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // S2-2b: DB=open, exchange empty, stop Executed → close as sl_hit at
+    //        the exact stop fill price (more accurate than best-effort).
+    // -----------------------------------------------------------------------
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn db_open_exchange_empty_stop_executed_closes_as_sl_hit(pool: PgPool) {
+        let account_id = seed_live_account(&pool).await;
+        let trade = seed_open_trade_with_stop(&pool, account_id, "stop-xyz").await;
+
+        // Exchange has no position, but the SL stop order executed at 11_100_000.
+        let api = MockExchangeApi::new_with_stop(
+            HashMap::new(),
+            StopOrderStatus::Executed {
+                price: dec!(11_100_000),
+                commission: dec!(50),
+            },
+        );
+        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let accounts = vec![account];
+        let apis = build_apis(api);
+        let price_store = empty_price_store();
+
+        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
+            .await
+            .expect("reconcile must succeed");
+
+        let row: (String, Option<String>, Option<Decimal>, Decimal) = sqlx::query_as(
+            "SELECT status, exit_reason, exit_price, fees FROM trades WHERE id = $1",
+        )
+        .bind(trade.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "closed");
+        assert_eq!(
+            row.1.as_deref(),
+            Some("sl_hit"),
+            "stop-executed reconcile records exit_reason=sl_hit"
+        );
+        assert_eq!(
+            row.2,
+            Some(dec!(11_100_000)),
+            "exit_price is the exact stop fill price"
+        );
+        assert_eq!(row.3, dec!(50), "commission is added to fees");
     }
 
     // -----------------------------------------------------------------------
@@ -694,7 +899,7 @@ mod reconcile_tests {
         let apis = build_apis(api);
         let price_store = empty_price_store();
 
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store)
+        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
             .await
             .expect("reconcile must succeed");
 
@@ -729,7 +934,7 @@ mod reconcile_tests {
         let apis = build_apis(api);
         let price_store = empty_price_store();
 
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store)
+        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
             .await
             .expect("reconcile must succeed");
 
@@ -781,7 +986,14 @@ mod reconcile_tests {
         let apis = build_apis(api);
         let price_store = empty_price_store();
 
-        let result = reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store).await;
+        let result = reconcile_live_accounts_at_startup(
+            &pool,
+            &accounts,
+            &apis,
+            price_store,
+            test_notifier(),
+        )
+        .await;
 
         assert!(
             result.is_err(),

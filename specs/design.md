@@ -37,7 +37,8 @@ OANDA API を使った FX 自動売買ツール。短期ルールベース戦略
 ### 通貨ペア
 
 - 動的に追加・変更可能。戦略ごとに対象ペアを設定
-- USD/JPY に限定しない。時間帯による流動性も考慮
+- 時間帯による流動性も考慮
+- **JPY 建てペアに限定**: 口座は全て JPY 建てで、position_sizer / margin は `price × qty` を JPY 金額として扱う。quote 通貨が JPY でないペア（`EUR_USD` 等）は証拠金・維持率を誤算するため、`AppConfig::validate`（`ensure_jpy_quote`）が起動時に拒否する。cross-currency 換算を実装するまでこのガードは外さない
 - **表記の正規化**: 内部表現は OANDA API 形式（`USD_JPY`）で統一する。Vegapunk 投入時やダッシュボード表示時に必要に応じて変換する。DB にも `USD_JPY` 形式で保存する
 
 ## アーキテクチャ
@@ -143,6 +144,68 @@ trait OrderExecutor {
 - ヒット時は `OrderExecutor::close_position()` を呼び、TradeEvent（Closed）を emit
 - SL/TP の価格は戦略がシグナル生成時に決定する。executor は判定と決済のみを担当
 
+**取引所側ストップ注文（live の一次防衛、Phase 4）:**
+
+live 口座では、**取引所側の逆指値（ストップ）注文が SL の一次防衛**であり、アプリの tick 監視は二次（バックアップ）として残す。プロセスが死んでいても取引所側で SL が執行される。paper（dry_run）は従来どおりアプリ側シミュレーションが正で、取引所側ストップは置かない。
+
+- **open 時**: `ExchangeApi::place_stop_order`（bitFlyer: `sendparentorder` SIMPLE/STOP、GMO: `closeOrder` executionType=STOP）で SL を発注し、`trades.stop_order_id` に保存する。trigger price は `PositionSizer::round_trigger_price` で取引所 tick に丸める（Long=切り上げ / Short=切り捨て = 早く発火する安全側）。**発注失敗は open を失敗させない**（ポジションは既に成立）。error ログ + `OrderFailed` 通知を出し、`stop_order_id` は NULL のまま（アプリ側 SL 監視が唯一の防衛になる）。
+- **close 時**: 成行 close の前に**必ず `stop_order_status` を確認**する。`Executed` ならその約定価格でクローズ記録し新規注文を出さない（二重発注＝反対ポジション生成を防ぐ）。`Active` なら cancel してから成行。cancel 失敗時は status を再確認し、不明なら close を中断（stale-lock 自己回復に委ねる）。
+- **発火検知ジョブ**: 60 秒間隔で live open trade（`stop_order_id IS NOT NULL`）の `stop_order_status` を確認し、`Executed` なら `closer::close_trade(.., SlHit, ..)` で確定する（fill_close の Executed ガードにより二重発注にならない）。
+- **startup reconcile**: 「DB=open だが取引所に position 無し」の時、`stop_order_id` があれば `stop_order_status` を確認し、`Executed` なら exit_price=約定価格 / exit_reason=`SlHit` / fees に commission 加算で close する（従来の best-effort reconciled より正確）。「DB=open かつ取引所に position あり」で stop が `Gone` の場合は SystemAlert（"stop order lost — position unprotected"）を出す。
+
+**Kill Switch（日次損失ロスカット）:**
+
+口座単位で当日の実現損失が閾値を超えたら、新規エントリーを一定時間停止する安全装置。live 切り替え前提の必須ガード。
+
+- **日次区切りは JST**: `risk_gate::jst_day_start(now)` が JST (UTC+9) の当日 00:00 を UTC で返す。集計はこの境界以降のクローズトレードのみ対象。
+- **実現ベース**: `trades::realized_net_since(account_id, since)` が `SUM(pnl_amount - fees)`（`status='closed'` かつ `exit_at >= since`）を返す。オープンポジションの含み損は含まない。
+- **判定は pure 関数**: `risk_gate::eval_daily_loss(day_net, day_start_balance, limit_pct)`。`day_net <= -(day_start_balance × limit_pct)` で Reject。`day_start_balance = current_balance - day_net`（現在残高は当日実現損益を織り込み済みのため差し引いて開始残高を復元）。`day_start_balance <= 0` は判定不能で Pass。
+- **設定** (`[risk]`): `daily_loss_limit_pct`（デフォルト 0.05 = 5%、`(0,1)` の範囲でバリデーション）、`halt_hours`（デフォルト 24、`> 0`）。
+- **fail-closed**: エントリー経路（`main.rs` の signal executor）で、`get_halt` / `realized_net_since` が失敗した場合はその口座の signal を skip する（損失判定できない口座に発注させない）。
+- **発火時**: `trading_accounts.halted_until` を `now + halt_hours` に、`halt_reason` を理由文字列にセットし、Slack へ `OrderFailed` 通知（fire-and-forget）を出して signal を skip。`halted_until` が未来の間、新規エントリーは全て拒否される。
+- **close は常に許可**: halt は新規エントリーのみを止める。既存ポジションの SL/TP・維持率・戦略 exit によるクローズはブロックしない。
+- **手動解除**: `halted_until` の経過を待つか、運用者が SQL で解除する。
+  ```sql
+  UPDATE trading_accounts SET halted_until = NULL WHERE name = '<account_name>';
+  ```
+
+**サイジング安全バッファ:**
+
+`PositionSizer` は各取引所のロスカット閾値 `Y` に安全バッファ `buffer` を上乗せしてサイジングする。
+
+- 式: `max_alloc = 1 / (Y + buffer + leverage × stop_loss_pct)`、`risk_alloc = min(max_alloc, allocation_pct)`。
+- `buffer` (`[risk].sizing_margin_buffer`、デフォルト 0.10、`>= 0` でバリデーション) は、スリッページ・週末ギャップ・SL 発動遅延で実現損失が SL 価格を超過しても、維持率がロスカット閾値まで即落ちしないための余裕。`buffer = 0` なら従来どおり `Y` ちょうどを狙う。
+
+**維持率アラート（live / paper の非対称）:**
+
+維持率（`compute_maintenance_ratio` = 純資産 / 必要証拠金合計）に対する対応は口座種別で分かれる。
+
+- **paper**: `liquidation.rs::detect_liquidation_targets` が維持率 `< Y`（取引所ロスカット閾値）で全 trade を bot 側から force-close する（模擬取引なので執行主体が bot）。
+- **live**: `margin_alert.rs::detect_margin_alerts` が **アラートのみ**。close は一切しない — live のロスカット執行は取引所の責務であり、bot は接近を運用者に知らせるだけ。
+  - **warn**: 維持率 `< Y × 1.3`
+  - **critical**: 維持率 `< Y × 1.1`
+  - crypto monitor tick で判定し、`NotifyEvent::SystemAlert` で Slack 通知。`(account, level)` ごと 30 分に 1 回のレート制限。
+  - **注意**: ここで使う残高は DB 管理値であり、取引所実残高とはドリフトしうる（残高ドリフト検知は下記 Phase 5）。
+
+**残高ドリフト検知（live のみ、Phase 5）:**
+
+bot は `current_balance` を DB 台帳（`initial + Σpnl − Σfees`）で管理するが、live では swap/SFD/手数料を取引所が直接徴収するため、取引所の実残高と徐々に乖離する。この乖離を **起動時（`startup_reconcile` 直後の one-shot）＋毎時（3600 秒間隔ジョブ）** に検知して Slack 警告する（`balance_drift::check_live_accounts`）。
+
+- **対象**: `account_type == "live"` の口座のみ。`LIVE_DRY_RUN` 強制時（`live_forces_dry_run == true`）は取引所残高が動かないため判定を skip する。
+- **比較**: `exchange_equity = get_collateral().collateral + open_position_pnl` と `bot_equity = current_balance + Σrequired_margin + Σunrealized_pnl`（`compute_maintenance_ratio` の純資産 numerator と同じ式）。bot 側 open position は `liquidation.rs` と同様に PriceStore の close-side bid/ask（Long=bid / Short=ask）で組む。価格が無い trade がある口座は skip（warn）。
+- **閾値**: `is_drift` は乖離が `max(取引所 equity の 1%, ¥500)` を超えたら真（pure 関数）。
+- **アラートのみ・自動補正しない**: 台帳の不変条件 `current_balance = initial + Σpnl − Σfees` を壊さないため、bot は乖離を運用者に知らせるだけで残高を書き換えない。補正（入出金・スワップ履歴の突き合わせ、必要なら `initial_balance` 調整 SQL）は運用者判断。
+- `NotifyEvent::SystemAlert`（title=`"balance drift"`）で通知。送信は main.rs 側で fire-and-forget（送信失敗は warn のみ、起動をブロックしない）。
+
+**GMO スワップレート鮮度チェック（config 手入力値の staleness 検知）:**
+
+GMO FX のスワップポイントは GMO が日次公表する配布値で API 取得手段が無い（`api.coin.z.com/fxdocs` で確認済み）。そのため `config/default.toml` の `[gmo_fx.swap.rates]` は運用者が公式スワップカレンダーを見て手入力する代表値であり、放置すると金利環境の変化で古くなる。
+
+- **判定**: `is_swap_rates_stale`（`crates/core/src/swap.rs`、pure 関数）が `[gmo_fx.swap].updated_on` から `max_age_days`（デフォルト 35 日）を超えたら stale と判定する。`swap_freshness_alert`（`crates/app/src/swap_freshness.rs`）がこれと「rates 未設定なのに GMO paper 口座が存在する」を合わせてアラート文言を組み立てる。
+- **起動時**: 1 回判定して `tracing::warn!` にログするのみ（Slack は鳴らさない — 起動のたびに通知が飛ぶのを避けるため）。
+- **日次**: overnight/swap ジョブ（`main.rs`、UTC 日付が変わるたびに 1 回）が fee 適用と同じタイミングで判定し、`NotifyEvent::SystemAlert`（title=`"swap rates freshness"`）で Slack に通知する。
+- **GMO スワップレート更新（月次）**: GMO 公式のスワップカレンダーを確認し、`config/default.toml` の `[gmo_fx.swap.rates]` と `updated_on` を更新する。放置すると `updated_on + max_age_days` 超過で日次 SystemAlert が出る。スワップは API で取得できない公表値のため手動更新が唯一の手段。
+
 ### macro-analyst
 
 Phase 0 では最小構成:
@@ -180,6 +243,14 @@ Phase 0 では最小構成:
 - 同じ Strategy trait を使うので、リアルタイムの戦略をそのままバックテスト可能
 - 明らかにダメな戦略の足切りが目的。作り込みは不要
 - **スイング戦略のバックテストは Phase 0 対象外**。on_macro_update に依存する戦略は過去マクロデータの再生が必要になるため、まずは短期ルールベース戦略のバックテストのみ対応する。スイング戦略の検証はリアルタイムのペーパートレードで行う
+
+**runner の近代化（Phase 6）:** `BacktestRunner::run` は本番トレードと整合する形に更新済み。
+
+- **exchange パラメータ化**: candle 取得の取引所は引数 `exchange: Exchange`（`bitflyer_cfd` / `gmo_fx`）で指定する。以前の `"oanda"` ハードコードは撤去。`SimTrader` も渡された取引所を持つ。
+- **本番同一サイジング**: エントリー数量は本番と同じ `PositionSizer::calculate_quantity`（no-liquidation 上限 + `margin_buffer`）で決める。以前の `quantity = 1` プレースホルダは撤去。サイザーが `None` を返した場合は発注不成立として `execution_failures` にカウントする（バックテストでは `margin_buffer = 0` を使い、生の上限で評価するのが既定）。
+- **PnL は数量ベース**: `pnl_amount = truncate_toward_zero((exit − entry) × quantity)`。本番 `trader.rs` の `truncate_yen(price_diff × quantity)` と一致。以前の `price_diff × leverage`（数量を無視するバグ）は撤去し、回帰テストでガードする。
+- **戦略 exit の再生**: 固定 SL/TP チェックに加え、各 candle で `strategy.on_open_positions(&[Position], &event)` を呼び、トレーリングストップ等の動的 exit を再生する。
+- **スプレッド近似の限界**: 各約定に定率 `spread_pct` を不利側（買いは高く・売りは安く）へ適用する一次近似のみ。**板深さ・実スプレッド変動・スリッページはモデル化していない**ため、薄い/速い相場では live 約定より楽観的な結果になる。
 
 ### dashboard
 
@@ -315,7 +386,7 @@ url = "postgresql://auto-trader:***@db:5432/auto_trader"
 interval_secs = 60
 
 [pairs]
-active = ["USD_JPY", "EUR_USD"]
+active = ["USD_JPY"]
 
 [[strategies]]
 name = "trend_follow_v1"
@@ -328,7 +399,7 @@ params = { ma_short = 20, ma_long = 50, rsi_threshold = 70 }
 name = "swing_llm_v1"
 enabled = true
 mode = "paper"
-pairs = ["USD_JPY", "EUR_USD"]
+pairs = ["USD_JPY"]
 params = { holding_days_max = 14 }
 ```
 

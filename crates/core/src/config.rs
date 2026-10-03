@@ -61,10 +61,58 @@ pub struct GmoFxConfig {
 /// USD_JPY = { long = 100, short = -120 }
 /// EUR_JPY = { long = 80, short = -100 }
 /// ```
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GmoFxSwapConfig {
     pub rates: HashMap<String, SwapRateEntry>,
+    /// rates を最後に GMO 公表スワップカレンダーと突合した日 ("YYYY-MM-DD")。
+    /// rates が非空なら必須 (validate で強制)。
+    pub updated_on: Option<String>,
+    /// updated_on からこの日数を超えたら staleness アラート。
+    #[serde(default = "default_swap_max_age_days")]
+    pub max_age_days: u32,
+}
+
+fn default_swap_max_age_days() -> u32 {
+    35 // 月次更新運用 + 猶予
+}
+
+impl Default for GmoFxSwapConfig {
+    fn default() -> Self {
+        Self {
+            rates: HashMap::new(),
+            updated_on: None,
+            max_age_days: default_swap_max_age_days(),
+        }
+    }
+}
+
+impl GmoFxSwapConfig {
+    /// updated_on を NaiveDate として返す。rates 非空なのに未設定/不正なら Err。
+    pub fn parsed_updated_on(&self) -> anyhow::Result<Option<chrono::NaiveDate>> {
+        match &self.updated_on {
+            None => Ok(None),
+            Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(Some)
+                .map_err(|e| {
+                    anyhow::anyhow!("[gmo_fx.swap].updated_on '{s}' is not YYYY-MM-DD: {e}")
+                }),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let parsed = self.parsed_updated_on()?;
+        if !self.rates.is_empty() && parsed.is_none() {
+            anyhow::bail!(
+                "[gmo_fx.swap].updated_on is required when rates are set \
+                 (staleness tracking needs a reference date)"
+            );
+        }
+        if self.max_age_days == 0 {
+            anyhow::bail!("[gmo_fx.swap].max_age_days must be > 0");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -184,12 +232,60 @@ pub struct PositionSizingConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct RiskConfig {
     pub price_freshness_secs: u64,
+    /// Kill Switch: 当日実現損失が開始残高のこの割合に達したら新規停止。
+    #[serde(default = "default_daily_loss_limit_pct")]
+    pub daily_loss_limit_pct: Decimal,
+    /// Kill Switch 発火後に新規エントリーを止める時間 (時間単位)。
+    #[serde(default = "default_halt_hours")]
+    pub halt_hours: u64,
+    /// PositionSizer が各取引所のロスカット閾値 Y に上乗せする安全バッファ。
+    /// max_alloc = 1 / (Y + buffer + L×s)。0 なら Y ちょうどを狙う。
+    #[serde(default = "default_sizing_margin_buffer")]
+    pub sizing_margin_buffer: Decimal,
+}
+
+fn default_daily_loss_limit_pct() -> Decimal {
+    Decimal::new(5, 2) // 0.05
+}
+
+fn default_halt_hours() -> u64 {
+    24
+}
+
+fn default_sizing_margin_buffer() -> Decimal {
+    Decimal::new(10, 2) // 0.10
+}
+
+/// `[risk]` セクション自体が config に無い時 (`AppConfig::risk == None`) の
+/// フォールバック値。各 field の serde default 関数と厳密に一致させること
+/// (`price_freshness_secs` のみ serde default が無いため 60 を直接指定 —
+/// `main.rs` が長らく使っていたハードコード値と同じ)。
+/// `risk_config_default_matches_serde_defaults` テストで serde 側との
+/// 一致を保証する。
+impl Default for RiskConfig {
+    fn default() -> Self {
+        Self {
+            price_freshness_secs: 60,
+            daily_loss_limit_pct: default_daily_loss_limit_pct(),
+            halt_hours: default_halt_hours(),
+            sizing_margin_buffer: default_sizing_margin_buffer(),
+        }
+    }
 }
 
 impl RiskConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.price_freshness_secs == 0 {
             anyhow::bail!("[risk].price_freshness_secs must be > 0");
+        }
+        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct >= Decimal::ONE {
+            anyhow::bail!("[risk].daily_loss_limit_pct must be in (0, 1)");
+        }
+        if self.halt_hours == 0 {
+            anyhow::bail!("[risk].halt_hours must be > 0");
+        }
+        if self.sizing_margin_buffer < Decimal::ZERO {
+            anyhow::bail!("[risk].sizing_margin_buffer must be >= 0");
         }
         Ok(())
     }
@@ -211,6 +307,22 @@ impl LiveConfig {
     }
 }
 
+/// 口座は全て JPY 建て。quote 通貨が JPY でないペア (EUR_USD 等) は、
+/// position_sizer / margin が price×qty を JPY 金額として扱う前提と矛盾し
+/// 証拠金・維持率を誤算するため、起動時に拒否する。
+/// cross-currency 換算を実装するまでこのガードを外してはならない。
+fn ensure_jpy_quote(pairs: &[String], section: &str) -> anyhow::Result<()> {
+    for p in pairs {
+        if !p.ends_with("_JPY") {
+            anyhow::bail!(
+                "[{section}] pair '{p}' is not JPY-quoted; \
+                 non-JPY quote pairs are unsupported (margin math assumes price×qty is JPY)"
+            );
+        }
+    }
+    Ok(())
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -228,6 +340,15 @@ impl AppConfig {
         if let Some(risk) = &self.risk {
             risk.validate()?;
         }
+        ensure_jpy_quote(&self.pairs.fx, "pairs.fx")?;
+        if let Some(crypto) = &self.pairs.crypto {
+            ensure_jpy_quote(crypto, "pairs.crypto")?;
+        }
+        ensure_jpy_quote(&self.pairs.active, "pairs.active")?;
+        for s in &self.strategies {
+            ensure_jpy_quote(&s.pairs, &format!("strategies({})", s.name))?;
+        }
+        self.gmo_fx.swap.validate()?;
         Ok(())
     }
 }
@@ -268,6 +389,59 @@ mod debug_redaction_tests {
         let rendered = format!("{cfg:?}");
         assert!(rendered.contains("api_key: None"));
         assert!(rendered.contains("api_secret: None"));
+    }
+}
+
+#[cfg(test)]
+mod jpy_quote_validation_tests {
+    use super::*;
+
+    fn base_toml(pairs_fx: &str, strategy_pairs: &str) -> String {
+        format!(
+            r#"
+[vegapunk]
+endpoint = "http://localhost:6840"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://localhost/test"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+fx = {pairs_fx}
+crypto = ["FX_BTC_JPY"]
+
+[[strategies]]
+name = "donchian_trend_v1"
+enabled = true
+mode = "paper"
+pairs = {strategy_pairs}
+"#
+        )
+    }
+
+    #[test]
+    fn rejects_non_jpy_quote_pair_in_pairs_fx() {
+        let toml_str = base_toml(r#"["USD_JPY", "EUR_USD"]"#, r#"["USD_JPY"]"#);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("EUR_USD"), "error should name the pair: {err}");
+    }
+
+    #[test]
+    fn rejects_non_jpy_quote_pair_in_strategy_pairs() {
+        let toml_str = base_toml(r#"["USD_JPY"]"#, r#"["EUR_USD"]"#);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_jpy_quote_pairs() {
+        let toml_str = base_toml(r#"["USD_JPY"]"#, r#"["USD_JPY", "FX_BTC_JPY"]"#);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_ok());
     }
 }
 
@@ -453,6 +627,107 @@ price_freshness_secs = 60
     fn risk_validate_rejects_zero_freshness() {
         let r = crate::config::RiskConfig {
             price_freshness_secs: 0,
+            daily_loss_limit_pct: rust_decimal_macros::dec!(0.05),
+            halt_hours: 24,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
+        };
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn risk_defaults_apply_when_kill_switch_fields_omitted() {
+        // price_freshness_secs のみ指定 → daily_loss_limit_pct / halt_hours は
+        // serde default (0.05 / 24) で埋まる。
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://u:p@localhost/auto_trader"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+active = ["USD_JPY"]
+
+[risk]
+price_freshness_secs = 60
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let risk = cfg.risk.expect("risk section should parse");
+        assert_eq!(risk.daily_loss_limit_pct, rust_decimal_macros::dec!(0.05));
+        assert_eq!(risk.halt_hours, 24);
+        risk.validate().unwrap();
+    }
+
+    #[test]
+    fn risk_config_default_matches_serde_defaults() {
+        // `RiskConfig::default()` (config.risk == None のフォールバック) は
+        // 各 field の serde default 関数と一致していなければならない。
+        // price_freshness_secs のみ serde default が無いため、[risk] に
+        // 明示指定した TOML との一致で確認する。
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://localhost:3000"
+schema = "fx-trading"
+
+[database]
+url = "postgresql://u:p@localhost/auto_trader"
+
+[monitor]
+interval_secs = 60
+
+[pairs]
+active = ["USD_JPY"]
+
+[risk]
+price_freshness_secs = 60
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let from_serde = cfg.risk.expect("risk section should parse");
+        let default = RiskConfig::default();
+        assert_eq!(
+            default.price_freshness_secs,
+            from_serde.price_freshness_secs
+        );
+        assert_eq!(
+            default.daily_loss_limit_pct,
+            from_serde.daily_loss_limit_pct
+        );
+        assert_eq!(default.halt_hours, from_serde.halt_hours);
+        assert_eq!(
+            default.sizing_margin_buffer,
+            from_serde.sizing_margin_buffer
+        );
+    }
+
+    #[test]
+    fn risk_validate_rejects_out_of_range_loss_pct() {
+        let too_big = crate::config::RiskConfig {
+            price_freshness_secs: 60,
+            daily_loss_limit_pct: rust_decimal_macros::dec!(1),
+            halt_hours: 24,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
+        };
+        assert!(too_big.validate().is_err());
+        let zero = crate::config::RiskConfig {
+            price_freshness_secs: 60,
+            daily_loss_limit_pct: rust_decimal_macros::dec!(0),
+            halt_hours: 24,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
+        };
+        assert!(zero.validate().is_err());
+    }
+
+    #[test]
+    fn risk_validate_rejects_zero_halt_hours() {
+        let r = crate::config::RiskConfig {
+            price_freshness_secs: 60,
+            daily_loss_limit_pct: rust_decimal_macros::dec!(0.05),
+            halt_hours: 0,
+            sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
         };
         assert!(r.validate().is_err());
     }
@@ -555,6 +830,9 @@ interval_secs = 60
 fx = []
 crypto = []
 
+[gmo_fx.swap]
+updated_on = "2026-07-07"
+
 [gmo_fx.swap.rates]
 USD_JPY = { long = 100, short = -120 }
 EUR_JPY = { long = 80, short = -100 }
@@ -592,5 +870,73 @@ crypto = []
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.gmo_fx.swap.rates.is_empty());
+    }
+
+    #[test]
+    fn swap_rates_without_updated_on_fail_validation() {
+        // rates があるのに updated_on 無し → 起動拒否 (鮮度管理の起点が無い)
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+
+[gmo_fx.swap.rates]
+USD_JPY = { long = 100, short = -120 }
+EUR_JPY = { long = 80, short = -100 }
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn swap_updated_on_must_be_valid_date() {
+        // updated_on = "not-a-date" → 起動拒否
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+
+[gmo_fx.swap]
+updated_on = "not-a-date"
+
+[gmo_fx.swap.rates]
+USD_JPY = { long = 100, short = -120 }
+EUR_JPY = { long = 80, short = -100 }
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn empty_rates_do_not_require_updated_on() {
+        // [gmo_fx.swap] 自体が無い既存 config は従来どおり valid
+        let toml_str = r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_ok());
     }
 }

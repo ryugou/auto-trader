@@ -207,6 +207,7 @@ async fn reconcile_noop_consistent_open(pool: PgPool) {
         &[account],
         &apis,
         price_store,
+        std::sync::Arc::new(auto_trader_notify::Notifier::new_disabled()),
     )
     .await
     .expect("reconcile should succeed");
@@ -242,6 +243,7 @@ async fn reconcile_orphan_force_closes(pool: PgPool) {
         &[account],
         &apis,
         price_store,
+        std::sync::Arc::new(auto_trader_notify::Notifier::new_disabled()),
     )
     .await
     .expect("reconcile should succeed");
@@ -288,6 +290,7 @@ async fn reconcile_stale_closing_resets_to_open(pool: PgPool) {
         &[account],
         &apis,
         price_store,
+        std::sync::Arc::new(auto_trader_notify::Notifier::new_disabled()),
     )
     .await
     .expect("reconcile should succeed");
@@ -326,6 +329,7 @@ async fn reconcile_phase3_incomplete_force_closes(pool: PgPool) {
         &[account],
         &apis,
         price_store,
+        std::sync::Arc::new(auto_trader_notify::Notifier::new_disabled()),
     )
     .await
     .expect("reconcile should succeed");
@@ -375,6 +379,7 @@ async fn reconcile_api_retry_exhaustion(pool: PgPool) {
         &[account],
         &apis,
         price_store,
+        std::sync::Arc::new(auto_trader_notify::Notifier::new_disabled()),
     )
     .await;
 
@@ -415,6 +420,7 @@ async fn reconcile_api_immediate_error(pool: PgPool) {
         &[account],
         &apis,
         price_store,
+        std::sync::Arc::new(auto_trader_notify::Notifier::new_disabled()),
     )
     .await;
 

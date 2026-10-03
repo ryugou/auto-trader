@@ -24,6 +24,7 @@
 
 use crate::config::SwapRateEntry;
 use crate::types::Direction;
+use chrono::NaiveDate;
 use rust_decimal::{Decimal, RoundingStrategy};
 use rust_decimal_macros::dec;
 
@@ -41,6 +42,16 @@ pub fn compute_daily_swap(rate: SwapRateEntry, direction: Direction, quantity: D
     };
     let lots = quantity / GMO_FX_LOT_SIZE;
     (per_lot * lots).round_dp_with_strategy(0, RoundingStrategy::ToZero)
+}
+
+/// swap rate 表が古いかの判定。`updated_on` から `max_age_days` を
+/// **超えたら** stale（ちょうどは stale ではない）。未来日付は not stale。
+///
+/// スワップポイントは GMO が公表する配布値で API 取得手段が無いため、
+/// config 手入力の rates が金利環境の変化で古くなる。この関数が日次ジョブ
+/// から呼ばれ、超過時に SystemAlert で運用者へ更新を促す。
+pub fn is_swap_rates_stale(updated_on: NaiveDate, today: NaiveDate, max_age_days: u32) -> bool {
+    (today - updated_on).num_days() > i64::from(max_age_days)
 }
 
 #[cfg(test)]
@@ -89,5 +100,24 @@ mod tests {
     fn zero_quantity_returns_zero() {
         let fee = compute_daily_swap(rate(dec!(100), dec!(-120)), Direction::Long, Decimal::ZERO);
         assert_eq!(fee, Decimal::ZERO);
+    }
+
+    #[test]
+    fn staleness_boundary_is_exclusive() {
+        use chrono::NaiveDate;
+        let updated = NaiveDate::from_ymd_opt(2026, 7, 7).unwrap();
+        // age == max_age_days ちょうどは stale ではない。超えたら stale。
+        let on_limit = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(); // +35日
+        let over_limit = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap(); // +36日
+        assert!(!is_swap_rates_stale(updated, on_limit, 35));
+        assert!(is_swap_rates_stale(updated, over_limit, 35));
+    }
+
+    #[test]
+    fn future_updated_on_is_not_stale() {
+        use chrono::NaiveDate;
+        let updated = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 7, 7).unwrap();
+        assert!(!is_swap_rates_stale(updated, today, 35));
     }
 }

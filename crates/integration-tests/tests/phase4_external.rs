@@ -86,10 +86,6 @@ mod gmo_fx {
             symbols.contains(&"USD_JPY"),
             "GMO FX: USD_JPY not found in ticker data. symbols={symbols:?}"
         );
-        assert!(
-            symbols.contains(&"EUR_USD"),
-            "GMO FX: EUR_USD not found in ticker data. symbols={symbols:?}"
-        );
     }
 
     #[tokio::test]

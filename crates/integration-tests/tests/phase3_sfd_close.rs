@@ -152,7 +152,7 @@ fn make_trader(
 ) -> Trader {
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("FX_BTC_JPY"), dec!(0.01));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let notifier = Arc::new(Notifier::new_disabled());
     Trader::new(
         pool,

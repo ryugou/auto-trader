@@ -39,7 +39,7 @@ Vegapunk は**価格分析や予測はしない**。役割は以下の 4 つ:
 nodes:
   TradeDecision:
     attributes:
-      pair: { type: string, required: true }        # USD_JPY, EUR_USD（OANDA 形式で統一）
+      pair: { type: string, required: true }        # USD_JPY, EUR_JPY（OANDA 形式で統一）
       direction: { type: string, required: true }    # long / short / close
       entry_price: { type: string }
       stop_loss: { type: string }

@@ -52,7 +52,7 @@ fn make_trader(
 ) -> Trader {
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let api = MockExchangeApiBuilder::new().build();
     let notifier = Arc::new(Notifier::new_disabled());
 
@@ -342,11 +342,14 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
 
     // First: create a trader with working API to open a trade
     let open_api = MockExchangeApiBuilder::new().build();
-    let sizer = Arc::new(PositionSizer::new({
-        let mut m = HashMap::new();
-        m.insert(Pair::new("USD_JPY"), dec!(1));
-        m
-    }));
+    let sizer = Arc::new(PositionSizer::new(
+        {
+            let mut m = HashMap::new();
+            m.insert(Pair::new("USD_JPY"), dec!(1));
+            m
+        },
+        rust_decimal::Decimal::ZERO,
+    ));
     let notifier = Arc::new(Notifier::new_disabled());
 
     let open_trader = Trader::new(
@@ -568,7 +571,7 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
 
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let api = MockExchangeApiBuilder::new().build();
 
     let trader = Trader::new(

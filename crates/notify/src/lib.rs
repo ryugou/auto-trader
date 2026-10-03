@@ -40,6 +40,15 @@ pub struct PositionClosedEvent {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemAlertEvent {
+    /// 例: "margin warn", "margin critical", "balance drift"
+    pub title: String,
+    pub account_name: String,
+    pub exchange: Exchange,
+    pub body: String,
+}
+
 /// 通知イベント。Slack には各イベントごとに整形された文面で送る。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -47,6 +56,7 @@ pub enum NotifyEvent {
     OrderFilled(OrderFilledEvent),
     OrderFailed(OrderFailedEvent),
     PositionClosed(PositionClosedEvent),
+    SystemAlert(SystemAlertEvent),
 }
 
 impl NotifyEvent {
@@ -57,6 +67,7 @@ impl NotifyEvent {
             NotifyEvent::OrderFilled(_) => "order_filled",
             NotifyEvent::OrderFailed(_) => "order_failed",
             NotifyEvent::PositionClosed(_) => "position_closed",
+            NotifyEvent::SystemAlert(_) => "system_alert",
         }
     }
 }
@@ -185,6 +196,13 @@ fn format_for_slack(event: &NotifyEvent) -> String {
             e.pnl_amount,
             e.reason,
             e.trade_id
+        ),
+        NotifyEvent::SystemAlert(e) => format!(
+            ":rotating_light: *{}* — {} [{}]\n{}",
+            e.title,
+            e.account_name,
+            e.exchange.as_str(),
+            e.body
         ),
     }
 }

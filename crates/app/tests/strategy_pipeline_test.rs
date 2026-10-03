@@ -42,7 +42,7 @@ const HINT_PRICE: Decimal = dec!(11000000);
 fn live_account_sizer() -> PositionSizer {
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new(PAIR), MIN_LOT);
-    PositionSizer::new(min_sizes)
+    PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO)
 }
 
 fn make_event(close: Decimal, high: Decimal, low: Decimal, idx: i64) -> PriceEvent {

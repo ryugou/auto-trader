@@ -153,6 +153,13 @@ where
     }
 }
 
+/// paper/live 判定の唯一の定義。`account_type == "paper"` もしくは
+/// LIVE_DRY_RUN 強制時に dry_run。この式を呼び出し側にコピーしないこと
+/// (判定が分岐すると paper=live 契約が壊れる)。
+pub fn effective_dry_run(account_type: &str, live_forces_dry_run: bool) -> bool {
+    account_type == "paper" || live_forces_dry_run
+}
+
 /// Register all enabled strategies from config into the engine.
 ///
 /// This function iterates `config.strategies`, constructs each strategy
@@ -302,9 +309,37 @@ pub async fn register_strategies(
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
+            name if name.starts_with("fx_new") => {
+                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+                engine.add_strategy(
+                    Box::new(auto_trader_strategy::fx_new::FxNewV1::new(
+                        sc.name.clone(),
+                        pairs,
+                    )),
+                    sc.mode.clone(),
+                );
+                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+            }
             other => {
                 tracing::warn!("unknown strategy: {other}, skipping");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod effective_dry_run_tests {
+    use super::effective_dry_run;
+
+    #[test]
+    fn paper_is_always_dry_run() {
+        assert!(effective_dry_run("paper", false));
+        assert!(effective_dry_run("paper", true));
+    }
+
+    #[test]
+    fn live_is_dry_run_only_when_forced() {
+        assert!(!effective_dry_run("live", false));
+        assert!(effective_dry_run("live", true));
     }
 }

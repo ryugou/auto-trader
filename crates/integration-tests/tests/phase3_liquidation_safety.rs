@@ -98,7 +98,7 @@ async fn build_trader_with_market(
 
     let mut min_sizes = HashMap::new();
     min_sizes.insert(pair, min_order_size);
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
 
     Trader::new(
         pool,

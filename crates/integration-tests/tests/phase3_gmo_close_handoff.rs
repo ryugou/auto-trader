@@ -149,7 +149,7 @@ fn make_trader(
 ) -> Trader {
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));
-    let sizer = Arc::new(PositionSizer::new(min_sizes));
+    let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let notifier = Arc::new(Notifier::new_disabled());
     Trader::new(
         pool,
@@ -194,6 +194,7 @@ async fn seed_open_trade(
         status: TradeStatus::Open,
         max_hold_until: None,
         exchange_position_id,
+        stop_order_id: None,
     };
     auto_trader_db::trades::insert_trade(pool, &trade)
         .await

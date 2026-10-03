@@ -12,6 +12,10 @@ pub struct BacktestReport {
     pub initial_balance: Decimal,
     pub final_balance: Decimal,
     pub profit_factor: f64,
+    /// Every trade produced by the run (open and closed), in the order they
+    /// were created/closed. Exposed so callers and tests can inspect
+    /// per-trade fills, quantity and PnL (e.g. to assert quantity-based PnL).
+    pub trades: Vec<Trade>,
 }
 
 impl BacktestReport {
@@ -88,6 +92,7 @@ impl BacktestReport {
             initial_balance,
             final_balance,
             profit_factor,
+            trades,
         }
     }
 

@@ -375,7 +375,8 @@ api_url = "https://api.bitflyer.com"
 # api_key / api_secret は将来の本番用。環境変数で管理（1Password + direnv）
 
 [pairs]
-fx = ["USD_JPY", "EUR_USD"]
+# JPY 建てペアのみ許可（AppConfig::validate が非 JPY quote を起動時に拒否）
+fx = ["USD_JPY"]
 crypto = ["FX_BTC_JPY"]
 
 [pair_config.FX_BTC_JPY]
@@ -384,11 +385,7 @@ min_order_size = 0.001
 
 [pair_config.USD_JPY]
 price_unit = 0.001
-min_order_size = 1        # 通貨単位（OANDA の実装に合わせて確認）
-
-[pair_config.EUR_USD]
-price_unit = 0.00001
-min_order_size = 1        # 通貨単位（OANDA の実装に合わせて確認）
+min_order_size = 1        # 通貨単位
 
 [position_sizing]
 method = "risk_based"
