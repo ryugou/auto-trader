@@ -58,7 +58,7 @@ impl<T: Clone> MethodConfig<T> {
     fn try_respond(&self) -> anyhow::Result<T> {
         let prev = self
             .fail_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 if n > 0 { Some(n - 1) } else { None }
             });
         match prev {

@@ -416,7 +416,7 @@ mod reconcile_tests {
         async fn get_positions(&self, product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {
             if self
                 .get_positions_failures_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                     if v > 0 { Some(v - 1) } else { None }
                 })
                 .is_ok()
