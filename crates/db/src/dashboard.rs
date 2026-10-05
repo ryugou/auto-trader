@@ -450,6 +450,17 @@ pub async fn get_all_evaluated_balances(
 }
 
 /// Daily balance history reconstructed from initial_balance and account_events.
+///
+/// Scoped to `active` accounts only: this chart shows the current balance
+/// trend of accounts the bot is still trading, not a full ledger of every
+/// account that ever existed. This is not because a retired account's
+/// balance is frozen — it isn't necessarily: retirement stops new entries
+/// but does not orphan a position still open on the account, so
+/// overnight/SFD fee events can keep landing on it after retirement (see
+/// `list_active_or_with_open_trades`). It is excluded here purely because
+/// this view tracks accounts currently being traded; a retired account's
+/// full history — including any post-retirement activity — remains visible
+/// elsewhere (trade list, summary) via the separate all-accounts functions.
 pub async fn get_balance_history(
     pool: &PgPool,
     account_type: Option<&str>,
@@ -458,7 +469,8 @@ pub async fn get_balance_history(
     let accounts: Vec<(Uuid, String, Decimal)> = sqlx::query_as(
         r#"SELECT id, name, initial_balance
            FROM trading_accounts
-           WHERE ($1::text IS NULL OR account_type = $1)
+           WHERE active
+             AND ($1::text IS NULL OR account_type = $1)
            ORDER BY created_at ASC"#,
     )
     .bind(account_type)

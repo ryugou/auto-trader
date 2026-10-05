@@ -218,6 +218,47 @@ async fn dashboard_balance_history(pool: sqlx::PgPool) {
     assert!(json["accounts"].is_array());
 }
 
+/// A retired (inactive) account must not appear in the balance-history chart
+/// — this chart tracks currently-trading accounts (#102). A retired account's
+/// balance is not necessarily frozen (a position left open can still receive
+/// fee events), but its history remains available via the all-accounts views.
+#[sqlx::test(migrations = "../../migrations")]
+async fn dashboard_balance_history_excludes_inactive_accounts(pool: sqlx::PgPool) {
+    let account_id = db::seed_trading_account(
+        &pool,
+        "retired_balance_history",
+        "paper",
+        "gmo_fx",
+        "bb_mean_revert_v1",
+        100_000,
+    )
+    .await;
+    sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("retire account");
+
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    let resp = client
+        .get(app.endpoint("/api/dashboard/balance-history"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let json: Value = resp.json().await.unwrap();
+    let accounts = json["accounts"].as_array().unwrap();
+    assert!(
+        accounts
+            .iter()
+            .all(|a| a["account_id"] != account_id.to_string()),
+        "retired account must not appear in balance history: {accounts:?}"
+    );
+}
+
 // ── GET /api/dashboard/strategies ────────────────────────────────────────
 
 #[sqlx::test(migrations = "../../migrations")]

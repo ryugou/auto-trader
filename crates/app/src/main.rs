@@ -33,6 +33,22 @@ fn exchange_from_str(s: &str) -> Option<Exchange> {
     s.parse().ok()
 }
 
+/// True if `account` exists and is still active.
+///
+/// Used as the final guard immediately before `execute()` in the signal
+/// executor loop, narrowing the window where a REST call retires the account
+/// (`active = false`) while the upstream risk checks (kill switch, daily
+/// loss limit, freshness gate, liquidation level, position lookup) are each
+/// awaiting the DB. The window is not fully closed: a retirement committed
+/// between this `get` and the trade INSERT inside `execute()` still leaves an
+/// open trade on a retired account, which `list_active_or_with_open_trades`
+/// keeps treating as an existing position (fees, margin monitoring, reconcile).
+fn account_still_tradable(
+    account: Option<&auto_trader_db::trading_accounts::TradingAccount>,
+) -> bool {
+    account.is_some_and(|a| a.active)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -548,7 +564,14 @@ async fn main() -> anyhow::Result<()> {
     // Log the accounts currently present at startup for visibility only.
     // Fatal if the DB query fails — we cannot validate live-safety preconditions
     // without this snapshot, so refusing to start is the correct behaviour.
-    let db_accounts = match auto_trader_db::trading_accounts::list_all(&pool).await {
+    // `list_active_or_with_open_trades`, not `list_active`: this snapshot
+    // feeds `resolve_exchange_liquidation_levels` and
+    // `reconcile_live_accounts_at_startup` below, both of which must also
+    // cover a retired account that still has an open position (it still
+    // needs a liquidation level resolved and its live state reconciled).
+    let db_accounts = match auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             anyhow::bail!(
@@ -561,7 +584,7 @@ async fn main() -> anyhow::Result<()> {
     }
     for pac in &db_accounts {
         tracing::info!(
-            "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
+            "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={}, active={})",
             pac.name,
             pac.id,
             pac.account_type,
@@ -569,7 +592,8 @@ async fn main() -> anyhow::Result<()> {
             pac.strategy,
             pac.current_balance,
             pac.initial_balance,
-            pac.leverage
+            pac.leverage,
+            pac.active
         );
         if !registered_strategies.iter().any(|s| s == &pac.strategy) {
             tracing::warn!(
@@ -1442,15 +1466,17 @@ async fn main() -> anyhow::Result<()> {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
 
-            // Re-read accounts from the DB for each signal.
-            let db_accounts = match auto_trader_db::trading_accounts::list_all(&executor_pool).await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("executor: failed to list trading accounts: {e}");
-                    continue;
-                }
-            };
+            // Re-read accounts from the DB for each signal. `list_active`:
+            // this dispatches *new* entries, so a retired account must never
+            // be matched here even if it still has an open position.
+            let db_accounts =
+                match auto_trader_db::trading_accounts::list_active(&executor_pool).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("executor: failed to list trading accounts: {e}");
+                        continue;
+                    }
+                };
 
             // Dispatch signal to all accounts bound to this strategy (any exchange).
             let mut matched_strategy = false;
@@ -1687,6 +1713,44 @@ async fn main() -> anyhow::Result<()> {
                         signal.strategy_name,
                         signal.pair,
                         name
+                    );
+                    continue;
+                }
+
+                // Final active re-check, immediately before execute(): the
+                // account could have been retired (active=false) via REST
+                // while this account sat through the DB-bound checks above
+                // (kill switch, daily loss limit, freshness gate,
+                // liquidation level, position lookup). `list_active` at loop
+                // entry only reflects state at that moment, so re-fetch by
+                // id here to catch a retirement that landed in between. This
+                // narrows the race rather than eliminating it: a retirement
+                // committed after this get but before execute()'s INSERT is
+                // still possible, and is covered by
+                // `list_active_or_with_open_trades`.
+                let account_now = match auto_trader_db::trading_accounts::get(
+                    &executor_pool,
+                    pac.id,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "active re-check: get failed for account {} ({}): {e} — skipping (fail-closed)",
+                            pac.name,
+                            pac.id
+                        );
+                        continue;
+                    }
+                };
+                if !account_still_tradable(account_now.as_ref()) {
+                    tracing::warn!(
+                        "skipping signal: account {} ({}) no longer active for strategy {} pair {}",
+                        pac.name,
+                        pac.id,
+                        signal.strategy_name,
+                        signal.pair
                     );
                     continue;
                 }
@@ -2081,20 +2145,25 @@ async fn main() -> anyhow::Result<()> {
             if today != last_date {
                 // Apply overnight/swap fees only to paper accounts (live accounts
                 // pay fees directly to the exchange; we don't deduct them here).
-                let accounts = match auto_trader_db::trading_accounts::list_all(&overnight_pool)
+                // `list_active_or_with_open_trades`: a retired paper account
+                // with an open position still accrues overnight fees on it.
+                let accounts =
+                    match auto_trader_db::trading_accounts::list_active_or_with_open_trades(
+                        &overnight_pool,
+                    )
                     .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // last_date 不更新で次 tick (60s 後) に retry。
-                        // ここで last_date = today にすると一時的 DB 障害で
-                        // 丸 1 日 skip してしまう (Copilot round-3 指摘)。
-                        tracing::error!(
-                            "overnight/swap: failed to list trading accounts (will retry next tick): {e}"
-                        );
-                        continue;
-                    }
-                };
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // last_date 不更新で次 tick (60s 後) に retry。
+                            // ここで last_date = today にすると一時的 DB 障害で
+                            // 丸 1 日 skip してしまう (Copilot round-3 指摘)。
+                            tracing::error!(
+                                "overnight/swap: failed to list trading accounts (will retry next tick): {e}"
+                            );
+                            continue;
+                        }
+                    };
                 // swap rate 表の鮮度チェック (1 日 1 回、fee 適用と同時)。
                 let has_gmo_paper = accounts
                     .iter()
@@ -2311,7 +2380,13 @@ async fn main() -> anyhow::Result<()> {
             // 受容する設計。idempotent retry は scope outside (PR B 共通化で
             // unique-index ベースの reconciliation を検討)。
 
-            let accounts = match auto_trader_db::trading_accounts::list_all(&sfd_pool).await {
+            // `list_active_or_with_open_trades`: a retired paper bitFlyer
+            // account with an open FX_BTC_JPY position still accrues SFD.
+            let accounts = match auto_trader_db::trading_accounts::list_active_or_with_open_trades(
+                &sfd_pool,
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(
@@ -2560,4 +2635,42 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use auto_trader_db::trading_accounts::TradingAccount;
+    use rust_decimal_macros::dec;
+
+    fn sample_account(active: bool) -> TradingAccount {
+        TradingAccount {
+            id: uuid::Uuid::nil(),
+            name: "test-account".to_string(),
+            account_type: "paper".to_string(),
+            exchange: "gmo_fx".to_string(),
+            strategy: "donchian_trend".to_string(),
+            initial_balance: dec!(100000),
+            current_balance: dec!(100000),
+            leverage: dec!(1),
+            currency: "JPY".to_string(),
+            created_at: chrono::Utc::now(),
+            active,
+        }
+    }
+
+    #[test]
+    fn account_still_tradable_true_for_active_account() {
+        assert!(account_still_tradable(Some(&sample_account(true))));
+    }
+
+    #[test]
+    fn account_still_tradable_false_for_retired_account() {
+        assert!(!account_still_tradable(Some(&sample_account(false))));
+    }
+
+    #[test]
+    fn account_still_tradable_false_when_account_missing() {
+        assert!(!account_still_tradable(None));
+    }
 }

@@ -25,9 +25,10 @@ use std::sync::Arc;
 /// This is the startup half of a defense-in-depth fail-closed design:
 /// - At startup: missing/invalid entries for exchanges in use abort the
 ///   process here, before any trading task spawns.
-/// - At runtime: the API rejects new account creation for exchanges absent
-///   from the resolved map or with a non-positive value
-///   (`accounts::create`), and the worker tasks log + skip the affected
+/// - At runtime: the API rejects new account creation and account
+///   reinstatement for exchanges absent from the resolved map or with a
+///   non-positive value (`accounts::create`, `accounts::update`), and the
+///   worker tasks log + skip the affected
 ///   signal/exit/close instead of panicking when an entry is missing for an
 ///   in-flight trade. Together these prevent the position sizer from
 ///   running without a valid `liquidation_margin_level`.
@@ -102,10 +103,10 @@ pub fn resolve_exchange_liquidation_levels(
 ///
 /// Worker tasks that need a sizing input call this on every iteration. The
 /// startup gate (`resolve_exchange_liquidation_levels`) validates the map
-/// against accounts at boot, and the create-account API rejects exchanges
-/// not present in the map, but this helper is the runtime fallback if a row
-/// snuck in another way (e.g. direct SQL). Returning `None` lets the caller
-/// `continue` instead of panicking.
+/// against accounts at boot, and the account-create/reinstate API rejects
+/// exchanges not present in the map, but this helper is the runtime fallback
+/// if a row snuck in another way (e.g. direct SQL). Returning `None` lets the
+/// caller `continue` instead of panicking.
 ///
 /// `context` is rendered into the log only on the miss path so the operator
 /// can correlate the skip with a specific trade or signal. Pass a closure

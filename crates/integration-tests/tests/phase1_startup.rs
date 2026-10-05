@@ -181,7 +181,7 @@ liquidation_margin_level = 0.50
     .unwrap();
 
     let result = {
-        let accts = auto_trader_db::trading_accounts::list_all(&pool)
+        let accts = auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
             .await
             .unwrap();
         auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
@@ -221,7 +221,7 @@ liquidation_margin_level = 0.50
     .unwrap();
 
     let result = {
-        let accts = auto_trader_db::trading_accounts::list_all(&pool)
+        let accts = auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
             .await
             .unwrap();
         auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
@@ -263,7 +263,7 @@ liquidation_margin_level = 1.00
     .unwrap();
 
     let result = {
-        let accts = auto_trader_db::trading_accounts::list_all(&pool)
+        let accts = auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
             .await
             .unwrap();
         auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
@@ -315,7 +315,7 @@ liquidation_margin_level = 0
     )
     .unwrap();
 
-    let accts = auto_trader_db::trading_accounts::list_all(&pool)
+    let accts = auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
         .await
         .unwrap();
     let map = auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)
@@ -369,7 +369,7 @@ liquidation_margin_level = 1.00
     )
     .unwrap();
 
-    let accts = auto_trader_db::trading_accounts::list_all(&pool)
+    let accts = auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
         .await
         .unwrap();
     let map = auto_trader::startup::resolve_exchange_liquidation_levels(&accts, &config)

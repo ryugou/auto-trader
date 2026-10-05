@@ -54,13 +54,16 @@ pub async fn check_live_accounts(ctx: &BalanceDriftContext) -> Vec<SystemAlertEv
         return vec![];
     }
 
-    let accounts = match auto_trader_db::trading_accounts::list_all(&ctx.pool).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("balance drift: failed to list accounts: {e}");
-            return vec![];
-        }
-    };
+    // `list_active_or_with_open_trades`: a retired live account can still
+    // have an open position whose exchange-vs-bot equity needs reconciling.
+    let accounts =
+        match auto_trader_db::trading_accounts::list_active_or_with_open_trades(&ctx.pool).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("balance drift: failed to list accounts: {e}");
+                return vec![];
+            }
+        };
 
     let mut alerts = Vec::new();
 

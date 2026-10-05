@@ -726,3 +726,458 @@ async fn delete_account_with_trades_fails(pool: sqlx::PgPool) {
     let json: Value = resp.json().await.unwrap();
     assert!(json["error"].as_str().unwrap().contains("trades"));
 }
+
+// ── active / retirement (#102, #100) ─────────────────────────────────────
+
+async fn create_test_account(client: &reqwest::Client, app: &app::TestApp, body: Value) -> Value {
+    client
+        .post(app.endpoint("/api/trading-accounts"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// GET /api/trading-accounts and GET /:id must report `active` on every row.
+#[sqlx::test(migrations = "../../migrations")]
+async fn account_responses_include_active_field(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Active Field Test",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "paper"
+        }),
+    )
+    .await;
+    assert_eq!(created["active"], true, "freshly created account is active");
+    let id = created["id"].as_str().unwrap();
+
+    let list: Vec<Value> = client
+        .get(app.endpoint("/api/trading-accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed = list
+        .iter()
+        .find(|a| a["id"] == created["id"])
+        .expect("account present in list");
+    assert_eq!(listed["active"], true);
+
+    let fetched: Value = client
+        .get(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fetched["active"], true);
+}
+
+/// Default list hides a retired account; `include_inactive=true` reveals it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn list_accounts_hides_inactive_unless_requested(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Will Retire",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "paper"
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let updated: Value = resp.json().await.unwrap();
+    assert_eq!(updated["active"], false);
+
+    let default_list: Vec<Value> = client
+        .get(app.endpoint("/api/trading-accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        default_list.iter().all(|a| a["id"] != created["id"]),
+        "retired account must be hidden from the default list"
+    );
+
+    let full_list: Vec<Value> = client
+        .get(app.endpoint("/api/trading-accounts?include_inactive=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        full_list.iter().any(|a| a["id"] == created["id"]),
+        "include_inactive=true must reveal the retired account"
+    );
+}
+
+/// A paper account can be retired (`active: false`) and then reinstated
+/// (`active: true`); each response must reflect the new `active` value.
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_account_can_retire_and_reinstate(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Retire Reinstate",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "paper"
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let retired: Value = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retired["active"], false);
+
+    let reinstated: Value = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reinstated["active"], true);
+}
+
+/// Retiring an account with an open trade is rejected (409) and the message
+/// reports how many open trades are blocking it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_account_retire_rejected_with_open_trades(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool.clone()).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Has Open Trade",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "paper"
+        }),
+    )
+    .await;
+    let id_str = created["id"].as_str().unwrap();
+    let account_id: uuid::Uuid = id_str.parse().unwrap();
+
+    seed::seed_open_trade(
+        &pool,
+        account_id,
+        "bb_mean_revert_v1",
+        "USD_JPY",
+        "gmo_fx",
+        "long",
+        dec!(150),
+        dec!(149),
+        dec!(1),
+        Utc::now(),
+    )
+    .await;
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id_str}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 409);
+    let json: Value = resp.json().await.unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("1 open/closing trade"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Retiring an account whose only unsettled trade is `closing` (exit order
+/// placed, not yet confirmed filled) is rejected the same way an `open`
+/// trade would be. `seed::seed_open_trade` always inserts `status = 'open'`,
+/// so this inserts the row directly to get a `closing` status.
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_account_retire_rejected_with_closing_trade(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool.clone()).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Has Closing Trade",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "paper"
+        }),
+    )
+    .await;
+    let id_str = created["id"].as_str().unwrap();
+    let account_id: uuid::Uuid = id_str.parse().unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO trades
+               (id, account_id, strategy_name, pair, exchange, direction,
+                entry_price, stop_loss, quantity, leverage, fees, status, entry_at)
+           VALUES ($1, $2, 'bb_mean_revert_v1', 'USD_JPY', 'gmo_fx', 'long',
+                   150, 149, 1, 2, 0, 'closing', $3)"#,
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(account_id)
+    .bind(Utc::now())
+    .execute(&pool)
+    .await
+    .expect("seed closing trade");
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id_str}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 409);
+    let json: Value = resp.json().await.unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("1 open/closing trade"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Reactivating a retired live account is rejected (409) when another live
+/// account is already active on the same exchange.
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_account_reactivate_live_rejected_when_another_is_active(pool: sqlx::PgPool) {
+    let app = app::spawn_test_app(pool).await;
+    let client = app.client();
+
+    let live_body = |name: &str| {
+        json!({
+            "name": name,
+            "exchange": "bitflyer_cfd",
+            "initial_balance": 50000,
+            "leverage": 1,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "live"
+        })
+    };
+
+    // First live account, then retire it so a second can be created.
+    let first = create_test_account(&client, &app, live_body("Live First")).await;
+    let first_id = first["id"].as_str().unwrap();
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{first_id}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = client
+        .post(app.endpoint("/api/trading-accounts"))
+        .json(&live_body("Live Second"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "second live account should succeed once first is retired"
+    );
+
+    // Reactivating the first must now conflict with the second (active).
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{first_id}")))
+        .json(&json!({"active": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 409);
+    let json: Value = resp.json().await.unwrap();
+    assert!(
+        json["error"].as_str().unwrap().contains("already active"),
+        "unexpected error: {}",
+        json["error"]
+    );
+}
+
+/// Reinstating (`active: false` → `true`) a live account must pass the same
+/// liquidation-level guard `create` enforces: the exchange needs a
+/// `[exchange_margin.<name>]` entry in config. Creates and retires the
+/// account while gmo_fx is configured, then reconnects with a config where
+/// gmo_fx has been removed from `[exchange_margin]` (e.g. an operator
+/// deleted the stale section after retiring the account) and confirms
+/// reinstatement is rejected instead of producing an account PositionSizer
+/// would silently refuse to size for.
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_account_reactivate_rejected_when_exchange_missing_from_margin_config(
+    pool: sqlx::PgPool,
+) {
+    use auto_trader_core::types::Exchange;
+    use auto_trader_market::price_store::PriceStore;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let app = app::spawn_test_app(pool.clone()).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Reinstate Missing Margin",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "live"
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    drop(app);
+
+    // Levels map intentionally only contains bitflyer_cfd — gmo_fx is missing.
+    let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
+    levels.insert(Exchange::BitflyerCfd, dec!(0.50));
+    let app =
+        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let client = app.client();
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 400);
+    let json: Value = resp.json().await.unwrap();
+    let error = json["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("exchange_margin"),
+        "error must reference [exchange_margin] section, got: {error}"
+    );
+    assert!(
+        error.contains("gmo_fx"),
+        "error must mention the offending exchange, got: {error}"
+    );
+}
+
+/// Mirror-image happy path: reinstating a (non-live) account succeeds when
+/// its exchange has a valid (positive) `liquidation_margin_level` entry,
+/// confirming the guard applies regardless of `account_type` and does not
+/// regress the existing retire/reinstate flow.
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_account_reactivate_allowed_when_liquidation_margin_level_configured(
+    pool: sqlx::PgPool,
+) {
+    use auto_trader_core::types::Exchange;
+    use auto_trader_market::price_store::PriceStore;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
+    levels.insert(Exchange::GmoFx, dec!(1.00));
+    let app =
+        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let client = app.client();
+
+    let created = create_test_account(
+        &client,
+        &app,
+        json!({
+            "name": "Reinstate Allowed",
+            "exchange": "gmo_fx",
+            "initial_balance": 100000,
+            "leverage": 2,
+            "strategy": "bb_mean_revert_v1",
+            "account_type": "paper"
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = client
+        .put(app.endpoint(&format!("/api/trading-accounts/{id}")))
+        .json(&json!({"active": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let json: Value = resp.json().await.unwrap();
+    assert_eq!(json["active"], true);
+}
