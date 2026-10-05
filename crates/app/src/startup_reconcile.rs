@@ -977,11 +977,17 @@ mod reconcile_tests {
             .unwrap()
             .unwrap();
 
-        // Virtualize time after DB seeding: the retry logic uses tokio::time::sleep
-        // (2s → 4s backoff), which auto-advances when no tasks are runnable under
-        // paused time. Pause must come after DB operations since the pool uses real
-        // timeouts internally.
-        tokio::time::pause();
+        // Time is intentionally NOT virtualized here: `reconcile_one_account`
+        // still issues a real DB query (list_open_or_closing_by_account) before
+        // the retry loop runs, and every sqlx pool acquire() performs a live
+        // ping() by default (test_before_acquire). Pausing tokio's clock while
+        // that real network round trip is outstanding races the paused-clock
+        // auto-advance (which fast-forwards to the next pending timer, i.e. the
+        // pool's acquire_timeout, as soon as a single non-blocking IO poll finds
+        // nothing ready) against the ping response, intermittently producing a
+        // spurious "pool timed out" instead of the intended retry-exhaustion
+        // error. The retry backoff (2s → 4s) below therefore sleeps in real
+        // time (~6s total for this test).
         let accounts = vec![account];
         let apis = build_apis(api);
         let price_store = empty_price_store();

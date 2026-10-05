@@ -368,9 +368,16 @@ async fn reconcile_api_retry_exhaustion(pool: PgPool) {
         .unwrap()
         .unwrap();
 
-    // Pause time so retry sleeps (2s→4s) auto-advance
-    tokio::time::pause();
-
+    // Time is intentionally NOT virtualized here: `reconcile_one_account` still
+    // issues a real DB query (list_open_or_closing_by_account) before the retry
+    // loop runs, and every sqlx pool acquire() performs a live ping() by default
+    // (test_before_acquire). Pausing tokio's clock while that real network round
+    // trip is outstanding races the paused-clock auto-advance (which fast-forwards
+    // to the next pending timer, i.e. the pool's acquire_timeout, as soon as a
+    // single non-blocking IO poll finds nothing ready) against the ping response,
+    // intermittently producing a spurious "pool timed out" instead of the intended
+    // retry-exhaustion error. The retry backoff (2s → 4s) below therefore sleeps in
+    // real time (~6s total for this test).
     let apis = build_apis(api);
     let price_store = empty_price_store();
 
@@ -410,7 +417,9 @@ async fn reconcile_api_immediate_error(pool: PgPool) {
         .unwrap()
         .unwrap();
 
-    tokio::time::pause();
+    // Time is not virtualized: this test performs real DB I/O, and a paused
+    // clock would auto-advance to the pool acquire timeout while the DB
+    // round trip is outstanding (see reconcile_api_retry_exhaustion).
 
     let apis = build_apis(api);
     let price_store = empty_price_store();
