@@ -183,3 +183,27 @@ sizing_margin_buffer = 0.10  # サイジング時にロスカット閾値 Y へ�
 [live]
 enabled = false  # true にしないと live 口座での取引が起動時・runtime 両方で拒否される
 dry_run = true
+
+# === Feed watchdog (Issue #109) ===
+# ホストのサスペンド (バッテリー切れでの蓋閉じスリープ等) からの復帰検知と、
+# 価格フィード途絶の検知。検知内容は Slack (SystemAlert) に通知する。
+# 自動再起動はしない (通知のみ) — 運用者が原因を切り分けて対応する。
+# enabled=false で止まるのはこの定期監視 (サスペンド検知とフィード鮮度判定)
+# だけであり、フィードタスク自体の終了検知 (main.rs のフィード起動ループが
+# 本設定に関係なく常時配線する spawn_feed_supervisor) には影響しない。
+[feed_watchdog]
+enabled = true
+check_interval_secs = 60      # 監視タスクがこの間隔で起きて判定する
+suspend_gap_secs = 300        # 壁時計の tick 間隔がこれ以上空いたらホストサスペンドとみなす
+stale_after_secs = 900        # bitFlyerの日次メンテナンス(約10分)を跨いで誤検知しないための値
+realert_interval_secs = 3600  # 途絶が続く間、この間隔で再通知する
+# OANDA は PriceStore を自身で更新せず最新tickが常に5〜11分古く見えるため、
+# stale_after_secs=900 前後を跨いで途絶/復旧通知を繰り返してしまう。また休場
+# 記録が無く週末も再通知が続くため、鮮度監視の対象から除外する。
+exclude_exchanges = ["oanda"]
+notify_retry_attempts = 5       # 通知送信失敗時の再送回数 (最初の送信を含まない。10が上限)
+notify_retry_initial_secs = 30  # 再送の初回待ち秒数 (以後2倍: 30,60,120,240,480)
+# 再送は「少なくとも1回届ける」方式。送信先が受信した後に送信側がタイムアウト
+# すると再送が走り、同じ通知が重複して2回以上届くことがある。
+# 制約: notify_retry_initial_secs × (2^notify_retry_attempts − 1) < realert_interval_secs
+# (途絶の再通知より先に再送が終わるようにするため。違反すると起動時の設定検証で拒否される)

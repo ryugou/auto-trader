@@ -5,6 +5,7 @@ mod wilson;
 
 use auto_trader::api;
 use auto_trader::price_store;
+use auto_trader::spawn_system_alerts;
 
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
@@ -30,25 +31,6 @@ use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
 
 fn exchange_from_str(s: &str) -> Option<Exchange> {
     s.parse().ok()
-}
-
-/// SystemAlert 群を fire-and-forget で送る (送信失敗は warn のみ)。
-/// 起動時 one-shot / 毎時 task の両方から呼ぶ (balance drift dispatch)。
-fn spawn_system_alerts(
-    notifier: &Arc<Notifier>,
-    alerts: Vec<auto_trader_notify::SystemAlertEvent>,
-) {
-    for ev in alerts {
-        let notifier = notifier.clone();
-        tokio::spawn(async move {
-            if let Err(e) = notifier
-                .send(auto_trader_notify::NotifyEvent::SystemAlert(ev))
-                .await
-            {
-                tracing::warn!("system alert send failed: {e}");
-            }
-        });
-    }
 }
 
 #[tokio::main]
@@ -792,25 +774,31 @@ async fn main() -> anyhow::Result<()> {
     // Each feed manages its own connection lifecycle; price_store and
     // price_tx are passed at run-time so feeds write ticks directly
     // (no intermediate raw-tick channel needed).
-    // Collect handles so we can abort them on shutdown, mirroring the
-    // old fx_monitor_handle / bitflyer_handle abort semantics.
+    // Supervisor wiring (await the JoinHandle, classify Ok/Err/panic vs.
+    // shutdown-abort, notify) lives in `feed_watchdog::spawn_feed_supervisor`
+    // (Issue #109 item 8) so main.rs only spawns the feed and hands off the
+    // handle. We keep only the returned AbortHandle here — shutdown aborts
+    // the inner feed task directly, which classify_feed_task_result
+    // recognizes via JoinError::is_cancelled() and correctly does not alert.
     // Box<dyn MarketFeed> encodes single ownership; feeds are consumed
     // by the for loop and moved into each spawned task.
-    let mut feed_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut feed_handles: Vec<tokio::task::AbortHandle> = Vec::new();
     for (exchange, feed) in feeds {
         let feed_price_store = price_store.clone();
         let feed_price_tx = price_tx.clone();
         let exchange_label = exchange;
-        let handle = tokio::spawn(async move {
+        let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             tracing::info!("starting market feed for {:?}", exchange_label);
-            if let Err(e) = feed.run(feed_price_store, feed_price_tx).await {
-                tracing::error!(
-                    "market feed for {:?} exited with error: {e}",
-                    exchange_label
-                );
-            }
+            feed.run(feed_price_store, feed_price_tx).await
         });
-        feed_handles.push(handle);
+        let abort_handle = auto_trader::feed_watchdog::spawn_feed_supervisor(
+            exchange_label,
+            notifier.clone(),
+            inner_handle,
+            config.feed_watchdog.notify_retry_attempts,
+            config.feed_watchdog.notify_retry_initial_secs,
+        );
+        feed_handles.push(abort_handle);
     }
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
@@ -2000,6 +1988,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: Feed watchdog (Issue #109) — host-suspend detection + feed
+    // staleness monitoring. A single long-running task; not spawned at all
+    // when disabled (mirrors the macro_analyst optional-task pattern below).
+    let feed_watchdog_handle = if config.feed_watchdog.enabled {
+        let feed_watchdog_ctx = auto_trader::feed_watchdog::FeedWatchdogContext {
+            price_store: price_store.clone(),
+            notifier: notifier.clone(),
+            config: config.feed_watchdog.clone(),
+        };
+        Some(tokio::spawn(auto_trader::feed_watchdog::run(
+            feed_watchdog_ctx,
+        )))
+    } else {
+        tracing::info!("feed watchdog disabled ([feed_watchdog].enabled=false)");
+        None
+    };
+
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
     // Since positions now live in the DB, this correctly applies fees to all
@@ -2474,6 +2479,9 @@ async fn main() -> anyhow::Result<()> {
     sfd_handle.abort();
     stop_fill_handle.abort(); // infinite 60s loop — must abort explicitly
     balance_drift_handle.abort(); // infinite 3600s loop — must abort explicitly
+    if let Some(h) = feed_watchdog_handle {
+        h.abort(); // infinite loop — must abort explicitly
+    }
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();

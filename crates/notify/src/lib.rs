@@ -49,6 +49,16 @@ pub struct SystemAlertEvent {
     pub body: String,
 }
 
+/// 取引所・口座に紐付かないプロセス全体のアラート (例: ホストサスペンド検知)。
+/// `SystemAlertEvent` は `exchange` が必須だが、ホストサスペンドのような事象は
+/// 特定の取引所に属さないため、この専用イベントを使う。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessAlertEvent {
+    /// 例: "process suspend detected"
+    pub title: String,
+    pub body: String,
+}
+
 /// 通知イベント。Slack には各イベントごとに整形された文面で送る。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -57,6 +67,7 @@ pub enum NotifyEvent {
     OrderFailed(OrderFailedEvent),
     PositionClosed(PositionClosedEvent),
     SystemAlert(SystemAlertEvent),
+    ProcessAlert(ProcessAlertEvent),
 }
 
 impl NotifyEvent {
@@ -68,6 +79,7 @@ impl NotifyEvent {
             NotifyEvent::OrderFailed(_) => "order_failed",
             NotifyEvent::PositionClosed(_) => "position_closed",
             NotifyEvent::SystemAlert(_) => "system_alert",
+            NotifyEvent::ProcessAlert(_) => "process_alert",
         }
     }
 }
@@ -204,6 +216,7 @@ fn format_for_slack(event: &NotifyEvent) -> String {
             e.exchange.as_str(),
             e.body
         ),
+        NotifyEvent::ProcessAlert(e) => format!(":rotating_light: *{}*\n{}", e.title, e.body),
     }
 }
 
@@ -230,6 +243,18 @@ mod tests {
         assert!(s.contains("bitflyer_cfd"));
         assert!(s.contains("FX_BTC_JPY"));
         assert!(s.contains("11500000"));
+    }
+
+    #[test]
+    fn format_process_alert() {
+        let ev = NotifyEvent::ProcessAlert(ProcessAlertEvent {
+            title: "process suspend detected".into(),
+            body: "process was unresponsive for 2820 minute(s)".into(),
+        });
+        assert_eq!(ev.variant_name(), "process_alert");
+        let s = format_for_slack(&ev);
+        assert!(s.contains("process suspend detected"));
+        assert!(s.contains("2820 minute"));
     }
 
     #[tokio::test]

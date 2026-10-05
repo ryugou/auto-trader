@@ -39,6 +39,17 @@ struct TickerData {
     status: String,
 }
 
+/// GMO FX ticker API の `status` 値で保守中を表す。
+const GMO_FX_STATUS_MAINTENANCE: i32 = 5;
+
+/// GMO FX ticker の `status` が保守中 (`GMO_FX_STATUS_MAINTENANCE`) のときだけ全ペアを休場として記録する。
+/// それ以外の非ゼロ status (API 障害・一時的な不正応答等) まで休場扱いすると、
+/// API がエラーを返し続ける間 feed watchdog が「正常な休場」と誤認し、本当の
+/// 途絶を検知できなくなる (Issue #109 item 3)。
+fn should_mark_market_closed(status: i32) -> bool {
+    status == GMO_FX_STATUS_MAINTENANCE
+}
+
 pub struct GmoFxFeed {
     pairs: Vec<Pair>,
     pool: Option<PgPool>,
@@ -140,14 +151,16 @@ impl MarketFeed for GmoFxFeed {
 
             if ticker.status != 0 {
                 // status=5 is maintenance — log at debug to avoid spam.
-                if ticker.status == 5 {
+                if ticker.status == GMO_FX_STATUS_MAINTENANCE {
                     tracing::debug!("GMO FX: maintenance (status=5), waiting");
                 } else {
                     tracing::warn!("GMO FX ticker non-zero status: {}", ticker.status);
                 }
-                // Mark all pairs as market closed so health shows the correct status.
-                for (_, fk) in pair_map.values() {
-                    price_store.mark_market_closed(fk.clone()).await;
+                if should_mark_market_closed(ticker.status) {
+                    // Mark all pairs as market closed so health shows the correct status.
+                    for (_, fk) in pair_map.values() {
+                        price_store.mark_market_closed(fk.clone()).await;
+                    }
                 }
                 continue;
             }
@@ -330,5 +343,14 @@ mod tests {
     #[test]
     fn exchange_gmo_fx_as_str() {
         assert_eq!(Exchange::GmoFx.as_str(), "gmo_fx");
+    }
+
+    #[test]
+    fn should_mark_market_closed_true_only_for_maintenance_status() {
+        assert!(!should_mark_market_closed(0));
+        assert!(should_mark_market_closed(GMO_FX_STATUS_MAINTENANCE));
+        assert!(!should_mark_market_closed(1));
+        assert!(!should_mark_market_closed(-1));
+        assert!(!should_mark_market_closed(99));
     }
 }
