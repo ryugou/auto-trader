@@ -258,7 +258,8 @@ Gemini の `generateContent` を使う。エンドポイントとモデルは既
 
 - 呼び出し回数は、HTTP 200 の応答を受け取った呼び出し（修復を含む）を 1 回と数える。再試行で失敗したものは数えない。
 - 当日（UTC）の呼び出し回数の合計が `max_llm_calls_per_day`（20）から `1 + repair_attempts` を引いた値を超えている場合、新しい `modify`・`novel` の世代を始めない。
-- 当日の入力と出力のトークン数の合計が `max_llm_tokens_per_day`（1,000,000）以上の場合も、新しい世代を始めない。
+- 当日の入力と出力のトークン数の合計に、`(1 + repair_attempts) × llm_token_reserve_per_call`（1 回の呼び出しの見込みの上限。50,000）を足した値が `max_llm_tokens_per_day`（1,000,000）を超える場合も、新しい世代を始めない。1 回の呼び出しの実際のトークン数が `llm_token_reserve_per_call` を超えた場合は、WARN を出す（上限を超え得るのは、この場合だけである）。
+- 呼び出し回数とトークン数は、世代を開始した日（UTC）に計上する。日付をまたいだ世代の呼び出しも開始した日に入るため、翌日の上限には数えない。ずれは 1 世代分（`1 + repair_attempts` 回）までである。
 - 呼び出し回数とトークン数は、呼び出しのたびに、応答の直後に世代の行へ保存する。
 - `llm_error` の世代が、同じ実行の中で 3 回続いた場合は、ERROR を出して実行を `failed` にし、終了コード 1 で終了する。
 
@@ -270,8 +271,8 @@ LLM への入力に含める要約は、DB の記録から毎回作る。要約�
 
 要約の内容:
 
-- 親（`parent_candidate_id`）が系譜に含まれる世代と、親が NULL の世代（`seed_script` が王者だったときの試行）の、直近 `experience_recent`（10）件。各世代について、種類、状態、`change_summary`、最も先のゲートまで進んだ候補の、学習区間の数値（`total_pips`、取引数、G1〜G3 の判定に使った値）と、G4・G5・封印区間の評価の合否。**検証区間と封印区間の数値は含めない。**
-- 全世代を通じて、不合格の理由になった回数が多いゲートの上位 3 つと、その回数
+- 親（`parent_candidate_id`）が系譜に含まれる世代と、親が NULL の世代（`seed_script` が王者だったときの試行）の、直近 `experience_recent`（10）件。各世代について、種類、状態、`change_summary`、最も先のゲートまで進んだ候補の、学習区間の数値（`total_pips`、取引数、G1〜G3 の判定に使った値）と、G4・G5 の合否。**検証区間と封印区間の数値、および封印区間の評価の合否は含めない。** 封印区間の合否を渡すと、後の世代が封印区間に合わせ込めるためである。
+- 全世代を通じて、不合格の理由になった回数が多いゲートの上位 3 つと、その回数（`G6` は数えない）
 - `invalid_script` になった世代の、直近 5 件のエラーメッセージ（各 300 文字まで）
 
 ## 10. 保存
@@ -350,9 +351,16 @@ CREATE TABLE evo_sealed_evals (
 
 CREATE INDEX evo_candidates_status_idx ON evo_candidates (status);
 CREATE INDEX evo_generations_started_at_idx ON evo_generations (started_at);
+
+ALTER TABLE evo_runs
+    ADD CONSTRAINT evo_runs_champion_candidate_fk
+    FOREIGN KEY (champion_candidate_id) REFERENCES evo_candidates(id);
+ALTER TABLE evo_generations
+    ADD CONSTRAINT evo_generations_parent_candidate_fk
+    FOREIGN KEY (parent_candidate_id) REFERENCES evo_candidates(id);
 ```
 
-- `evo_runs.champion_candidate_id` と `evo_generations.parent_candidate_id` は、王者が `seed_script` の場合に NULL とする。この 2 列には外部キーを付けない（テーブルの作成順が循環するため）。
+- `evo_runs.champion_candidate_id` と `evo_generations.parent_candidate_id` は、王者が `seed_script` の場合に NULL とする。この 2 列の外部キーは、テーブルの作成順が循環するため、全テーブルを作った後に `ALTER TABLE` で付ける。
 - `failed_gate` は、`G1`〜`G5`、`G4_superseded`、`G6` のいずれかとする。
 - `validation_pips` は、G4 まで進まなかった候補では NULL とする。
 - `train_metrics` は、その組の学習区間の実行の、基盤設計 10 章の全体の指標と `metrics` の内容を持つ。
@@ -378,6 +386,7 @@ stagnation_generations = 5
 max_generations_per_run = 5
 max_llm_calls_per_day = 20
 max_llm_tokens_per_day = 1000000
+llm_token_reserve_per_call = 50000
 repair_attempts = 2
 max_combinations = 1000000
 sweep_max_runs = 1000
@@ -403,7 +412,7 @@ stress_cost_pips = 0.5
 検証（違反は終了コード 1）:
 
 - `headline_theta_pips` は `[sim].thetas_pips` に含まれる。
-- 日数と回数は 1 以上。`top_k <= sweep_max_runs <= 1,000,000`。`max_llm_calls_per_day > repair_attempts`。
+- 日数と回数は 1 以上。`top_k <= sweep_max_runs <= 1,000,000`。`max_llm_calls_per_day > repair_attempts`。`1 <= llm_token_reserve_per_call`、かつ `(1 + repair_attempts) × llm_token_reserve_per_call <= max_llm_tokens_per_day`。
 - `min_trades_per_day > 0`。`1 <= min_positive_segments <= 6`。`max_protective_stop_ratio`、`robust_ratio`、`decay_ratio` は 0 以上 1 以下。`promote_margin >= 0`。`min_margin_pips_validation >= 0`。`min_margin_pips_sealed >= 0`。`stress_cost_pips >= 0`。
 - `seed_script` のファイルが存在し、基盤設計 8.1 の検証を通る。
 
@@ -421,7 +430,7 @@ stress_cost_pips = 0.5
 
 - 売買プロセスと同じイメージを使う。既存の `auto-trader` サービスに `image: auto-trader:latest` を加え（`build: .` は残す）、`evolver` は `image: auto-trader:latest` だけを指定する（イメージを 2 つ作らないため）。
 - `network_mode: host`、`volumes: ./config:/app/config:ro`、`environment` に `CONFIG_PATH`、`GEMINI_API_KEY`、`RUST_LOG`、`depends_on: db（service_healthy）`、`restart: unless-stopped`、`cpus: 1.0` とする。
-- `command` は `["sh", "-c", "while true; do auto-trader-sim evolve; sleep 21600; done"]` とする（6 時間ごと）。
+- `command` は `["sh", "-c", "while true; do if auto-trader-sim evolve; then sleep 21600; else sleep 600; fi; done"]` とする。終了コード 0 なら 6 時間後、0 以外なら 10 分後に次を実行する。初回の起動でマイグレーションの適用より先に走った場合や、DB の一時的な障害の場合に、6 時間止まらないようにするためである。同じエラーが続く場合は、10 分ごとに ERROR が出る。
 
 `Dockerfile` に、`COPY crates/sim/scripts/ /app/crates/sim/scripts/` を追加する。
 
