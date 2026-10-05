@@ -19,7 +19,7 @@ use auto_trader_market::market_feed::MarketFeed;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
 use auto_trader_market::oanda_private::OandaPrivateApi;
-use auto_trader_notify::Notifier;
+use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -639,6 +639,64 @@ async fn main() -> anyhow::Result<()> {
             &db_accounts,
             &config,
         )?);
+
+    // fx_new strategies (a) size positions assuming GMO_FX_LEVERAGE and (b)
+    // only ever process price events from FX_NEW_EXCHANGE (see
+    // crates/strategy/src/fx_new.rs). A mismatched leverage silently shifts
+    // real risk away from the intended 1%-of-equity stop loss; a mismatched
+    // exchange means the strategy never sees a price event for that account
+    // and so never trades it at all. Flag both loudly but do not abort
+    // startup over either — the account still runs, just not as intended.
+    for mismatch in auto_trader::startup::check_fx_new_account_assumptions(&db_accounts) {
+        // The account's own (raw) exchange string is the most informative
+        // value to report on, even for an exchange mismatch; fall back to
+        // the strategy's expected exchange only if it fails to parse at all
+        // (e.g. a typo'd or unsupported value), rather than hardcoding
+        // GmoFx regardless of what the account actually has on file.
+        let notify_exchange = mismatch
+            .account_exchange
+            .parse::<Exchange>()
+            .unwrap_or(auto_trader_strategy::fx_new::FX_NEW_EXCHANGE);
+        match &mismatch.kind {
+            auto_trader::startup::FxNewMismatchKind::Leverage {
+                account_leverage,
+                expected_leverage,
+            } => {
+                let body = format!(
+                    "account '{}' has leverage {} but fx_new strategy assumes {} — risk sizing (1% of equity at stop) is wrong for this account until leverage is corrected",
+                    mismatch.account_name, account_leverage, expected_leverage
+                );
+                tracing::error!("fx_new leverage mismatch: {body}");
+                auto_trader::spawn_notify(
+                    &notifier,
+                    NotifyEvent::SystemAlert(SystemAlertEvent {
+                        title: "fx_new leverage mismatch".to_string(),
+                        account_name: mismatch.account_name.clone(),
+                        exchange: notify_exchange,
+                        body,
+                    }),
+                );
+            }
+            auto_trader::startup::FxNewMismatchKind::Exchange { expected_exchange } => {
+                let body = format!(
+                    "account '{}' has exchange '{}' but fx_new only processes {} events — no signal will ever be generated for this account until the exchange is corrected",
+                    mismatch.account_name,
+                    mismatch.account_exchange,
+                    expected_exchange.as_str()
+                );
+                tracing::error!("fx_new exchange mismatch: {body}");
+                auto_trader::spawn_notify(
+                    &notifier,
+                    NotifyEvent::SystemAlert(SystemAlertEvent {
+                        title: "fx_new exchange mismatch".to_string(),
+                        account_name: mismatch.account_name.clone(),
+                        exchange: notify_exchange,
+                        body,
+                    }),
+                );
+            }
+        }
+    }
 
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every

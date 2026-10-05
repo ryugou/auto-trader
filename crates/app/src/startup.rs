@@ -153,6 +153,76 @@ where
     }
 }
 
+/// Which of the `fx_new` strategy's hardcoded assumptions an account
+/// violates. An account can appear in the result of
+/// `check_fx_new_account_assumptions` up to twice (once per kind) because
+/// the two checks are independent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FxNewMismatchKind {
+    /// `leverage` does not match `fx_new::GMO_FX_LEVERAGE`, the value the
+    /// strategy's 1%-of-equity stop-loss sizing assumes.
+    Leverage {
+        account_leverage: Decimal,
+        expected_leverage: Decimal,
+    },
+    /// `exchange` does not parse to `fx_new::FX_NEW_EXCHANGE` (or does not
+    /// parse as an `Exchange` at all). `FxNewV1::accepts` only processes
+    /// price events from that exchange, so the strategy silently never
+    /// trades this account.
+    Exchange { expected_exchange: Exchange },
+}
+
+/// Active account whose configuration violates one of the `fx_new`
+/// strategy's hardcoded assumptions (see `FxNewMismatchKind`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FxNewAccountMismatch {
+    pub account_name: String,
+    /// `account.exchange` verbatim, always populated regardless of whether
+    /// it parses as `Exchange` — the operator needs to see exactly what is
+    /// stored in the database, not a fallback value.
+    pub account_exchange: String,
+    pub kind: FxNewMismatchKind,
+}
+
+/// Pure check: active accounts whose `strategy` starts with `"fx_new"` must
+/// have `leverage == fx_new::GMO_FX_LEVERAGE` and an `exchange` that parses
+/// to `fx_new::FX_NEW_EXCHANGE`. Called once at startup; mismatches are
+/// logged and notified but do not abort the process — the account still
+/// trades (or silently never trades, for an exchange mismatch), just not as
+/// intended.
+pub fn check_fx_new_account_assumptions(accounts: &[TradingAccount]) -> Vec<FxNewAccountMismatch> {
+    let mut mismatches = Vec::new();
+    for a in accounts
+        .iter()
+        .filter(|a| a.active && a.strategy.starts_with("fx_new"))
+    {
+        if a.leverage != auto_trader_strategy::fx_new::GMO_FX_LEVERAGE {
+            mismatches.push(FxNewAccountMismatch {
+                account_name: a.name.clone(),
+                account_exchange: a.exchange.clone(),
+                kind: FxNewMismatchKind::Leverage {
+                    account_leverage: a.leverage,
+                    expected_leverage: auto_trader_strategy::fx_new::GMO_FX_LEVERAGE,
+                },
+            });
+        }
+        let exchange_matches = a
+            .exchange
+            .parse::<Exchange>()
+            .is_ok_and(|ex| ex == auto_trader_strategy::fx_new::FX_NEW_EXCHANGE);
+        if !exchange_matches {
+            mismatches.push(FxNewAccountMismatch {
+                account_name: a.name.clone(),
+                account_exchange: a.exchange.clone(),
+                kind: FxNewMismatchKind::Exchange {
+                    expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
+                },
+            });
+        }
+    }
+    mismatches
+}
+
 /// paper/live 判定の唯一の定義。`account_type == "paper"` もしくは
 /// LIVE_DRY_RUN 強制時に dry_run。この式を呼び出し側にコピーしないこと
 /// (判定が分岐すると paper=live 契約が壊れる)。
@@ -341,5 +411,135 @@ mod effective_dry_run_tests {
     fn live_is_dry_run_only_when_forced() {
         assert!(!effective_dry_run("live", false));
         assert!(effective_dry_run("live", true));
+    }
+}
+
+#[cfg(test)]
+mod fx_new_account_assumption_tests {
+    use super::{FxNewMismatchKind, check_fx_new_account_assumptions};
+    use auto_trader_db::trading_accounts::TradingAccount;
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+    use uuid::Uuid;
+
+    /// Build a `TradingAccount` with every field filled, varying only the
+    /// four fields each test case cares about (`strategy`, `exchange`,
+    /// `leverage`, `active`).
+    fn account(
+        strategy: &str,
+        exchange: &str,
+        leverage: rust_decimal::Decimal,
+        active: bool,
+    ) -> TradingAccount {
+        TradingAccount {
+            id: Uuid::new_v4(),
+            name: format!("{strategy}-account"),
+            account_type: "paper".to_string(),
+            exchange: exchange.to_string(),
+            strategy: strategy.to_string(),
+            initial_balance: dec!(100000),
+            current_balance: dec!(100000),
+            leverage,
+            currency: "JPY".to_string(),
+            created_at: Utc::now(),
+            active,
+        }
+    }
+
+    #[test]
+    fn matching_leverage_and_exchange_on_active_fx_new_account_has_no_mismatch() {
+        let accounts = vec![account("fx_new_v1", "gmo_fx", dec!(10), true)];
+        assert!(check_fx_new_account_assumptions(&accounts).is_empty());
+    }
+
+    #[test]
+    fn wrong_exchange_on_active_fx_new_account_is_reported_as_exchange_mismatch() {
+        let accounts = vec![account("fx_new_v1", "oanda", dec!(10), true)];
+        let mismatches = check_fx_new_account_assumptions(&accounts);
+        assert_eq!(mismatches.len(), 1, "expected exactly one mismatch");
+        let m = &mismatches[0];
+        assert_eq!(m.account_name, "fx_new_v1-account");
+        assert_eq!(m.account_exchange, "oanda");
+        assert_eq!(
+            m.kind,
+            FxNewMismatchKind::Exchange {
+                expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
+            }
+        );
+    }
+
+    #[test]
+    fn wrong_leverage_on_active_fx_new_account_is_reported_as_leverage_mismatch() {
+        let accounts = vec![account("fx_new_v1", "gmo_fx", dec!(5), true)];
+        let mismatches = check_fx_new_account_assumptions(&accounts);
+        assert_eq!(mismatches.len(), 1, "expected exactly one mismatch");
+        let m = &mismatches[0];
+        assert_eq!(m.account_name, "fx_new_v1-account");
+        assert_eq!(m.account_exchange, "gmo_fx");
+        assert_eq!(
+            m.kind,
+            FxNewMismatchKind::Leverage {
+                account_leverage: dec!(5),
+                expected_leverage: dec!(10),
+            }
+        );
+    }
+
+    #[test]
+    fn wrong_leverage_and_exchange_on_active_fx_new_account_reports_both_mismatches() {
+        let accounts = vec![account("fx_new_v1", "oanda", dec!(5), true)];
+        let mismatches = check_fx_new_account_assumptions(&accounts);
+        assert_eq!(mismatches.len(), 2, "expected one mismatch per kind");
+        assert!(
+            mismatches.iter().any(|m| m.kind
+                == FxNewMismatchKind::Leverage {
+                    account_leverage: dec!(5),
+                    expected_leverage: dec!(10),
+                }),
+            "missing leverage mismatch: {mismatches:?}"
+        );
+        assert!(
+            mismatches.iter().any(|m| m.kind
+                == FxNewMismatchKind::Exchange {
+                    expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
+                }),
+            "missing exchange mismatch: {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn unrecognised_exchange_string_on_active_fx_new_account_is_reported_with_raw_value() {
+        let accounts = vec![account("fx_new_v1", "unknown_fx", dec!(10), true)];
+        let mismatches = check_fx_new_account_assumptions(&accounts);
+        assert_eq!(mismatches.len(), 1, "expected exactly one mismatch");
+        let m = &mismatches[0];
+        assert_eq!(
+            m.account_exchange, "unknown_fx",
+            "raw unparseable exchange string must be preserved verbatim"
+        );
+        assert_eq!(
+            m.kind,
+            FxNewMismatchKind::Exchange {
+                expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
+            }
+        );
+    }
+
+    #[test]
+    fn mismatches_on_inactive_fx_new_account_are_ignored() {
+        let accounts = vec![account("fx_new_v1", "oanda", dec!(5), false)];
+        assert!(
+            check_fx_new_account_assumptions(&accounts).is_empty(),
+            "inactive accounts must not be flagged regardless of leverage/exchange"
+        );
+    }
+
+    #[test]
+    fn mismatches_on_non_fx_new_strategy_are_ignored() {
+        let accounts = vec![account("donchian_trend_v1", "oanda", dec!(5), true)];
+        assert!(
+            check_fx_new_account_assumptions(&accounts).is_empty(),
+            "strategies not prefixed with fx_new must not be checked"
+        );
     }
 }
