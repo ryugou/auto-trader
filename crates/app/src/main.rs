@@ -668,9 +668,11 @@ async fn main() -> anyhow::Result<()> {
     // only ever process price events from FX_NEW_EXCHANGE (see
     // crates/strategy/src/fx_new.rs). A mismatched leverage silently shifts
     // real risk away from the intended 1%-of-equity stop loss; a mismatched
-    // exchange means the strategy never sees a price event for that account
-    // and so never trades it at all. Flag both loudly but do not abort
-    // startup over either — the account still runs, just not as intended.
+    // exchange is caught fail-closed by `fx_new_dispatch_allowed` in the
+    // executor's dispatch loop below, which excludes the account from
+    // dispatch, so no order is ever placed for it. Flag both loudly but do
+    // not abort startup over either — the account still runs, just not as
+    // intended.
     for mismatch in auto_trader::startup::check_fx_new_account_assumptions(&db_accounts) {
         // The account's own (raw) exchange string is the most informative
         // value to report on, even for an exchange mismatch; fall back to
@@ -703,7 +705,7 @@ async fn main() -> anyhow::Result<()> {
             }
             auto_trader::startup::FxNewMismatchKind::Exchange { expected_exchange } => {
                 let body = format!(
-                    "account '{}' has exchange '{}' but fx_new only processes {} events — no signal will ever be generated for this account until the exchange is corrected",
+                    "account '{}' has exchange '{}' but fx_new only processes {} events — the executor will not dispatch fx_new signals to this account until the exchange is corrected, so no order will be placed for it",
                     mismatch.account_name,
                     mismatch.account_exchange,
                     expected_exchange.as_str()
@@ -1498,6 +1500,26 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+                // Guard: fx_new strategies only ever derive signals from
+                // FX_NEW_EXCHANGE price events (FxNewV1::accepts), so a
+                // signal from an fx_new strategy must never reach an account
+                // on a different exchange — it would be sized and timed off
+                // a price move that never happened there. Evaluated on every
+                // dispatch (not just at startup) so an account added or
+                // reinstated via REST after boot is covered too.
+                if !auto_trader::startup::fx_new_dispatch_allowed(&signal.strategy_name, exchange) {
+                    tracing::warn!(
+                        "skipping account {} ({}): strategy '{}' is fx_new-family and only ever \
+                         derives signals from {} price events, but this account's exchange is \
+                         {} — no order will be placed for this account",
+                        pac.name,
+                        pac.id,
+                        signal.strategy_name,
+                        auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
+                        exchange
+                    );
+                    continue;
+                }
                 // Guard: signal.pair must belong to this account's exchange.
                 // Without this, a BitflyerCfd FX_BTC_JPY signal would match
                 // a GmoFx account running the same strategy, then fail with

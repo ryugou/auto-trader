@@ -168,8 +168,9 @@ pub enum FxNewMismatchKind {
     },
     /// `exchange` does not parse to `fx_new::FX_NEW_EXCHANGE` (or does not
     /// parse as an `Exchange` at all). `FxNewV1::accepts` only processes
-    /// price events from that exchange, so the strategy silently never
-    /// trades this account.
+    /// price events from that exchange, and the executor's dispatch loop
+    /// excludes such an account via `fx_new_dispatch_allowed` (logging a
+    /// warning each time), so no order is ever placed for it.
     Exchange { expected_exchange: Exchange },
 }
 
@@ -185,17 +186,30 @@ pub struct FxNewAccountMismatch {
     pub kind: FxNewMismatchKind,
 }
 
+/// Single definition of "is this strategy name part of the `fx_new` family".
+/// Shared by `check_fx_new_account_assumptions` (startup report),
+/// `fx_new_dispatch_allowed` (per-dispatch gate) and the strategy
+/// registration that instantiates `FxNewV1`, so these cannot silently drift
+/// apart by each hardcoding the `"fx_new"` prefix separately.
+fn is_fx_new_strategy(strategy_name: &str) -> bool {
+    strategy_name.starts_with("fx_new")
+}
+
 /// Pure check: active accounts whose `strategy` starts with `"fx_new"` must
 /// have `leverage == fx_new::GMO_FX_LEVERAGE` and an `exchange` that parses
 /// to `fx_new::FX_NEW_EXCHANGE`. Called once at startup; mismatches are
-/// logged and notified but do not abort the process — the account still
-/// trades (or silently never trades, for an exchange mismatch), just not as
-/// intended.
+/// logged and notified but do not abort the process. A leverage mismatch
+/// still lets the account trade, with the wrong risk sizing. An exchange
+/// mismatch is enforced on every signal dispatch by `fx_new_dispatch_allowed`
+/// (checked in the executor's dispatch loop in `main.rs`), which excludes
+/// the account from dispatch — so this report flags the misconfiguration up
+/// front, but the dispatch loop is what actually keeps the account from
+/// trading on the wrong exchange.
 pub fn check_fx_new_account_assumptions(accounts: &[TradingAccount]) -> Vec<FxNewAccountMismatch> {
     let mut mismatches = Vec::new();
     for a in accounts
         .iter()
-        .filter(|a| a.active && a.strategy.starts_with("fx_new"))
+        .filter(|a| a.active && is_fx_new_strategy(&a.strategy))
     {
         if a.leverage != auto_trader_strategy::fx_new::GMO_FX_LEVERAGE {
             mismatches.push(FxNewAccountMismatch {
@@ -222,6 +236,24 @@ pub fn check_fx_new_account_assumptions(accounts: &[TradingAccount]) -> Vec<FxNe
         }
     }
     mismatches
+}
+
+/// Fail-closed gate for the executor's signal-dispatch loop (see `main.rs`,
+/// the loop below the "Dispatch signal to all accounts bound to this
+/// strategy" comment). `fx_new` strategies only ever derive signals from
+/// `fx_new::FX_NEW_EXCHANGE` price events (`FxNewV1::accepts`), so
+/// dispatching one of those signals to an account on a different exchange
+/// would place an order sized and timed off a price move that never
+/// happened on that account's actual exchange. Returns `false` to exclude
+/// such an account from dispatch.
+///
+/// Called on every dispatch, not just at startup, so an account added or
+/// reinstated via REST after boot is covered by the same gate — unlike
+/// `check_fx_new_account_assumptions`, which only runs once at startup and
+/// therefore cannot see accounts that did not exist yet at that point.
+pub fn fx_new_dispatch_allowed(strategy: &str, account_exchange: Exchange) -> bool {
+    !is_fx_new_strategy(strategy)
+        || account_exchange == auto_trader_strategy::fx_new::FX_NEW_EXCHANGE
 }
 
 /// paper/live 判定の唯一の定義。`account_type == "paper"` もしくは
@@ -380,7 +412,7 @@ pub async fn register_strategies(
                 );
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
-            name if name.starts_with("fx_new") => {
+            name if is_fx_new_strategy(name) => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
                 engine.add_strategy(
                     Box::new(auto_trader_strategy::fx_new::FxNewV1::new(
@@ -412,6 +444,43 @@ mod effective_dry_run_tests {
     fn live_is_dry_run_only_when_forced() {
         assert!(!effective_dry_run("live", false));
         assert!(effective_dry_run("live", true));
+    }
+}
+
+#[cfg(test)]
+mod fx_new_dispatch_allowed_tests {
+    use super::fx_new_dispatch_allowed;
+    use auto_trader_core::types::Exchange;
+
+    #[test]
+    fn fx_new_strategy_on_gmo_fx_account_is_allowed() {
+        assert!(fx_new_dispatch_allowed("fx_new_v1", Exchange::GmoFx));
+    }
+
+    #[test]
+    fn fx_new_strategy_on_oanda_account_is_rejected() {
+        assert!(!fx_new_dispatch_allowed("fx_new_v1", Exchange::Oanda));
+    }
+
+    #[test]
+    fn fx_new_strategy_on_bitflyer_cfd_account_is_rejected() {
+        assert!(!fx_new_dispatch_allowed("fx_new_v1", Exchange::BitflyerCfd));
+    }
+
+    #[test]
+    fn non_fx_new_strategy_is_allowed_on_any_exchange() {
+        assert!(fx_new_dispatch_allowed(
+            "donchian_trend_v1",
+            Exchange::Oanda
+        ));
+        assert!(fx_new_dispatch_allowed(
+            "donchian_trend_v1",
+            Exchange::BitflyerCfd
+        ));
+        assert!(fx_new_dispatch_allowed(
+            "donchian_trend_v1",
+            Exchange::GmoFx
+        ));
     }
 }
 
