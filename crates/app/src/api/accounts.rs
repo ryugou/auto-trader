@@ -283,7 +283,18 @@ pub async fn update(
     // 500 here —
     // pre-check at the HTTP boundary so the response is a precise 409 with
     // the open/closing-trade count the operator needs to act on.
-    if req.active == Some(false) {
+    // Already-retired (or nonexistent) accounts skip this pre-check:
+    // retiring an already-retired account is a no-op (the target state is
+    // already reached, so an unsettled trade that shows up afterward must
+    // not block a request that should succeed), and a nonexistent account's
+    // 404 is produced by the `update_account` call below without needing to
+    // duplicate that check here.
+    if req.active == Some(false)
+        && let Some(account) = trading_accounts::get(&state.pool, id)
+            .await
+            .map_err(ApiError::from)?
+        && account.active
+    {
         let unsettled = trades::list_open_or_closing_by_account(&state.pool, id)
             .await
             .map_err(ApiError::from)?;
@@ -344,12 +355,47 @@ pub async fn update(
     }
     trading_accounts::update_account(&state.pool, id, &req)
         .await
-        .map_err(ApiError::from)?
+        .map_err(|e| update_account_error_to_api_error(id, e))?
         .map(Json)
         .ok_or(ApiError(
             StatusCode::NOT_FOUND,
             "account not found".to_string(),
         ))
+}
+
+/// Convert `update_account`'s typed error into an `ApiError`.
+///
+/// `OpenTrades` always means a conflict with the current state (another
+/// request raced the pre-check above), so it maps to 409 regardless of what
+/// produced it. Its message omits the account id (already in the URL path)
+/// so it matches the pre-check's 409 message above exactly — the DB layer's
+/// own `Display` includes the id for its own callers (CLI, logs), which
+/// would otherwise make these two 409 responses read as different errors
+/// for the same condition.
+fn update_account_error_to_api_error(
+    id: Uuid,
+    e: trading_accounts::UpdateAccountError,
+) -> ApiError {
+    match e {
+        trading_accounts::UpdateAccountError::OpenTrades { count, .. } => ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "cannot deactivate account: {count} open/closing trade(s) exist; close them first"
+            ),
+        ),
+        trading_accounts::UpdateAccountError::Other(err) => {
+            // `{err:#}` (anyhow's alternate Display) walks the full chain
+            // joined by ": ", so the logged message includes the
+            // underlying sqlx/DB error instead of only the top-level
+            // context string `err.to_string()` would give.
+            let message = format!("{err:#}");
+            let api_err = ApiError::from(err);
+            if api_err.0 == StatusCode::INTERNAL_SERVER_ERROR {
+                tracing::error!("update_account failed for account {id}: {message}");
+            }
+            api_err
+        }
+    }
 }
 
 pub async fn remove(
@@ -366,5 +412,52 @@ pub async fn remove(
             StatusCode::NOT_FOUND,
             "account not found".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `OpenTrades` must always become a 409 whose message carries the
+    /// trade count but not the account id — the id is already in the URL
+    /// path, and this message must stay byte-for-byte identical to the
+    /// pre-check's 409 in `update` (see the comment above
+    /// `update_account_error_to_api_error`) so a caller cannot tell which
+    /// of the two checks caught the race.
+    #[test]
+    fn open_trades_error_becomes_conflict_without_account_id() {
+        let id = Uuid::new_v4();
+        let api_err = update_account_error_to_api_error(
+            id,
+            trading_accounts::UpdateAccountError::OpenTrades {
+                account_id: id,
+                count: 2,
+            },
+        );
+        assert_eq!(api_err.0, StatusCode::CONFLICT);
+        assert_eq!(
+            api_err.1,
+            "cannot deactivate account: 2 open/closing trade(s) exist; close them first"
+        );
+        assert!(
+            !api_err.1.contains(&id.to_string()),
+            "409 message must not contain the account id (already in the URL path): {}",
+            api_err.1
+        );
+    }
+
+    /// Any other DB-layer failure must still fall back to the generic 500
+    /// that `ApiError::from(anyhow::Error)` produces for an unrecognized
+    /// error — `update_account_error_to_api_error` must not swallow or
+    /// reinterpret it.
+    #[test]
+    fn other_error_falls_back_to_internal_server_error() {
+        let api_err = update_account_error_to_api_error(
+            Uuid::new_v4(),
+            trading_accounts::UpdateAccountError::Other(anyhow::anyhow!("boom")),
+        );
+        assert_eq!(api_err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(api_err.1, "internal error");
     }
 }

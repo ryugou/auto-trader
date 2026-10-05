@@ -1702,32 +1702,31 @@ async fn main() -> anyhow::Result<()> {
                     dry_run,
                 );
                 let name = pac.name.clone();
-                dispatched = true;
-                let positions = trader.open_positions().await.unwrap_or_default();
-                let has_position = positions.iter().any(|p| {
-                    p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
-                });
-                if has_position {
-                    tracing::debug!(
-                        "skipping signal: {} already has open position for {} in account {}",
-                        signal.strategy_name,
-                        signal.pair,
-                        name
-                    );
-                    continue;
-                }
 
-                // Final active re-check, immediately before execute(): the
-                // account could have been retired (active=false) via REST
-                // while this account sat through the DB-bound checks above
-                // (kill switch, daily loss limit, freshness gate,
-                // liquidation level, position lookup). `list_active` at loop
+                // Active re-check, placed after all the gates above (kill
+                // switch, daily loss limit, freshness, liquidation level)
+                // but before `dispatched` is set: the account could have
+                // been retired (active=false) via REST while this account
+                // sat through those DB-bound checks. `list_active` at loop
                 // entry only reflects state at that moment, so re-fetch by
                 // id here to catch a retirement that landed in between. This
-                // narrows the race rather than eliminating it: a retirement
-                // committed after this get but before execute()'s INSERT is
-                // still possible, and is covered by
-                // `list_active_or_with_open_trades`.
+                // must run before
+                // `dispatched = true`: a signal discarded *by this
+                // re-check* for a retired account must not be counted as
+                // dispatched. (The has_position skip further below is a
+                // separate, pre-existing case and is unaffected — that
+                // skip still happens after `dispatched = true` and this
+                // change does not alter it.)
+                //
+                // This narrows the race rather than eliminating it: the
+                // open_positions() call and has_position check below still
+                // run between this re-check and execute(), so a retirement
+                // committed in that window — or committed after this check
+                // but before execute()'s INSERT — is still possible. That
+                // residual race is covered by
+                // `list_active_or_with_open_trades`, which keeps a retired
+                // account visible for fee accrual / margin monitoring /
+                // reconcile as long as it still has an open or closing trade.
                 let account_now = match auto_trader_db::trading_accounts::get(
                     &executor_pool,
                     pac.id,
@@ -1751,6 +1750,21 @@ async fn main() -> anyhow::Result<()> {
                         pac.id,
                         signal.strategy_name,
                         signal.pair
+                    );
+                    continue;
+                }
+
+                dispatched = true;
+                let positions = trader.open_positions().await.unwrap_or_default();
+                let has_position = positions.iter().any(|p| {
+                    p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
+                });
+                if has_position {
+                    tracing::debug!(
+                        "skipping signal: {} already has open position for {} in account {}",
+                        signal.strategy_name,
+                        signal.pair,
+                        name
                     );
                     continue;
                 }
