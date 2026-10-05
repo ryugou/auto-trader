@@ -213,6 +213,24 @@ impl Strategy for FxNewV1 {
         if event.candle.timeframe != "M5" {
             return None;
         }
+        // Validate the M5 bar itself before it reaches `aggregate_m15`. The
+        // aggregate's open/close come from only the first/third M5 bars and
+        // its high/low are a min/max across all three, so a corrupt value on
+        // the *middle* bar (or a corrupt high/low that isn't the extreme)
+        // would never surface in the aggregated M15 candle's own OHLC and
+        // would slip past the post-aggregation `is_valid_candle` check below.
+        if !Self::is_valid_candle(&event.candle) {
+            tracing::warn!(
+                "fx_new: non-positive OHLC for M5 {} at {}: open={} high={} low={} close={}, skipping aggregation",
+                event.pair.0,
+                event.candle.timestamp,
+                event.candle.open,
+                event.candle.high,
+                event.candle.low,
+                event.candle.close
+            );
+            return None;
+        }
         let candle = self.aggregate_m15(event)?;
         if !Self::is_valid_candle(&candle) {
             tracing::warn!(
@@ -294,6 +312,20 @@ impl Strategy for FxNewV1 {
             }
             if event.candle.timeframe == "H1" {
                 self.push_h1(event);
+            } else if event.candle.timeframe == "M5" && !Self::is_valid_candle(&event.candle) {
+                // Same per-M5 validation as `on_price`: catch a corrupt
+                // middle/non-extreme M5 value here, before it ever reaches
+                // `aggregate_m15`, since the aggregated M15 candle's own
+                // OHLC would not necessarily reflect it.
+                tracing::warn!(
+                    "fx_new: non-positive OHLC for M5 {} at {}: open={} high={} low={} close={}, skipping aggregation during warmup",
+                    event.pair.0,
+                    event.candle.timestamp,
+                    event.candle.open,
+                    event.candle.high,
+                    event.candle.low,
+                    event.candle.close
+                );
             } else if event.candle.timeframe == "M5"
                 && let Some(candle) = self.aggregate_m15(event)
             {
@@ -939,6 +971,120 @@ mod tests {
         assert!(
             signal.is_none(),
             "non-positive close must not produce a signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_price_excludes_m5_bar_with_zero_open_from_aggregation() {
+        let mut s = strategy();
+        // Only the middle (second) M5 bar is corrupt (open = 0); the other
+        // two are clean. The M15 aggregate's open/high/low/close come from
+        // the first/third bars and the high/low across all three, so a
+        // corrupt open on the *middle* bar alone would never surface in the
+        // aggregated M15 candle's own OHLC — proving this must be caught
+        // per-M5, before aggregation, not only on the aggregated result.
+        assert!(
+            s.on_price(&m5(0, (dec!(100), dec!(101), dec!(99), dec!(100.5)), 10))
+                .await
+                .is_none()
+        );
+        assert!(
+            s.on_price(&m5(5, (dec!(0), dec!(101), dec!(99), dec!(100.2)), 10))
+                .await
+                .is_none()
+        );
+        assert!(
+            s.on_price(&m5(10, (dec!(100.2), dec!(101), dec!(99), dec!(100)), 10))
+                .await
+                .is_none()
+        );
+
+        assert_eq!(
+            s.m5_pending.get("USD_JPY").map(Vec::len),
+            Some(2),
+            "the invalid middle M5 bar must not be buffered for aggregation"
+        );
+        assert!(
+            s.m15.get("USD_JPY").is_none_or(VecDeque::is_empty),
+            "a bucket missing its invalid middle M5 bar must never complete into an M15 candle"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_price_excludes_m5_bar_with_negative_close_from_aggregation() {
+        let mut s = strategy();
+        // Same as above but the middle bar's close (not open) is corrupt
+        // (negative); the first/third bars and the resulting high/low stay
+        // positive, so the aggregated M15 candle's own OHLC would again hide
+        // the defect without a per-M5 check.
+        assert!(
+            s.on_price(&m5(0, (dec!(100), dec!(101), dec!(99), dec!(100.5)), 10))
+                .await
+                .is_none()
+        );
+        assert!(
+            s.on_price(&m5(5, (dec!(100.5), dec!(101), dec!(99), dec!(-1)), 10))
+                .await
+                .is_none()
+        );
+        assert!(
+            s.on_price(&m5(10, (dec!(100.2), dec!(101), dec!(99), dec!(100)), 10))
+                .await
+                .is_none()
+        );
+
+        assert_eq!(
+            s.m5_pending.get("USD_JPY").map(Vec::len),
+            Some(2),
+            "the invalid middle M5 bar must not be buffered for aggregation"
+        );
+        assert!(
+            s.m15.get("USD_JPY").is_none_or(VecDeque::is_empty),
+            "a bucket missing its invalid middle M5 bar must never complete into an M15 candle"
+        );
+    }
+
+    #[tokio::test]
+    async fn warmup_excludes_m5_bar_with_zero_open_from_aggregation() {
+        let mut s = strategy();
+        let events = vec![
+            m5(0, (dec!(100), dec!(101), dec!(99), dec!(100.5)), 10),
+            m5(5, (dec!(0), dec!(101), dec!(99), dec!(100.2)), 10),
+            m5(10, (dec!(100.2), dec!(101), dec!(99), dec!(100)), 10),
+        ];
+
+        s.warmup(&events).await;
+
+        assert_eq!(
+            s.m5_pending.get("USD_JPY").map(Vec::len),
+            Some(2),
+            "the invalid middle M5 bar must not be buffered for aggregation during warmup"
+        );
+        assert!(
+            s.m15.get("USD_JPY").is_none_or(VecDeque::is_empty),
+            "a bucket missing its invalid middle M5 bar must never complete into an M15 candle during warmup"
+        );
+    }
+
+    #[tokio::test]
+    async fn warmup_excludes_m5_bar_with_negative_close_from_aggregation() {
+        let mut s = strategy();
+        let events = vec![
+            m5(0, (dec!(100), dec!(101), dec!(99), dec!(100.5)), 10),
+            m5(5, (dec!(100.5), dec!(101), dec!(99), dec!(-1)), 10),
+            m5(10, (dec!(100.2), dec!(101), dec!(99), dec!(100)), 10),
+        ];
+
+        s.warmup(&events).await;
+
+        assert_eq!(
+            s.m5_pending.get("USD_JPY").map(Vec::len),
+            Some(2),
+            "the invalid middle M5 bar must not be buffered for aggregation during warmup"
+        );
+        assert!(
+            s.m15.get("USD_JPY").is_none_or(VecDeque::is_empty),
+            "a bucket missing its invalid middle M5 bar must never complete into an M15 candle during warmup"
         );
     }
 
