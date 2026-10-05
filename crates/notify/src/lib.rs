@@ -126,7 +126,9 @@ impl Notifier {
         Self {
             slack_webhook_url,
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(
+                    auto_trader_core::config::NOTIFY_SEND_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("reqwest client builder should not fail with basic config"),
         }

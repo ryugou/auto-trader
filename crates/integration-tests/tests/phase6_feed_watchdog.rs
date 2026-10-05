@@ -33,7 +33,7 @@ async fn never_ticked_feed_triggers_slack_stale_notification() {
     // (validate() の制約: suspend_gap_secs > check_interval_secs,
     //  stale_after_secs >= check_interval_secs は満たしたまま)。
     // 再送の挙動はこのテストの対象外なので notify_retry_attempts=0
-    // (再送無し) にして、realert_interval_secs(60) に対する合計待ち時間の
+    // (再送無し) にして、realert_interval_secs(60) に対する再送の最悪時間の
     // 制約 (validate() 参照) を単純に満たす。
     let config = FeedWatchdogConfig {
         enabled: true,
@@ -91,7 +91,7 @@ async fn excluded_exchange_never_ticked_does_not_trigger_stale_notification() {
     let notifier = Arc::new(Notifier::new(Some(webhook_url)));
 
     // 再送の挙動はこのテストの対象外なので notify_retry_attempts=0 (再送無し)
-    // にして、realert_interval_secs(60) に対する合計待ち時間の制約
+    // にして、realert_interval_secs(60) に対する再送の最悪時間の制約
     // (validate() 参照) を単純に満たす。
     let config = FeedWatchdogConfig {
         enabled: true,

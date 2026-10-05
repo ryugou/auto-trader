@@ -49,6 +49,15 @@ pub struct AppConfig {
 /// たびにほぼ終わらない再送タスクが積み重なってしまう (`validate()` 参照)。
 const MAX_NOTIFY_RETRY_ATTEMPTS: u64 = 10;
 
+/// 通知 1 回の送信 (HTTP リクエスト 1 回) のタイムアウト秒数。
+/// `auto_trader_notify::Notifier` の reqwest クライアント timeout と、ここでの
+/// 再送待ち時間の設定検証 (`FeedWatchdogConfig::validate`) が同じ値を参照する
+/// 必要がある。検証側は「障害中は送信のたびにこの秒数まで待たされる」ことを
+/// 最悪時間の計算前提にしており、送信側の実際のタイムアウトとずれると
+/// (例: 送信側だけタイムアウトを伸ばす) 検証が実態を反映しなくなり、再送が
+/// realert_interval_secs に食い込む事態を検知できなくなる。
+pub const NOTIFY_SEND_TIMEOUT_SECS: u64 = 10;
+
 /// フィード監視 (TOML key `[feed_watchdog]`)。
 ///
 /// - ホストのサスペンド検知: 監視タスクの壁時計 (`chrono::Utc::now()`) の
@@ -161,9 +170,10 @@ impl FeedWatchdogConfig {
             );
         }
         // 再送の待ち時間の合計 = initial_secs * (2^attempts - 1) (等比数列の和)。
-        // attempts は上で <= MAX_NOTIFY_RETRY_ATTEMPTS (10) に制限済みなので
-        // 2^attempts は u128 の範囲内に確実に収まるが、将来の上限緩和で
-        // 無警告に桁あふれしないよう checked 演算で明示的に計算する。
+        // これは待ち時間のみであり、各送信そのものに掛かる時間 (HTTP タイムアウト
+        // まで待たされうる) を含まない。attempts は上で <= MAX_NOTIFY_RETRY_ATTEMPTS
+        // (10) に制限済みなので 2^attempts は u128 の範囲内に確実に収まるが、将来の
+        // 上限緩和で無警告に桁あふれしないよう checked 演算で明示的に計算する。
         let total_wait_secs: u128 = 2u128
             .checked_pow(self.notify_retry_attempts as u32)
             .and_then(|pow| pow.checked_sub(1))
@@ -176,12 +186,42 @@ impl FeedWatchdogConfig {
                     self.notify_retry_initial_secs
                 )
             })?;
-        if total_wait_secs >= self.realert_interval_secs as u128 {
+        // 実際の最悪時間は待ち時間の合計だけでは済まない: 障害中は送信
+        // (初回 + 再送 = notify_retry_attempts + 1 回) のたびに HTTP が
+        // NOTIFY_SEND_TIMEOUT_SECS までブロックしうる (`Notifier::send` は
+        // 1回の送信で HTTP リクエストを1回しか行わないため、送信1回の最悪時間は
+        // この秒数で固定)。これを待ち時間の合計に加えたものを最悪時間とし、
+        // realert_interval_secs 未満であることを要求する。
+        // なお、タスクのスケジューリング遅延や sleep の遅延超過は含まない近似値であり、
+        // 運用値では十分なマージン (既定 990s vs 3600s) を取る前提。
+        let send_count: u128 = (self.notify_retry_attempts as u128)
+            .checked_add(1)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[feed_watchdog] overflow while computing notify send count \
+                     (notify_retry_attempts={})",
+                    self.notify_retry_attempts
+                )
+            })?;
+        let worst_case_secs: u128 = send_count
+            .checked_mul(NOTIFY_SEND_TIMEOUT_SECS as u128)
+            .and_then(|send_timeout_total| total_wait_secs.checked_add(send_timeout_total))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[feed_watchdog] overflow while computing worst-case notify time \
+                     (notify_retry_attempts={}, notify_retry_initial_secs={}, \
+                     NOTIFY_SEND_TIMEOUT_SECS={NOTIFY_SEND_TIMEOUT_SECS})",
+                    self.notify_retry_attempts,
+                    self.notify_retry_initial_secs
+                )
+            })?;
+        if worst_case_secs >= self.realert_interval_secs as u128 {
             anyhow::bail!(
-                "[feed_watchdog] total notify retry wait time ({total_wait_secs}s = \
-                 notify_retry_initial_secs({}) * (2^notify_retry_attempts({}) - 1)) must be < \
-                 realert_interval_secs ({}) (otherwise the stale-feed re-alert could fire while \
-                 the previous alert's retries are still in flight)",
+                "[feed_watchdog] worst-case notify time ({worst_case_secs}s = total retry wait \
+                 {total_wait_secs}s [notify_retry_initial_secs({}) * (2^notify_retry_attempts({}) \
+                 - 1)] + {send_count} sends * NOTIFY_SEND_TIMEOUT_SECS({NOTIFY_SEND_TIMEOUT_SECS}s)) \
+                 must be < realert_interval_secs ({}) (otherwise the stale-feed re-alert could fire \
+                 while the previous alert's sends/retries are still in flight)",
                 self.notify_retry_initial_secs,
                 self.notify_retry_attempts,
                 self.realert_interval_secs
@@ -1284,15 +1324,50 @@ crypto = []
         c.validate().unwrap();
     }
 
-    // ----- notify_retry_attempts 上限 + 再送合計時間 (Issue #109 followup #1) -----
+    // ----- notify_retry_attempts 上限 + 再送の最悪時間 (待ち時間合計 + 送信
+    // タイムアウト) (Issue #109 followup #1/#2) -----
 
     #[test]
     fn validate_accepts_notify_retry_attempts_at_cap_of_ten() {
         let mut c = valid();
         c.notify_retry_attempts = 10;
-        // sum = 1 * (2^10 - 1) = 1023s, realert_interval_secs より十分小さい。
         c.notify_retry_initial_secs = 1;
-        c.realert_interval_secs = 1024;
+        // total_wait = 1 * (2^10 - 1) = 1023s
+        // worst_case = 1023 + (10+1 sends) * NOTIFY_SEND_TIMEOUT_SECS(10s) = 1133s
+        c.realert_interval_secs = 1134; // worst_case より 1 秒大きい
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_cap_of_ten_attempts_when_worst_case_equals_realert_interval() {
+        let mut c = valid();
+        c.notify_retry_attempts = 10;
+        c.notify_retry_initial_secs = 1;
+        // total_wait = 1 * (2^10 - 1) = 1023s
+        // worst_case = 1023 + (10+1 sends) * NOTIFY_SEND_TIMEOUT_SECS(10s) = 1133s
+        c.realert_interval_secs = 1133; // worst_case と等しい (拒否)
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("worst-case notify time"), "err={err}");
+    }
+
+    #[test]
+    fn validate_rejects_zero_retry_attempts_when_single_send_timeout_equals_realert_interval() {
+        let mut c = valid();
+        c.notify_retry_attempts = 0;
+        // total_wait = 30 * (2^0 - 1) = 0s
+        // worst_case = 0 + (0+1 send) * NOTIFY_SEND_TIMEOUT_SECS(10s) = 10s
+        // 初回送信 1 回分のタイムアウトが式に入っていることの回帰テスト。
+        c.realert_interval_secs = 10; // worst_case と等しい (拒否)
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("worst-case notify time"), "err={err}");
+    }
+
+    #[test]
+    fn validate_accepts_zero_retry_attempts_when_realert_interval_exceeds_single_send_timeout() {
+        let mut c = valid();
+        c.notify_retry_attempts = 0;
+        // total_wait = 0s, worst_case = 0 + 1 * 10s = 10s
+        c.realert_interval_secs = 11; // worst_case より 1 秒大きい
         c.validate().unwrap();
     }
 
@@ -1309,30 +1384,54 @@ crypto = []
     }
 
     #[test]
-    fn validate_rejects_retry_wait_total_equal_to_realert_interval() {
+    fn validate_rejects_worst_case_equal_to_realert_interval() {
         let mut c = valid();
         c.notify_retry_attempts = 5;
-        c.notify_retry_initial_secs = 30; // sum = 30 * (2^5 - 1) = 930s
-        c.realert_interval_secs = 930;
+        // total_wait = 30 * (2^5 - 1) = 930s
+        // worst_case = 930 + 6 * 10 = 990s = realert_interval_secs (等しい場合も拒否)
+        c.notify_retry_initial_secs = 30;
+        c.realert_interval_secs = 990;
         let err = c.validate().unwrap_err().to_string();
         assert!(
-            err.contains("notify_retry"),
-            "equal totals must be rejected: err={err}"
+            err.contains("worst-case notify time"),
+            "worst case equal to realert_interval_secs must be rejected: err={err}"
         );
     }
 
     #[test]
-    fn validate_accepts_retry_wait_total_one_second_below_realert_interval() {
+    fn validate_rejects_when_send_timeouts_push_worst_case_past_realert_interval() {
+        // total_wait (930s) だけを見れば realert_interval_secs (950s) 未満だが、
+        // 送信6回 (初回+再送5回) 分の HTTP タイムアウト (10s/回) を足した
+        // worst_case = 930 + 6*10 = 990s は 950s 以上になるため拒否されるべき。
+        // これは「待ち時間の合計」だけでなく「送信のタイムアウト込みの最悪時間」
+        // で判定していることを確認する回帰テスト。
         let mut c = valid();
         c.notify_retry_attempts = 5;
-        c.notify_retry_initial_secs = 30; // sum = 930s
-        c.realert_interval_secs = 931;
+        c.notify_retry_initial_secs = 30; // total_wait = 930s
+        c.realert_interval_secs = 950; // 930 < 950 だが worst_case(990) >= 950
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("realert_interval_secs"),
+            "worst case (incl. send timeout) must be rejected: err={err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_worst_case_one_second_below_realert_interval() {
+        // 最悪時間 (待ち時間合計 + 送信タイムアウト) が realert_interval_secs を
+        // 1秒下回る境界値: total_wait=930s, worst_case=930+6*10=990s,
+        // realert_interval_secs=991s (worst_case より1秒大きい)。
+        let mut c = valid();
+        c.notify_retry_attempts = 5;
+        c.notify_retry_initial_secs = 30; // total_wait = 930s
+        c.realert_interval_secs = 991; // worst_case(990) = realert_interval_secs - 1
         c.validate().unwrap();
     }
 
     #[test]
     fn validate_accepts_issue_109_default_notify_retry_settings() {
-        // 既定値 (5回・30秒・realert=3600秒): sum = 30*(2^5-1) = 930s < 3600s。
+        // 既定値 (5回・30秒・realert=3600秒):
+        // total_wait = 30*(2^5-1) = 930s, worst_case = 930 + 6*10 = 990s < 3600s。
         FeedWatchdogConfig::default().validate().unwrap();
     }
 

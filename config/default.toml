@@ -205,5 +205,6 @@ notify_retry_attempts = 5       # 通知送信失敗時の再送回数 (最初�
 notify_retry_initial_secs = 30  # 再送の初回待ち秒数 (以後2倍: 30,60,120,240,480)
 # 再送は「少なくとも1回届ける」方式。送信先が受信した後に送信側がタイムアウト
 # すると再送が走り、同じ通知が重複して2回以上届くことがある。
-# 制約: notify_retry_initial_secs × (2^notify_retry_attempts − 1) < realert_interval_secs
+# 制約: notify_retry_initial_secs × (2^notify_retry_attempts − 1) + (notify_retry_attempts + 1) × 10 < realert_interval_secs
+# (10 は送信 1 回の HTTP タイムアウト秒数。初回 + 再送のすべてがタイムアウトまで待つ場合の最悪時間)
 # (途絶の再通知より先に再送が終わるようにするため。違反すると起動時の設定検証で拒否される)
