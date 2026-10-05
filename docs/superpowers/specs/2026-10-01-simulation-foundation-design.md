@@ -2,19 +2,19 @@
 
 | 項目    | 内容 |
 | ----- | --- |
-| 目的    | 過去の USD/JPY データにアルゴリズムを流して評価する仕組み（データ取得、実質上限の計算、スクリプト実行、シミュレーション、評価、パラメータ探索）の仕様を決める |
+| 目的    | 過去の USD/JPY データにアルゴリズムを流して評価する仕組み（データ取得、基準値の計算、スクリプト実行、シミュレーション、評価、パラメータ探索）の仕様を決める |
 | 読者    | この基盤の実装者、進化ループの設計者 |
-| 正本の範囲 | 折り返し・理論値・実質上限・捕捉率の定義、スクリプトの契約、シミュレーションの約定規則、評価指標、`sim_*` テーブル、`auto-trader-sim` のコマンド |
-| 関連文書  | [`2026-10-01-self-evolving-trader-concept.md`](2026-10-01-self-evolving-trader-concept.md)（目標と全体構成）。指標の計算式は `crates/market/src/indicators.rs` を正本とする |
+| 正本の範囲 | 折り返し・理論値・実質上限・確定追随・捕捉率の定義、スクリプトの契約、シミュレーションの約定規則、評価指標、`sim_*` テーブル、`auto-trader-sim` のコマンド（`evolve` を除く） |
+| 関連文書  | [`2026-10-01-self-evolving-trader-concept.md`](2026-10-01-self-evolving-trader-concept.md)（目標と全体構成）、[`2026-10-05-evolution-loop-design.md`](2026-10-05-evolution-loop-design.md)（`evolve` サブコマンドと進化ループ）。指標の計算式は `crates/market/src/indicators.rs` を正本とする |
 
 ## 1. 範囲
 
 この基盤が行うこと:
 
 - GMO 外国為替 FX の公開 API から USD/JPY の 5 分足（買値・売値）を取得して保存する。
-- 保存した足から折り返しを抽出し、理論値と実質上限を計算する。
+- 保存した足から折り返しを抽出し、基準値（理論値、実質上限、確定追随）を計算する。
 - スクリプトで書かれたアルゴリズムを隔離して実行し、過去の足に流して売買結果を出す。
-- 売買結果を実質上限と比べ、評価指標を計算して保存する。
+- 売買結果を理論値と比べ、評価指標を計算して保存する。
 - 1 つのスクリプトのパラメータを、LLM を使わずに並列で探索する。
 
 この基盤が行わないこと: LLM の呼び出し、候補の作成と選抜、昇格条件の判定、定期実行、ペーパー運用、画面。これらは進化ループ以降の設計書で定める。
@@ -30,7 +30,7 @@
 | `config` | 設定の読み込みと検証 | なし |
 | `data` | `sim_candles` の読み書き、GMO 公開 API からの取得 | `sqlx`、`reqwest` |
 | `series` | 足の配列、上位足への集約、指標系列の計算とキャッシュ | なし |
-| `benchmark` | 折り返しの抽出、理論値と実質上限の計算 | `series` |
+| `benchmark` | 折り返しの抽出、基準値（理論値、実質上限、確定追随）の計算 | `series` |
 | `script` | スクリプトのコンパイル、検証、隔離実行 | `rhai`、`series` |
 | `engine` | 1 回のシミュレーション（約定、保護ストップ、売買記録） | `script`、`series` |
 | `eval` | 評価指標の計算 | `benchmark`、`engine` |
@@ -66,7 +66,7 @@ max_operations_per_run = 1000000000
 indicator_cache_mb = 512
 ```
 
-- `auto-trader-sim` は、環境変数 `CONFIG_PATH`（未設定時は `config/default.toml`）のファイルから `[database].url` と `[sim]` だけを読む。`AppConfig::load` は使わない。
+- `auto-trader-sim` は、環境変数 `CONFIG_PATH`（未設定時は `config/default.toml`）のファイルから `[database].url` と `[sim]` を読む。`evolve` サブコマンドは、さらに `[evolve]`、`[evolve.gates]`、`[gemini]` を読む（正本は [`2026-10-05-evolution-loop-design.md`](2026-10-05-evolution-loop-design.md) の 11 章）。`AppConfig::load` は使わない。
 - `[sim]` のキーが欠けている場合は、上記の値を既定値として使う。
 - 次を満たさない場合は ERROR を出して終了コード 1 で終了する: `warmup_bars >= 1`、`protective_stop_pips >= 1`、`thetas_pips` は空でなく各値が 1 以上で重複がない、`jobs >= 1`、`max_operations_per_bar >= 1`、`max_operations_per_run >= 1`、`indicator_cache_mb >= 1`。
 
@@ -178,7 +178,15 @@ CREATE TABLE sim_candles (
 | 理論値 | `bid_close[b] - ask_close[a]` | `bid_close[a] - ask_close[b]` |
 | 実質上限 | `bid_open[b+1] - ask_open[a+1]` | `bid_open[a+1] - ask_open[b+1]` |
 
-各基準値は、すべての波の値の合計とする。
+理論値と実質上限は、すべての波の値の合計とする。
+
+**確定追随** は、折り返しの確定を見てから売買した場合の損益で、未来の情報を使わずに実行できる。折り返し点 `P` が確定した足（7.1 の手順 1〜3 で、逆行が折り返し幅に達した足）の位置を `c(P)` とする。波の始点を `P_a`、終点を `P_b` とすると、確定追随の値は次のとおりとする。
+
+| 上昇の波 | 下降の波 |
+| --- | --- |
+| `bid_open[c(P_b)+1] - ask_open[c(P_a)+1]` | `bid_open[c(P_a)+1] - ask_open[c(P_b)+1]` |
+
+確定追随の合計は、足 `c(P_b)+1` が評価期間内に存在する波だけを対象にする。足 `c(P_b)+1` が評価期間内に存在しない波の確定追随の値は、なし（null）とする。最初の折り返し点の `c` は、7.1 の手順 1 で方向が決まった足とする。
 
 ## 8. スクリプト
 
@@ -233,7 +241,7 @@ fn on_bar(ctx, p) {
 | `ctx.entry_price` | 建値（円）。ポジションがなければ `0.0` |
 | `ctx.bars_held` | `t - 建てた足の添字`。建てた足では `0`。ドテンで `0` に戻る。ポジションがなければ `0` |
 | `ctx.unrealized_pips` | 含み損益。買いは `bid_close[t] - 建値`、売りは `建値 - ask_close[t]` を pips にした値。ポジションがなければ `0.0` |
-| `ctx.time` | 足 `t` の終了時刻（UTC のエポック秒） |
+| `ctx.time` | 足 `t` の終了時刻（UTC のエポック秒）。スクリプトを実行する側の設定で無効にできる。無効の場合は、参照すると実行時エラーとする。既定は有効 |
 | `ctx.hour` | 足 `t` の終了時刻の時（UTC、0〜23） |
 | `ctx.weekday` | 足 `t` の終了時刻の曜日（UTC、月曜 = 0） |
 | `ctx.spread` | `ask_close[t] - bid_close[t]` を pips にした値 |
@@ -310,25 +318,27 @@ fn on_bar(ctx, p) {
 | 指標 | 定義 |
 | --- | --- |
 | `leg_count` | 波の数 |
-| `ideal_pips`、`realizable_pips` | 7.2 の理論値と実質上限 |
-| `capture_rate` | `total_pips / realizable_pips`。`realizable_pips <= 0` なら null |
+| `ideal_pips`、`realizable_pips`、`confirm_pips` | 7.2 の理論値、実質上限、確定追随 |
+| `capture_rate` | `total_pips / ideal_pips`。`ideal_pips <= 0` なら null |
 | `correct_side_ratio` | 方向ラベルが付いた足のうち、終値時点のポジションが波の方向と一致していた足の割合。方向ラベルが付いた足がなければ null |
 | `missed_legs` | 方向が一致していた足の割合が 0.5 未満の波を、実質上限の値の大きい順に最大 20 件。同値の場合は開始時刻の早い順とする |
 | `mean_lag_bars` | 方向が一致した足を 1 本以上含む波について、`最初に一致した足の添字 - (a+1)` の平均。対象の波がなければ null |
 | `mean_lag_pips` | 同じ波について、`mid2_close[最初に一致した足] - mid2_close[a]` の絶対値を pips にした値の平均。対象の波がなければ null |
 
-`capture_rate` の分子は評価期間全体の損益、分母は波として扱う区間だけの実質上限であり、対象の区間が一致しない。値は負にも 1 超にもなる。`capture_rate` は、同じ評価期間・同じ折り返し幅の結果どうしの比較にだけ使う。
+`capture_rate` の分子は評価期間全体の損益、分母は波として扱う区間だけの理論値であり、対象の区間が一致しない。値は負にも 1 超にもなる。`capture_rate` は、同じ評価期間・同じ折り返し幅の結果どうしの比較にだけ使う。実質上限は理論値との差がごく小さい（始値が直前の足の終値とほぼ同じため）ので、比較には使わない。
 
-`metrics` 列の JSON は次の形とする。`by_theta` のキーは折り返し幅（pips）の 10 進表記とする。
+`metrics` 列の JSON は次の形とする。`by_theta` のキーは折り返し幅（pips）の 10 進表記とする。`version` は 2 とする。`version` がない行は、`capture_rate` の分母が実質上限だった時期のものであり、その `capture_rate` は比較に使わない。
 
 ```json
 {
+  "version": 2,
   "segments": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
   "by_theta": {
     "20": {
       "leg_count": 0,
       "ideal_pips": 0.0,
       "realizable_pips": 0.0,
+      "confirm_pips": 0.0,
       "capture_rate": null,
       "correct_side_ratio": null,
       "mean_lag_bars": null,
@@ -411,7 +421,7 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 
 - `source_sha256` は、ソースの UTF-8 バイト列の SHA-256 を小文字の 16 進で表す。
 - 同じ `source_sha256` のスクリプトは 1 行だけ保存する。登録済みのスクリプトを再登録した場合は、既存の行を変更せず、その `id` を使う。
-- `name` は、スクリプトのファイル名から拡張子を除いたものとする。
+- `name` は、スクリプトのファイル名から拡張子を除いたものとする。進化ループが登録する `origin = 'llm'` のスクリプトの `name` は、進化ループ設計 8.3 に従う。
 - `origin = 'human'` の場合、`parent_id` は NULL とする。
 
 バッチ:
@@ -448,9 +458,10 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 | --- | --- | --- |
 | `migrate` | なし | `migrations/` のマイグレーションを適用する |
 | `backfill` | `--from`、`--to` | 5.2 の取得を、`from` から `to` までの各日付（両端を含む）について行う。日付は API の `date` としてそのまま渡す。`from` が 2023-10-28（API が受け付ける最も古い日付）より前の場合は、引数の誤りとする |
-| `benchmark` | `--from`、`--to` | `thetas_pips` の各値について、波の数、理論値、実質上限を出力する |
+| `benchmark` | `--from`、`--to` | `thetas_pips` の各値について、波の数、理論値、実質上限、確定追随を出力する |
 | `run` | `--script <path>`、`--params <json>`、`--from`、`--to` | スクリプトを登録し、シミュレーションを 1 回実行して保存し、指標と所要時間を出力する |
 | `sweep` | `--script <path>`、`--from`、`--to`、`--max-runs <n>`、`--seed <n>`、`--jobs <n>` | 11 章の探索を実行して保存し、`total_pips` の上位 10 件と所要時間を出力する |
+| `evolve` | 進化ループ設計 12 章 | 進化ループを 1 回実行する。正本は [`2026-10-05-evolution-loop-design.md`](2026-10-05-evolution-loop-design.md) |
 
 引数の規則:
 
@@ -473,11 +484,11 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 
 | 対象 | 確認する内容 |
 | --- | --- |
-| 折り返し | 手作りの系列で、波の数、位置、理論値、実質上限が期待値と一致する。逆行がちょうど折り返し幅の場合に折り返しとなる。同値の極値は先の位置を保持する。最後の未確定区間と、足 `b+1` がない波は除外される |
+| 折り返し | 手作りの系列で、波の数、位置、理論値、実質上限、確定追随が期待値と一致する。逆行がちょうど折り返し幅の場合に折り返しとなる。同値の極値は先の位置を保持する。最後の未確定区間と、足 `b+1` がない波は除外される。足 `c(P_b)+1` がない波の確定追随が null になる |
 | 集約 | 足 `t` より後の足を書き換えても、足 `t` の時点でスクリプトに見える上位足と指標の値が変わらない |
 | 指標 | 8 種すべてで、6.3 の一致条件を満たし、マップのキーと値の対応が 6.3 の表のとおりである。`period`・`mult`・`shift` の範囲外が実行時エラーになる。65 種類目のキーの要求が実行時エラーになる |
 | 約定 | 評価期間の先頭の足では約定しない。次の足の始値で、買値・売値を正しく使って約定する。ドテンは同じ足で決済と新規を行う。保護ストップは、足の途中の到達と始値での飛び越えの両方で正しい価格になる。期間末の決済が行われる |
-| スクリプト | 無限ループが `script_error` になる。演算数の合計の上限超過が `script_error` になる。戻り値の不正が `script_error` になる。8.1 の検証違反がそれぞれ `invalid_script` になる。トップレベルの文が実行されない。`import`、`sleep`、時刻・乱数の関数が失敗する。`this` の状態が足をまたいで保持される。`mult` に整数と小数の両方を渡せる |
+| スクリプト | 無限ループが `script_error` になる。演算数の合計の上限超過が `script_error` になる。戻り値の不正が `script_error` になる。8.1 の検証違反がそれぞれ `invalid_script` になる。トップレベルの文が実行されない。`import`、`sleep`、時刻・乱数の関数が失敗する。`this` の状態が足をまたいで保持される。`mult` に整数と小数の両方を渡せる。`ctx.time` を無効にした場合に、参照すると実行時エラーになり、有効の場合は値が返る |
 | 評価 | 手作りの売買と波で、10 章の各指標が期待値と一致する。分母が 0 の指標が null になる |
 | 探索 | 同じ `seed` で同じ組み合わせになる。`jobs = 1` と `jobs = 4` で、`params`、`status`、`error`、指標の列、`metrics` の集合が一致する。`default` の組み合わせが必ず含まれる。小数の刻みで `max` の値が候補に含まれる |
 | 取得 | モックサーバーで、買値・売値の結合、片方だけの足の除外、不正な足の除外、再試行、失敗時の終了コードを確認する |
@@ -490,7 +501,7 @@ CREATE INDEX sim_batches_script_id_idx ON sim_batches (script_id);
 
 1. `./scripts/test-all.sh` が `ALL GREEN` で終了する。14 章のテストはこのスクリプトの実行対象に含める。
 2. `backfill --from 2023-10-28 --to <実行日の前日>` が終了コード 0 で完了し、`sim_candles` に 200,000 本以上の足が保存される。
-3. `benchmark`（`--from`、`--to` を省略）が、`thetas_pips` の各値について波の数、理論値、実質上限を出力する。
+3. `benchmark`（`--from`、`--to` を省略）が、`thetas_pips` の各値について波の数、理論値、実質上限、確定追随を出力する。
 4. `crates/sim/scripts/donchian_sar.rhai`（8.1 のスクリプト）を `run`（`--from`、`--to` を省略）し、結果が保存される。所要時間の目標は 5 秒以内とする。超えた場合、実装者は仕様を変えずに測定値を報告する。
 5. 同じスクリプトを `sweep --max-runs 26` で、`--jobs 1` と `--jobs 4` のそれぞれで実行し、14 章「探索」の一致条件を満たす。
 
