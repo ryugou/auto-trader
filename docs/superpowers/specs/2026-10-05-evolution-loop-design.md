@@ -133,7 +133,7 @@ fn on_bar(ctx, p) {
 4. **区分の決定**: 3 章の区分を決める。`anchor_date` が現在の `anchor` と異なる `finalist` の候補を、すべて `expired` にする。
 5. **王者の評価**: 王者を決め（4 章）、学習・検証・封印の各区間と `[anchor, data_to)` で実行して、`total_pips` と取引数を得る。結果は、この実行の中で比較の基準として使う。`promotable` の候補が、学習・検証・封印のいずれかの区間で `script_error` になった場合は、WARN を出してその候補を除き、王者を決め直す（除いた候補の ID は `evo_runs.error` に記録する）。`[anchor, data_to)` で `script_error` になった場合は、王者を除かず、見出しの指標を記録しない（NULL）で、WARN を出す。`seed_script` が、学習・検証・封印のいずれかの区間で `script_error` になった場合は、ERROR を出して終了コード 1 で終了する。王者が `seed_script` の場合は、`sim_scripts` に `origin = 'human'`、`name` = ファイル名から拡張子を除いたものとして登録する（登録済みなら、その行を使う）。実行の行（`evo_runs`）を、王者の値と見出しの指標とともに作る。 あわせて、`seed_script` を既定のパラメータで `[anchor, data_to)` で実行し、`total_pips` を記録する（王者が `seed_script` で既定のパラメータの場合は、王者の値をそのまま使う）。この実行が `script_error` になった場合は、記録しない（NULL）で、WARN を出す。
 6. **合わせ直し**: 王者のスクリプトについて、現在の `anchor` の区分で開始した `kind = 'retune'` の世代のうち、状態が `completed` または `too_slow` のものがない場合に、`retune` の世代を 1 回実行する。区切りの中では学習区間が変わらず、探索の結果も変わらないため、同じ区切りで繰り返さない。
-7. **世代の実行**: 8 章の上限に達するか、`max_generations_per_run` に達するまで、`modify` または `novel` の世代を 1 つずつ順に実行する。世代は並列に実行しない。
+7. **世代の実行**: 8 章の上限に達するか、`max_generations_per_run` に達するまで、`modify` または `novel` の世代を 1 つずつ順に実行する。世代は並列に実行しない。1 回の実行の所要時間は、世代ごとの探索の上限（`max_sweep_secs`）と世代数の上限により、おおむね `(1 + max_generations_per_run) × max_sweep_secs` に、LLM の呼び出しと封印区間の評価の時間を加えた範囲に収まる。
 8. **封印区間の評価**: 7 章の条件を満たす場合に、1 回だけ行う。
 9. **終了**: 実行の行を `completed` にし、実行した世代数、作った候補数、`finalist` と `promotable` になった候補、LLM の呼び出し回数と消費トークン数を出力する。
 
@@ -208,7 +208,7 @@ fn on_bar(ctx, p) {
 封印区間は、同じデータで何度も試すと、偶然通過する候補が出る。評価は、次の条件をすべて満たす場合に、1 回の実行につき 1 候補だけ行う。
 
 - 現在の `anchor` の `finalist` が 1 つ以上ある。
-- 直近の封印区間の評価（`evo_sealed_evals` の `evaluated_at` の最大値）から `sealed_eval_interval_days`（3 日）以上たっている、または評価が 1 件もない。
+- 直近の封印区間の評価（`evo_sealed_evals` の `evaluated_at` の最大値）から `sealed_eval_interval_days`（3 日）以上たっている、または評価が 1 件もない。かつ、同じ `anchor_date` での評価の回数が `block_days ÷ sealed_eval_interval_days`（10 回）に達していない（データの取得が長く止まって区切りが進まない場合に、同じ封印区間を上限を超えて使わないため）。
 
 手順:
 
@@ -220,7 +220,7 @@ fn on_bar(ctx, p) {
    - 1 日あたりの取引数が G1 の基準を満たす。
 5. 選ばれなかった `finalist` は、そのまま残す。
 
-1 つの区切り（30 日）の間に封印区間を評価できるのは、最大で `block_days ÷ sealed_eval_interval_days` 回（10 回）である。封印区間（90 日）は区切り 3 つ分にまたがるため、同じ日のデータは、最大でその 3 倍の回数の評価に使われる。昇格のたびに王者の封印区間の値が上がり、次の合格が難しくなることと、必要な差の最小値で、偶然の通過を抑える。
+1 つの区切り（30 日）の間に封印区間を評価できるのは、上の条件により最大で `block_days ÷ sealed_eval_interval_days` 回（10 回）である。封印区間（90 日）は区切り 3 つ分にまたがるため、同じ日のデータは、最大でその 3 倍の回数の評価に使われる。昇格のたびに王者の封印区間の値が上がり、次の合格が難しくなることと、必要な差の最小値で、偶然の通過を抑える。
 
 ## 8. LLM の呼び出し
 
@@ -230,7 +230,7 @@ Gemini の `generateContent` を使う。エンドポイントとモデルは既
 
 - リクエストの `generationConfig` に、`responseMimeType = "application/json"` と、次の 4 つの文字列の項目を必須とする `responseSchema` を指定する: `name`、`hypothesis`、`change_summary`、`script`。
 - 応答の本文は、`candidates[0].content.parts[0].text` を JSON として読む。
-- 入力のトークン数は `usageMetadata.promptTokenCount`、出力のトークン数は `usageMetadata.candidatesTokenCount + usageMetadata.thoughtsTokenCount` とする（項目がなければ 0）。
+- 入力のトークン数は `usageMetadata.promptTokenCount`、出力のトークン数は `usageMetadata.candidatesTokenCount + usageMetadata.thoughtsTokenCount` とする。`usageMetadata` またはその項目がない場合は、欠けている側を `llm_token_reserve_per_call`（8.4）として数え、WARN を出す（欠けを 0 と数えると、上限の管理が成り立たないため）。
 - タイムアウトは `llm_timeout_secs`（120）とする。HTTP のエラーとタイムアウトは、`llm_retry`（2）回まで、10 秒・30 秒の間隔で再試行する。
 
 ### 8.2 入力
@@ -436,6 +436,8 @@ stress_cost_pips = 0.5
 `Dockerfile` に、`COPY crates/sim/scripts/ /app/crates/sim/scripts/` を追加する。
 
 マイグレーションは売買プロセスの起動時に適用される。`evolver` は、テーブルが存在しない場合、エラーで終了する。
+
+`evolver` を初めて動かす前に、`backfill` を保存済みの全範囲に対して 1 回再実行する。これより前の `backfill` は、失敗した日付の後も取得を続けていたため、保存済みの足の途中に欠けが残っている可能性がある。再実行は upsert のため結果を変えず、欠けだけが埋まる。
 
 ## 13. テスト
 
