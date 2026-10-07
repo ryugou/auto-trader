@@ -1,6 +1,16 @@
 use serde::Deserialize;
 use uuid::Uuid;
 
+/// Query params for `GET /api/trading-accounts`.
+///
+/// Default (`include_inactive` absent or `false`) hides retired accounts —
+/// callers that need the full roster (e.g. an admin screen listing retired
+/// accounts) must opt in explicitly.
+#[derive(Debug, Deserialize, Default)]
+pub struct AccountsFilter {
+    pub include_inactive: Option<bool>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[allow(dead_code)]
 pub struct DashboardFilter {

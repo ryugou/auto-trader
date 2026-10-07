@@ -403,8 +403,10 @@ async fn overnight_fee_job_applies_to_paper_bitflyer_trades(pool: sqlx::PgPool) 
     .await;
 
     // Replicate the job logic: list accounts, filter paper+BitflyerCfd,
-    // list open trades, compute fee, apply.
-    let accounts = auto_trader_db::trading_accounts::list_all(&pool)
+    // list open trades, compute fee, apply. main.rs's overnight loop uses
+    // `list_active_or_with_open_trades` (a retired account can still have
+    // an open position that must keep accruing fees).
+    let accounts = auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
         .await
         .expect("list accounts");
 

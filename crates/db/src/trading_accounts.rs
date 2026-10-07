@@ -124,15 +124,63 @@ pub async fn get_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Tradi
     Ok(row.map(TradingAccount::from))
 }
 
-/// List only active accounts (`active = TRUE`), ordered by created_at ascending.
+/// List every trading account regardless of `active`, ordered by created_at
+/// ascending.
 ///
-/// Inactive (retired) accounts are excluded, so callers that iterate this list
-/// (overnight swap, SFD, startup reconcile, balance drift, etc.) never handle
-/// open trades that remain on a retired account. `get` / `get_account` return
-/// an account regardless of its `active` flag.
+/// This is the unfiltered view: display/aggregation call sites that need to
+/// show the full roster (e.g. the accounts API with `include_inactive=true`)
+/// should use this. Call sites that decide where money moves must use
+/// `list_active` or `list_active_or_with_open_trades` instead — see their
+/// docs for which one applies.
 pub async fn list_all(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     let rows = sqlx::query_as::<_, AccountRow>(&format!(
+        "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts ORDER BY created_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(TradingAccount::from).collect())
+}
+
+/// List only active accounts (`active = TRUE`), ordered by created_at ascending.
+///
+/// Use for call sites that decide *new* trading activity: matching a signal
+/// to an account, picking accounts to register at startup, or any "trade on
+/// this account" decision. A retired (inactive) account must never receive a
+/// new entry, so it must never appear in this list. `get` / `get_account`
+/// return an account regardless of its `active` flag.
+pub async fn list_active(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
+    let rows = sqlx::query_as::<_, AccountRow>(&format!(
         "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts WHERE active ORDER BY created_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(TradingAccount::from).collect())
+}
+
+/// List active accounts, plus any inactive (retired) account that still has
+/// an unsettled trade (`trades.status IN ('open', 'closing')`), ordered by
+/// created_at ascending. "Unsettled" includes `closing` (exit order placed,
+/// not yet confirmed filled) alongside `open` — a position mid-close still
+/// needs fees applied and margin monitored exactly like a fully open one.
+///
+/// Use for call sites that service *existing* positions rather than decide
+/// new ones: overnight/swap fee accrual, SFD accrual, startup reconcile,
+/// balance-drift detection, the liquidation-level startup gate, and margin
+/// monitoring. Retiring an account (`active = FALSE`) stops new entries but
+/// must not orphan a position still open or closing on it — those need fees
+/// applied, margin monitored, and a liquidation level resolved exactly like
+/// an active account's. Once the account has no open/closing trades left,
+/// it naturally drops out of this list on its own (no separate cleanup
+/// needed).
+pub async fn list_active_or_with_open_trades(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
+    let rows = sqlx::query_as::<_, AccountRow>(&format!(
+        "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts ta
+         WHERE ta.active
+            OR EXISTS (
+                SELECT 1 FROM trades t
+                WHERE t.account_id = ta.id AND t.status IN ('open', 'closing')
+            )
+         ORDER BY ta.created_at ASC"
     ))
     .fetch_all(pool)
     .await?;
@@ -208,6 +256,55 @@ pub struct UpdateTradingAccount {
     pub name: Option<String>,
     pub leverage: Option<Decimal>,
     pub strategy: Option<String>,
+    /// Retire (`false`) or reinstate (`true`) the account. `None` leaves the
+    /// current value untouched. See `update_account` for the guards applied
+    /// on each transition.
+    ///
+    /// Reinstating an account (`false` → `true`) makes it eligible for new
+    /// trades starting from the next signal. The HTTP layer
+    /// (`accounts::update`) re-validates the account's exchange against the
+    /// process-startup-resolved liquidation-level map before calling
+    /// `update_account` (same guard `create` applies); this function itself
+    /// does not, so a non-HTTP caller bypassing the API is responsible for
+    /// that check. One input is resolved once at process startup and is
+    /// *not* recomputed by either path:
+    /// - `fx_new` leverage/exchange assumption checks
+    ///   (`startup::check_fx_new_account_assumptions`): these run exactly
+    ///   once at startup, against the accounts that were active at that
+    ///   moment. A reinstated `fx_new*` account is never re-checked, so a
+    ///   leverage/exchange mismatch is not flagged again until the process
+    ///   restarts.
+    pub active: Option<bool>,
+}
+
+/// Translate a Postgres constraint violation from an INSERT/UPDATE on
+/// `trading_accounts` into an `anyhow::Error` whose top-level message names
+/// the violated constraint, while keeping `e` as the error source (via
+/// `anyhow::Error::new(e).context(..)` rather than `anyhow::anyhow!(..)`) so
+/// `ApiError::from(anyhow::Error)` can still find the original
+/// `sqlx::Error::Database` by walking `anyhow::Error::chain()` and match on
+/// its Postgres error code. Constraints not recognized here are returned
+/// unmodified (`e.into()`); a generic fallback ("duplicate name") still
+/// applies at the API layer if `name` ever gains a unique constraint.
+fn translate_unique_violation(e: sqlx::Error, exchange: &str) -> anyhow::Error {
+    let constraint = match &e {
+        sqlx::Error::Database(db_err) => db_err.constraint().map(str::to_string),
+        _ => None,
+    };
+    let message = match constraint.as_deref() {
+        Some("trading_accounts_one_live_per_exchange") => Some(format!(
+            "live account for exchange '{exchange}' already exists; \
+             only 1 active live account per exchange is supported"
+        )),
+        Some("trading_accounts_exchange_normalized") => Some(format!(
+            "invalid exchange '{exchange}': must match ^[a-z0-9_]+$"
+        )),
+        _ => None,
+    };
+    match message {
+        Some(message) => anyhow::Error::new(e).context(message),
+        None => e.into(),
+    }
 }
 
 pub async fn create_account(
@@ -241,15 +338,18 @@ pub async fn create_account(
     if let Err(e) = exchange.parse::<Exchange>() {
         anyhow::bail!("{e}");
     }
-    // live 口座は同一 exchange に 1 件のみ許可 (bitFlyer API client が
-    // singleton のため、複数行があると margin / collateral 共有で会計破綻する)。
-    // 通常フローの早期失敗として SELECT で確認する。並行 INSERT が競合した場合は
-    // DB 側の partial unique index (trading_accounts_one_live_per_exchange) が
-    // 守る（Fix 6: INSERT エラーを friendly message に変換）。
+    // live 口座は同一 exchange に active な行が 1 件のみ許可 (bitFlyer API
+    // client が singleton のため、複数行があると margin / collateral 共有で
+    // 会計破綻する)。退役済み (active = FALSE) の live 口座は対象外 — 取引
+    // 履歴を残したまま退役させた口座が、同じ exchange への新しい live 口座
+    // 作成を永久に妨げてはならない。通常フローの早期失敗として SELECT で
+    // 確認する。並行 INSERT が競合した場合は DB 側の partial unique index
+    // (trading_accounts_one_live_per_exchange、WHERE account_type = 'live'
+    // AND active) が守る（Fix 6: INSERT エラーを friendly message に変換）。
     if req.account_type == "live" {
         let existing: Option<(Uuid,)> = sqlx::query_as(
             "SELECT id FROM trading_accounts
-             WHERE exchange = $1 AND account_type = 'live'
+             WHERE exchange = $1 AND account_type = 'live' AND active
              LIMIT 1",
         )
         .bind(&exchange)
@@ -295,59 +395,144 @@ pub async fn create_account(
         .bind(&currency)
         .fetch_one(pool)
         .await
-        .map_err(|e| -> anyhow::Error {
-            // Concurrent inserts can race past the app-layer pre-check above.
-            // The DB partial unique index is the real guard; translate its
-            // unique_violation (23505) into a friendly error.
-            if let sqlx::Error::Database(ref db_err) = e {
-                match db_err.constraint() {
-                    Some("trading_accounts_one_live_per_exchange") => {
-                        return anyhow::anyhow!(
-                            "live account for exchange '{}' already exists",
-                            exchange
-                        );
-                    }
-                    Some("trading_accounts_exchange_normalized") => {
-                        return anyhow::anyhow!(
-                            "invalid exchange '{}': must match ^[a-z0-9_]+$",
-                            exchange
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            e.into()
-        })?;
+        // Concurrent inserts can race past the app-layer pre-check above.
+        // The DB partial unique index is the real guard.
+        .map_err(|e| translate_unique_violation(e, &exchange))?;
     Ok(TradingAccount::from(row))
+}
+
+/// Error from `update_account`, typed so callers (the HTTP layer in
+/// particular) can decide the response status without re-parsing a string.
+#[derive(Debug)]
+pub enum UpdateAccountError {
+    /// Deactivation (`active = Some(false)`) was rejected because `count`
+    /// open/closing trade(s) still exist on the account.
+    OpenTrades { account_id: Uuid, count: usize },
+    /// Everything else (unique constraint violation, unexpected DB error,
+    /// leverage validation failure, live-reactivation conflict). The
+    /// unique-violation disambiguation (duplicate name / duplicate live
+    /// account) is already handled by `ApiError::from(anyhow::Error)`
+    /// walking the chain, so callers must pass this variant straight to
+    /// that conversion rather than re-implementing the dispatch here.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for UpdateAccountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateAccountError::OpenTrades { account_id, count } => write!(
+                f,
+                "cannot deactivate account {account_id}: {count} open/closing trade(s) exist; close them first"
+            ),
+            UpdateAccountError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for UpdateAccountError {}
+
+impl From<anyhow::Error> for UpdateAccountError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<sqlx::Error> for UpdateAccountError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Other(e.into())
+    }
 }
 
 pub async fn update_account(
     pool: &PgPool,
     id: Uuid,
     req: &UpdateTradingAccount,
-) -> anyhow::Result<Option<TradingAccount>> {
-    // Validate leverage against the account's exchange before UPDATE. We need
-    // the exchange from the existing row — fetch only when the caller is
-    // actually changing leverage to avoid an extra query on no-op updates.
-    if let Some(new_leverage) = req.leverage {
-        let exchange: Option<(String,)> =
-            sqlx::query_as("SELECT exchange FROM trading_accounts WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await?;
-        if let Some((exchange_str,)) = exchange {
-            let exchange_enum: Exchange = exchange_str.parse()?;
-            if let Err(msg) = validate_leverage_for_exchange(exchange_enum, new_leverage) {
-                anyhow::bail!(msg);
-            }
+) -> Result<Option<TradingAccount>, UpdateAccountError> {
+    // Fetch the existing row once when any validation needs the account's
+    // current state (exchange for the leverage cap / live-reactivation
+    // check, account_type for the live-reactivation check). Skipped on
+    // no-op updates to avoid an extra query.
+    let existing = if req.leverage.is_some() || req.active.is_some() {
+        get_account(pool, id).await?
+    } else {
+        None
+    };
+
+    // Validate leverage against the account's exchange before UPDATE.
+    if let Some(new_leverage) = req.leverage
+        && let Some(account) = &existing
+    {
+        let exchange_enum: Exchange = account.exchange.parse()?;
+        if let Err(msg) = validate_leverage_for_exchange(exchange_enum, new_leverage) {
+            return Err(UpdateAccountError::Other(anyhow::anyhow!(msg)));
         }
     }
+
+    // Reinstating a live account must not collide with another already-active
+    // live account on the same exchange — same reason `create_account`
+    // rejects a second live row per exchange (shared singleton API client).
+    //
+    // The deactivation guard (reject retiring an account that still has an
+    // open/closing trade) is *not* checked here as a separate query — it is
+    // folded into the UPDATE's WHERE clause below so the check and the write
+    // happen in one statement, closing the window where a committed trade
+    // could appear between a standalone check and a follow-up UPDATE. It does
+    // not see a concurrent transaction's *uncommitted* trade INSERT (READ
+    // COMMITTED; the trades FK lock does not conflict with an `active`
+    // UPDATE), so that residual case can leave an open trade on a retired
+    // account — `list_active_or_with_open_trades` keeps such accounts covered
+    // for fee application, margin monitoring and reconcile.
+    if let Some(new_active) = req.active
+        && new_active
+        && let Some(account) = &existing
+        && account.account_type == "live"
+    {
+        let existing_live: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM trading_accounts
+             WHERE exchange = $1 AND account_type = 'live' AND active AND id <> $2
+             LIMIT 1",
+        )
+        .bind(&account.exchange)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((other_id,)) = existing_live {
+            return Err(UpdateAccountError::Other(anyhow::anyhow!(
+                "cannot reactivate account {id}: live account for exchange '{}' already active (id={}); only 1 active live account per exchange is supported",
+                account.exchange,
+                other_id
+            )));
+        }
+    }
+
+    // `$5 IS DISTINCT FROM FALSE` is true for both NULL (active untouched)
+    // and TRUE (reactivating), so that half of the OR only ever constrains
+    // the row when `req.active == Some(false)` (retiring). `NOT active`
+    // reads the row's *current* value as the UPDATE itself evaluates it —
+    // if the account is already inactive, the unsettled-trade check is
+    // skipped unconditionally, making a repeated deactivation request a
+    // no-op that always succeeds.
+    //
+    // This must be a condition inside the UPDATE's own WHERE clause rather
+    // than a Rust-side branch on a value fetched earlier (`existing`):
+    // between that fetch and this statement, a concurrent transaction could
+    // commit a reactivation (active: false -> true). A decision made in
+    // Rust from the stale `existing.active` would then bind the wrong thing
+    // and silently let the guard bypass stick even though the row is active
+    // again. `NOT active` here is read by the same statement that writes
+    // the row, under the same row lock, so it cannot observe a value that
+    // is already stale by the time it is read.
     let sql = format!(
         r#"UPDATE trading_accounts SET
                name = COALESCE($2, name),
                leverage = COALESCE($3, leverage),
-               strategy = COALESCE($4, strategy)
+               strategy = COALESCE($4, strategy),
+               active = COALESCE($5, active)
            WHERE id = $1
+             AND ($5 IS DISTINCT FROM FALSE OR NOT active OR NOT EXISTS (
+                 SELECT 1 FROM trades t
+                 WHERE t.account_id = $1 AND t.status IN ('open', 'closing')
+             ))
            RETURNING {ACCOUNT_COLUMNS}"#
     );
     let row = sqlx::query_as::<_, AccountRow>(&sql)
@@ -355,9 +540,47 @@ pub async fn update_account(
         .bind(&req.name)
         .bind(req.leverage)
         .bind(&req.strategy)
+        .bind(req.active)
         .fetch_optional(pool)
-        .await?;
-    Ok(row.map(TradingAccount::from))
+        .await
+        .map_err(|e| {
+            UpdateAccountError::Other(match &existing {
+                Some(account) => translate_unique_violation(e, &account.exchange),
+                // A name/strategy-only update (no `active`/`leverage` change)
+                // never touches the columns the one-live-per-exchange /
+                // exchange-normalized constraints guard, so no path here can
+                // trigger either — leave the error untranslated.
+                None => e.into(),
+            })
+        })?;
+    if let Some(r) = row {
+        return Ok(Some(TradingAccount::from(r)));
+    }
+
+    // 0 rows is ambiguous between "no account with this id" and "the
+    // deactivation guard blocked the write" — both look identical from
+    // `rows_affected`. Disambiguate using `existing`, fetched before the
+    // UPDATE ran. This arm is only reached when the row was still active at
+    // UPDATE time: the WHERE clause's `NOT active` makes the guard a no-op
+    // once the row is already inactive, so an already-retired account can
+    // never land here even though `req.active == Some(false)`.
+    match (&existing, req.active) {
+        (None, _) => Ok(None),
+        (Some(_), Some(false)) => {
+            let unsettled = crate::trades::list_open_or_closing_by_account(pool, id)
+                .await
+                .map_err(UpdateAccountError::from)?;
+            Err(UpdateAccountError::OpenTrades {
+                account_id: id,
+                count: unsettled.len(),
+            })
+        }
+        // Every other `req.active` value makes the WHERE guard a no-op, so
+        // 0 rows here would mean the row was deleted between the `existing`
+        // fetch and the UPDATE above — not expected from any caller in this
+        // codebase, but fall back to "not found" rather than panicking.
+        (Some(_), _) => Ok(None),
+    }
 }
 
 pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
@@ -524,10 +747,79 @@ mod tests {
         }
     }
 
-    /// `list_all` must hide retired accounts while `get` still returns them.
+    fn paper_req(name: &str, exchange: &str) -> CreateTradingAccount {
+        CreateTradingAccount {
+            name: name.to_string(),
+            exchange: exchange.to_string(),
+            initial_balance: dec!(50000),
+            leverage: dec!(1),
+            strategy: "bb_mean_revert_v1".to_string(),
+            account_type: "paper".to_string(),
+            currency: "JPY".to_string(),
+        }
+    }
+
+    fn no_op_update() -> UpdateTradingAccount {
+        UpdateTradingAccount {
+            name: None,
+            leverage: None,
+            strategy: None,
+            active: None,
+        }
+    }
+
+    /// Insert a minimal trade row directly (bypassing the executor) with the
+    /// given `status` so tests can exercise `list_active_or_with_open_trades`
+    /// and the deactivation guard across every unsettled status ('open' and
+    /// 'closing') without the full signal -> trade pipeline.
+    async fn insert_trade_with_status(pool: &sqlx::PgPool, account_id: Uuid, status: &str) {
+        sqlx::query(
+            r#"INSERT INTO trades
+                   (id, account_id, strategy_name, pair, exchange, direction,
+                    entry_price, quantity, leverage, stop_loss, entry_at, status)
+               VALUES ($1, $2, 'bb_mean_revert_v1', 'FX_BTC_JPY', 'bitflyer_cfd', 'long',
+                       100, 0.01, 2, 90, NOW(), $3)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(account_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert trade with status");
+    }
+
+    async fn insert_open_trade(pool: &sqlx::PgPool, account_id: Uuid) {
+        insert_trade_with_status(pool, account_id, "open").await;
+    }
+
+    /// `list_all` returns every account regardless of `active` — it is the
+    /// unfiltered view for display/aggregation, not a trading-decision list.
     #[sqlx::test(migrations = "../../migrations")]
-    async fn list_all_excludes_inactive_accounts(pool: sqlx::PgPool) {
+    async fn list_all_includes_inactive_accounts(pool: sqlx::PgPool) {
         let retired_id = list_all(&pool)
+            .await
+            .expect("list accounts")
+            .first()
+            .expect("migrations seed at least one account")
+            .id;
+
+        sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
+            .bind(retired_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate account");
+
+        let listed = list_all(&pool).await.expect("list accounts after retire");
+        assert!(
+            listed.iter().any(|a| a.id == retired_id),
+            "list_all must still include the now-inactive account {retired_id}"
+        );
+    }
+
+    /// `list_active` must hide retired accounts while `get` still returns them.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_active_excludes_inactive_accounts(pool: sqlx::PgPool) {
+        let retired_id = list_active(&pool)
             .await
             .expect("list accounts")
             .first()
@@ -540,10 +832,12 @@ mod tests {
             .await
             .expect("deactivate account");
 
-        let listed = list_all(&pool).await.expect("list accounts after retire");
+        let listed = list_active(&pool)
+            .await
+            .expect("list accounts after retire");
         assert!(
             listed.iter().all(|a| a.id != retired_id),
-            "inactive account {retired_id} must not appear in list_all"
+            "inactive account {retired_id} must not appear in list_active"
         );
         let fetched = get(&pool, retired_id)
             .await
@@ -552,12 +846,387 @@ mod tests {
         assert!(!fetched.active, "fetched account must be inactive");
     }
 
+    /// `list_active_or_with_open_trades` must include an active account, must
+    /// include a retired account that still has an open trade, and must
+    /// exclude a retired account with no open trades.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_active_or_with_open_trades_covers_active_and_retired_with_open_trades(
+        pool: sqlx::PgPool,
+    ) {
+        let active_id = create_account(&pool, &paper_req("active_acct", "gmo_fx"))
+            .await
+            .expect("create active account")
+            .id;
+        let retired_no_trades_id = create_account(&pool, &paper_req("retired_no_trades", "gmo_fx"))
+            .await
+            .expect("create retired-no-trades account")
+            .id;
+        let retired_with_trade_id =
+            create_account(&pool, &paper_req("retired_with_trade", "gmo_fx"))
+                .await
+                .expect("create retired-with-trade account")
+                .id;
+
+        for id in [retired_no_trades_id, retired_with_trade_id] {
+            sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("deactivate account");
+        }
+        insert_open_trade(&pool, retired_with_trade_id).await;
+
+        let active_only = list_active(&pool).await.expect("list_active");
+        assert!(
+            active_only.iter().any(|a| a.id == active_id),
+            "list_active must include the active account"
+        );
+        assert!(
+            active_only
+                .iter()
+                .all(|a| a.id != retired_no_trades_id && a.id != retired_with_trade_id),
+            "list_active must exclude every retired account regardless of open trades"
+        );
+
+        let active_or_open = list_active_or_with_open_trades(&pool)
+            .await
+            .expect("list_active_or_with_open_trades");
+        assert!(
+            active_or_open.iter().any(|a| a.id == active_id),
+            "must include the active account"
+        );
+        assert!(
+            active_or_open.iter().any(|a| a.id == retired_with_trade_id),
+            "must include the retired account that still has an open trade"
+        );
+        assert!(
+            active_or_open.iter().all(|a| a.id != retired_no_trades_id),
+            "must exclude the retired account with no open trades"
+        );
+
+        let all = list_all(&pool).await.expect("list_all");
+        assert!(
+            all.iter().any(|a| a.id == retired_no_trades_id),
+            "list_all must include every account regardless of trades"
+        );
+    }
+
+    /// A retired account with a `closing` (not yet confirmed filled) trade
+    /// must still be included — the position still needs fees applied and
+    /// margin monitored while the exit order is in flight.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_active_or_with_open_trades_includes_retired_account_with_closing_trade(
+        pool: sqlx::PgPool,
+    ) {
+        let retired_closing_id = create_account(&pool, &paper_req("retired_closing", "gmo_fx"))
+            .await
+            .expect("create retired-closing account")
+            .id;
+        sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
+            .bind(retired_closing_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate account");
+        insert_trade_with_status(&pool, retired_closing_id, "closing").await;
+
+        let listed = list_active_or_with_open_trades(&pool)
+            .await
+            .expect("list_active_or_with_open_trades");
+        assert!(
+            listed.iter().any(|a| a.id == retired_closing_id),
+            "must include the retired account that still has a closing trade"
+        );
+    }
+
+    /// Retiring a live account frees its exchange slot: a new live account
+    /// for the same exchange is then allowed to be created.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn live_insert_same_exchange_succeeds_after_existing_retired(pool: sqlx::PgPool) {
+        let first = create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("first live insert ok");
+        sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
+            .bind(first.id)
+            .execute(&pool)
+            .await
+            .expect("retire first live account");
+
+        create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("second live insert should succeed once the first is retired");
+    }
+
+    /// Deactivating an account with an open trade is rejected; the error
+    /// reports the open/closing trade count so the operator knows what to
+    /// close first.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_rejects_deactivation_with_open_trades(pool: sqlx::PgPool) {
+        let account = create_account(&pool, &paper_req("has_open_trade", "gmo_fx"))
+            .await
+            .expect("create account");
+        insert_open_trade(&pool, account.id).await;
+
+        let err = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect_err("deactivation with an open trade must be rejected");
+        assert!(
+            err.to_string().contains("1 open/closing trade"),
+            "error must report the open/closing trade count: {err}"
+        );
+    }
+
+    /// The open/closing-trade rejection must be reachable as a typed
+    /// `OpenTrades` variant, not just via string matching — the HTTP layer
+    /// matches on the variant to pick a 409 instead of falling through
+    /// `ApiError::from(anyhow::Error)`'s generic 500 fallback.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_rejects_deactivation_with_open_trades_as_typed_error(
+        pool: sqlx::PgPool,
+    ) {
+        let account = create_account(&pool, &paper_req("typed_open_trade_err", "gmo_fx"))
+            .await
+            .expect("create account");
+        insert_open_trade(&pool, account.id).await;
+
+        let err = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect_err("deactivation with an open trade must be rejected");
+        assert!(
+            matches!(err, UpdateAccountError::OpenTrades { count: 1, .. }),
+            "expected UpdateAccountError::OpenTrades {{ count: 1, .. }}, got: {err:?}"
+        );
+    }
+
+    /// Deactivating an account whose only unsettled trade is `closing` (exit
+    /// order placed, not yet confirmed filled) is rejected the same way an
+    /// `open` trade would be — the account must stay active until the
+    /// position is fully closed.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_rejects_deactivation_with_closing_trades(pool: sqlx::PgPool) {
+        let account = create_account(&pool, &paper_req("has_closing_trade", "gmo_fx"))
+            .await
+            .expect("create account");
+        insert_trade_with_status(&pool, account.id, "closing").await;
+
+        let err = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect_err("deactivation with a closing trade must be rejected");
+        assert!(
+            err.to_string().contains("1 open/closing trade"),
+            "error must report the closing trade: {err}"
+        );
+    }
+
+    /// When both an open and a closing trade exist on the same account, the
+    /// error reports their combined count, not just one status.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_rejects_deactivation_counts_open_and_closing_together(
+        pool: sqlx::PgPool,
+    ) {
+        let account = create_account(&pool, &paper_req("has_both_statuses", "gmo_fx"))
+            .await
+            .expect("create account");
+        insert_trade_with_status(&pool, account.id, "open").await;
+        insert_trade_with_status(&pool, account.id, "closing").await;
+
+        let err = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect_err("deactivation with open + closing trades must be rejected");
+        assert!(
+            err.to_string().contains("2 open/closing trade"),
+            "error must report the combined count of 2: {err}"
+        );
+    }
+
+    /// Deactivating a nonexistent account must return `Ok(None)` (not-found),
+    /// not the open/closing-trade error — the 0-row UPDATE result must be
+    /// disambiguated correctly even when `req.active == Some(false)`.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_returns_none_for_nonexistent_account_when_deactivating(
+        pool: sqlx::PgPool,
+    ) {
+        let result = update_account(
+            &pool,
+            Uuid::new_v4(),
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("a nonexistent account must not error");
+        assert!(
+            result.is_none(),
+            "nonexistent account must report Ok(None), not an error"
+        );
+    }
+
+    /// Deactivating an account with no open trades succeeds.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_allows_deactivation_without_open_trades(pool: sqlx::PgPool) {
+        let account = create_account(&pool, &paper_req("no_open_trade", "gmo_fx"))
+            .await
+            .expect("create account");
+
+        let updated = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("deactivation should succeed")
+        .expect("account exists");
+        assert!(!updated.active);
+    }
+
+    /// A repeated deactivation request against an account that is already
+    /// retired must succeed even if an open/closing trade now exists on it
+    /// (e.g. one that was still unsettled at the moment of the first
+    /// retirement) — the account already reached the requested state, so
+    /// re-running the unsettled-trade guard would reject a request that is
+    /// a no-op by definition.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_allows_repeated_deactivation_with_open_trades(pool: sqlx::PgPool) {
+        let account = create_account(&pool, &paper_req("repeat_retire", "gmo_fx"))
+            .await
+            .expect("create account");
+
+        update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("first deactivation should succeed")
+        .expect("account exists");
+
+        insert_open_trade(&pool, account.id).await;
+
+        let updated = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("repeated deactivation on an already-retired account must succeed")
+        .expect("account exists");
+        assert!(!updated.active, "account must remain inactive");
+    }
+
+    /// Reactivating a live account is rejected while another active live
+    /// account already exists for the same exchange.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_rejects_reactivating_live_when_another_active_live_exists(
+        pool: sqlx::PgPool,
+    ) {
+        let retired = create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("create first live account");
+        update_account(
+            &pool,
+            retired.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("retire first live account");
+        create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("create second live account while first is retired");
+
+        let err = update_account(
+            &pool,
+            retired.id,
+            &UpdateTradingAccount {
+                active: Some(true),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect_err("reactivating must be rejected while another live account is active");
+        assert!(
+            err.to_string().contains("already active"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Reactivating a live account succeeds when no other active live
+    /// account exists for the same exchange.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_account_allows_reactivating_live_when_no_conflict(pool: sqlx::PgPool) {
+        let account = create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("create live account");
+        update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(false),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("retire account");
+
+        let reactivated = update_account(
+            &pool,
+            account.id,
+            &UpdateTradingAccount {
+                active: Some(true),
+                ..no_op_update()
+            },
+        )
+        .await
+        .expect("reactivation should succeed")
+        .expect("account exists");
+        assert!(reactivated.active);
+    }
+
     /// The FX-new migration retires the legacy FX accounts and seeds `FX新`.
     /// Legacy ids (031/032) are not seeded by every migration history, so they
     /// are only asserted when present.
     #[sqlx::test(migrations = "../../migrations")]
     async fn migration_retires_legacy_fx_accounts_and_seeds_fx_new(pool: sqlx::PgPool) {
-        let listed = list_all(&pool).await.expect("list accounts");
+        let listed = list_active(&pool).await.expect("list accounts");
         let fx_new_id = Uuid::parse_str("a0000000-0000-0000-0000-000000000040").unwrap();
 
         let fx_new = listed
@@ -598,6 +1267,61 @@ mod tests {
         assert!(
             err.to_string().contains("already exists"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// `update_account_rejects_reactivating_live_when_another_active_live_exists`
+    /// (above) covers the sequential case: the app-level pre-check inside
+    /// `update_account` sees the conflicting active row and rejects with a
+    /// friendly "already active" message *before* ever reaching the UPDATE.
+    /// That guard can only be bypassed by genuine concurrency (a second
+    /// transaction committing a conflicting row between the guard's SELECT
+    /// and the UPDATE) — not reproducible deterministically without an
+    /// async-runtime dev-dependency this crate does not have. This test
+    /// instead verifies the DB-layer fallback itself: `translate_unique_violation`
+    /// (the function `update_account`'s `.map_err` now shares with
+    /// `create_account`) against a *real* `sqlx::Error::Database` obtained by
+    /// provoking the same unique index with a raw INSERT, bypassing
+    /// `create_account`'s app-level pre-check the way a non-guarded write
+    /// path would.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn translate_unique_violation_reports_exchange_and_already_exists(pool: sqlx::PgPool) {
+        let first = create_account(&pool, &live_req("bitflyer_cfd"))
+            .await
+            .expect("create first live account");
+
+        let db_err = sqlx::query(
+            "INSERT INTO trading_accounts
+                 (id, name, account_type, exchange, strategy,
+                  initial_balance, current_balance, leverage, currency, active)
+             VALUES ($1, 'second-live', 'live', 'bitflyer_cfd', 'bb_mean_revert_v1',
+                     50000, 50000, 1, 'JPY', TRUE)",
+        )
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect_err("a second active live row for the same exchange must violate the unique index");
+        assert!(
+            matches!(db_err, sqlx::Error::Database(_)),
+            "expected a database error from the unique index, got: {db_err:?}"
+        );
+
+        let translated = translate_unique_violation(db_err, &first.exchange);
+        assert!(
+            translated.to_string().contains(&first.exchange)
+                && translated.to_string().contains("already exists"),
+            "message must name the exchange and say it already exists: {translated}"
+        );
+        // The original sqlx::Error must still be reachable via the chain so
+        // `ApiError::from(anyhow::Error)` can match on the Postgres
+        // constraint name.
+        assert!(
+            translated.chain().any(|c| matches!(
+                c.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::Database(e))
+                    if e.constraint() == Some("trading_accounts_one_live_per_exchange")
+            )),
+            "the original sqlx::Error::Database must remain in the anyhow chain"
         );
     }
 

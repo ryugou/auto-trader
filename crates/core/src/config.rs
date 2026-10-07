@@ -38,6 +38,197 @@ pub struct AppConfig {
     /// 未設定なら空 HashMap (該当 pair の swap 計上は 0)。
     #[serde(default)]
     pub gmo_fx: GmoFxConfig,
+    /// フィード監視 (Issue #109: ホストサスペンド検知 + フィード途絶監視)。
+    /// 節自体が無い既存 config でも `FeedWatchdogConfig::default()` で起動できる。
+    #[serde(default)]
+    pub feed_watchdog: FeedWatchdogConfig,
+}
+
+/// `notify_retry_attempts` の上限。これを超えると、待ち時間
+/// (`notify_retry_initial_secs × 2^attempts`) が指数的に伸び続け、通知の
+/// たびにほぼ終わらない再送タスクが積み重なってしまう (`validate()` 参照)。
+const MAX_NOTIFY_RETRY_ATTEMPTS: u64 = 10;
+
+/// 通知 1 回の送信 (HTTP リクエスト 1 回) のタイムアウト秒数。
+/// `auto_trader_notify::Notifier` の reqwest クライアント timeout と、ここでの
+/// 再送待ち時間の設定検証 (`FeedWatchdogConfig::validate`) が同じ値を参照する
+/// 必要がある。検証側は「障害中は送信のたびにこの秒数まで待たされる」ことを
+/// 最悪時間の計算前提にしており、送信側の実際のタイムアウトとずれると
+/// (例: 送信側だけタイムアウトを伸ばす) 検証が実態を反映しなくなり、再送が
+/// realert_interval_secs に食い込む事態を検知できなくなる。
+pub const NOTIFY_SEND_TIMEOUT_SECS: u64 = 10;
+
+/// フィード監視 (TOML key `[feed_watchdog]`)。
+///
+/// - ホストのサスペンド検知: 監視タスクの壁時計 (`chrono::Utc::now()`) の
+///   tick 間隔が `suspend_gap_secs` 以上空いたら、ホストスリープ等による
+///   長時間停止とみなす。
+/// - フィード途絶検知: 各フィードの最新 tick が `stale_after_secs` 以上
+///   古い (または起動から `stale_after_secs` 経っても tick 無し) なら途絶と
+///   みなし、`realert_interval_secs` ごとに再通知する。
+/// - `enabled=false` で止まるのは上記2つの定期監視だけであり、フィードタスク
+///   自体の終了検知 (`feed_watchdog::spawn_feed_supervisor`。main.rs のフィード
+///   起動ループから本設定に関係なく常時配線される) には影響しない。
+///
+/// 節もキーも無い既存 config は下記 `Default` 実装の値で起動する。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FeedWatchdogConfig {
+    pub enabled: bool,
+    pub check_interval_secs: u64,
+    pub suspend_gap_secs: u64,
+    pub stale_after_secs: u64,
+    pub realert_interval_secs: u64,
+    /// 鮮度監視・途絶/復旧通知の対象から除外する取引所名のリスト
+    /// (`Exchange::as_str()` の値、例: "oanda")。フィードタスク終了検知
+    /// (`spawn_feed_supervisor` / `classify_feed_task_result`) はこの設定に
+    /// 関係なく常に行う。
+    ///
+    /// 既定で "oanda" を除外するのは、OANDA フィードが `PriceStore` を自身で
+    /// 更新せず (完成済み M5 足の開始時刻を tick 時刻として記録するため) 最新
+    /// tick が常に 5〜11分古く見え、`stale_after_secs=900` 前後を跨いで
+    /// 途絶/復旧通知を繰り返してしまうため。また OANDA には休場記録
+    /// (`mark_market_closed`) が無く、週末も再通知が続いてしまう。
+    pub exclude_exchanges: Vec<String>,
+    /// 通知送信失敗時の再送回数 (最初の送信を含まない)。0 なら再送しない。
+    /// ホスト復帰直後は DNS/Wi-Fi が未復旧で送信が失敗しうるため、既定で
+    /// 再送する (Issue #109 followup)。`validate()` が
+    /// `MAX_NOTIFY_RETRY_ATTEMPTS` 以下であることを強制する (上限が無いと、
+    /// 通知のたびに待ち時間が飽和しほぼ終わらない再送タスクが積み重なる)。
+    ///
+    /// 再送は「少なくとも1回届ける」方式であり、送信先が受信した後に送信側が
+    /// タイムアウトする (応答が届かない) と再送が走り、同じ通知が重複して
+    /// 2回以上届くことがある。通知の受信側はこの重複を前提にすること。
+    pub notify_retry_attempts: u64,
+    /// 再送の初回待ち時間 (秒)。以後 2 倍で増える
+    /// (`notify_retry_delay_secs` 参照)。
+    pub notify_retry_initial_secs: u64,
+}
+
+impl Default for FeedWatchdogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_secs: 60,
+            suspend_gap_secs: 300,
+            // bitFlyer の日次メンテナンス(約10分)を跨いで誤検知しないための値。
+            stale_after_secs: 900,
+            realert_interval_secs: 3600,
+            exclude_exchanges: vec!["oanda".to_string()],
+            notify_retry_attempts: 5,
+            notify_retry_initial_secs: 30,
+        }
+    }
+}
+
+impl FeedWatchdogConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.check_interval_secs == 0 {
+            anyhow::bail!("[feed_watchdog].check_interval_secs must be >= 1");
+        }
+        if self.suspend_gap_secs == 0 {
+            anyhow::bail!("[feed_watchdog].suspend_gap_secs must be >= 1");
+        }
+        if self.stale_after_secs == 0 {
+            anyhow::bail!("[feed_watchdog].stale_after_secs must be >= 1");
+        }
+        if self.realert_interval_secs == 0 {
+            anyhow::bail!("[feed_watchdog].realert_interval_secs must be >= 1");
+        }
+        if self.notify_retry_initial_secs == 0 {
+            anyhow::bail!("[feed_watchdog].notify_retry_initial_secs must be >= 1");
+        }
+        if self.suspend_gap_secs <= self.check_interval_secs {
+            anyhow::bail!(
+                "[feed_watchdog].suspend_gap_secs ({}) must be > check_interval_secs ({}) \
+                 (otherwise every tick interval itself would look like a suspend)",
+                self.suspend_gap_secs,
+                self.check_interval_secs
+            );
+        }
+        if self.stale_after_secs < self.check_interval_secs {
+            anyhow::bail!(
+                "[feed_watchdog].stale_after_secs ({}) must be >= check_interval_secs ({}) \
+                 (otherwise a feed could be flagged stale before the watchdog ever checks it)",
+                self.stale_after_secs,
+                self.check_interval_secs
+            );
+        }
+        for ex in &self.exclude_exchanges {
+            if let Err(e) = ex.parse::<crate::types::Exchange>() {
+                anyhow::bail!(
+                    "[feed_watchdog].exclude_exchanges contains unknown exchange '{ex}': {e}"
+                );
+            }
+        }
+        if self.notify_retry_attempts > MAX_NOTIFY_RETRY_ATTEMPTS {
+            anyhow::bail!(
+                "[feed_watchdog].notify_retry_attempts ({}) must be <= {MAX_NOTIFY_RETRY_ATTEMPTS} \
+                 (an unbounded retry count lets the backoff wait time grow without limit, \
+                 piling up near-endless retry tasks for every alert)",
+                self.notify_retry_attempts
+            );
+        }
+        // 再送の待ち時間の合計 = initial_secs * (2^attempts - 1) (等比数列の和)。
+        // これは待ち時間のみであり、各送信そのものに掛かる時間 (HTTP タイムアウト
+        // まで待たされうる) を含まない。attempts は上で <= MAX_NOTIFY_RETRY_ATTEMPTS
+        // (10) に制限済みなので 2^attempts は u128 の範囲内に確実に収まるが、将来の
+        // 上限緩和で無警告に桁あふれしないよう checked 演算で明示的に計算する。
+        let total_wait_secs: u128 = 2u128
+            .checked_pow(self.notify_retry_attempts as u32)
+            .and_then(|pow| pow.checked_sub(1))
+            .and_then(|doublings| doublings.checked_mul(self.notify_retry_initial_secs as u128))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[feed_watchdog] overflow while computing total notify retry wait time \
+                     (notify_retry_attempts={}, notify_retry_initial_secs={})",
+                    self.notify_retry_attempts,
+                    self.notify_retry_initial_secs
+                )
+            })?;
+        // 実際の最悪時間は待ち時間の合計だけでは済まない: 障害中は送信
+        // (初回 + 再送 = notify_retry_attempts + 1 回) のたびに HTTP が
+        // NOTIFY_SEND_TIMEOUT_SECS までブロックしうる (`Notifier::send` は
+        // 1回の送信で HTTP リクエストを1回しか行わないため、送信1回の最悪時間は
+        // この秒数で固定)。これを待ち時間の合計に加えたものを最悪時間とし、
+        // realert_interval_secs 未満であることを要求する。
+        // なお、タスクのスケジューリング遅延や sleep の遅延超過は含まない近似値であり、
+        // 運用値では十分なマージン (既定 990s vs 3600s) を取る前提。
+        let send_count: u128 = (self.notify_retry_attempts as u128)
+            .checked_add(1)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[feed_watchdog] overflow while computing notify send count \
+                     (notify_retry_attempts={})",
+                    self.notify_retry_attempts
+                )
+            })?;
+        let worst_case_secs: u128 = send_count
+            .checked_mul(NOTIFY_SEND_TIMEOUT_SECS as u128)
+            .and_then(|send_timeout_total| total_wait_secs.checked_add(send_timeout_total))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[feed_watchdog] overflow while computing worst-case notify time \
+                     (notify_retry_attempts={}, notify_retry_initial_secs={}, \
+                     NOTIFY_SEND_TIMEOUT_SECS={NOTIFY_SEND_TIMEOUT_SECS})",
+                    self.notify_retry_attempts,
+                    self.notify_retry_initial_secs
+                )
+            })?;
+        if worst_case_secs >= self.realert_interval_secs as u128 {
+            anyhow::bail!(
+                "[feed_watchdog] worst-case notify time ({worst_case_secs}s = total retry wait \
+                 {total_wait_secs}s [notify_retry_initial_secs({}) * (2^notify_retry_attempts({}) \
+                 - 1)] + {send_count} sends * NOTIFY_SEND_TIMEOUT_SECS({NOTIFY_SEND_TIMEOUT_SECS}s)) \
+                 must be < realert_interval_secs ({}) (otherwise the stale-feed re-alert could fire \
+                 while the previous alert's sends/retries are still in flight)",
+                self.notify_retry_initial_secs,
+                self.notify_retry_attempts,
+                self.realert_interval_secs
+            );
+        }
+        Ok(())
+    }
 }
 
 /// GMO FX 用 config (TOML key `[gmo_fx]`)。現状は swap rate のみ。
@@ -349,6 +540,7 @@ impl AppConfig {
             ensure_jpy_quote(&s.pairs, &format!("strategies({})", s.name))?;
         }
         self.gmo_fx.swap.validate()?;
+        self.feed_watchdog.validate()?;
         Ok(())
     }
 }
@@ -938,5 +1130,321 @@ crypto = []
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod feed_watchdog_config_tests {
+    use super::*;
+
+    fn minimal_config_toml() -> String {
+        r#"
+[vegapunk]
+endpoint = "http://x"
+schema = "y"
+[database]
+url = "postgresql://x"
+[monitor]
+interval_secs = 60
+[pairs]
+fx = []
+crypto = []
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn section_absent_uses_issue_109_defaults() {
+        // [feed_watchdog] 節が無い既存 config は Issue #109 で定めた既定値で
+        // 起動できる (節が無くても絶対にエラーにしない)。
+        let config: AppConfig = toml::from_str(&minimal_config_toml()).unwrap();
+        assert!(config.validate().is_ok());
+        let fw = config.feed_watchdog;
+        assert!(fw.enabled);
+        assert_eq!(fw.check_interval_secs, 60);
+        assert_eq!(fw.suspend_gap_secs, 300);
+        assert_eq!(fw.stale_after_secs, 900);
+        assert_eq!(fw.realert_interval_secs, 3600);
+        assert_eq!(fw.exclude_exchanges, vec!["oanda".to_string()]);
+        assert_eq!(fw.notify_retry_attempts, 5);
+        assert_eq!(fw.notify_retry_initial_secs, 30);
+    }
+
+    #[test]
+    fn partial_section_fills_missing_keys_with_defaults() {
+        // 節はあるが一部キーのみ指定 → 残りは default で埋まる
+        // (GmoFxSwapConfig と同じ container-level #[serde(default)] パターン)。
+        let toml_str = format!(
+            "{}\n[feed_watchdog]\nenabled = false\n",
+            minimal_config_toml()
+        );
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        let fw = config.feed_watchdog;
+        assert!(!fw.enabled);
+        assert_eq!(fw.check_interval_secs, 60);
+        assert_eq!(fw.suspend_gap_secs, 300);
+        assert_eq!(fw.stale_after_secs, 900);
+        assert_eq!(fw.realert_interval_secs, 3600);
+        assert_eq!(fw.exclude_exchanges, vec!["oanda".to_string()]);
+        assert_eq!(fw.notify_retry_attempts, 5);
+        assert_eq!(fw.notify_retry_initial_secs, 30);
+    }
+
+    #[test]
+    fn explicit_values_parse() {
+        let toml_str = format!(
+            "{}\n[feed_watchdog]\nenabled = true\ncheck_interval_secs = 30\n\
+             suspend_gap_secs = 120\nstale_after_secs = 90\nrealert_interval_secs = 1800\n\
+             notify_retry_attempts = 3\nnotify_retry_initial_secs = 10\n",
+            minimal_config_toml()
+        );
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        config.validate().unwrap();
+        let fw = config.feed_watchdog;
+        assert_eq!(fw.check_interval_secs, 30);
+        assert_eq!(fw.suspend_gap_secs, 120);
+        assert_eq!(fw.stale_after_secs, 90);
+        assert_eq!(fw.realert_interval_secs, 1800);
+        assert_eq!(fw.notify_retry_attempts, 3);
+        assert_eq!(fw.notify_retry_initial_secs, 10);
+    }
+
+    fn valid() -> FeedWatchdogConfig {
+        FeedWatchdogConfig {
+            enabled: true,
+            check_interval_secs: 60,
+            suspend_gap_secs: 300,
+            stale_after_secs: 600,
+            realert_interval_secs: 3600,
+            exclude_exchanges: Vec::new(),
+            notify_retry_attempts: 5,
+            notify_retry_initial_secs: 30,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_defaults() {
+        valid().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_check_interval() {
+        let mut c = valid();
+        c.check_interval_secs = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_suspend_gap() {
+        let mut c = valid();
+        c.suspend_gap_secs = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_stale_after() {
+        let mut c = valid();
+        c.stale_after_secs = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_realert_interval() {
+        let mut c = valid();
+        c.realert_interval_secs = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_notify_retry_initial_secs() {
+        let mut c = valid();
+        c.notify_retry_initial_secs = 0;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("notify_retry_initial_secs"), "err={err}");
+    }
+
+    #[test]
+    fn validate_accepts_zero_notify_retry_attempts() {
+        // 0 は「再送しない」(最初の送信のみ) を意味する正常な設定値。
+        let mut c = valid();
+        c.notify_retry_attempts = 0;
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_suspend_gap_equal_to_check_interval() {
+        // suspend_gap_secs > check_interval_secs が要件 (厳密に超過が必要)。
+        let mut c = valid();
+        c.suspend_gap_secs = c.check_interval_secs;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("suspend_gap_secs"));
+    }
+
+    #[test]
+    fn validate_rejects_suspend_gap_less_than_check_interval() {
+        let mut c = valid();
+        c.suspend_gap_secs = c.check_interval_secs - 1;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_stale_after_equal_to_check_interval() {
+        // stale_after_secs >= check_interval_secs が要件 (等しいのは許容)。
+        let mut c = valid();
+        c.stale_after_secs = c.check_interval_secs;
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_stale_after_less_than_check_interval() {
+        let mut c = valid();
+        c.stale_after_secs = c.check_interval_secs - 1;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_exclude_exchange() {
+        let mut c = valid();
+        c.exclude_exchanges = vec!["unknown_exchange".to_string()];
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("unknown_exchange"), "err={err}");
+    }
+
+    #[test]
+    fn validate_accepts_known_exclude_exchange() {
+        let mut c = valid();
+        c.exclude_exchanges = vec!["oanda".to_string()];
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_empty_exclude_exchanges() {
+        let mut c = valid();
+        c.exclude_exchanges = Vec::new();
+        c.validate().unwrap();
+    }
+
+    // ----- notify_retry_attempts 上限 + 再送の最悪時間 (待ち時間合計 + 送信
+    // タイムアウト) (Issue #109 followup #1/#2) -----
+
+    #[test]
+    fn validate_accepts_notify_retry_attempts_at_cap_of_ten() {
+        let mut c = valid();
+        c.notify_retry_attempts = 10;
+        c.notify_retry_initial_secs = 1;
+        // total_wait = 1 * (2^10 - 1) = 1023s
+        // worst_case = 1023 + (10+1 sends) * NOTIFY_SEND_TIMEOUT_SECS(10s) = 1133s
+        c.realert_interval_secs = 1134; // worst_case より 1 秒大きい
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_cap_of_ten_attempts_when_worst_case_equals_realert_interval() {
+        let mut c = valid();
+        c.notify_retry_attempts = 10;
+        c.notify_retry_initial_secs = 1;
+        // total_wait = 1 * (2^10 - 1) = 1023s
+        // worst_case = 1023 + (10+1 sends) * NOTIFY_SEND_TIMEOUT_SECS(10s) = 1133s
+        c.realert_interval_secs = 1133; // worst_case と等しい (拒否)
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("worst-case notify time"), "err={err}");
+    }
+
+    #[test]
+    fn validate_rejects_zero_retry_attempts_when_single_send_timeout_equals_realert_interval() {
+        let mut c = valid();
+        c.notify_retry_attempts = 0;
+        // total_wait = 30 * (2^0 - 1) = 0s
+        // worst_case = 0 + (0+1 send) * NOTIFY_SEND_TIMEOUT_SECS(10s) = 10s
+        // 初回送信 1 回分のタイムアウトが式に入っていることの回帰テスト。
+        c.realert_interval_secs = 10; // worst_case と等しい (拒否)
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("worst-case notify time"), "err={err}");
+    }
+
+    #[test]
+    fn validate_accepts_zero_retry_attempts_when_realert_interval_exceeds_single_send_timeout() {
+        let mut c = valid();
+        c.notify_retry_attempts = 0;
+        // total_wait = 0s, worst_case = 0 + 1 * 10s = 10s
+        c.realert_interval_secs = 11; // worst_case より 1 秒大きい
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_notify_retry_attempts_above_cap_of_ten() {
+        let mut c = valid();
+        c.notify_retry_attempts = 11;
+        c.notify_retry_initial_secs = 1;
+        // realert_interval_secs は十分大きくして、拒否理由が上限違反であり
+        // 合計時間違反ではないことを確定させる。
+        c.realert_interval_secs = u64::MAX;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("notify_retry_attempts"), "err={err}");
+    }
+
+    #[test]
+    fn validate_rejects_worst_case_equal_to_realert_interval() {
+        let mut c = valid();
+        c.notify_retry_attempts = 5;
+        // total_wait = 30 * (2^5 - 1) = 930s
+        // worst_case = 930 + 6 * 10 = 990s = realert_interval_secs (等しい場合も拒否)
+        c.notify_retry_initial_secs = 30;
+        c.realert_interval_secs = 990;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("worst-case notify time"),
+            "worst case equal to realert_interval_secs must be rejected: err={err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_when_send_timeouts_push_worst_case_past_realert_interval() {
+        // total_wait (930s) だけを見れば realert_interval_secs (950s) 未満だが、
+        // 送信6回 (初回+再送5回) 分の HTTP タイムアウト (10s/回) を足した
+        // worst_case = 930 + 6*10 = 990s は 950s 以上になるため拒否されるべき。
+        // これは「待ち時間の合計」だけでなく「送信のタイムアウト込みの最悪時間」
+        // で判定していることを確認する回帰テスト。
+        let mut c = valid();
+        c.notify_retry_attempts = 5;
+        c.notify_retry_initial_secs = 30; // total_wait = 930s
+        c.realert_interval_secs = 950; // 930 < 950 だが worst_case(990) >= 950
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("realert_interval_secs"),
+            "worst case (incl. send timeout) must be rejected: err={err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_worst_case_one_second_below_realert_interval() {
+        // 最悪時間 (待ち時間合計 + 送信タイムアウト) が realert_interval_secs を
+        // 1秒下回る境界値: total_wait=930s, worst_case=930+6*10=990s,
+        // realert_interval_secs=991s (worst_case より1秒大きい)。
+        let mut c = valid();
+        c.notify_retry_attempts = 5;
+        c.notify_retry_initial_secs = 30; // total_wait = 930s
+        c.realert_interval_secs = 991; // worst_case(990) = realert_interval_secs - 1
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_issue_109_default_notify_retry_settings() {
+        // 既定値 (5回・30秒・realert=3600秒):
+        // total_wait = 30*(2^5-1) = 930s, worst_case = 930 + 6*10 = 990s < 3600s。
+        FeedWatchdogConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn repo_default_toml_is_valid() {
+        // リポジトリの config/default.toml が [feed_watchdog] 込みでそのまま読める。
+        let content = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/default.toml"),
+        )
+        .expect("config/default.toml must exist");
+        let config: AppConfig = toml::from_str(&content).expect("default.toml must parse");
+        config
+            .validate()
+            .expect("default.toml must pass validation");
     }
 }

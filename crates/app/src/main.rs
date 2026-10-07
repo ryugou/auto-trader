@@ -5,6 +5,7 @@ mod wilson;
 
 use auto_trader::api;
 use auto_trader::price_store;
+use auto_trader::spawn_system_alerts;
 
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
@@ -18,7 +19,7 @@ use auto_trader_market::market_feed::MarketFeed;
 use auto_trader_market::monitor::MarketMonitor;
 use auto_trader_market::oanda::OandaClient;
 use auto_trader_market::oanda_private::OandaPrivateApi;
-use auto_trader_notify::Notifier;
+use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -32,23 +33,20 @@ fn exchange_from_str(s: &str) -> Option<Exchange> {
     s.parse().ok()
 }
 
-/// SystemAlert 群を fire-and-forget で送る (送信失敗は warn のみ)。
-/// 起動時 one-shot / 毎時 task の両方から呼ぶ (balance drift dispatch)。
-fn spawn_system_alerts(
-    notifier: &Arc<Notifier>,
-    alerts: Vec<auto_trader_notify::SystemAlertEvent>,
-) {
-    for ev in alerts {
-        let notifier = notifier.clone();
-        tokio::spawn(async move {
-            if let Err(e) = notifier
-                .send(auto_trader_notify::NotifyEvent::SystemAlert(ev))
-                .await
-            {
-                tracing::warn!("system alert send failed: {e}");
-            }
-        });
-    }
+/// True if `account` exists and is still active.
+///
+/// Used as the final guard immediately before `execute()` in the signal
+/// executor loop, narrowing the window where a REST call retires the account
+/// (`active = false`) while the upstream risk checks (kill switch, daily
+/// loss limit, freshness gate, liquidation level, position lookup) are each
+/// awaiting the DB. The window is not fully closed: a retirement committed
+/// between this `get` and the trade INSERT inside `execute()` still leaves an
+/// open trade on a retired account, which `list_active_or_with_open_trades`
+/// keeps treating as an existing position (fees, margin monitoring, reconcile).
+fn account_still_tradable(
+    account: Option<&auto_trader_db::trading_accounts::TradingAccount>,
+) -> bool {
+    account.is_some_and(|a| a.active)
 }
 
 #[tokio::main]
@@ -566,7 +564,14 @@ async fn main() -> anyhow::Result<()> {
     // Log the accounts currently present at startup for visibility only.
     // Fatal if the DB query fails — we cannot validate live-safety preconditions
     // without this snapshot, so refusing to start is the correct behaviour.
-    let db_accounts = match auto_trader_db::trading_accounts::list_all(&pool).await {
+    // `list_active_or_with_open_trades`, not `list_active`: this snapshot
+    // feeds `resolve_exchange_liquidation_levels` and
+    // `reconcile_live_accounts_at_startup` below, both of which must also
+    // cover a retired account that still has an open position (it still
+    // needs a liquidation level resolved and its live state reconciled).
+    let db_accounts = match auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             anyhow::bail!(
@@ -579,7 +584,7 @@ async fn main() -> anyhow::Result<()> {
     }
     for pac in &db_accounts {
         tracing::info!(
-            "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={})",
+            "trading account: {} (id={}, type={}, exchange={}, strategy={}, balance={} (initial={}), leverage={}, active={})",
             pac.name,
             pac.id,
             pac.account_type,
@@ -587,7 +592,8 @@ async fn main() -> anyhow::Result<()> {
             pac.strategy,
             pac.current_balance,
             pac.initial_balance,
-            pac.leverage
+            pac.leverage,
+            pac.active
         );
         if !registered_strategies.iter().any(|s| s == &pac.strategy) {
             tracing::warn!(
@@ -657,6 +663,66 @@ async fn main() -> anyhow::Result<()> {
             &db_accounts,
             &config,
         )?);
+
+    // fx_new strategies (a) size positions assuming GMO_FX_LEVERAGE and (b)
+    // only ever process price events from FX_NEW_EXCHANGE (see
+    // crates/strategy/src/fx_new.rs). A mismatched leverage silently shifts
+    // real risk away from the intended 1%-of-equity stop loss; a mismatched
+    // exchange is caught fail-closed by `fx_new_dispatch_allowed` in the
+    // executor's dispatch loop below, which excludes the account from
+    // dispatch, so no order is ever placed for it. Flag both loudly but do
+    // not abort startup over either — the account still runs, just not as
+    // intended.
+    for mismatch in auto_trader::startup::check_fx_new_account_assumptions(&db_accounts) {
+        // The account's own (raw) exchange string is the most informative
+        // value to report on, even for an exchange mismatch; fall back to
+        // the strategy's expected exchange only if it fails to parse at all
+        // (e.g. a typo'd or unsupported value), rather than hardcoding
+        // GmoFx regardless of what the account actually has on file.
+        let notify_exchange = mismatch
+            .account_exchange
+            .parse::<Exchange>()
+            .unwrap_or(auto_trader_strategy::fx_new::FX_NEW_EXCHANGE);
+        match &mismatch.kind {
+            auto_trader::startup::FxNewMismatchKind::Leverage {
+                account_leverage,
+                expected_leverage,
+            } => {
+                let body = format!(
+                    "account '{}' has leverage {} but fx_new strategy assumes {} — risk sizing (1% of equity at stop) is wrong for this account until leverage is corrected",
+                    mismatch.account_name, account_leverage, expected_leverage
+                );
+                tracing::error!("fx_new leverage mismatch: {body}");
+                auto_trader::spawn_notify(
+                    &notifier,
+                    NotifyEvent::SystemAlert(SystemAlertEvent {
+                        title: "fx_new leverage mismatch".to_string(),
+                        account_name: mismatch.account_name.clone(),
+                        exchange: notify_exchange,
+                        body,
+                    }),
+                );
+            }
+            auto_trader::startup::FxNewMismatchKind::Exchange { expected_exchange } => {
+                let body = format!(
+                    "account '{}' has exchange '{}' but fx_new only processes {} events — the executor will not dispatch fx_new signals to this account until the exchange is corrected, so no order will be placed for it",
+                    mismatch.account_name,
+                    mismatch.account_exchange,
+                    expected_exchange.as_str()
+                );
+                tracing::error!("fx_new exchange mismatch: {body}");
+                auto_trader::spawn_notify(
+                    &notifier,
+                    NotifyEvent::SystemAlert(SystemAlertEvent {
+                        title: "fx_new exchange mismatch".to_string(),
+                        account_name: mismatch.account_name.clone(),
+                        exchange: notify_exchange,
+                        body,
+                    }),
+                );
+            }
+        }
+    }
 
     // Pre-compute the PositionSizer once at startup and share via Arc.
     // Per-tick reconstruction (every SL/TP check, every strategy exit, every
@@ -792,25 +858,31 @@ async fn main() -> anyhow::Result<()> {
     // Each feed manages its own connection lifecycle; price_store and
     // price_tx are passed at run-time so feeds write ticks directly
     // (no intermediate raw-tick channel needed).
-    // Collect handles so we can abort them on shutdown, mirroring the
-    // old fx_monitor_handle / bitflyer_handle abort semantics.
+    // Supervisor wiring (await the JoinHandle, classify Ok/Err/panic vs.
+    // shutdown-abort, notify) lives in `feed_watchdog::spawn_feed_supervisor`
+    // (Issue #109 item 8) so main.rs only spawns the feed and hands off the
+    // handle. We keep only the returned AbortHandle here — shutdown aborts
+    // the inner feed task directly, which classify_feed_task_result
+    // recognizes via JoinError::is_cancelled() and correctly does not alert.
     // Box<dyn MarketFeed> encodes single ownership; feeds are consumed
     // by the for loop and moved into each spawned task.
-    let mut feed_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut feed_handles: Vec<tokio::task::AbortHandle> = Vec::new();
     for (exchange, feed) in feeds {
         let feed_price_store = price_store.clone();
         let feed_price_tx = price_tx.clone();
         let exchange_label = exchange;
-        let handle = tokio::spawn(async move {
+        let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             tracing::info!("starting market feed for {:?}", exchange_label);
-            if let Err(e) = feed.run(feed_price_store, feed_price_tx).await {
-                tracing::error!(
-                    "market feed for {:?} exited with error: {e}",
-                    exchange_label
-                );
-            }
+            feed.run(feed_price_store, feed_price_tx).await
         });
-        feed_handles.push(handle);
+        let abort_handle = auto_trader::feed_watchdog::spawn_feed_supervisor(
+            exchange_label,
+            notifier.clone(),
+            inner_handle,
+            config.feed_watchdog.notify_retry_attempts,
+            config.feed_watchdog.notify_retry_initial_secs,
+        );
+        feed_handles.push(abort_handle);
     }
 
     // Task: Macro analyst (news -> summarize -> broadcast to strategies)
@@ -1396,15 +1468,17 @@ async fn main() -> anyhow::Result<()> {
         while let Some(signal_event) = signal_rx.recv().await {
             let signal = &signal_event.signal;
 
-            // Re-read accounts from the DB for each signal.
-            let db_accounts = match auto_trader_db::trading_accounts::list_all(&executor_pool).await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("executor: failed to list trading accounts: {e}");
-                    continue;
-                }
-            };
+            // Re-read accounts from the DB for each signal. `list_active`:
+            // this dispatches *new* entries, so a retired account must never
+            // be matched here even if it still has an open position.
+            let db_accounts =
+                match auto_trader_db::trading_accounts::list_active(&executor_pool).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("executor: failed to list trading accounts: {e}");
+                        continue;
+                    }
+                };
 
             // Dispatch signal to all accounts bound to this strategy (any exchange).
             let mut matched_strategy = false;
@@ -1426,6 +1500,26 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+                // Guard: fx_new strategies only ever derive signals from
+                // FX_NEW_EXCHANGE price events (FxNewV1::accepts), so a
+                // signal from an fx_new strategy must never reach an account
+                // on a different exchange — it would be sized and timed off
+                // a price move that never happened there. Evaluated on every
+                // dispatch (not just at startup) so an account added or
+                // reinstated via REST after boot is covered too.
+                if !auto_trader::startup::fx_new_dispatch_allowed(&signal.strategy_name, exchange) {
+                    tracing::warn!(
+                        "skipping account {} ({}): strategy '{}' is fx_new-family and only ever \
+                         derives signals from {} price events, but this account's exchange is \
+                         {} — no order will be placed for this account",
+                        pac.name,
+                        pac.id,
+                        signal.strategy_name,
+                        auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
+                        exchange
+                    );
+                    continue;
+                }
                 // Guard: signal.pair must belong to this account's exchange.
                 // Without this, a BitflyerCfd FX_BTC_JPY signal would match
                 // a GmoFx account running the same strategy, then fail with
@@ -1630,6 +1724,58 @@ async fn main() -> anyhow::Result<()> {
                     dry_run,
                 );
                 let name = pac.name.clone();
+
+                // Active re-check, placed after all the gates above (kill
+                // switch, daily loss limit, freshness, liquidation level)
+                // but before `dispatched` is set: the account could have
+                // been retired (active=false) via REST while this account
+                // sat through those DB-bound checks. `list_active` at loop
+                // entry only reflects state at that moment, so re-fetch by
+                // id here to catch a retirement that landed in between. This
+                // must run before
+                // `dispatched = true`: a signal discarded *by this
+                // re-check* for a retired account must not be counted as
+                // dispatched. (The has_position skip further below is a
+                // separate, pre-existing case and is unaffected — that
+                // skip still happens after `dispatched = true` and this
+                // change does not alter it.)
+                //
+                // This narrows the race rather than eliminating it: the
+                // open_positions() call and has_position check below still
+                // run between this re-check and execute(), so a retirement
+                // committed in that window — or committed after this check
+                // but before execute()'s INSERT — is still possible. That
+                // residual race is covered by
+                // `list_active_or_with_open_trades`, which keeps a retired
+                // account visible for fee accrual / margin monitoring /
+                // reconcile as long as it still has an open or closing trade.
+                let account_now = match auto_trader_db::trading_accounts::get(
+                    &executor_pool,
+                    pac.id,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "active re-check: get failed for account {} ({}): {e} — skipping (fail-closed)",
+                            pac.name,
+                            pac.id
+                        );
+                        continue;
+                    }
+                };
+                if !account_still_tradable(account_now.as_ref()) {
+                    tracing::warn!(
+                        "skipping signal: account {} ({}) no longer active for strategy {} pair {}",
+                        pac.name,
+                        pac.id,
+                        signal.strategy_name,
+                        signal.pair
+                    );
+                    continue;
+                }
+
                 dispatched = true;
                 let positions = trader.open_positions().await.unwrap_or_default();
                 let has_position = positions.iter().any(|p| {
@@ -2000,6 +2146,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Task: Feed watchdog (Issue #109) — host-suspend detection + feed
+    // staleness monitoring. A single long-running task; not spawned at all
+    // when disabled (mirrors the macro_analyst optional-task pattern below).
+    let feed_watchdog_handle = if config.feed_watchdog.enabled {
+        let feed_watchdog_ctx = auto_trader::feed_watchdog::FeedWatchdogContext {
+            price_store: price_store.clone(),
+            notifier: notifier.clone(),
+            config: config.feed_watchdog.clone(),
+        };
+        Some(tokio::spawn(auto_trader::feed_watchdog::run(
+            feed_watchdog_ctx,
+        )))
+    } else {
+        tracing::info!("feed watchdog disabled ([feed_watchdog].enabled=false)");
+        None
+    };
+
     // Task: Overnight fee (crypto paper accounts)
     // Apply 0.04%/day fee to open positions at UTC 0:00.
     // Since positions now live in the DB, this correctly applies fees to all
@@ -2018,20 +2181,25 @@ async fn main() -> anyhow::Result<()> {
             if today != last_date {
                 // Apply overnight/swap fees only to paper accounts (live accounts
                 // pay fees directly to the exchange; we don't deduct them here).
-                let accounts = match auto_trader_db::trading_accounts::list_all(&overnight_pool)
+                // `list_active_or_with_open_trades`: a retired paper account
+                // with an open position still accrues overnight fees on it.
+                let accounts =
+                    match auto_trader_db::trading_accounts::list_active_or_with_open_trades(
+                        &overnight_pool,
+                    )
                     .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // last_date 不更新で次 tick (60s 後) に retry。
-                        // ここで last_date = today にすると一時的 DB 障害で
-                        // 丸 1 日 skip してしまう (Copilot round-3 指摘)。
-                        tracing::error!(
-                            "overnight/swap: failed to list trading accounts (will retry next tick): {e}"
-                        );
-                        continue;
-                    }
-                };
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // last_date 不更新で次 tick (60s 後) に retry。
+                            // ここで last_date = today にすると一時的 DB 障害で
+                            // 丸 1 日 skip してしまう (Copilot round-3 指摘)。
+                            tracing::error!(
+                                "overnight/swap: failed to list trading accounts (will retry next tick): {e}"
+                            );
+                            continue;
+                        }
+                    };
                 // swap rate 表の鮮度チェック (1 日 1 回、fee 適用と同時)。
                 let has_gmo_paper = accounts
                     .iter()
@@ -2248,7 +2416,13 @@ async fn main() -> anyhow::Result<()> {
             // 受容する設計。idempotent retry は scope outside (PR B 共通化で
             // unique-index ベースの reconciliation を検討)。
 
-            let accounts = match auto_trader_db::trading_accounts::list_all(&sfd_pool).await {
+            // `list_active_or_with_open_trades`: a retired paper bitFlyer
+            // account with an open FX_BTC_JPY position still accrues SFD.
+            let accounts = match auto_trader_db::trading_accounts::list_active_or_with_open_trades(
+                &sfd_pool,
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(
@@ -2474,6 +2648,9 @@ async fn main() -> anyhow::Result<()> {
     sfd_handle.abort();
     stop_fill_handle.abort(); // infinite 60s loop — must abort explicitly
     balance_drift_handle.abort(); // infinite 3600s loop — must abort explicitly
+    if let Some(h) = feed_watchdog_handle {
+        h.abort(); // infinite loop — must abort explicitly
+    }
     daily_handle.abort(); // infinite loop — must abort explicitly
     if let Some(h) = macro_analyst_handle {
         h.abort();
@@ -2494,4 +2671,42 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use auto_trader_db::trading_accounts::TradingAccount;
+    use rust_decimal_macros::dec;
+
+    fn sample_account(active: bool) -> TradingAccount {
+        TradingAccount {
+            id: uuid::Uuid::nil(),
+            name: "test-account".to_string(),
+            account_type: "paper".to_string(),
+            exchange: "gmo_fx".to_string(),
+            strategy: "donchian_trend".to_string(),
+            initial_balance: dec!(100000),
+            current_balance: dec!(100000),
+            leverage: dec!(1),
+            currency: "JPY".to_string(),
+            created_at: chrono::Utc::now(),
+            active,
+        }
+    }
+
+    #[test]
+    fn account_still_tradable_true_for_active_account() {
+        assert!(account_still_tradable(Some(&sample_account(true))));
+    }
+
+    #[test]
+    fn account_still_tradable_false_for_retired_account() {
+        assert!(!account_still_tradable(Some(&sample_account(false))));
+    }
+
+    #[test]
+    fn account_still_tradable_false_when_account_missing() {
+        assert!(!account_still_tradable(None));
+    }
 }
