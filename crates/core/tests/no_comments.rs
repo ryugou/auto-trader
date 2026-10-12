@@ -10,6 +10,7 @@ const CHECKED_CRATES: &[&str] = &[
     "backtest",
     "db",
     "executor",
+    "market",
 ];
 
 fn workspace_root() -> PathBuf {

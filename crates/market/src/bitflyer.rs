@@ -223,54 +223,11 @@ fn emit_candle_event(
         lows.drain(..lows.len() - 200);
     }
 
-    let mut indicator_map = HashMap::new();
-    if compute_full_indicators {
-        if let Some(v) = indicators::sma(closes, 20) {
-            indicator_map.insert("sma_20".to_string(), v);
-        }
-        if let Some(v) = indicators::sma(closes, 50) {
-            indicator_map.insert("sma_50".to_string(), v);
-        }
-        if let Some(v) = indicators::rsi(closes, 14) {
-            indicator_map.insert("rsi_14".to_string(), v);
-        }
-        if let Some(v) = indicators::atr(highs, lows, closes, 14) {
-            indicator_map.insert("atr_14".to_string(), v);
-        }
-        if let Some(v) = indicators::adx(highs, lows, closes, 14) {
-            indicator_map.insert("adx_14".to_string(), v);
-        }
-        if let Some((bb_lo, bb_mid, bb_up)) =
-            indicators::bollinger_bands(closes, 20, Decimal::from(2))
-            && bb_mid > Decimal::ZERO
-        {
-            let bb_width_pct = (bb_up - bb_lo) / bb_mid * Decimal::from(100);
-            indicator_map.insert("bb_width_pct".to_string(), bb_width_pct);
-        }
-        if let Some(current_atr) = indicator_map.get("atr_14").copied() {
-            let lookback = 50.min(closes.len());
-            if lookback >= 15 {
-                let mut atr_count_below = 0u32;
-                let mut atr_total = 0u32;
-                for end in (closes.len() - lookback)..closes.len() {
-                    if end >= 14
-                        && let Some(past_atr) =
-                            indicators::atr(&highs[..=end], &lows[..=end], &closes[..=end], 14)
-                    {
-                        atr_total += 1;
-                        if past_atr < current_atr {
-                            atr_count_below += 1;
-                        }
-                    }
-                }
-                if atr_total > 0 {
-                    let pct = Decimal::from(atr_count_below) / Decimal::from(atr_total)
-                        * Decimal::from(100);
-                    indicator_map.insert("atr_percentile".to_string(), pct);
-                }
-            }
-        }
-    }
+    let indicator_map = if compute_full_indicators {
+        indicators::indicator_map(closes, highs, lows)
+    } else {
+        HashMap::new()
+    };
 
     let event = PriceEvent {
         pair: candle.pair.clone(),

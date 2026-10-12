@@ -1,11 +1,3 @@
-//! Stub [`ExchangeApi`] that returns an error on every call.
-//!
-//! Used for paper/dry_run accounts whose exchange has no Private API
-//! implementation yet (e.g. GMO Coin FX before account opening).
-//! [`crate::unified_trader::UnifiedTrader`] never calls API methods when
-//! `dry_run = true` — fills are sourced from the PriceStore instead — so
-//! these errors should never fire in practice.
-
 use async_trait::async_trait;
 
 use crate::bitflyer_private::{
@@ -22,9 +14,7 @@ impl ExchangeApi for NullExchangeApi {
         &self,
         _req: SendChildOrderRequest,
     ) -> anyhow::Result<SendChildOrderResponse> {
-        anyhow::bail!(
-            "NullExchangeApi: send_child_order called on stub (dry_run account has no real API)"
-        )
+        anyhow::bail!("unsupported operation: send_child_order")
     }
 
     async fn get_child_orders(
@@ -32,7 +22,7 @@ impl ExchangeApi for NullExchangeApi {
         _product_code: &str,
         _child_order_acceptance_id: &str,
     ) -> anyhow::Result<Vec<ChildOrder>> {
-        anyhow::bail!("NullExchangeApi: get_child_orders called on stub")
+        anyhow::bail!("unsupported operation: get_child_orders")
     }
 
     async fn get_executions(
@@ -40,15 +30,15 @@ impl ExchangeApi for NullExchangeApi {
         _product_code: &str,
         _child_order_acceptance_id: &str,
     ) -> anyhow::Result<Vec<Execution>> {
-        anyhow::bail!("NullExchangeApi: get_executions called on stub")
+        anyhow::bail!("unsupported operation: get_executions")
     }
 
     async fn get_positions(&self, _product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {
-        anyhow::bail!("NullExchangeApi: get_positions called on stub")
+        anyhow::bail!("unsupported operation: get_positions")
     }
 
     async fn get_collateral(&self) -> anyhow::Result<Collateral> {
-        anyhow::bail!("NullExchangeApi: get_collateral called on stub")
+        anyhow::bail!("unsupported operation: get_collateral")
     }
 
     async fn cancel_child_order(
@@ -56,7 +46,7 @@ impl ExchangeApi for NullExchangeApi {
         _product_code: &str,
         _child_order_acceptance_id: &str,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("NullExchangeApi: cancel_child_order called on stub")
+        anyhow::bail!("unsupported operation: cancel_child_order")
     }
 
     async fn resolve_position_id(
