@@ -8,7 +8,7 @@ mod types;
 mod test_support;
 
 pub use http::{BitflyerPrivateApi, RateLimiter};
-pub(crate) use http::{MAX_ERROR_BODY_CHARS, truncate_body};
+pub(crate) use http::{MAX_ERROR_BODY_CHARS, sign, truncate_body};
 pub use types::{
     BitflyerApiError, BitflyerErrorBody, ChildOrder, ChildOrderState, ChildOrderType, Collateral,
     ExchangePosition, Execution, SendChildOrderRequest, SendChildOrderResponse, Side, TimeInForce,
