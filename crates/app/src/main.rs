@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
             oanda_config.api_url.clone(),
             account_id,
             api_key,
-        ));
+        )?);
         exchange_apis.insert(Exchange::Oanda, oanda_api);
         tracing::info!("OANDA ExchangeApi registered");
     } else {

@@ -10,12 +10,14 @@ use rust_decimal_macros::dec;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[cfg(test)]
 fn api(base_url: &str) -> OandaPrivateApi {
     OandaPrivateApi::new(
         base_url.to_string(),
         "101-001-12345-001".to_string(),
         "test-token".to_string(),
     )
+    .unwrap()
 }
 
 #[tokio::test]
