@@ -1383,7 +1383,7 @@ mod tests {
             .await
             .expect_err("unknown exchange should be rejected");
         assert!(
-            err.to_string().contains("unknown exchange 'unknown'"),
+            err.to_string().contains("unsupported exchange: unknown"),
             "unexpected error: {err}"
         );
     }
