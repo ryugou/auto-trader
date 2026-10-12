@@ -1,8 +1,3 @@
-//! 外部通知チャネル (Slack Webhook など)。
-//!
-//! `db::notifications` はアプリ内通知（UI ベル表示）専用で、オペレータが
-//! 外部で気付く通知はこの crate が担う。
-
 use auto_trader_core::types::{Direction, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -42,24 +37,18 @@ pub struct PositionClosedEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemAlertEvent {
-    /// 例: "margin warn", "margin critical", "balance drift"
     pub title: String,
     pub account_name: String,
     pub exchange: Exchange,
     pub body: String,
 }
 
-/// 取引所・口座に紐付かないプロセス全体のアラート (例: ホストサスペンド検知)。
-/// `SystemAlertEvent` は `exchange` が必須だが、ホストサスペンドのような事象は
-/// 特定の取引所に属さないため、この専用イベントを使う。
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessAlertEvent {
-    /// 例: "process suspend detected"
     pub title: String,
     pub body: String,
 }
 
-/// 通知イベント。Slack には各イベントごとに整形された文面で送る。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NotifyEvent {
@@ -71,8 +60,6 @@ pub enum NotifyEvent {
 }
 
 impl NotifyEvent {
-    /// イベント種別の short name。失敗ログ等で可読性が高い値を返す。
-    /// `std::mem::discriminant` より人間可読で、将来 serde 実装変更にも耐える。
     pub fn variant_name(&self) -> &'static str {
         match self {
             NotifyEvent::OrderFilled(_) => "order_filled",
@@ -86,101 +73,98 @@ impl NotifyEvent {
 
 #[derive(Debug, Error)]
 pub enum NotifyError {
-    /// reqwest 由来の HTTP エラー。`From<reqwest::Error>` は `?` 経由で
-    /// 呼ばれても `without_url()` で URL (= Slack Webhook secret) を
-    /// 必ず落とすよう手書き実装している。`#[from]` を使わない理由は
-    /// まさにこの secret redaction 強制のため。
-    #[error("http error: {0}")]
+    #[error("failed to send slack request: {0}")]
     Http(reqwest::Error),
-    #[error("slack returned non-2xx status: {0}")]
+    #[error("failed to build slack http client: {0}")]
+    BuildClient(reqwest::Error),
+    #[error("unsupported slack response status: {0}")]
     Status(u16),
+}
+
+fn redact_webhook_url(e: reqwest::Error) -> reqwest::Error {
+    e.without_url()
 }
 
 impl From<reqwest::Error> for NotifyError {
     fn from(e: reqwest::Error) -> Self {
-        // `?` で自動変換された場合でも必ず URL を落とす。
-        // この 1 箇所でガードすることで、将来 send() 以外の関数が
-        // `self.http.<...>.send().await?` のパターンで reqwest::Error
-        // を投げても secret が漏れない。
-        NotifyError::Http(e.without_url())
+        NotifyError::Http(redact_webhook_url(e))
     }
 }
 
-/// Slack Webhook 送信クライアント。`slack_webhook_url` が None なら
-/// no-op（ログのみ）。通知失敗は本業務を止めないため、送信失敗は
-/// warn ログに留め、呼び出し側に Result を返しつつも実運用では
-/// 結果を無視してよい設計。
 #[derive(Clone)]
-pub struct Notifier {
-    slack_webhook_url: Option<String>,
+struct SlackWebhook {
+    url: String,
     http: reqwest::Client,
 }
 
+#[derive(Clone)]
+pub struct Notifier {
+    slack: Option<SlackWebhook>,
+}
+
 impl Notifier {
-    /// No-op notifier for tests: behaves like `new(None)` (Slack skipped).
     pub fn new_disabled() -> Self {
-        Self::new(None)
+        Self { slack: None }
     }
 
-    pub fn new(slack_webhook_url: Option<String>) -> Self {
-        Self {
-            slack_webhook_url,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(
-                    auto_trader_core::config::NOTIFY_SEND_TIMEOUT_SECS,
-                ))
-                .build()
-                .expect("reqwest client builder should not fail with basic config"),
-        }
+    pub fn new(slack_webhook_url: Option<String>) -> Result<Self, NotifyError> {
+        let Some(url) = slack_webhook_url else {
+            return Ok(Self::new_disabled());
+        };
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(
+                auto_trader_core::config::NOTIFY_SEND_TIMEOUT_SECS,
+            ))
+            .build()
+            .map_err(|e| NotifyError::BuildClient(redact_webhook_url(e)))?;
+        Ok(Self {
+            slack: Some(SlackWebhook { url, http }),
+        })
     }
 
-    /// Slack Webhook にイベントを送信する。
-    ///
-    /// **呼び出し側規約**:
-    /// - `OrderFilled` など高頻度・低重要度: `tokio::spawn`
-    ///   で fire-and-forget (`let _ = notifier.send(ev).await;`)
-    /// - リトライは本メソッド内で行わない。配線側の責務。
     pub async fn send(&self, event: NotifyEvent) -> Result<(), NotifyError> {
         let variant = event.variant_name();
-        let Some(url) = &self.slack_webhook_url else {
-            tracing::debug!(
-                event = variant,
-                "notify: slack webhook not configured, skipping"
-            );
+        let Some(slack) = &self.slack else {
+            tracing::debug!(event = variant, "slack webhook not configured, skipping");
             return Ok(());
         };
         let text = format_for_slack(&event);
         let body = serde_json::json!({ "text": text });
-        // reqwest::Error の Display (%e) は失敗した URL を含むため、
-        // そのままログ出力 / 呼び出し側への return に使うと Slack
-        // Webhook URL (= secret) が漏れる。without_url() で URL を
-        // 落としてから記録・返却する。
-        let resp = match self.http.post(url).json(&body).send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                let redacted = e.without_url();
-                tracing::warn!(
-                    event = variant,
-                    is_timeout = redacted.is_timeout(),
-                    is_connect = redacted.is_connect(),
-                    error = %redacted,
-                    "notify: slack http error"
-                );
-                return Err(NotifyError::Http(redacted));
-            }
-        };
+        let resp = slack
+            .http
+            .post(&slack.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| log_send_error(variant, e))?;
         let status = resp.status();
         if !status.is_success() {
-            tracing::warn!(
-                event = variant,
-                status = status.as_u16(),
-                "notify: slack returned non-2xx"
-            );
-            return Err(NotifyError::Status(status.as_u16()));
+            return Err(log_non_success_status(variant, status));
         }
-        tracing::debug!(event = variant, "notify: slack ok");
+        tracing::debug!(event = variant, "slack ok");
         Ok(())
     }
+}
+
+fn log_send_error(variant: &str, e: reqwest::Error) -> NotifyError {
+    let redacted = redact_webhook_url(e);
+    tracing::warn!(
+        event = variant,
+        is_timeout = redacted.is_timeout(),
+        is_connect = redacted.is_connect(),
+        error = %redacted,
+        "failed to send slack request"
+    );
+    NotifyError::Http(redacted)
+}
+
+fn log_non_success_status(variant: &str, status: reqwest::StatusCode) -> NotifyError {
+    tracing::warn!(
+        event = variant,
+        status = status.as_u16(),
+        "unsupported slack response status"
+    );
+    NotifyError::Status(status.as_u16())
 }
 
 fn format_for_slack(event: &NotifyEvent) -> String {
@@ -223,52 +207,4 @@ fn format_for_slack(event: &NotifyEvent) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    #[test]
-    fn format_order_filled() {
-        let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
-            account_name: "通常".into(),
-            exchange: Exchange::BitflyerCfd,
-            trade_id: Uuid::nil(),
-            pair: Pair::new("FX_BTC_JPY"),
-            direction: Direction::Long,
-            quantity: dec!(0.01),
-            price: dec!(11500000),
-            at: Utc::now(),
-        });
-        let s = format_for_slack(&ev);
-        assert!(s.contains("約定"));
-        assert!(s.contains("通常"));
-        assert!(s.contains("bitflyer_cfd"));
-        assert!(s.contains("FX_BTC_JPY"));
-        assert!(s.contains("11500000"));
-    }
-
-    #[test]
-    fn format_process_alert() {
-        let ev = NotifyEvent::ProcessAlert(ProcessAlertEvent {
-            title: "process suspend detected".into(),
-            body: "process was unresponsive for 2820 minute(s)".into(),
-        });
-        assert_eq!(ev.variant_name(), "process_alert");
-        let s = format_for_slack(&ev);
-        assert!(s.contains("process suspend detected"));
-        assert!(s.contains("2820 minute"));
-    }
-
-    #[tokio::test]
-    async fn send_without_webhook_is_noop() {
-        let n = Notifier::new(None);
-        let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
-            account_name: "通常".into(),
-            exchange: Exchange::BitflyerCfd,
-            strategy_name: "test".into(),
-            pair: Pair::new("FX_BTC_JPY"),
-            reason: "test".into(),
-        });
-        n.send(ev).await.unwrap();
-    }
-}
+mod tests;

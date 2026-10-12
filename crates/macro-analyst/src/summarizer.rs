@@ -44,16 +44,14 @@ struct GeminiPartResponse {
 }
 
 impl GeminiSummarizer {
-    pub fn new(api_url: &str, api_key: &str, model: &str) -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
+    pub fn new(api_url: &str, api_key: &str, model: &str) -> anyhow::Result<Self> {
+        let client = crate::http_client::build_http_client()?;
+        Ok(Self {
+            client,
             api_url: api_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
-        }
+        })
     }
 
     pub async fn summarize_for_fx(&self, text: &str) -> anyhow::Result<String> {

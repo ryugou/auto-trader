@@ -567,7 +567,7 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
 
     // Create a trader with a real webhook mock
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
 
     let mut min_sizes = HashMap::new();
     min_sizes.insert(Pair::new("USD_JPY"), dec!(1));

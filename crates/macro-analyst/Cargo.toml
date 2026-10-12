@@ -16,3 +16,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 feed-rs = "2"
 sqlx = { workspace = true }
+
+[lints]
+workspace = true
