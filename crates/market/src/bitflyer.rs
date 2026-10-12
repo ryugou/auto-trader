@@ -1,23 +1,22 @@
-// Match old raw_tick_tx capacity (main.rs pre-refactor). Sized to
-// absorb brief bursts during heavy market activity without dropping
-// ticks; drain task typically empties the queue in <1ms.
 const PRICE_STORE_TICK_CHANNEL_CAP: usize = 1024;
 
-use crate::candle_builder::CandleBuilder;
-use crate::indicators;
-use crate::market_feed::MarketFeed;
-use crate::price_store::{FeedKey, LatestTick, PriceStore};
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::types::{Exchange, Pair};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+
+use crate::candle_builder::CandleBuilder;
+use crate::indicators;
+use crate::market_feed::MarketFeed;
+use crate::price_store::{FeedKey, LatestTick, PriceStore};
 
 #[derive(serde::Deserialize)]
 struct JsonRpcMessage {
@@ -50,16 +49,6 @@ pub struct BitflyerMonitor {
     lows_seed: HashMap<String, Vec<Decimal>>,
 }
 
-/// 現物 spot (SFD 計算専用) と判定する product_code。
-/// strategy/candle は mount しないが、PriceStore に tick を流して
-/// SFD accrual job (app/main.rs) が乖離率を計算できるようにする。
-///
-/// **将来 BTC_JPY を strategy 対象にしたい場合**: この const から
-/// `"BTC_JPY"` を削除すれば builder/h1_builders に通常通り mount される
-/// (caller が `pairs: Vec<Pair>` に明示的に BTC_JPY を渡している前提)。
-/// 現状は hardcode で十分 — BTC_JPY を bitFlyer Crypto CFD の戦略対象に
-/// する具体的予定がないため YAGNI (Copilot review round-14 で auto-added
-/// pair の track 化が提案されたが、複雑性追加に見合わないと判断)。
 const SPOT_ONLY_PAIRS: &[&str] = &["BTC_JPY"];
 
 fn is_spot_only(pair: &Pair) -> bool {
@@ -68,8 +57,6 @@ fn is_spot_only(pair: &Pair) -> bool {
 
 impl BitflyerMonitor {
     pub fn new(ws_url: &str, pairs: Vec<Pair>, timeframe: &str) -> Self {
-        // FX_BTC_JPY を subscribe するなら BTC_JPY (現物 spot) も自動追加。
-        // SFD (現物-FX 乖離手数料) を bot 側で計算するために必要。
         let mut pairs = pairs;
         let has_fx_btc = pairs.iter().any(|p| p.0 == "FX_BTC_JPY");
         let has_spot_btc = pairs.iter().any(|p| p.0 == "BTC_JPY");
@@ -92,24 +79,11 @@ impl BitflyerMonitor {
         self
     }
 
-    /// Pre-populate per-pair `closes_map` (and derive matching highs/lows from
-    /// the same candle history) so indicators can fire from the very first live
-    /// candle after restart. Caller is responsible for loading and ordering
-    /// the closes (oldest → newest).
-    ///
-    /// For the new ATR/ADX indicators highs and lows are required.
-    /// When only closes are available (e.g. legacy callers), the seed
-    /// approximates high = low = close, which degrades ATR/ADX quality but
-    /// does not panic. The canonical path in `main.rs` passes full `Candle`
-    /// structs via `with_candle_seed`.
     pub fn with_closes_seed(mut self, seed: HashMap<String, Vec<Decimal>>) -> Self {
         self.closes_seed = seed;
         self
     }
 
-    /// Pre-populate candle history (closes + highs + lows) from the DB warmup
-    /// path. Preferred over `with_closes_seed` when the caller has full candle
-    /// data available (which is always the case in the app composition layer).
     pub fn with_candle_seed(
         mut self,
         highs: HashMap<String, Vec<Decimal>>,
@@ -127,17 +101,9 @@ impl BitflyerMonitor {
         price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()> {
-        // Primary builders for the configured timeframe (M5 for crypto strategies
-        // that want fine-grained data, e.g. bb_mean_revert).
         let mut builders: HashMap<String, CandleBuilder> = HashMap::new();
-        // Secondary H1 builders — Donchian / Squeeze strategies use 1H candles
-        // to reduce false breakouts on daily-bar-designed logic.
-        // Only created when the primary timeframe is not already H1; if it were,
-        // both `builders` and `h1_builders` would emit H1 candles → duplicate events.
         let mut h1_builders: HashMap<String, CandleBuilder> = HashMap::new();
         for pair in &self.pairs {
-            // spot-only pairs (e.g. BTC_JPY for SFD calculation) bypass candle
-            // /strategy mount — they are subscribed to PriceStore only.
             if is_spot_only(pair) {
                 continue;
             }
@@ -152,32 +118,21 @@ impl BitflyerMonitor {
                 );
             }
         }
-        // Seed indicator state from caller-provided history. Move out rather
-        // than cloning to avoid duplicate copies of every warmup vector.
         let mut closes_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.closes_seed);
         let mut highs_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.highs_seed);
         let mut lows_map: HashMap<String, Vec<Decimal>> = std::mem::take(&mut self.lows_seed);
-        // H1-native indicator history, kept separate from the primary (M5) maps
-        // so that H1 PriceEvents carry indicators computed from H1 candles
-        // rather than M5-derived values. There is no warmup seed for H1 (the
-        // caller only supplies primary-timeframe history), so these accumulate
-        // from live ticks.
         let mut closes_map_h1: HashMap<String, Vec<Decimal>> = HashMap::new();
         let mut highs_map_h1: HashMap<String, Vec<Decimal>> = HashMap::new();
         let mut lows_map_h1: HashMap<String, Vec<Decimal>> = HashMap::new();
         for (pair, closes) in &closes_map {
             tracing::info!(
-                "bitflyer warmup: seeded {} {} closes for {}",
-                closes.len(),
-                self.timeframe,
-                pair
+                pair = %pair,
+                timeframe = %self.timeframe,
+                count = closes.len(),
+                "seeded warmup closes"
             );
         }
 
-        // Internal bounded channel: WS loop uses try_send (non-blocking, drops
-        // on full) and hands raw ticks to a dedicated drain task that performs
-        // the async PriceStore write. This keeps the WS read loop non-blocking,
-        // matching the semantics of the old raw_tick_tx channel.
         let (tick_tx, mut tick_rx) =
             mpsc::channel::<(FeedKey, LatestTick)>(PRICE_STORE_TICK_CHANNEL_CAP);
         let ps = price_store.clone();
@@ -213,7 +168,6 @@ impl BitflyerMonitor {
                         tracing::info!("price channel closed, stopping bitflyer monitor");
                         return Ok(());
                     }
-                    // Normal close — reconnect (server can close gracefully)
                     tracing::info!("bitflyer websocket closed normally, reconnecting");
                     backoff_secs = 1;
                     continue;
@@ -225,12 +179,14 @@ impl BitflyerMonitor {
                     }
                     if tick_tx.is_closed() {
                         tracing::error!(
-                            "bitflyer feed: tick drain channel permanently closed, stopping feed (no reconnect)"
+                            "failed to forward ticks: drain channel closed, stopping feed without reconnect"
                         );
                         return Err(e);
                     }
                     tracing::warn!(
-                        "bitflyer websocket error, reconnecting in {backoff_secs}s: {e}"
+                        backoff_secs,
+                        error = %e,
+                        "failed to stream websocket messages, reconnecting"
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(60);
@@ -240,13 +196,6 @@ impl BitflyerMonitor {
     }
 }
 
-/// Build and emit a `PriceEvent` for a completed candle, updating the rolling
-/// indicator history vectors in-place. The indicator map is computed from the
-/// primary-timeframe history vectors so the position monitor and API
-/// server always see fresh primary-timeframe indicators regardless of which
-/// timeframe fired. H1 PriceEvents carry a namespaced indicator map —
-/// strategies that consume them compute their own indicators from their
-/// internal `VecDeque<Candle>` history.
 fn emit_candle_event(
     candle: auto_trader_core::types::Candle,
     closes_map: &mut HashMap<String, Vec<Decimal>>,
@@ -291,7 +240,6 @@ fn emit_candle_event(
         if let Some(v) = indicators::adx(highs, lows, closes, 14) {
             indicator_map.insert("adx_14".to_string(), v);
         }
-        // BB width as percentage of SMA20
         if let Some((bb_lo, bb_mid, bb_up)) =
             indicators::bollinger_bands(closes, 20, Decimal::from(2))
             && bb_mid > Decimal::ZERO
@@ -299,7 +247,6 @@ fn emit_candle_event(
             let bb_width_pct = (bb_up - bb_lo) / bb_mid * Decimal::from(100);
             indicator_map.insert("bb_width_pct".to_string(), bb_width_pct);
         }
-        // ATR percentile: rank of current ATR within the last 50 ATR values
         if let Some(current_atr) = indicator_map.get("atr_14").copied() {
             let lookback = 50.min(closes.len());
             if lookback >= 15 {
@@ -354,7 +301,7 @@ async fn connect_and_stream(
 ) -> anyhow::Result<()> {
     let (ws, _) = connect_async(ws_url).await?;
     let (mut write, mut read) = ws.split();
-    tracing::info!("bitflyer websocket connected: {}", ws_url);
+    tracing::info!(ws_url = %ws_url, "bitflyer websocket connected");
 
     for pair in pairs {
         let subscribe = serde_json::json!({
@@ -365,30 +312,20 @@ async fn connect_and_stream(
         write.send(Message::Text(subscribe.to_string())).await?;
     }
 
-    // Per-pair cache of the most recent primary-timeframe indicator map.
-    // Declared outside the tick loop so H1 candles that complete on a tick
-    // where no primary candle fires can still carry the last-known indicators.
     let mut latest_indicators: HashMap<String, HashMap<String, Decimal>> = HashMap::new();
-    // Dynamic prefix derived from the primary timeframe (e.g. "m5", "h1").
     let primary_tf_prefix = primary_timeframe.to_lowercase();
 
-    // Heartbeat timeout: if no message arrives for this duration, assume
-    // the connection is dead (e.g. stale TCP after WiFi reconnect) and
-    // return an error so the outer loop reconnects. bitFlyer normally
-    // sends ticker updates every few seconds, so 120s silence is abnormal.
     const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     loop {
         let msg = match tokio::time::timeout(HEARTBEAT_TIMEOUT, read.next()).await {
             Ok(Some(msg)) => msg?,
             Ok(None) => {
-                // Stream ended normally (server closed).
                 return Ok(());
             }
             Err(_) => {
-                // No message for HEARTBEAT_TIMEOUT — connection is likely dead.
                 anyhow::bail!(
-                    "no WebSocket message received for {}s, assuming stale connection",
+                    "failed to receive websocket message: no message for {}s, treating connection as stale",
                     HEARTBEAT_TIMEOUT.as_secs()
                 );
             }
@@ -415,11 +352,6 @@ async fn connect_and_stream(
         let ts =
             chrono::DateTime::parse_from_rfc3339(&ticker.timestamp)?.with_timezone(&chrono::Utc);
 
-        // Forward the raw tick to PriceStore via try_send (non-blocking).
-        // **builder mount の有無に関係なく forward する**: BTC_JPY (現物 spot)
-        // のように strategy/candle は不要だが SFD 計算で
-        // PriceStore.latest_bid_ask が要る pair があるため。
-        // Drain task の channel が満杯なら drop (次の tick で埋まる、許容)。
         if let Err(e) = tick_tx.try_send((
             FeedKey::new(Exchange::BitflyerCfd, Pair::new(product_code)),
             LatestTick {
@@ -431,41 +363,30 @@ async fn connect_and_stream(
         )) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
-                    tracing::debug!("bitflyer tick drop: drain channel full");
+                    tracing::debug!("failed to send tick: drain channel full");
                 }
                 mpsc::error::TrySendError::Closed(_) => {
-                    tracing::error!(
-                        "bitflyer tick drain channel closed; PriceStore updates stopped — stopping feed"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "bitflyer tick drain channel closed; PriceStore updates stopped"
-                    ));
+                    tracing::error!("failed to send tick: drain channel closed, stopping feed");
+                    return Err(anyhow::anyhow!("failed to send tick: drain channel closed"));
                 }
             }
         }
 
         let Some(builder) = builders.get_mut(product_code) else {
-            // no candle/strategy mounted (e.g. BTC_JPY spot for SFD only) —
-            // tick already in PriceStore, nothing else to do.
             continue;
         };
 
-        // --- Primary timeframe (e.g. M5) candle ---
-        // on_tick returns completed candle when period boundary is crossed
         let from_tick = builder.on_tick(price, size, ts, best_bid, best_ask);
         let from_complete = builder.try_complete(ts, best_bid, best_ask);
         if let Some(candle) = from_tick.or(from_complete) {
             if let Some(pool) = pool
                 && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
             {
-                tracing::warn!("failed to save crypto candle: {e}");
+                tracing::warn!(error = %e, "failed to save crypto candle");
             }
             let pair_key = candle.pair.0.clone();
-            let (event, indicators) = emit_candle_event(
-                candle, closes_map, highs_map, lows_map,
-                true, // full indicator map for primary timeframe
-            );
-            // Persist indicators so H1 candles on subsequent ticks can use them.
+            let (event, indicators) =
+                emit_candle_event(candle, closes_map, highs_map, lows_map, true);
             latest_indicators.insert(pair_key, indicators);
             if price_tx.send(event).await.is_err() {
                 tracing::info!("price channel closed, stopping bitflyer monitor");
@@ -473,7 +394,6 @@ async fn connect_and_stream(
             }
         }
 
-        // --- H1 candle (only when h1_builders is populated, i.e. primary != H1) ---
         if let Some(h1_builder) = h1_builders.get_mut(product_code) {
             let h1_from_tick = h1_builder.on_tick(price, size, ts, best_bid, best_ask);
             let h1_from_complete = h1_builder.try_complete(ts, best_bid, best_ask);
@@ -481,20 +401,10 @@ async fn connect_and_stream(
                 if let Some(pool) = pool
                     && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &h1_candle).await
                 {
-                    tracing::warn!("failed to save H1 crypto candle: {e}");
+                    tracing::warn!(error = %e, "failed to save h1 crypto candle");
                 }
-                // H1 events carry H1-NATIVE indicators: compute the unprefixed
-                // adx_14 / atr_percentile / etc. from the H1 history maps so that
-                // H1-triggered strategies' entry_indicators and regime
-                // classification reflect the H1 timeframe. (Before this change the
-                // unprefixed values were M5-derived, mislabeling weekly_batch's
-                // regime-bucketed Wilson analysis by timeframe.)
                 let (mut h1_event, _h1_indicators) =
                     emit_candle_event(h1_candle, closes_map_h1, highs_map_h1, lows_map_h1, true);
-                // Primary-timeframe (M5) indicators remain available but ONLY
-                // under a `{prefix}_` namespace (e.g. "m5_adx_14") for analytics
-                // — never unprefixed. Uses the per-pair cache so they are present
-                // even when the primary candle did not complete on this same tick.
                 if let Some(m5) = latest_indicators.get(product_code) {
                     for (key, value) in m5 {
                         h1_event
@@ -518,267 +428,9 @@ impl MarketFeed for BitflyerMonitor {
         price_store: Arc<PriceStore>,
         price_tx: mpsc::Sender<PriceEvent>,
     ) -> anyhow::Result<()> {
-        // Box<Self> gives us owned BitflyerMonitor via *self; no try_unwrap needed.
         (*self).run_inner(price_store, price_tx).await
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::candle_builder::CandleBuilder;
-    use auto_trader_core::types::{Exchange, Pair};
-    use chrono::{TimeZone, Utc};
-    use rust_decimal_macros::dec;
-
-    /// `BitflyerMonitor::new` で FX_BTC_JPY を含む pair リストを渡すと
-    /// 自動的に BTC_JPY (現物 spot, SFD 計算用) が追加されること。
-    #[test]
-    fn new_auto_adds_btc_jpy_when_fx_btc_jpy_is_subscribed() {
-        let mon = BitflyerMonitor::new("ws://test", vec![Pair::new("FX_BTC_JPY")], "M5");
-        let pair_codes: Vec<&str> = mon.pairs.iter().map(|p| p.0.as_str()).collect();
-        assert!(pair_codes.contains(&"FX_BTC_JPY"));
-        assert!(
-            pair_codes.contains(&"BTC_JPY"),
-            "BTC_JPY (spot) must be auto-added for SFD calc, got: {:?}",
-            pair_codes
-        );
-    }
-
-    /// FX_BTC_JPY が含まれない場合は BTC_JPY を追加しない。
-    #[test]
-    fn new_does_not_add_btc_jpy_when_no_fx_btc_jpy() {
-        let mon = BitflyerMonitor::new("ws://test", vec![Pair::new("ETH_JPY")], "M5");
-        let pair_codes: Vec<&str> = mon.pairs.iter().map(|p| p.0.as_str()).collect();
-        assert!(!pair_codes.contains(&"BTC_JPY"));
-    }
-
-    /// 既に BTC_JPY が含まれている場合は二重追加しない。
-    #[test]
-    fn new_does_not_duplicate_btc_jpy_when_already_subscribed() {
-        let mon = BitflyerMonitor::new(
-            "ws://test",
-            vec![Pair::new("FX_BTC_JPY"), Pair::new("BTC_JPY")],
-            "M5",
-        );
-        let btc_count = mon.pairs.iter().filter(|p| p.0 == "BTC_JPY").count();
-        assert_eq!(btc_count, 1, "BTC_JPY must not be duplicated");
-    }
-
-    /// is_spot_only が BTC_JPY を spot-only と判定すること。
-    #[test]
-    fn is_spot_only_classifies_btc_jpy_as_spot() {
-        assert!(is_spot_only(&Pair::new("BTC_JPY")));
-        assert!(!is_spot_only(&Pair::new("FX_BTC_JPY")));
-        assert!(!is_spot_only(&Pair::new("ETH_JPY")));
-    }
-
-    /// Verify that a completed M5 candle produces a full indicator_map
-    /// and an H1 builder for the same pair correctly tracks progress.
-    #[test]
-    fn emit_candle_event_populates_indicators_for_primary_timeframe() {
-        let pair = Pair::new("FX_BTC_JPY");
-        let mut closes_map: HashMap<String, Vec<Decimal>> = HashMap::new();
-        let mut highs_map: HashMap<String, Vec<Decimal>> = HashMap::new();
-        let mut lows_map: HashMap<String, Vec<Decimal>> = HashMap::new();
-
-        // Seed 20 bars so SMA20 can fire
-        let entry = closes_map.entry("FX_BTC_JPY".to_string()).or_default();
-        for i in 0..20u64 {
-            entry.push(Decimal::from(10_000_000u64 + i * 1000));
-        }
-        highs_map
-            .entry("FX_BTC_JPY".to_string())
-            .or_default()
-            .extend(entry.iter().map(|c| *c + dec!(5000)));
-        lows_map
-            .entry("FX_BTC_JPY".to_string())
-            .or_default()
-            .extend(entry.iter().map(|c| *c - dec!(5000)));
-
-        let candle = auto_trader_core::types::Candle {
-            pair: pair.clone(),
-            exchange: Exchange::BitflyerCfd,
-            timeframe: "M5".to_string(),
-            open: dec!(10_020_000),
-            high: dec!(10_025_000),
-            low: dec!(10_015_000),
-            close: dec!(10_022_000),
-            volume: Some(10),
-            best_bid: None,
-            best_ask: None,
-            timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 0, 5, 0).unwrap(),
-        };
-
-        let (event, _indicators) =
-            emit_candle_event(candle, &mut closes_map, &mut highs_map, &mut lows_map, true);
-        assert_eq!(event.candle.timeframe, "M5");
-        // SMA20 must be present after 21 closes (20 seeded + 1 from candle)
-        assert!(
-            event.indicators.contains_key("sma_20"),
-            "sma_20 must be in indicator map"
-        );
-    }
-
-    /// H1 events must carry H1-NATIVE unprefixed indicators, with M5-derived
-    /// values only under the `m5_` prefix. Build two divergent histories (a
-    /// strong M5 uptrend vs. a choppy H1 series) so ADX differs between them,
-    /// then reproduce the emission path: emit the H1 event from the H1 maps and
-    /// attach M5 indicators prefixed. The bare `adx_14` must equal the H1-native
-    /// value and differ from `m5_adx_14`.
-    #[test]
-    fn h1_event_carries_h1_native_indicators_not_m5() {
-        let pair = Pair::new("FX_BTC_JPY");
-        let code = "FX_BTC_JPY".to_string();
-
-        // --- M5 history: strong monotonic uptrend → high ADX ---
-        let mut m5_closes: HashMap<String, Vec<Decimal>> = HashMap::new();
-        let mut m5_highs: HashMap<String, Vec<Decimal>> = HashMap::new();
-        let mut m5_lows: HashMap<String, Vec<Decimal>> = HashMap::new();
-        {
-            let c = m5_closes.entry(code.clone()).or_default();
-            let h = m5_highs.entry(code.clone()).or_default();
-            let l = m5_lows.entry(code.clone()).or_default();
-            for i in 0..40u64 {
-                let base = Decimal::from(10_000_000u64 + i * 20_000);
-                c.push(base);
-                h.push(base + dec!(3000));
-                l.push(base - dec!(3000));
-            }
-        }
-        let m5_candle = auto_trader_core::types::Candle {
-            pair: pair.clone(),
-            exchange: Exchange::BitflyerCfd,
-            timeframe: "M5".to_string(),
-            open: dec!(10_800_000),
-            high: dec!(10_823_000),
-            low: dec!(10_817_000),
-            close: dec!(10_820_000),
-            volume: Some(10),
-            best_bid: None,
-            best_ask: None,
-            timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 0, 5, 0).unwrap(),
-        };
-        let (_m5_event, m5_indicators) =
-            emit_candle_event(m5_candle, &mut m5_closes, &mut m5_highs, &mut m5_lows, true);
-
-        // --- H1 history: choppy oscillation → low ADX (differs from M5) ---
-        let mut h1_closes: HashMap<String, Vec<Decimal>> = HashMap::new();
-        let mut h1_highs: HashMap<String, Vec<Decimal>> = HashMap::new();
-        let mut h1_lows: HashMap<String, Vec<Decimal>> = HashMap::new();
-        {
-            let c = h1_closes.entry(code.clone()).or_default();
-            let h = h1_highs.entry(code.clone()).or_default();
-            let l = h1_lows.entry(code.clone()).or_default();
-            for i in 0..40u64 {
-                let osc = if i % 2 == 0 { 50_000 } else { 0 };
-                let base = Decimal::from(10_000_000u64 + osc);
-                c.push(base);
-                h.push(base + dec!(3000));
-                l.push(base - dec!(3000));
-            }
-        }
-        let h1_candle = auto_trader_core::types::Candle {
-            pair: pair.clone(),
-            exchange: Exchange::BitflyerCfd,
-            timeframe: "H1".to_string(),
-            open: dec!(10_000_000),
-            high: dec!(10_053_000),
-            low: dec!(9_997_000),
-            close: dec!(10_050_000),
-            volume: Some(10),
-            best_bid: None,
-            best_ask: None,
-            timestamp: Utc.with_ymd_and_hms(2026, 4, 19, 1, 0, 0).unwrap(),
-        };
-
-        // Reproduce the emission path from connect_and_stream's H1 block.
-        let (mut h1_event, _h1_ind) =
-            emit_candle_event(h1_candle, &mut h1_closes, &mut h1_highs, &mut h1_lows, true);
-        for (key, value) in &m5_indicators {
-            h1_event.indicators.insert(format!("m5_{key}"), *value);
-        }
-
-        let h1_native_adx = *h1_event
-            .indicators
-            .get("adx_14")
-            .expect("H1 event must carry a bare adx_14");
-        let m5_adx_prefixed = *h1_event
-            .indicators
-            .get("m5_adx_14")
-            .expect("H1 event must also carry m5_adx_14 (prefixed)");
-        let m5_native = *m5_indicators
-            .get("adx_14")
-            .expect("M5 map must have adx_14");
-
-        assert_eq!(h1_event.candle.timeframe, "H1");
-        // The prefixed value is exactly the M5-derived ADX.
-        assert_eq!(
-            m5_adx_prefixed, m5_native,
-            "m5_adx_14 must equal the M5-native ADX"
-        );
-        // The bare adx_14 is the H1-native value and differs from the M5 value
-        // (the two histories diverge, so their ADX cannot coincide).
-        assert_ne!(
-            h1_native_adx, m5_adx_prefixed,
-            "bare adx_14 must be H1-native, not the M5 value"
-        );
-    }
-
-    /// H1 builders must track ticks independently from M5 builders.
-    /// Two ticks within the same H1 period should not yet emit a candle.
-    #[test]
-    fn h1_builder_does_not_emit_mid_period() {
-        let pair = Pair::new("FX_BTC_JPY");
-        let mut h1 = CandleBuilder::new(pair, Exchange::BitflyerCfd, "H1".to_string());
-        let base = Utc.with_ymd_and_hms(2026, 4, 19, 10, 0, 0).unwrap();
-
-        // Two ticks within the same H1 period — should not emit
-        assert!(
-            h1.on_tick(dec!(10_000_000), dec!(0.1), base, None, None)
-                .is_none()
-        );
-        assert!(
-            h1.on_tick(
-                dec!(10_010_000),
-                dec!(0.2),
-                base + chrono::Duration::minutes(30),
-                None,
-                None
-            )
-            .is_none()
-        );
-        // Still mid-period
-        assert!(
-            h1.try_complete(base + chrono::Duration::minutes(59), None, None)
-                .is_none()
-        );
-    }
-
-    /// A tick arriving in the next H1 period must complete the previous candle.
-    #[test]
-    fn h1_builder_emits_on_period_boundary() {
-        let pair = Pair::new("FX_BTC_JPY");
-        let mut h1 = CandleBuilder::new(pair, Exchange::BitflyerCfd, "H1".to_string());
-        let base = Utc.with_ymd_and_hms(2026, 4, 19, 10, 0, 0).unwrap();
-
-        h1.on_tick(dec!(10_000_000), dec!(0.1), base, None, None);
-
-        // Tick in the next H1 period completes the previous candle
-        let candle = h1.on_tick(
-            dec!(10_100_000),
-            dec!(0.1),
-            base + chrono::Duration::hours(1),
-            None,
-            None,
-        );
-        assert!(
-            candle.is_some(),
-            "H1 candle should be emitted at period boundary"
-        );
-        let c = candle.unwrap();
-        assert_eq!(c.timeframe, "H1");
-        assert_eq!(c.open, dec!(10_000_000));
-        assert_eq!(c.close, dec!(10_000_000));
-    }
-}
+mod tests;
