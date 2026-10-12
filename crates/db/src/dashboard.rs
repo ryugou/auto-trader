@@ -4,10 +4,6 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct SummaryStats {
     pub total_trades: i64,
@@ -91,11 +87,6 @@ pub struct BalanceHistoryAccount {
     pub data: Vec<BalanceHistoryPoint>,
 }
 
-// ---------------------------------------------------------------------------
-// Queries
-// ---------------------------------------------------------------------------
-
-/// Dashboard summary: total trades, win count, total PnL, max drawdown.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_summary(
     pool: &PgPool,
@@ -147,7 +138,6 @@ pub async fn get_summary(
     Ok(row)
 }
 
-/// Daily PnL history with cumulative sum (window function).
 #[allow(clippy::too_many_arguments)]
 pub async fn get_pnl_history(
     pool: &PgPool,
@@ -181,7 +171,6 @@ pub async fn get_pnl_history(
     Ok(rows)
 }
 
-/// Per-strategy aggregates.
 pub async fn get_strategy_stats(
     pool: &PgPool,
     exchange: Option<&str>,
@@ -206,7 +195,6 @@ pub async fn get_strategy_stats(
     Ok(rows)
 }
 
-/// Per-pair aggregates.
 pub async fn get_pair_stats(
     pool: &PgPool,
     exchange: Option<&str>,
@@ -231,7 +219,6 @@ pub async fn get_pair_stats(
     Ok(rows)
 }
 
-/// Win rate grouped by hour of day (based on entry_at).
 pub async fn get_hourly_winrate(
     pool: &PgPool,
     exchange: Option<&str>,
@@ -256,7 +243,6 @@ pub async fn get_hourly_winrate(
     Ok(rows)
 }
 
-/// Paginated trade list with optional filters. Returns (rows, total_count).
 #[allow(clippy::too_many_arguments)]
 pub async fn get_trades(
     pool: &PgPool,
@@ -318,14 +304,6 @@ pub async fn get_trades(
     Ok((rows, total.0))
 }
 
-/// Evaluate a trading account's balance.
-///
-/// `trading_accounts.current_balance` stores **free cash** (margin is locked
-/// out when a position opens). The "total equity" view shown on the dashboard
-/// adds back:
-///
-///   - `locked_margin`: `TRUNC(quantity × entry_price / leverage)` per open trade
-///   - `unrealized_pnl`: mark-to-market gain/loss vs the latest price candle
 pub async fn get_evaluated_balance(
     pool: &PgPool,
     account_id: Uuid,
@@ -382,7 +360,6 @@ pub async fn get_evaluated_balance(
     Ok(row)
 }
 
-/// Evaluate all trading accounts' balances in a single query (no N+1).
 pub async fn get_all_evaluated_balances(
     pool: &PgPool,
 ) -> anyhow::Result<std::collections::HashMap<uuid::Uuid, EvaluatedBalance>> {
@@ -449,23 +426,10 @@ pub async fn get_all_evaluated_balances(
     Ok(map)
 }
 
-/// Daily balance history reconstructed from initial_balance and account_events.
-///
-/// Scoped to `active` accounts only: this chart shows the current balance
-/// trend of accounts the bot is still trading, not a full ledger of every
-/// account that ever existed. This is not because a retired account's
-/// balance is frozen — it isn't necessarily: retirement stops new entries
-/// but does not orphan a position still open on the account, so
-/// overnight/SFD fee events can keep landing on it after retirement (see
-/// `list_active_or_with_open_trades`). It is excluded here purely because
-/// this view tracks accounts currently being traded; a retired account's
-/// full history — including any post-retirement activity — remains visible
-/// elsewhere (trade list, summary) via the separate all-accounts functions.
 pub async fn get_balance_history(
     pool: &PgPool,
     account_type: Option<&str>,
 ) -> anyhow::Result<Vec<BalanceHistoryAccount>> {
-    // Load accounts from trading_accounts, optionally filtered by account_type.
     let accounts: Vec<(Uuid, String, Decimal)> = sqlx::query_as(
         r#"SELECT id, name, initial_balance
            FROM trading_accounts

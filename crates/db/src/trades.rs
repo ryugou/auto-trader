@@ -1,18 +1,9 @@
-//! Trade DB access for the unified Trader.
-//!
-//! All functions operate against the `trades` schema defined in
-//! `migrations/20260415000001_unified_rewrite.sql` — `account_id` rather
-//! than the legacy `paper_account_id` column, `quantity` is NOT NULL, and there
-//! is no `mode` / `child_order_*` / `pnl_pips` column.
-
 use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Trade, TradeStatus};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Internal row for acquire_close_lock — captures both the trade columns and
-/// the pre-update `closing_started_at` so the caller can detect stale recovery.
 #[derive(sqlx::FromRow)]
 struct AcquireLockRow {
     #[sqlx(flatten)]
@@ -20,11 +11,6 @@ struct AcquireLockRow {
     old_closing_started_at: Option<DateTime<Utc>>,
 }
 
-// ---------------------------------------------------------------------------
-// New API for Trader
-// ---------------------------------------------------------------------------
-
-/// Insert a trade row inside the given transaction.
 pub async fn insert_trade<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -69,17 +55,12 @@ where
     Ok(())
 }
 
-/// Lock margin for an open trade.
-///
-/// Deducts `margin_amount` from `trading_accounts.current_balance` and
-/// inserts an `account_events` row with `event_type='margin_lock'`.
 pub async fn lock_margin(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
     trade_id: Uuid,
     margin_amount: Decimal,
 ) -> anyhow::Result<()> {
-    // Update balance and capture new value in a single statement
     let new_balance: Decimal = sqlx::query_scalar(
         r#"UPDATE trading_accounts
            SET current_balance = current_balance - $2
@@ -97,9 +78,6 @@ pub async fn lock_margin(
     )
     .bind(account_id)
     .bind(trade_id)
-    // Cash delta is negative — locking margin removes free cash from the
-    // account. Storing the sign correctly keeps SUM(amount) reconcilable
-    // against current_balance for ledger invariants.
     .bind(-margin_amount)
     .bind(new_balance)
     .execute(&mut *tx)
@@ -107,16 +85,6 @@ pub async fn lock_margin(
     Ok(())
 }
 
-/// Fetch an open trade for closing.
-///
-/// Must be called inside a transaction when used for concurrent-safe close
-/// operations (the caller is responsible for `WHERE status = 'open'` CAS via
-/// `update_trade_closed`).  Accepts any sqlx executor so callers can pass
-/// either a `&PgPool` (for simple reads) or `&mut Transaction` (for locked
-/// reads).
-///
-/// Returns `None` when the trade is not found, already closed, or belongs
-/// to a different account.
 pub async fn get_trade_for_close<'e, E>(
     executor: E,
     trade_id: Uuid,
@@ -141,47 +109,10 @@ where
     row.map(|r| r.try_into()).transpose()
 }
 
-/// Stale `closing` lock recovery threshold (seconds).
-///
-/// A trade left in `status='closing'` longer than this is considered
-/// orphaned (e.g. process crashed mid-close, future cancelled, etc.)
-/// and `acquire_close_lock` is allowed to re-acquire it. Five minutes
-/// is generous: a healthy close path completes in ~1 s (single
-/// `send_child_order` + `get_executions` poll within 5 s timeout).
-///
-/// PR-2's reconciler will provide a more aggressive sweep for these,
-/// but this self-healing path ensures a single crashed Trader cannot
-/// permanently strand a trade.
 pub const STALE_CLOSING_THRESHOLD_SECS: i64 = 300;
 
-/// Acquire close ownership for a trade by atomically transitioning
-/// `status` from `open` to `closing`.
-///
-/// Returns the locked `Trade` on success. Returns `None` when the
-/// trade is not in `open` status (already closed by another concurrent
-/// path, or never existed). The caller MUST proceed to either
-/// `update_trade_closed` (success) or `release_close_lock` (rollback).
-///
-/// **Cancellation safety**: if the original lock holder's future is
-/// dropped (cancellation, panic, process crash) without calling
-/// `release_close_lock`, the trade would normally remain stuck in
-/// `closing` forever. To prevent this, the WHERE clause also accepts
-/// rows already in `closing` status whose `closing_started_at` is older
-/// than `STALE_CLOSING_THRESHOLD_SECS` ago — adopting the orphan
-/// instead of leaking it.
-///
-/// This is the **only** correct entry point for closing a trade in
-/// live mode: it prevents two concurrent close paths from both
-/// dispatching opposite-side orders to the exchange.
-/// Result of [`acquire_close_lock`]: the locked trade plus a flag indicating
-/// whether this was a stale-recovery re-acquisition (i.e. the row was already
-/// in `closing` state before we locked it). Callers MUST check this flag before
-/// dispatching a new exchange close order — the position may already be closed
-/// at the exchange if the previous holder crashed after Phase 2 succeeded.
 pub struct CloseLockAcquired {
     pub trade: Trade,
-    /// `true` when we re-acquired a stale `closing` row (crash recovery path).
-    /// `false` for the normal `open → closing` transition.
     pub was_stale_recovery: bool,
 }
 
@@ -190,8 +121,6 @@ pub async fn acquire_close_lock(
     trade_id: Uuid,
     account_id: Uuid,
 ) -> anyhow::Result<Option<CloseLockAcquired>> {
-    // Use a CTE to capture the row's pre-update closing_started_at so we can
-    // determine whether this is a fresh lock or a stale-recovery re-acquisition.
     let row = sqlx::query_as::<_, AcquireLockRow>(
         r#"WITH pre AS (
              SELECT closing_started_at AS old_closing_started_at
@@ -238,11 +167,6 @@ pub async fn acquire_close_lock(
     .transpose()
 }
 
-/// Release a close lock by transitioning `closing` back to `open`.
-///
-/// Called when the exchange API call failed and we must NOT close the
-/// trade. The status returns to `open` so subsequent close attempts can
-/// retry.
 pub async fn release_close_lock<'e, E>(executor: E, trade_id: Uuid) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -259,23 +183,6 @@ where
     Ok(())
 }
 
-/// 共通 fee 適用ロジック。`apply_overnight_fee` / `apply_sfd_fee` /
-/// `apply_swap_fee` が thin wrapper として呼ぶ。
-///
-/// Atomically:
-///   1. CAS on `status='open'` & account_id match (Ok(None) if no row)
-///   2. `trades.fees += fee_amount` (negative amount decreases fees)
-///   3. `trading_accounts.current_balance -= fee_amount`
-///      (negative amount → balance increases = received fee)
-///   4. Insert `account_events` row with given `event_type`,
-///      `amount = -fee_amount` (outflow when fee positive, inflow when negative)
-///
-/// `occurred_at` が `None` の場合は DB の `DEFAULT NOW()` が入る
-/// (`apply_overnight_fee` の現状動作)。`Some(at)` を渡すと明示 timestamp
-/// (catch-up loop の hour boundary attribution 用、SFD/swap で使用)。
-///
-/// Returns `Ok(Some(new_balance))` when applied, `Ok(None)` when the trade
-/// was no longer open (CAS skip).
 async fn apply_fee_inner(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -342,9 +249,6 @@ async fn apply_fee_inner(
     Ok(Some(new_balance))
 }
 
-/// Apply an overnight fee for a single trade. Thin wrapper over
-/// `apply_fee_inner` (event_type='overnight_fee', occurred_at=NOW() via DB
-/// default — daily 1 回 apply のため hour-precision attribution は不要)。
 pub async fn apply_overnight_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -354,10 +258,6 @@ pub async fn apply_overnight_fee(
     apply_fee_inner(tx, account_id, trade_id, fee_amount, "overnight_fee", None).await
 }
 
-/// Apply an SFD fee (positive = paper pays, negative = receives).
-/// Thin wrapper over `apply_fee_inner` (event_type='sfd_fee')。
-/// `occurred_at` は catch-up loop の hour boundary を渡す
-/// (NOW() で同 timestamp になり daily 集計が歪むのを防ぐ、Copilot PR #92 round-9 指摘)。
 pub async fn apply_sfd_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -376,9 +276,6 @@ pub async fn apply_sfd_fee(
     .await
 }
 
-/// Apply a swap fee (positive = paper pays, negative = receives).
-/// Thin wrapper over `apply_fee_inner` (event_type='swap_fee')。
-/// GMO FX paper accrual job が daily で呼ぶ。
 pub async fn apply_swap_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -397,7 +294,6 @@ pub async fn apply_swap_fee(
     .await
 }
 
-/// Update a trade to closed state inside the given transaction.
 pub async fn update_trade_closed<'e, E>(
     executor: E,
     trade_id: Uuid,
@@ -430,15 +326,11 @@ where
     .execute(executor)
     .await?;
     if result.rows_affected() == 0 {
-        anyhow::bail!("trade {trade_id} not found or already closed");
+        anyhow::bail!("failed to close trade: not found or already closed");
     }
     Ok(())
 }
 
-/// Release margin back to the account and record pnl.
-///
-/// Adds `margin_return + pnl_amount` to `trading_accounts.current_balance`
-/// and inserts `account_events` rows for `margin_release` and `trade_close`.
 pub async fn release_margin(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -446,7 +338,6 @@ pub async fn release_margin(
     margin_return: Decimal,
     pnl_amount: Decimal,
 ) -> anyhow::Result<()> {
-    // Return margin + pnl to balance, capture new value
     let new_balance: Decimal = sqlx::query_scalar(
         r#"UPDATE trading_accounts
            SET current_balance = current_balance + $2 + $3
@@ -459,7 +350,6 @@ pub async fn release_margin(
     .fetch_one(&mut *tx)
     .await?;
 
-    // Record margin_release event
     sqlx::query(
         r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
            VALUES ($1, $2, 'margin_release', $3, $4)"#,
@@ -467,11 +357,10 @@ pub async fn release_margin(
     .bind(account_id)
     .bind(trade_id)
     .bind(margin_return)
-    .bind(new_balance - pnl_amount) // balance after margin return, before pnl credit
+    .bind(new_balance - pnl_amount)
     .execute(&mut *tx)
     .await?;
 
-    // Record trade_close event with pnl
     sqlx::query(
         r#"INSERT INTO account_events (account_id, trade_id, event_type, amount, balance_after)
            VALUES ($1, $2, 'trade_close', $3, $4)"#,
@@ -486,10 +375,6 @@ pub async fn release_margin(
     Ok(())
 }
 
-/// Fetch all trades with `status IN ('open', 'closing')` for a given account.
-///
-/// Used by the startup reconciler to identify DB rows that may have drifted
-/// from exchange state during a previous shutdown or crash.
 pub async fn list_open_or_closing_by_account(
     pool: &PgPool,
     account_id: Uuid,
@@ -510,12 +395,6 @@ pub async fn list_open_or_closing_by_account(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-/// Close a trade using a synthetic (best-effort) exit price.
-///
-/// Used by the startup reconciler when the exchange position is confirmed
-/// closed but Phase 3 never completed. Pass `ExitReason::Reconciled` (or
-/// another variant) so the TradeRow mapper can round-trip the value without
-/// erroring on an unknown string.
 pub async fn close_trade_reconciled(
     pool: &PgPool,
     trade_id: Uuid,
@@ -525,7 +404,6 @@ pub async fn close_trade_reconciled(
 ) -> anyhow::Result<()> {
     let exit_at = chrono::Utc::now();
 
-    // Fetch the trade to compute margin for the balance release.
     let trade = sqlx::query_as::<_, TradeRow>(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
                   stop_loss, take_profit, quantity, leverage, fees, account_id,
@@ -538,11 +416,8 @@ pub async fn close_trade_reconciled(
     .bind(trade_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| {
-        anyhow::anyhow!("close_trade_reconciled: trade {trade_id} not found or already closed")
-    })?;
+    .ok_or_else(|| anyhow::anyhow!("failed to close trade: not found or already closed"))?;
 
-    // Truncate toward zero to keep ledger integer.
     let margin = (trade.entry_price * trade.quantity / trade.leverage)
         .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
 
@@ -568,17 +443,15 @@ pub async fn close_trade_reconciled(
     .rows_affected();
 
     if rows_affected == 0 {
-        anyhow::bail!("close_trade_reconciled: trade {trade_id} not found or already closed");
+        anyhow::bail!("failed to close trade: not found or already closed");
     }
 
-    // Release margin + pnl back to account balance via shared helper.
     release_margin(&mut tx, trade.account_id, trade_id, margin, pnl_amount).await?;
 
     tx.commit().await?;
     Ok(())
 }
 
-/// Fetch all open trades for a given account.
 pub async fn get_open_trades_by_account(
     pool: &PgPool,
     account_id: Uuid,
@@ -599,7 +472,6 @@ pub async fn get_open_trades_by_account(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-/// Fetch open trades for a (strategy, pair) pair. Used by the strategy engine.
 pub async fn get_open_trades(
     pool: &PgPool,
     strategy_name: &str,
@@ -621,7 +493,6 @@ pub async fn get_open_trades(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-/// Fetch a single trade by id.
 pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Trade>> {
     let row = sqlx::query_as::<_, TradeRow>(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
@@ -638,10 +509,6 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
     row.map(|r| r.try_into()).transpose()
 }
 
-/// Fetch a single open trade by id, joined with account_name and account_type.
-///
-/// Returns `None` when the trade is not found or is already closed.
-/// Used by the exit executor to avoid a separate `get_account()` call.
 pub async fn get_open_trade_with_account(
     pool: &PgPool,
     trade_id: Uuid,
@@ -678,7 +545,6 @@ pub async fn get_open_trade_with_account(
     .transpose()
 }
 
-/// Add a fee delta to trades.fees (positive delta increases fees).
 pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Result<()> {
     let result = sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
         .bind(id)
@@ -686,13 +552,11 @@ pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Re
         .execute(pool)
         .await?;
     if result.rows_affected() == 0 {
-        anyhow::bail!("trade {id} not found when adding fees");
+        anyhow::bail!("failed to add fees for trade: not found");
     }
     Ok(())
 }
 
-/// account の `since` 以降にクローズした trade の実現損益合計 (pnl_amount - fees)。
-/// Kill Switch の日次損失判定に使う。open 中の含み損は含まない (実現ベース)。
 pub async fn realized_net_since(
     pool: &PgPool,
     account_id: Uuid,
@@ -709,7 +573,6 @@ pub async fn realized_net_since(
     Ok(row.0.unwrap_or(Decimal::ZERO))
 }
 
-/// Discriminator for `TradeEvent` rows.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeEventKind {
@@ -720,7 +583,6 @@ pub enum TradeEventKind {
     Close,
 }
 
-/// One entry in a single trade's chronological event timeline.
 #[derive(Debug, serde::Serialize)]
 pub struct TradeEvent {
     pub kind: TradeEventKind,
@@ -732,7 +594,6 @@ pub struct TradeEvent {
     pub pnl_amount: Option<Decimal>,
 }
 
-/// Build the event timeline for a single trade.
 pub async fn get_trade_events(
     pool: &PgPool,
     trade_id: Uuid,
@@ -824,7 +685,6 @@ pub async fn get_trade_events(
     Ok(Some(events))
 }
 
-/// Response row for positions API.
 #[derive(Debug)]
 pub struct OpenTradeWithAccount {
     pub trade: Trade,
@@ -832,7 +692,6 @@ pub struct OpenTradeWithAccount {
     pub account_type: Option<String>,
 }
 
-/// Fetch open trades for a single (exchange, pair) joined with account name and type.
 pub async fn list_open_with_account_name_for_pair(
     pool: &PgPool,
     exchange: &str,
@@ -873,7 +732,6 @@ pub async fn list_open_with_account_name_for_pair(
         .collect()
 }
 
-/// Fetch all currently open trades joined with account name and type.
 pub async fn list_open_with_account_name(
     pool: &PgPool,
 ) -> anyhow::Result<Vec<OpenTradeWithAccount>> {
@@ -909,10 +767,6 @@ pub async fn list_open_with_account_name(
         })
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Internal row mapper
-// ---------------------------------------------------------------------------
 
 #[derive(sqlx::FromRow)]
 struct TradeRow {
@@ -979,7 +833,6 @@ impl TryFrom<TradeRow> for Trade {
     }
 }
 
-/// Paginated trade list (for API use).
 pub async fn list_trades(
     pool: &PgPool,
     limit: i64,
@@ -1049,127 +902,4 @@ pub async fn list_trades(
 }
 
 #[cfg(test)]
-mod realized_net_since_tests {
-    use super::*;
-    use chrono::TimeZone;
-    use rust_decimal_macros::dec;
-
-    /// Insert a minimal trade row via direct SQL. `exit_at`/`pnl_amount`
-    /// are set only for closed trades.
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_test_trade(
-        pool: &PgPool,
-        account_id: Uuid,
-        strategy_name: &str,
-        status: &str,
-        entry_at: DateTime<Utc>,
-        exit_at: Option<DateTime<Utc>>,
-        pnl_amount: Option<Decimal>,
-        fees: Decimal,
-    ) {
-        sqlx::query(
-            r#"INSERT INTO trades
-                   (id, account_id, strategy_name, pair, exchange, direction,
-                    entry_price, quantity, leverage, fees, stop_loss,
-                    entry_at, exit_at, pnl_amount, status)
-               VALUES ($1, $2, $3, 'FX_BTC_JPY', 'bitflyer_cfd', 'long',
-                       100, 0.01, 2, $4, 90,
-                       $5, $6, $7, $8)"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(account_id)
-        .bind(strategy_name)
-        .bind(fees)
-        .bind(entry_at)
-        .bind(exit_at)
-        .bind(pnl_amount)
-        .bind(status)
-        .execute(pool)
-        .await
-        .expect("insert test trade");
-    }
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn realized_net_since_sums_closed_trades_and_excludes_boundary(pool: sqlx::PgPool) {
-        let account = crate::trading_accounts::list_all(&pool)
-            .await
-            .expect("list accounts")
-            .into_iter()
-            .next()
-            .expect("migrations seed at least one account");
-        let strategy = account.strategy.clone();
-
-        let since = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
-
-        // Two closed trades AT/AFTER `since` — counted.
-        // A: pnl 1000 - fees 100 = 900
-        insert_test_trade(
-            &pool,
-            account.id,
-            &strategy,
-            "closed",
-            Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap(),
-            Some(Utc.with_ymd_and_hms(2026, 7, 5, 12, 0, 0).unwrap()),
-            Some(dec!(1000)),
-            dec!(100),
-        )
-        .await;
-        // B: pnl -300 - fees 50 = -350
-        insert_test_trade(
-            &pool,
-            account.id,
-            &strategy,
-            "closed",
-            Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap(),
-            Some(Utc.with_ymd_and_hms(2026, 7, 6, 12, 0, 0).unwrap()),
-            Some(dec!(-300)),
-            dec!(50),
-        )
-        .await;
-        // C: closed BEFORE `since` — excluded (boundary).
-        insert_test_trade(
-            &pool,
-            account.id,
-            &strategy,
-            "closed",
-            Utc.with_ymd_and_hms(2026, 6, 30, 0, 0, 0).unwrap(),
-            Some(Utc.with_ymd_and_hms(2026, 6, 30, 23, 59, 59).unwrap()),
-            Some(dec!(99999)),
-            dec!(0),
-        )
-        .await;
-        // D: still open — excluded (status filter).
-        insert_test_trade(
-            &pool,
-            account.id,
-            &strategy,
-            "open",
-            Utc.with_ymd_and_hms(2026, 7, 7, 0, 0, 0).unwrap(),
-            None,
-            None,
-            dec!(0),
-        )
-        .await;
-
-        let net = realized_net_since(&pool, account.id, since)
-            .await
-            .expect("realized_net_since");
-        // 900 + (-350) = 550
-        assert_eq!(net, dec!(550), "only closed trades at/after `since` count");
-    }
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn realized_net_since_zero_when_no_trades(pool: sqlx::PgPool) {
-        let account = crate::trading_accounts::list_all(&pool)
-            .await
-            .expect("list accounts")
-            .into_iter()
-            .next()
-            .expect("migrations seed at least one account");
-        let since = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
-        let net = realized_net_since(&pool, account.id, since)
-            .await
-            .expect("realized_net_since");
-        assert_eq!(net, Decimal::ZERO);
-    }
-}
+mod tests;
