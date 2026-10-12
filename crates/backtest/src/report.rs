@@ -12,9 +12,6 @@ pub struct BacktestReport {
     pub initial_balance: Decimal,
     pub final_balance: Decimal,
     pub profit_factor: f64,
-    /// Every trade produced by the run (open and closed), in the order they
-    /// were created/closed. Exposed so callers and tests can inspect
-    /// per-trade fills, quantity and PnL (e.g. to assert quantity-based PnL).
     pub trades: Vec<Trade>,
 }
 
@@ -44,7 +41,6 @@ impl BacktestReport {
 
         let total_pnl = closed.iter().filter_map(|t| t.pnl_amount).sum::<Decimal>();
 
-        // Max drawdown from equity curve
         let mut peak = initial_balance;
         let mut max_dd = Decimal::ZERO;
         let mut equity = initial_balance;

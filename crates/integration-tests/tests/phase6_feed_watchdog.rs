@@ -27,7 +27,7 @@ async fn never_ticked_feed_triggers_slack_stale_notification() {
     let price_store = PriceStore::new(vec![feed_key]);
 
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
 
     // 実時間で数秒以内にテストが終わるよう、秒数は極小値にする
     // (validate() の制約: suspend_gap_secs > check_interval_secs,
@@ -88,7 +88,7 @@ async fn excluded_exchange_never_ticked_does_not_trigger_stale_notification() {
     let price_store = PriceStore::new(vec![feed_key]);
 
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
 
     // 再送の挙動はこのテストの対象外なので notify_retry_attempts=0 (再送無し)
     // にして、realert_interval_secs(60) に対する再送の最悪時間の制約
@@ -165,7 +165,7 @@ async fn wait_for_body(slack: &MockSlackWebhook, needle: &str) -> bool {
 #[tokio::test]
 async fn spawn_feed_supervisor_notifies_on_normal_exit() {
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
     let (tx, _rx) = tokio::sync::mpsc::channel::<PriceEvent>(1);
     let price_store = PriceStore::new(vec![]);
     let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> =
@@ -183,7 +183,7 @@ async fn spawn_feed_supervisor_notifies_on_normal_exit() {
 #[tokio::test]
 async fn spawn_feed_supervisor_notifies_on_error_exit() {
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
     let (tx, _rx) = tokio::sync::mpsc::channel::<PriceEvent>(1);
     let price_store = PriceStore::new(vec![]);
     let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> =
@@ -201,7 +201,7 @@ async fn spawn_feed_supervisor_notifies_on_error_exit() {
 #[tokio::test]
 async fn spawn_feed_supervisor_notifies_on_panic() {
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
     let (tx, _rx) = tokio::sync::mpsc::channel::<PriceEvent>(1);
     let price_store = PriceStore::new(vec![]);
     let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> =
@@ -219,7 +219,7 @@ async fn spawn_feed_supervisor_notifies_on_panic() {
 #[tokio::test]
 async fn spawn_feed_supervisor_does_not_notify_on_abort() {
     let (slack, webhook_url) = MockSlackWebhook::start().await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
     let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async {
         std::future::pending::<()>().await;
         #[allow(unreachable_code)]
@@ -256,7 +256,7 @@ async fn stale_notification_is_delivered_after_transient_webhook_failures_recove
 
     let (slack, webhook_url) = MockSlackWebhook::start().await;
     slack.with_error_response(500).await;
-    let notifier = Arc::new(Notifier::new(Some(webhook_url)));
+    let notifier = Arc::new(Notifier::new(Some(webhook_url)).unwrap());
 
     // notify_retry_initial_secs は validate() の最小許容値 (>=1)。
     // notify_retry_attempts も本番既定 (5) である必要はなく、テストが長引か

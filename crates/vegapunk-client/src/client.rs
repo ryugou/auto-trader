@@ -1,11 +1,12 @@
-use crate::proto::graph_rag_engine_client::GraphRagEngineClient;
-use crate::proto::*;
 use async_trait::async_trait;
 use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
+
+use crate::proto::graph_rag_engine_client::GraphRagEngineClient;
+use crate::proto::*;
 
 type AuthClient = GraphRagEngineClient<InterceptedService<Channel, AuthInterceptor>>;
 
@@ -59,6 +60,21 @@ impl VegapunkClient {
     }
 }
 
+fn clamp_top_k_to_non_negative(top_k: i32) -> i32 {
+    top_k.max(0)
+}
+
+fn search_hit_with_non_empty_text(item: SearchResultItem) -> Option<SearchHit> {
+    let text = item.text?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(SearchHit {
+        text,
+        score: item.score.unwrap_or(0.0),
+    })
+}
+
 #[async_trait]
 impl VegapunkApi for VegapunkClient {
     async fn ingest_raw(
@@ -94,9 +110,7 @@ impl VegapunkApi for VegapunkClient {
             text: query.to_string(),
             filter: None,
             depth: None,
-            // proto top_k は論理的に非負。consumer (MockVegapunkApi) と挙動を
-            // 揃えるため負数を 0 に clamp してから forward する。
-            top_k: Some(top_k.max(0)),
+            top_k: Some(clamp_top_k_to_non_negative(top_k)),
             format: None,
             mode: Some(mode.as_str().to_string()),
             schema: self.schema.clone(),
@@ -105,22 +119,10 @@ impl VegapunkApi for VegapunkClient {
             structural_weight: None,
         };
         let response = client.search(request).await?.into_inner();
-        // proto の SearchResultItem.text は optional。None/空 text は consumer
-        // (Gemini prompt 等) に渡しても意味が無いので boundary で落とす。
         let hits = response
             .results
             .into_iter()
-            .filter_map(|r| {
-                let text = r.text?;
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(SearchHit {
-                        text,
-                        score: r.score.unwrap_or(0.0),
-                    })
-                }
-            })
+            .filter_map(search_hit_with_non_empty_text)
             .collect();
         Ok(SearchResults {
             hits,
@@ -148,3 +150,6 @@ impl VegapunkApi for VegapunkClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

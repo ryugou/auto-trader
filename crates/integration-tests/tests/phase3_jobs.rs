@@ -520,7 +520,8 @@ async fn macro_analyst_produces_update() {
         &gemini_server.uri(),
         "test-key",
         "test-model",
-    );
+    )
+    .unwrap();
 
     // Create broadcast channel
     let (macro_tx, mut macro_rx) = tokio::sync::broadcast::channel::<MacroUpdate>(16);

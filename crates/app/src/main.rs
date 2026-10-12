@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Notifier — Slack Webhook for operator alerts.
     let slack_webhook_url = std::env::var("SLACK_WEBHOOK_URL").ok();
-    let notifier: Arc<Notifier> = Arc::new(Notifier::new(slack_webhook_url));
+    let notifier: Arc<Notifier> = Arc::new(Notifier::new(slack_webhook_url)?);
 
     // Build the expected feed list — (exchange, pair) tuples this
     // process is configured to monitor. The health endpoint uses
@@ -910,7 +910,7 @@ async fn main() -> anyhow::Result<()> {
                     &gemini_config.api_url,
                     &api_key,
                     &gemini_config.model,
-                )
+                )?
                 .with_db(pool.clone());
 
                 // Wire KnowledgeStore for macro event ingestion
