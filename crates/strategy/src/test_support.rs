@@ -3,22 +3,23 @@ use std::collections::HashMap;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::strategy::Strategy;
 use auto_trader_core::types::{Candle, Direction, Exchange, Pair, Position, Trade, TradeStatus};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use uuid::Uuid;
 
-pub(crate) fn make_event(
+pub(crate) fn make_event_at(
     pair: &str,
     timeframe: &str,
     close: Decimal,
     high: Decimal,
     low: Decimal,
+    ts: DateTime<Utc>,
 ) -> PriceEvent {
     PriceEvent {
         pair: Pair::new(pair),
         exchange: Exchange::BitflyerCfd,
-        timestamp: Utc::now(),
+        timestamp: ts,
         candle: Candle {
             pair: Pair::new(pair),
             exchange: Exchange::BitflyerCfd,
@@ -30,18 +31,19 @@ pub(crate) fn make_event(
             volume: Some(0),
             best_bid: None,
             best_ask: None,
-            timestamp: Utc::now(),
+            timestamp: ts,
         },
         indicators: HashMap::new(),
     }
 }
 
-pub(crate) fn make_position_with_sl(
+pub(crate) fn make_position_with_sl_at(
     strategy: &str,
     pair: &str,
     direction: Direction,
     entry: Decimal,
     stop_loss: Decimal,
+    entry_at: DateTime<Utc>,
 ) -> Position {
     Position {
         trade: Trade {
@@ -58,7 +60,7 @@ pub(crate) fn make_position_with_sl(
             quantity: dec!(0.001),
             leverage: dec!(2),
             fees: dec!(0),
-            entry_at: Utc::now(),
+            entry_at,
             exit_at: None,
             pnl_amount: None,
             exit_reason: None,
@@ -68,6 +70,26 @@ pub(crate) fn make_position_with_sl(
             stop_order_id: None,
         },
     }
+}
+
+pub(crate) fn make_event(
+    pair: &str,
+    timeframe: &str,
+    close: Decimal,
+    high: Decimal,
+    low: Decimal,
+) -> PriceEvent {
+    make_event_at(pair, timeframe, close, high, low, Utc::now())
+}
+
+pub(crate) fn make_position_with_sl(
+    strategy: &str,
+    pair: &str,
+    direction: Direction,
+    entry: Decimal,
+    stop_loss: Decimal,
+) -> Position {
+    make_position_with_sl_at(strategy, pair, direction, entry, stop_loss, Utc::now())
 }
 
 pub(crate) async fn warmup_with_flat_candles(

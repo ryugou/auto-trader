@@ -1,16 +1,38 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::strategy::{MacroUpdate, Strategy};
 use auto_trader_core::types::{Direction, Pair, Signal};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
-use std::sync::Arc;
+use rust_decimal_macros::dec;
+
+fn pip_offsets_are_tradable(sl_pips: f64, tp_pips: f64) -> bool {
+    const MAX_PIPS: f64 = 10_000.0;
+    sl_pips.is_finite()
+        && tp_pips.is_finite()
+        && sl_pips > 0.0
+        && tp_pips > 0.0
+        && sl_pips <= MAX_PIPS
+        && tp_pips <= MAX_PIPS
+}
+
+fn entry_price_is_tradable(price: Decimal) -> bool {
+    price > Decimal::ZERO
+}
+
+fn strip_markdown_code_fence(text: &str) -> &str {
+    text.trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+}
 
 pub struct SwingLLMv1 {
     name: String,
     pairs: Vec<Pair>,
-    /// Maximum holding days — currently used as LLM prompt context only.
-    /// Enforcement via forced close is not implemented in Phase 0.
     holding_days_max: u32,
     knowledge: Arc<dyn KnowledgeStore>,
     gemini_client: reqwest::Client,
@@ -60,7 +82,6 @@ impl SwingLLMv1 {
         let failures = self.consecutive_failures.get(pair).copied().unwrap_or(0);
 
         if failures > 0 {
-            // Exponential backoff on consecutive failures: 5min, 10min, 20min, ..., capped at 4h
             let backoff_mins = (5i64 * 2i64.saturating_pow(failures.min(6) - 1)).min(240);
             return match self.last_attempt.get(pair) {
                 Some(last) => now - *last >= chrono::Duration::minutes(backoff_mins),
@@ -68,7 +89,6 @@ impl SwingLLMv1 {
             };
         }
 
-        // Normal interval: check_interval since last successful query
         match self.last_check.get(pair) {
             Some(last) => now - *last >= self.check_interval,
             None => true,
@@ -80,16 +100,13 @@ impl SwingLLMv1 {
         pair: &Pair,
         current_price: Decimal,
     ) -> anyhow::Result<Option<(Direction, Decimal, Decimal, Decimal, f64)>> {
-        // 1. Search KnowledgeStore for similar patterns
         let search_result = self
             .knowledge
             .search_similar_patterns(pair, current_price, 5)
             .await?;
 
-        // 2. Build context from search results
         let context: Vec<String> = search_result.hits.into_iter().map(|h| h.text).collect();
 
-        // 3. Ask Gemini Flash for trade decision
         let macro_context = self.latest_macro.as_deref().unwrap_or("マクロ情報なし");
         let prompt = format!(
             "あなたはFXスイングトレードの判断AIです。以下の情報からトレード判断をしてください。\n\n\
@@ -130,13 +147,7 @@ impl SwingLLMv1 {
             .as_str()
             .unwrap_or("");
 
-        // Strip markdown code fences if present
-        let json_text = text
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
+        let json_text = strip_markdown_code_fence(text);
 
         let decision: serde_json::Value = serde_json::from_str(json_text)?;
 
@@ -149,31 +160,18 @@ impl SwingLLMv1 {
             return Ok(None);
         }
 
-        // LLM-provided values are untrusted input. Reject non-finite,
-        // non-positive, or absurdly large pip offsets before they flow into
-        // `stop_loss_pct = sl / entry` at the call site, where a zero /
-        // negative / NaN would produce an inverted or invalid SL/TP at
-        // execution time. Upper bound 10000 pips = ~100 JPY or ~1.00
-        // non-JPY — anything beyond is clearly a model hallucination.
-        const MAX_PIPS: f64 = 10_000.0;
-        if !sl_pips.is_finite()
-            || !tp_pips.is_finite()
-            || sl_pips <= 0.0
-            || tp_pips <= 0.0
-            || sl_pips > MAX_PIPS
-            || tp_pips > MAX_PIPS
-        {
+        if !pip_offsets_are_tradable(sl_pips, tp_pips) {
             tracing::warn!(
-                "swing_llm: rejecting decision with invalid pip offsets (sl_pips={}, tp_pips={})",
-                sl_pips,
-                tp_pips
+                sl_pips = sl_pips,
+                tp_pips = tp_pips,
+                "invalid pip offsets: out of tradable range"
             );
             return Ok(None);
         }
-        if current_price <= Decimal::ZERO {
+        if !entry_price_is_tradable(current_price) {
             tracing::warn!(
-                "swing_llm: rejecting decision with non-positive entry price {}",
-                current_price
+                entry_price = %current_price,
+                "invalid entry price: non-positive"
             );
             return Ok(None);
         }
@@ -185,9 +183,9 @@ impl SwingLLMv1 {
         };
 
         let pip_size = if pair.0.contains("JPY") {
-            Decimal::new(1, 2) // JPY pairs: 0.01
+            dec!(0.01)
         } else {
-            Decimal::new(1, 4) // others: 0.0001
+            dec!(0.0001)
         };
 
         let sl = pip_size * Decimal::try_from(sl_pips)?;
@@ -217,7 +215,6 @@ impl Strategy for SwingLLMv1 {
             .query_vegapunk_and_llm(&event.pair, event.candle.close)
             .await;
 
-        // Track success/failure separately for backoff
         let now = chrono::Utc::now();
         self.last_attempt.insert(pair_key.clone(), now);
         match &result {
@@ -236,7 +233,6 @@ impl Strategy for SwingLLMv1 {
 
         match result {
             Ok(Some((direction, entry, sl, tp, confidence))) => {
-                // Convert absolute pip offsets to fill-price fractions.
                 let stop_loss_pct = sl / entry;
                 let take_profit_pct = tp / entry;
                 Some(Signal {
@@ -247,13 +243,13 @@ impl Strategy for SwingLLMv1 {
                     take_profit_pct: Some(take_profit_pct),
                     confidence,
                     timestamp: event.timestamp,
-                    allocation_pct: rust_decimal::Decimal::new(5, 1), // 0.5
+                    allocation_pct: dec!(0.5),
                     max_hold_until: None,
                 })
             }
             Ok(None) => None,
             Err(e) => {
-                tracing::warn!("swing_llm decision failed for {}: {e}", event.pair);
+                tracing::warn!(pair = %event.pair.0, error = %e, "failed to query llm decision");
                 None
             }
         }
@@ -263,3 +259,6 @@ impl Strategy for SwingLLMv1 {
         self.latest_macro = Some(update.summary.clone());
     }
 }
+
+#[cfg(test)]
+mod tests;
