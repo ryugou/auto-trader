@@ -4,9 +4,13 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 type DrawdownRow = (String, String, String, Uuid, String, Decimal);
+type GroupKey = (String, String, String, Uuid);
 
-pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
-    let rows: Vec<DrawdownRow> = sqlx::query_as(
+async fn fetch_closed_trades_for_day(
+    pool: &PgPool,
+    date: NaiveDate,
+) -> anyhow::Result<Vec<DrawdownRow>> {
+    let rows = sqlx::query_as(
         "SELECT t.strategy_name, t.pair, t.exchange, t.account_id,
                     ta.account_type, t.pnl_amount
              FROM trades t
@@ -19,8 +23,12 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
     .bind(date)
     .fetch_all(pool)
     .await?;
+    Ok(rows)
+}
 
-    type GroupKey = (String, String, String, Uuid);
+fn group_pnls_by_strategy_pair_exchange_account(
+    rows: Vec<DrawdownRow>,
+) -> std::collections::HashMap<GroupKey, (Vec<Decimal>, String)> {
     let mut groups: std::collections::HashMap<GroupKey, (Vec<Decimal>, String)> =
         std::collections::HashMap::new();
     for (strategy, pair, exchange, account_id, account_type, pnl) in rows {
@@ -29,66 +37,89 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
             .or_insert_with(|| (Vec::new(), account_type));
         entry.0.push(pnl);
     }
+    groups
+}
 
-    for ((strategy, pair, exchange, account_id), (pnls, account_type)) in &groups {
-        let mut peak = Decimal::ZERO;
-        let mut equity = Decimal::ZERO;
-        let mut max_dd = Decimal::ZERO;
-        for pnl in pnls {
-            equity += *pnl;
-            if equity > peak {
-                peak = equity;
-            }
-            let dd = peak - equity;
-            if dd > max_dd {
-                max_dd = dd;
-            }
+fn max_drawdown(pnls: &[Decimal]) -> Decimal {
+    let mut peak = Decimal::ZERO;
+    let mut equity = Decimal::ZERO;
+    let mut max_dd = Decimal::ZERO;
+    for pnl in pnls {
+        equity += *pnl;
+        if equity > peak {
+            peak = equity;
         }
+        let dd = peak - equity;
+        if dd > max_dd {
+            max_dd = dd;
+        }
+    }
+    max_dd
+}
 
-        let account_type_str: &str = account_type;
+async fn persist_max_drawdown(
+    pool: &PgPool,
+    date: NaiveDate,
+    group_key: &GroupKey,
+    pnls_and_account_type: &(Vec<Decimal>, String),
+    max_dd: Decimal,
+) -> anyhow::Result<()> {
+    let (strategy, pair, exchange, account_id) = group_key;
+    let (pnls, account_type) = pnls_and_account_type;
+    let account_type_str: &str = account_type;
 
-        let result = sqlx::query(
-            "UPDATE daily_summary SET max_drawdown = $1
-             WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND account_type = $5
-               AND exchange = $6 AND account_id = $7",
+    let result = sqlx::query(
+        "UPDATE daily_summary SET max_drawdown = $1
+         WHERE date = $2 AND strategy_name = $3 AND pair = $4 AND account_type = $5
+           AND exchange = $6 AND account_id = $7",
+    )
+    .bind(max_dd)
+    .bind(date)
+    .bind(strategy.as_str())
+    .bind(pair.as_str())
+    .bind(account_type_str)
+    .bind(exchange.as_str())
+    .bind(*account_id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        let (total_trades, total_wins, total_pnl): (i64, i64, Decimal) = pnls.iter().fold(
+            (0i64, 0i64, Decimal::ZERO),
+            |(count, wins, pnl_sum), pnl| {
+                let win = if *pnl > Decimal::ZERO { 1 } else { 0 };
+                (count + 1, wins + win, pnl_sum + *pnl)
+            },
+        );
+        sqlx::query(
+            r#"INSERT INTO daily_summary (date, strategy_name, pair, account_type, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+               ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
+               SET max_drawdown = $10"#,
         )
-        .bind(max_dd)
         .bind(date)
         .bind(strategy.as_str())
         .bind(pair.as_str())
         .bind(account_type_str)
         .bind(exchange.as_str())
         .bind(*account_id)
+        .bind(total_trades as i32)
+        .bind(total_wins as i32)
+        .bind(total_pnl)
+        .bind(max_dd)
         .execute(pool)
         .await?;
+    }
+    Ok(())
+}
 
-        if result.rows_affected() == 0 {
-            let (total_trades, total_wins, total_pnl): (i64, i64, Decimal) = pnls.iter().fold(
-                (0i64, 0i64, Decimal::ZERO),
-                |(count, wins, pnl_sum), pnl| {
-                    let win = if *pnl > Decimal::ZERO { 1 } else { 0 };
-                    (count + 1, wins + win, pnl_sum + *pnl)
-                },
-            );
-            sqlx::query(
-                r#"INSERT INTO daily_summary (date, strategy_name, pair, account_type, exchange, account_id, trade_count, win_count, total_pnl, max_drawdown)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                   ON CONFLICT ON CONSTRAINT daily_summary_unique_key DO UPDATE
-                   SET max_drawdown = $10"#,
-            )
-            .bind(date)
-            .bind(strategy.as_str())
-            .bind(pair.as_str())
-            .bind(account_type_str)
-            .bind(exchange.as_str())
-            .bind(*account_id)
-            .bind(total_trades as i32)
-            .bind(total_wins as i32)
-            .bind(total_pnl)
-            .bind(max_dd)
-            .execute(pool)
-            .await?;
-        }
+pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
+    let rows = fetch_closed_trades_for_day(pool, date).await?;
+    let groups = group_pnls_by_strategy_pair_exchange_account(rows);
+
+    for (group_key, pnls_and_account_type) in &groups {
+        let max_dd = max_drawdown(&pnls_and_account_type.0);
+        persist_max_drawdown(pool, date, group_key, pnls_and_account_type, max_dd).await?;
     }
 
     Ok(())

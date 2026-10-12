@@ -1,5 +1,6 @@
 pub mod candles;
 pub mod dashboard;
+mod jst_day_start;
 pub mod macro_events;
 pub mod notifications;
 pub mod pool;
