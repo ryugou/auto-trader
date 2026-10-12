@@ -41,7 +41,7 @@
 - D-1 lint の定義: `Cargo.toml` の `[workspace.lints.clippy]` に `too_many_lines`、`cognitive_complexity`、`fn_params_excessive_bools`、`unwrap_used`、`expect_used` を `"warn"` で置き、`./scripts/test-all.sh` の `-D warnings` で失敗させる。しきい値は `clippy.toml` の `too-many-lines-threshold = 80`、テストの `unwrap` / `expect` は `allow-unwrap-in-tests = true` と `allow-expect-in-tests = true` で許す
 - D-2 段階的な有効化: crate が適合を終えた run で、その crate の `Cargo.toml` に `[lints] workspace = true` を加え、`crates/core/tests/no_comments.rs` の `CHECKED_CRATES` にその crate のディレクトリ名を加える。未適合の crate には lint を適用しない
 - D-3 crate の順序: core → notify → vegapunk-client → macro-analyst → backtest → db → executor → market → strategy → app → sim → integration-tests(依存の少ない順)
-- D-4 テストの置き場所: `src/<module>.rs` の末尾の `#[cfg(test)] mod <name> { ... }` は、`src/<module>.rs` に `#[cfg(test)] mod tests;` を置き、`src/<module>/tests.rs` に移す。1 ファイルに複数のテストモジュールがある場合は、1 つの `tests.rs` の中で `mod <name> { ... }` として残す。`tests.rs` の先頭は `use super::*;`
+- D-4 テストの置き場所: `src/<module>.rs` の末尾の `#[cfg(test)] mod <name> { ... }` は、`src/<module>.rs` に `#[cfg(test)] mod tests;` を置き、`src/<module>/tests.rs` に移す。1 ファイルに複数のテストモジュールがある場合は、1 つの `tests.rs` の中で `mod <name> { ... }` として残す。`tests.rs` の `use` も SC-3 の順(標準ライブラリ → サードパーティ → 同じ crate)に並べ、`use super::*;` は同じ crate のグループに置く
 - D-5 ログ(SC-12): 共通のログ関数は `tracing` のマクロとし、出力の形は `crates/app/src/main.rs` の subscriber の設定 1 か所で決める。本文は小文字で始め、末尾にピリオドを付けず、識別子・件数は構造化フィールド(`key = value`)で渡す。本文の書き換えは、その crate の「コメントの除去」run で行う
 - D-6 doc コメント(SC-9)の内容の移し先: 受け付けない入力の説明はテスト(FF-5)に、理由の説明は関数名・定数名に移す。移し先が無い説明(型の用途の説明など)は削除する
 - D-7 run の 3 種類と順序(crate ごと): R-a テストの分離と `use` の整列 → R-b コメントの除去と SC-6・SC-12 への文言の統一 → R-c ファイルと関数の分割、`unwrap` / `expect` の除去、lint の有効化。R-a と R-b は本体の追加行が少ないため 1 run にまとめてよい
@@ -176,7 +176,7 @@ fn url_inside_string_literal_is_not_a_comment() {
 
 - [ ] **Step 2: `cargo test -p auto-trader-core --test no_comments` が通ることを確認する**
 
-Expected: 6 passed。
+Expected: 7 passed(Unix では symlink を辿らないことのテストを含めて 8 passed)。
 
 - [ ] **Step 3: `CHECKED_CRATES` を一時的に `&["core"]` にして実行し、`checked_crates_have_no_comment_lines_in_src` が現在の `crates/core/src` のコメントを列挙して失敗することを確認し、`&[]` に戻す(RH-8)**
 
@@ -271,7 +271,7 @@ Run: `grep -nE '^\s*(//|/\*)' -r crates/<crate>/src | grep -v 'SAFETY:'`
 
 - [ ] **Step 5: `crates/core/tests/no_comments.rs` の `CHECKED_CRATES` にこの crate のディレクトリ名を加え、`cargo test -p auto-trader-core --test no_comments` が通ることを確認する**
 
-- [ ] **Step 6: `cargo test -p <package>` の件数が R-a の後と同じか、FF-5 で加えた分だけ増えていることを確認する**
+- [ ] **Step 6: `cargo test -p <package> --lib` の件数が R-a の後と同じか、FF-5 で加えた分だけ増えていることを確認する**
 
 ### Run R-c: 分割、`unwrap` / `expect` の除去、lint の有効化
 
@@ -279,7 +279,13 @@ Run: `grep -nE '^\s*(//|/\*)' -r crates/<crate>/src | grep -v 'SAFETY:'`
 
 - [ ] **Step 1: 500 行を超える本体ファイルと、80 行を超える関数を列挙する**
 
+80 行を超える関数とテスト外の `unwrap` / `expect` は clippy で列挙する。
+
 Run: `cargo clippy -p <package> --all-targets --locked -- -W clippy::too_many_lines -W clippy::cognitive_complexity -W clippy::fn_params_excessive_bools -W clippy::unwrap_used -W clippy::expect_used 2>&1 | grep -E '^(warning|error)' | sort | uniq -c`
+
+500 行を超える本体ファイルは行数で列挙する(`tests.rs` は本体に含めない)。
+
+Run: `find crates/<crate>/src -name '*.rs' -not -name tests.rs -exec awk 'END { if (NR > 500) print NR, FILENAME }' {} \;`
 
 - [ ] **Step 2: 500 行を超える本体ファイルを、責務ごとに `src/<module>/<responsibility>.rs` に分ける(KM-5、SC-2)。分割先の型と関数の可視性は分割前と同じ範囲にし、`pub(crate)` より広くしない**
 
