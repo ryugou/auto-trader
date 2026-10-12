@@ -1,5 +1,3 @@
-//! Notification DB access.
-
 use auto_trader_core::types::Trade;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -11,24 +9,18 @@ use uuid::Uuid;
 pub struct Notification {
     pub id: Uuid,
     pub kind: String,
-    /// Non-nullable in DB for both trade_opened and trade_closed (see
-    /// `notifications` CHECK constraints in the unified_rewrite migration).
     pub trade_id: Uuid,
     pub account_id: Uuid,
     pub strategy_name: String,
     pub pair: String,
     pub direction: String,
     pub price: Decimal,
-    /// Only populated for kind='trade_closed' (DB CHECK
-    /// `notifications_close_requires_pnl_and_reason`).
     pub pnl_amount: Option<Decimal>,
-    /// Only populated for kind='trade_closed'.
     pub exit_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub read_at: Option<DateTime<Utc>>,
 }
 
-/// Insert a `trade_opened` notification.
 pub async fn insert_trade_opened<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -51,26 +43,19 @@ where
     Ok(())
 }
 
-/// Insert a `trade_closed` notification.
-///
-/// Returns an error if the trade is missing fields that are required for
-/// a close-event row (`exit_price`, `pnl_amount`, `exit_reason`). The DB
-/// CHECK constraint `notifications_close_requires_pnl_and_reason` would
-/// reject the insert anyway, but failing in Rust gives a clearer error
-/// message and avoids round-trip cost on bad data.
 pub async fn insert_trade_closed<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let exit_price = trade.exit_price.ok_or_else(|| {
-        anyhow::anyhow!("insert_trade_closed: trade {} has no exit_price", trade.id)
-    })?;
-    let pnl_amount = trade.pnl_amount.ok_or_else(|| {
-        anyhow::anyhow!("insert_trade_closed: trade {} has no pnl_amount", trade.id)
-    })?;
-    let exit_reason = trade.exit_reason.ok_or_else(|| {
-        anyhow::anyhow!("insert_trade_closed: trade {} has no exit_reason", trade.id)
-    })?;
+    let exit_price = trade
+        .exit_price
+        .ok_or_else(|| anyhow::anyhow!("invalid trade: missing exit_price"))?;
+    let pnl_amount = trade
+        .pnl_amount
+        .ok_or_else(|| anyhow::anyhow!("invalid trade: missing pnl_amount"))?;
+    let exit_reason = trade
+        .exit_reason
+        .ok_or_else(|| anyhow::anyhow!("invalid trade: missing exit_reason"))?;
     let direction = trade.direction.as_str();
     sqlx::query(
         r#"INSERT INTO notifications
@@ -91,7 +76,6 @@ where
     Ok(())
 }
 
-/// Paginated list with optional filters.
 pub async fn list(
     pool: &PgPool,
     limit: i64,
@@ -192,14 +176,4 @@ pub async fn purge_old_read(pool: &PgPool) -> anyhow::Result<u64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use auto_trader_core::types::ExitReason;
-
-    #[test]
-    fn exit_reason_as_str_no_quotes() {
-        let s = ExitReason::SlHit.as_str();
-        assert!(!s.starts_with('"'));
-        assert!(!s.ends_with('"'));
-        assert!(!s.is_empty());
-    }
-}
+mod tests;

@@ -8,6 +8,7 @@ const CHECKED_CRATES: &[&str] = &[
     "vegapunk-client",
     "macro-analyst",
     "backtest",
+    "db",
 ];
 
 fn workspace_root() -> PathBuf {
