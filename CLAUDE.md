@@ -8,10 +8,11 @@
 
 このスクリプトが単一の入口。**個別コマンドを部分的に打つ運用は禁止** (取りこぼし防止)。スクリプトは以下を順に実行し、いずれか 1 段階でも失敗したら即停止する:
 
-1. `cargo fmt --all -- --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace --lib --bins --tests` (全 crate の lib + bin + `tests/` 配下 integration tests。`auto-trader-integration-tests` の smoke / phase1-4 / mocks もここで一括実行)
-4. `cargo test --workspace --doc` (全 crate の doc tests)
+1. `cargo build --workspace --locked`
+2. `cargo fmt --all -- --check`
+3. `cargo clippy --workspace --all-targets --locked -- -D warnings`
+4. `cargo test --workspace --lib --bins --tests --locked` (全 crate の lib + bin + `tests/` 配下 integration tests。`auto-trader-integration-tests` の smoke / phase1-4 / mocks もここで一括実行)
+5. `cargo test --workspace --doc --locked` (全 crate の doc tests)
 
 `auto-trader-integration-tests` には以下が含まれ、これが green であることが「**理論上システムが正常にトレードできることを保証する**」最低条件:
 

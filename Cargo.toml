@@ -85,3 +85,10 @@ codegen-units = 16
 
 [profile.dev.package."*"]
 debug = false
+
+[workspace.lints.clippy]
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+fn_params_excessive_bools = "warn"
+unwrap_used = "warn"
+expect_used = "warn"

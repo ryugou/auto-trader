@@ -130,26 +130,30 @@ else
   exit 1
 fi
 
+step "cargo build --workspace --locked"
+cargo build --workspace --locked
+ok "build passed"
+
 # ── 静的チェック ──────────────────────────────────────────────────────
 step "cargo fmt --all -- --check"
 cargo fmt --all -- --check
 ok "fmt clean"
 
-step "cargo clippy --workspace --all-targets -- -D warnings"
-cargo clippy --workspace --all-targets -- -D warnings
+step "cargo clippy --workspace --all-targets --locked -- -D warnings"
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ok "clippy clean"
 
 # ── テスト本体 ────────────────────────────────────────────────────────
-step "cargo test --workspace --lib --bins --tests"
+step "cargo test --workspace --lib --bins --tests --locked"
 # `--tests` で crates/*/tests/*.rs 直下の integration tests も拾う
 # (--lib --bins だけだと crate-local integration tests が完全に skip される)。
 # auto-trader-integration-tests crate もここで一括実行される
 # (smoke / phase1-4 / mocks 含む)。
-cargo test --workspace --lib --bins --tests
+cargo test --workspace --lib --bins --tests --locked
 ok "lib + bin + per-crate integration tests passed (incl. auto-trader-integration-tests)"
 
-step "cargo test --workspace --doc"
-cargo test --workspace --doc
+step "cargo test --workspace --doc --locked"
+cargo test --workspace --doc --locked
 ok "doc tests passed"
 
 # ── サマリ ────────────────────────────────────────────────────────────
