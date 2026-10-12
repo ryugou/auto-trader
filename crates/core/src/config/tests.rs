@@ -72,14 +72,21 @@ pairs = {strategy_pairs}
         let toml_str = base_toml(r#"["USD_JPY", "EUR_USD"]"#, r#"["USD_JPY"]"#);
         let config: AppConfig = toml::from_str(&toml_str).unwrap();
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("EUR_USD"), "error should name the pair: {err}");
+        assert_eq!(
+            err,
+            "invalid option \"pairs.fx\": pair \"EUR_USD\" must be quoted in JPY"
+        );
     }
 
     #[test]
     fn rejects_non_jpy_quote_pair_in_strategy_pairs() {
         let toml_str = base_toml(r#"["USD_JPY"]"#, r#"["EUR_USD"]"#);
         let config: AppConfig = toml::from_str(&toml_str).unwrap();
-        assert!(config.validate().is_err());
+        let err = config.validate().unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "invalid option \"strategies.donchian_trend_v1.pairs\": pair \"EUR_USD\" must be quoted in JPY"
+        );
     }
 
     #[test]
@@ -554,7 +561,17 @@ USD_JPY = { long = 100, short = -120 }
 EUR_JPY = { long = 80, short = -100 }
 "#;
     let config: AppConfig = toml::from_str(toml_str).unwrap();
-    assert!(config.validate().is_err());
+    let err = config.validate().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "invalid option \"gmo_fx.swap.updated_on\": must be YYYY-MM-DD"
+    );
+    assert!(
+        err.chain()
+            .nth(1)
+            .is_some_and(|source| source.downcast_ref::<chrono::ParseError>().is_some()),
+        "err={err:?}"
+    );
 }
 
 #[test]
@@ -860,11 +877,15 @@ crypto = []
 #[test]
 fn load_reports_config_path_when_file_is_missing() {
     let path = Path::new("/nonexistent-dir-for-auto-trader-test/missing-config.toml");
-    let err = AppConfig::load(path).unwrap_err().to_string();
+    let err = AppConfig::load(path).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "failed to read config file /nonexistent-dir-for-auto-trader-test/missing-config.toml"
+    );
     assert!(
-        err.starts_with(
-            "failed to read config file /nonexistent-dir-for-auto-trader-test/missing-config.toml: "
-        ),
-        "err={err}"
+        err.chain()
+            .nth(1)
+            .is_some_and(|source| source.downcast_ref::<std::io::Error>().is_some()),
+        "err={err:?}"
     );
 }

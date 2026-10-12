@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::Context;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -166,7 +167,7 @@ impl GmoFxSwapConfig {
             None => Ok(None),
             Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
                 .map(Some)
-                .map_err(|e| anyhow::anyhow!("invalid option \"gmo_fx.swap.updated_on\": {e}")),
+                .context("invalid option \"gmo_fx.swap.updated_on\": must be YYYY-MM-DD"),
         }
     }
 
@@ -354,7 +355,7 @@ impl LiveConfig {
 fn ensure_jpy_quote(pairs: &[String], section: &str) -> anyhow::Result<()> {
     for p in pairs {
         if !p.ends_with("_JPY") {
-            anyhow::bail!("invalid pair \"{p}\": not JPY-quoted (section: {section})");
+            anyhow::bail!("invalid option \"{section}\": pair \"{p}\" must be quoted in JPY");
         }
     }
     Ok(())
@@ -363,9 +364,9 @@ fn ensure_jpy_quote(pairs: &[String], section: &str) -> anyhow::Result<()> {
 impl AppConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
         let config: Self = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("failed to parse config file {}: {e}", path.display()))?;
+            .with_context(|| format!("failed to parse config file {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }
@@ -383,7 +384,7 @@ impl AppConfig {
         }
         ensure_jpy_quote(&self.pairs.active, "pairs.active")?;
         for s in &self.strategies {
-            ensure_jpy_quote(&s.pairs, &format!("strategies({})", s.name))?;
+            ensure_jpy_quote(&s.pairs, &format!("strategies.{}.pairs", s.name))?;
         }
         self.gmo_fx.swap.validate()?;
         self.feed_watchdog.validate()?;
