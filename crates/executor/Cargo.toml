@@ -32,3 +32,6 @@ auto-trader-notify = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+
+[lints]
+workspace = true

@@ -66,7 +66,7 @@ async fn seed_price_store(
 /// Seed a live trading_account into the DB and return its UUID.
 ///
 /// Uses the existing strategy seed from the migration (bb_mean_revert_v1).
-async fn seed_live_account(pool: &PgPool) -> Uuid {
+async fn seed_live_account(pool: &PgPool) -> sqlx::Result<Uuid> {
     let id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO trading_accounts
@@ -77,9 +77,8 @@ async fn seed_live_account(pool: &PgPool) -> Uuid {
     )
     .bind(id)
     .execute(pool)
-    .await
-    .expect("seed_live_account failed");
-    id
+    .await?;
+    Ok(id)
 }
 
 /// Build a minimal pair_configs map for FX_BTC_JPY.
@@ -104,7 +103,7 @@ fn build_live_trader(
         "k".to_string(),
         "s".to_string(),
     ));
-    let notifier = Arc::new(Notifier::new(None).unwrap());
+    let notifier = Arc::new(Notifier::new_disabled());
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
         rust_decimal::Decimal::ZERO,
@@ -133,7 +132,7 @@ fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceSt
         "k".to_string(),
         "s".to_string(),
     ));
-    let notifier = Arc::new(Notifier::new(None).unwrap());
+    let notifier = Arc::new(Notifier::new_disabled());
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
         rust_decimal::Decimal::ZERO,
@@ -158,7 +157,7 @@ async fn seed_open_trade(
     account_id: Uuid,
     entry_price: Decimal,
     quantity: Decimal,
-) -> Trade {
+) -> sqlx::Result<Trade> {
     let trade = Trade {
         id: Uuid::new_v4(),
         account_id,
@@ -213,9 +212,8 @@ async fn seed_open_trade(
     .bind("open")
     .bind(trade.max_hold_until)
     .execute(pool)
-    .await
-    .expect("seed_open_trade failed");
-    trade
+    .await?;
+    Ok(trade)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +233,7 @@ async fn dry_run_long_entry_selects_ask_price(pool: PgPool) {
     let bid = dec!(11_500_000);
     let ask = dec!(11_500_500);
     let price_store = seed_price_store(bid, ask).await;
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let trader = build_dry_run_trader(pool.clone(), account_id, price_store);
 
     let signal = make_signal("FX_BTC_JPY", Direction::Long);
@@ -263,7 +261,7 @@ async fn dry_run_short_entry_selects_bid_price(pool: PgPool) {
     let bid = dec!(11_500_000);
     let ask = dec!(11_500_500);
     let price_store = seed_price_store(bid, ask).await;
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let trader = build_dry_run_trader(pool.clone(), account_id, price_store);
 
     let signal = make_signal("FX_BTC_JPY", Direction::Short);
@@ -291,7 +289,7 @@ async fn dry_run_close_long_selects_bid_price(pool: PgPool) {
     let entry_bid = dec!(11_500_000);
     let entry_ask = dec!(11_500_500);
     let price_store = seed_price_store(entry_bid, entry_ask).await;
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let trader = build_dry_run_trader(pool.clone(), account_id, price_store.clone());
 
     // Open a Long via execute so the DB and margin ledger are consistent
@@ -345,7 +343,7 @@ async fn dry_run_close_short_selects_ask_price(pool: PgPool) {
     let entry_bid = dec!(11_500_000);
     let entry_ask = dec!(11_500_500);
     let price_store = seed_price_store(entry_bid, entry_ask).await;
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let trader = build_dry_run_trader(pool.clone(), account_id, price_store.clone());
 
     // Open a Short via execute so the DB and margin ledger are consistent
@@ -464,7 +462,7 @@ async fn live_execute_calls_api_and_uses_actual_fill_price(pool: PgPool) {
         .await;
 
     // seed DB: live account
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
 
     // PriceStore: live mode でも position sizing に hint_price が必要
     let bid = dec!(11_500_000);
@@ -536,7 +534,7 @@ async fn live_execute_times_out_if_no_execution_returned(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let bid = dec!(11_500_000);
     let ask = dec!(11_500_500);
     let price_store = seed_price_store(bid, ask).await;
@@ -619,14 +617,16 @@ async fn live_close_calls_api_and_uses_actual_fill_price(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
 
     // PriceStore は close_position 内では dry_run=true 時のみ参照されるが、
     // Trader::new に渡すために生成する (close_position 自体は使わない)
     let price_store = PriceStore::new(vec![]);
 
     // DB に open Long trade を直接 seed
-    let open_trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+    let open_trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005))
+        .await
+        .unwrap();
 
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
 
@@ -673,8 +673,10 @@ async fn live_close_calls_api_and_uses_actual_fill_price(pool: PgPool) {
 /// correctly filters by status = 'open'.
 #[sqlx::test(migrations = "../../migrations")]
 async fn get_trade_for_close_returns_none_for_closed_trade(pool: PgPool) {
-    let account_id = seed_live_account(&pool).await;
-    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005))
+        .await
+        .unwrap();
 
     // Manually mark the trade as closed in the DB
     sqlx::query("UPDATE trades SET status = 'closed', exit_price = $2, exit_at = now(), pnl_amount = 0 WHERE id = $1")
@@ -745,9 +747,11 @@ async fn second_close_fails_after_first_close_succeeds(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let price_store = PriceStore::new(vec![]);
-    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005))
+        .await
+        .unwrap();
 
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store);
 
@@ -790,8 +794,10 @@ async fn second_close_fails_after_first_close_succeeds(pool: PgPool) {
 /// Verify all three side effects are visible after tx.commit().
 #[sqlx::test(migrations = "../../migrations")]
 async fn apply_overnight_fee_is_atomic(pool: PgPool) {
-    let account_id = seed_live_account(&pool).await;
-    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005))
+        .await
+        .unwrap();
 
     // Initial balance is 30_000 (from seed_live_account)
     let fee = dec!(100);
@@ -899,8 +905,10 @@ async fn concurrent_close_dispatches_api_once(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
-    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005)).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
+    let trade = seed_open_trade(&pool, account_id, dec!(11_500_000), dec!(0.005))
+        .await
+        .unwrap();
 
     // Build two independent Trader instances pointing at the same DB + same
     // wiremock server, then race them with tokio::spawn.
@@ -1062,7 +1070,7 @@ async fn timeout_then_executions_filled_returns_ok(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store)
         .with_poll_timeout(std::time::Duration::from_millis(200));
@@ -1169,7 +1177,7 @@ async fn timeout_then_order_active_attempts_cancel(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store)
         .with_poll_timeout(std::time::Duration::from_millis(200));
@@ -1287,7 +1295,7 @@ async fn timeout_then_aggregate_error_falls_to_cleanup(pool: PgPool) {
         .mount(&server)
         .await;
 
-    let account_id = seed_live_account(&pool).await;
+    let account_id = seed_live_account(&pool).await.unwrap();
     let price_store = seed_price_store(dec!(11_500_000), dec!(11_500_500)).await;
     let trader = build_live_trader(pool.clone(), account_id, server.uri(), price_store)
         .with_poll_timeout(std::time::Duration::from_millis(200));
