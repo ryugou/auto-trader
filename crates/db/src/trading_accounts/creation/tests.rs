@@ -18,8 +18,7 @@ mod leverage_validation {
     #[test]
     fn gmo_fx_rejects_above_25x() {
         let err = validate_leverage_for_exchange(Exchange::GmoFx, dec!(26)).unwrap_err();
-        assert!(err.contains("25"), "error mentions cap: {err}");
-        assert!(err.contains("gmo_fx"), "error mentions exchange: {err}");
+        assert_eq!(err, "invalid leverage: exceeds regulatory cap 25");
     }
 
     #[test]
@@ -31,7 +30,7 @@ mod leverage_validation {
     #[test]
     fn bitflyer_cfd_rejects_above_2x() {
         let err = validate_leverage_for_exchange(Exchange::BitflyerCfd, dec!(3)).unwrap_err();
-        assert!(err.contains("2"), "error mentions cap: {err}");
+        assert_eq!(err, "invalid leverage: exceeds regulatory cap 2");
     }
 
     #[test]

@@ -31,9 +31,7 @@ pub fn validate_leverage_for_exchange(exchange: Exchange, leverage: Decimal) -> 
         Exchange::Oanda => return Ok(()),
     };
     if leverage > cap {
-        Err(format!(
-            "invalid leverage: exceeds regulatory cap {cap} for {exchange}"
-        ))
+        Err(format!("invalid leverage: exceeds regulatory cap {cap}"))
     } else {
         Ok(())
     }
