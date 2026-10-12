@@ -82,9 +82,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(if let Some(bf) = config.bitflyer.as_ref() {
             let api_key = bf.api_key.clone().unwrap_or_default();
             let api_secret = bf.api_secret.clone().unwrap_or_default();
-            BitflyerPrivateApi::new(api_key, api_secret)
+            BitflyerPrivateApi::new(api_key, api_secret)?
         } else {
-            BitflyerPrivateApi::new(String::new(), String::new())
+            BitflyerPrivateApi::new(String::new(), String::new())?
         });
 
     // Exchange API registry — maps Exchange variant to its private-API client.

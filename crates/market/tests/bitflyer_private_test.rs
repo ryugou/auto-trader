@@ -12,12 +12,14 @@ use rust_decimal_macros::dec;
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[cfg(test)]
 fn client_for(server: &MockServer) -> BitflyerPrivateApi {
     BitflyerPrivateApi::new_for_test(
         server.uri(),
         "test-key".to_string(),
         "test-secret".to_string(),
     )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -399,6 +401,7 @@ async fn rate_limit_waits_when_bucket_empty() {
         "test-key".to_string(),
         "test-secret".to_string(),
     )
+    .unwrap()
     .with_rate_limiter(limiter);
 
     let start = Instant::now();
