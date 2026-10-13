@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
     match (env_trimmed("GMO_API_KEY"), env_trimmed("GMO_API_SECRET")) {
         (Some(key), Some(secret)) => {
             let gmo_api: Arc<dyn ExchangeApi> = Arc::new(
-                auto_trader_market::gmo_fx_private::GmoFxPrivateApi::new(key, secret),
+                auto_trader_market::gmo_fx_private::GmoFxPrivateApi::new(key, secret)?,
             );
             exchange_apis.insert(Exchange::GmoFx, gmo_api);
             tracing::info!("GMO FX ExchangeApi registered");
