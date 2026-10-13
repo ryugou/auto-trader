@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CHECKED_CRATES: &[&str] = &[];
+const CHECKED_CRATES: &[&str] = &["core"];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -33,22 +33,148 @@ fn collect_rust_files_without_following_symlinks(
     Ok(())
 }
 
-fn is_forbidden_comment_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("// SAFETY:") {
-        return false;
+enum ScanState {
+    Code,
+    QuotedString,
+    RawString { hashes: usize },
+}
+
+fn raw_string_open(bytes: &[u8], after_r: usize) -> Option<(usize, usize)> {
+    let mut j = after_r;
+    while bytes.get(j) == Some(&b'#') {
+        j += 1;
     }
-    trimmed.starts_with("//") || trimmed.starts_with("/*")
+    if bytes.get(j) != Some(&b'"') {
+        return None;
+    }
+    Some((j - after_r, j + 1))
+}
+
+fn raw_string_closes_at(bytes: &[u8], quote: usize, hashes: usize) -> bool {
+    bytes
+        .get(quote + 1..quote + 1 + hashes)
+        .is_some_and(|s| s.iter().all(|&b| b == b'#'))
+}
+
+fn char_literal_end(text: &str, quote: usize) -> usize {
+    let bytes = text.as_bytes();
+    match bytes.get(quote + 1) {
+        Some(b'\\') => {
+            let mut j = quote + 3;
+            while j < bytes.len() && bytes[j] != b'\'' {
+                j += 1;
+            }
+            (j + 1).min(bytes.len())
+        }
+        Some(_) => {
+            let Some(c) = text[quote + 1..].chars().next() else {
+                return quote + 1;
+            };
+            let after = quote + 1 + c.len_utf8();
+            if bytes.get(after) == Some(&b'\'') {
+                after + 1
+            } else {
+                quote + 1
+            }
+        }
+        None => quote + 1,
+    }
+}
+
+fn is_safety_comment_at(text: &str, slashes: usize) -> bool {
+    let line_start = text[..slashes].rfind('\n').map_or(0, |p| p + 1);
+    text[line_start..slashes].trim().is_empty() && text[slashes..].starts_with("// SAFETY:")
+}
+
+fn comment_line_numbers(text: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut line = 1usize;
+    let mut state = ScanState::Code;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match state {
+            ScanState::Code => match b {
+                b'\n' => {
+                    line += 1;
+                    i += 1;
+                }
+                b'"' => {
+                    state = ScanState::QuotedString;
+                    i += 1;
+                }
+                b'r' => match raw_string_open(bytes, i + 1) {
+                    Some((hashes, next)) => {
+                        state = ScanState::RawString { hashes };
+                        i = next;
+                    }
+                    None => i += 1,
+                },
+                b'\'' => i = char_literal_end(text, i),
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    if !is_safety_comment_at(text, i) {
+                        found.push(line);
+                    }
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    found.push(line);
+                    let mut j = i + 2;
+                    while j < bytes.len() && !(bytes[j] == b'*' && bytes.get(j + 1) == Some(&b'/'))
+                    {
+                        if bytes[j] == b'\n' {
+                            line += 1;
+                        }
+                        j += 1;
+                    }
+                    i = (j + 2).min(bytes.len());
+                }
+                _ => i += 1,
+            },
+            ScanState::QuotedString => match b {
+                b'\\' => {
+                    if bytes.get(i + 1) == Some(&b'\n') {
+                        line += 1;
+                    }
+                    i += 2;
+                }
+                b'"' => {
+                    state = ScanState::Code;
+                    i += 1;
+                }
+                b'\n' => {
+                    line += 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+            ScanState::RawString { hashes } => match b {
+                b'"' if raw_string_closes_at(bytes, i, hashes) => {
+                    state = ScanState::Code;
+                    i += 1 + hashes;
+                }
+                b'\n' => {
+                    line += 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+        }
+    }
+    found.dedup();
+    found
 }
 
 fn comment_lines_in(file: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let text = fs::read_to_string(file)
         .map_err(|e| format!("failed to read file \"{}\": {e}", file.display()))?;
-    Ok(text
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| is_forbidden_comment_line(line))
-        .map(|(i, line)| format!("{}:{}: {}", file.display(), i + 1, line.trim()))
+    let lines: Vec<&str> = text.lines().collect();
+    Ok(comment_line_numbers(&text)
+        .into_iter()
+        .map(|n| format!("{}:{n}: {}", file.display(), lines[n - 1].trim()))
         .collect())
 }
 
@@ -131,30 +257,78 @@ fn rejects_symlinked_directory() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn has_comment(src: &str) -> bool {
+    !comment_line_numbers(src).is_empty()
+}
+
 #[test]
 fn line_comment_is_forbidden() {
-    assert!(is_forbidden_comment_line("    // explain"));
+    assert!(has_comment("    // explain"));
 }
 
 #[test]
 fn doc_comment_is_forbidden() {
-    assert!(is_forbidden_comment_line("/// doc"));
-    assert!(is_forbidden_comment_line("//! module doc"));
+    assert!(has_comment("/// doc"));
+    assert!(has_comment("//! module doc"));
 }
 
 #[test]
 fn block_comment_start_is_forbidden() {
-    assert!(is_forbidden_comment_line("/* block */"));
+    assert!(has_comment("/* block */"));
 }
 
 #[test]
 fn safety_comment_is_allowed() {
-    assert!(!is_forbidden_comment_line("    // SAFETY: fd is owned"));
+    assert!(!has_comment("    // SAFETY: fd is owned"));
 }
 
 #[test]
 fn url_inside_string_literal_is_not_a_comment() {
-    assert!(!is_forbidden_comment_line(
-        r#"let url = "https://example.com";"#
-    ));
+    assert!(!has_comment(r#"let url = "https://example.com";"#));
+}
+
+#[test]
+fn trailing_comment_after_code_is_forbidden() {
+    assert!(has_comment("let x = 5; // 0.5"));
+}
+
+#[test]
+fn url_inside_raw_string_literal_is_not_a_comment() {
+    assert!(!has_comment(r#"let s = r"http://example.com";"#));
+    assert!(!has_comment(r##"let s = r#"http://example.com"#;"##));
+}
+
+#[test]
+fn comment_after_string_with_escaped_quote_is_forbidden() {
+    assert!(has_comment(r#"let s = "a\"b"; // comment"#));
+}
+
+#[test]
+fn trailing_comment_after_multiline_raw_string_close_is_forbidden() {
+    let src = "let s = r#\"\nurl = http://example.com\n\"#; // comment\n";
+    assert_eq!(comment_line_numbers(src), vec![3]);
+}
+
+#[test]
+fn slashes_inside_multiline_raw_string_are_not_a_comment() {
+    let src = "let s = r#\"\nurl = http://example.com\n\"#;\n";
+    assert!(comment_line_numbers(src).is_empty());
+}
+
+#[test]
+fn trailing_comment_after_multiline_quoted_string_continuation_is_forbidden() {
+    let src = "let s = \"foo \\\nbar\"; // comment\n";
+    assert_eq!(comment_line_numbers(src), vec![2]);
+}
+
+#[test]
+fn trailing_comment_after_quote_char_literal_is_forbidden() {
+    assert!(has_comment("let c = '\"'; // c"));
+    assert!(has_comment("let c = b'\"'; // c"));
+}
+
+#[test]
+fn trailing_comment_after_lifetime_is_forbidden() {
+    assert!(has_comment("fn f<'a>(x: &'a str) {} // c"));
+    assert!(!has_comment("fn f<'a>(x: &'a str) {}"));
 }

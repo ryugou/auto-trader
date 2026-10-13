@@ -1,7 +1,9 @@
-use crate::types::{Candle, Exchange, ExitReason, Pair, Signal, Trade};
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+
+use crate::types::{Candle, Exchange, ExitReason, Pair, Signal, Trade};
 
 #[derive(Debug, Clone)]
 pub struct PriceEvent {
@@ -31,8 +33,5 @@ pub enum TradeAction {
 pub struct TradeEvent {
     pub trade: Trade,
     pub action: TradeAction,
-    /// Account type string ("paper" / "live") carried alongside the trade so
-    /// downstream consumers (e.g. daily-summary recorder) do not need a
-    /// separate `get_account()` DB call per event.
     pub account_type: Option<String>,
 }
