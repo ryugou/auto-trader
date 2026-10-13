@@ -5,7 +5,10 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::creation::{translate_unique_violation, validate_leverage_for_exchange};
+use super::creation::{
+    REACTIVATE_ACCOUNT_OPERATION, build_one_live_per_exchange_conflict_message,
+    translate_unique_violation, validate_leverage_for_exchange,
+};
 use super::model::{ACCOUNT_COLUMNS, AccountRow, TradingAccount};
 
 const ATOMIC_DEACTIVATION_GUARD_WHERE: &str = "$5 IS DISTINCT FROM FALSE OR NOT active OR NOT EXISTS (\
@@ -186,7 +189,9 @@ pub async fn update_account(
         .await
         .map_err(|e| {
             UpdateAccountError::Other(match &existing {
-                Some(_) => translate_unique_violation(e),
+                Some(account) => {
+                    translate_unique_violation(e, REACTIVATE_ACCOUNT_OPERATION, &account.exchange)
+                }
                 None => e.into(),
             })
         })?;
@@ -223,9 +228,9 @@ async fn reject_if_other_live_account_active(
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    if let Some((other_id,)) = existing_live {
+    if existing_live.is_some() {
         return Err(UpdateAccountError::Other(anyhow::anyhow!(
-            "invalid account: live account already active for exchange {exchange} (id={other_id}); only 1 active live account per exchange is supported"
+            build_one_live_per_exchange_conflict_message(REACTIVATE_ACCOUNT_OPERATION, exchange)
         )));
     }
     Ok(())

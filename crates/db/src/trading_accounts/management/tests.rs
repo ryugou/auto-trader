@@ -378,8 +378,9 @@ async fn update_account_rejects_reactivating_live_when_another_active_live_exist
     )
     .await
     .expect_err("reactivating must be rejected while another live account is active");
-    assert!(
-        err.to_string().contains("already active"),
+    assert_eq!(
+        err.to_string(),
+        build_one_live_per_exchange_conflict_message(REACTIVATE_ACCOUNT_OPERATION, "bitflyer_cfd"),
         "unexpected error: {err}"
     );
 }

@@ -207,9 +207,9 @@ pub async fn create(
     {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            format!(
-                "failed to create account: live account already exists for exchange \"{exchange_normalized}\"; \
-                 only 1 live account per exchange is supported"
+            trading_accounts::build_one_live_per_exchange_conflict_message(
+                trading_accounts::CREATE_ACCOUNT_OPERATION,
+                &exchange_normalized,
             ),
         ));
     }
@@ -314,15 +314,15 @@ async fn reject_reactivation_violating_activation_guards(
         &account.exchange,
     )?;
     if account.account_type == "live"
-        && let Some(other_id) =
-            find_active_live_account_for_exchange(&state.pool, &account.exchange, Some(id)).await?
+        && find_active_live_account_for_exchange(&state.pool, &account.exchange, Some(id))
+            .await?
+            .is_some()
     {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            format!(
-                "failed to reactivate account: live account already active for exchange \"{}\" \
-                 (id={}); only 1 active live account per exchange is supported",
-                account.exchange, other_id
+            trading_accounts::build_one_live_per_exchange_conflict_message(
+                trading_accounts::REACTIVATE_ACCOUNT_OPERATION,
+                &account.exchange,
             ),
         ));
     }

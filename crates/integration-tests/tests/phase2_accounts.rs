@@ -1050,8 +1050,10 @@ async fn update_account_reactivate_live_rejected_when_another_is_active(pool: sq
 
     assert_eq!(resp.status().as_u16(), 409);
     let json: Value = resp.json().await.unwrap();
-    assert!(
-        json["error"].as_str().unwrap().contains("already active"),
+    assert_eq!(
+        json["error"].as_str().unwrap(),
+        "failed to reactivate account: live account already exists for exchange \"bitflyer_cfd\"; \
+                only 1 live account per exchange is supported",
         "unexpected error: {}",
         json["error"]
     );

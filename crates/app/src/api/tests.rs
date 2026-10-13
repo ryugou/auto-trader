@@ -60,17 +60,21 @@ fn unique_violation_on_one_live_per_exchange_surfaces_the_db_layer_message() {
         constraint: "trading_accounts_one_live_per_exchange",
     });
     let wrapped = anyhow::Error::new(db_err).context(
-        "live account for exchange 'bitflyer_cfd' already exists; \
-         only 1 active live account per exchange is supported",
+        auto_trader_db::trading_accounts::build_one_live_per_exchange_conflict_message(
+            auto_trader_db::trading_accounts::CREATE_ACCOUNT_OPERATION,
+            "bitflyer_cfd",
+        ),
     );
 
     let api_err: ApiError = wrapped.into();
 
     assert_eq!(api_err.0, StatusCode::CONFLICT);
-    assert!(
-        api_err.1.contains("bitflyer_cfd") && api_err.1.contains("already exists"),
-        "expected the DB-layer message to pass through, got: {}",
-        api_err.1
+    assert_eq!(
+        api_err.1,
+        auto_trader_db::trading_accounts::build_one_live_per_exchange_conflict_message(
+            auto_trader_db::trading_accounts::CREATE_ACCOUNT_OPERATION,
+            "bitflyer_cfd",
+        )
     );
 }
 

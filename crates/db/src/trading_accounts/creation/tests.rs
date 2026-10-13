@@ -91,8 +91,9 @@ async fn duplicate_live_insert_same_exchange_fails(pool: sqlx::PgPool) {
     let err = create_account(&pool, &req)
         .await
         .expect_err("second live insert should fail");
-    assert!(
-        err.to_string().contains("already exists"),
+    assert_eq!(
+        err.to_string(),
+        build_one_live_per_exchange_conflict_message(CREATE_ACCOUNT_OPERATION, "bitflyer_cfd"),
         "unexpected error: {err}"
     );
 }
@@ -119,10 +120,11 @@ async fn translate_unique_violation_reports_already_exists(pool: sqlx::PgPool) {
         "expected a database error from the unique index, got: {db_err:?}"
     );
 
-    let translated = translate_unique_violation(db_err);
-    assert!(
-        translated.to_string().contains("already exists"),
-        "message must say the live account already exists: {translated}"
+    let translated = translate_unique_violation(db_err, CREATE_ACCOUNT_OPERATION, "bitflyer_cfd");
+    assert_eq!(
+        translated.to_string(),
+        build_one_live_per_exchange_conflict_message(CREATE_ACCOUNT_OPERATION, "bitflyer_cfd"),
+        "unexpected message: {translated}"
     );
     assert!(
         translated.chain().any(|c| matches!(
