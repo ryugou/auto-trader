@@ -63,7 +63,7 @@ async fn test_database_url(pool: &PgPool) -> String {
 }
 
 /// `config::load` が読める最小の TOML を一時ファイルに書く(`config.rs` のテストの
-/// `write_fixture` と同じパターン: プロセス id + テスト名でファイル名を一意にする)。
+/// `write_process_unique_fixture` と同じパターン: プロセス id + テスト名でファイル名を一意にする)。
 fn write_config(name: &str, database_url: &str, sim_extra_lines: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "auto-trader-sim-cli-test-{}-{name}.toml",
