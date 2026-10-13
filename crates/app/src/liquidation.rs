@@ -1,9 +1,3 @@
-//! paper account の維持率ロスカット判定。
-//!
-//! `Trader::close_position` を直接呼ばず、close 対象 trade_id の Vec を返すだけ
-//! の pure 判定 helper (出力は close 計画)。`main.rs` の crypto monitor ループ
-//! から呼び出され、戻り値を `closer::close_trade` で処理する。
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,28 +12,17 @@ use uuid::Uuid;
 
 use crate::positions::build_close_side_positions;
 
-/// 維持率判定で参照する読み取り専用の環境。
-/// price tick ループの先頭で 1 度組み立てて借用で渡す想定。
 pub struct LiquidationContext {
     pub pool: PgPool,
     pub price_store: Arc<PriceStore>,
     pub exchange_liquidation_levels: Arc<HashMap<Exchange, Decimal>>,
-    /// `LIVE_DRY_RUN=1` で起動した時、live account も paper 扱いで
-    /// 維持率ロスカットを行うか。通常運用では false。
     pub live_forces_dry_run: bool,
 }
 
-/// `event` の tick が来た時、同 exchange の paper account を walk して、
-/// 維持率 `< threshold` の account の全 trade_id を返す。
-///
-/// 戻り値 `Vec<(account_id, vec_of_trade_ids)>`。caller が順次 close する。
-///
-/// 仕様:
-/// - paper account のみ対象 (`account_type == "paper"` または
-///   `live_forces_dry_run == true`)。live は exchange 側で自動なのでスキップ。
-/// - 同 account の trade のうち、PriceStore に最新 bid/ask が無いものが
-///   1 つでもあればその account 全体を skip (false-positive Liquidation を避ける)。
-/// - 維持率は `< threshold` (厳密下回り) のみ発火。`==` では発火しない。
+fn is_below_liquidation_threshold(ratio: Decimal, threshold: Decimal) -> bool {
+    ratio < threshold
+}
+
 pub async fn detect_liquidation_targets(
     ctx: &LiquidationContext,
     open_trades: &[OpenTradeWithAccount],
@@ -47,10 +30,9 @@ pub async fn detect_liquidation_targets(
 ) -> Vec<(Uuid, Vec<Uuid>)> {
     let threshold = match ctx.exchange_liquidation_levels.get(&event.exchange) {
         Some(t) => *t,
-        None => return vec![], // 設定無しなら判定しない
+        None => return vec![],
     };
 
-    // tick の exchange の open trade を account_id で bucketing (1 pass)。
     let mut buckets: HashMap<Uuid, Vec<&OpenTradeWithAccount>> = HashMap::new();
     for owned in open_trades
         .iter()
@@ -62,12 +44,10 @@ pub async fn detect_liquidation_targets(
             .push(owned);
     }
 
-    // 同 pair の bid/ask 取得は read lock を取るので、tick 内で 1 回キャッシュ。
     let mut price_cache: HashMap<FeedKey, Option<(Decimal, Decimal)>> = HashMap::new();
     let mut results = Vec::new();
 
     for (account_id, trades_in_account) in buckets {
-        // account_type 判定。paper のみ対象。
         let account_type = trades_in_account
             .first()
             .and_then(|t| t.account_type.as_deref())
@@ -77,26 +57,24 @@ pub async fn detect_liquidation_targets(
             continue;
         }
 
-        // account row を read
         let account =
             match auto_trader_db::trading_accounts::get_account(&ctx.pool, account_id).await {
                 Ok(Some(a)) => a,
                 Ok(None) => {
                     tracing::warn!(
-                        "liquidation: account {account_id} not found (delete race?), skipping"
+                        account_id = %account_id,
+                        "invalid account: not found"
                     );
                     continue;
                 }
                 Err(e) => {
-                    tracing::warn!("liquidation: failed to read account {account_id}: {e}");
+                    tracing::warn!(account_id = %account_id, error = %e, "failed to read account");
                     continue;
                 }
             };
 
-        // OpenPosition vec を組む。price 不在の trade があったら account 判定 skip
-        // (false-positive Liquidation を避ける、保守的)。
         let ctx_label = format!("liquidation: account {account_id}");
-        let positions = match build_close_side_positions(
+        let positions_with_all_prices_known = match build_close_side_positions(
             trades_in_account.iter().map(|owned| &owned.trade),
             &ctx.price_store,
             &mut price_cache,
@@ -108,17 +86,21 @@ pub async fn detect_liquidation_targets(
             None => continue,
         };
 
-        // 維持率計算
-        let ratio = match compute_maintenance_ratio(account.current_balance, &positions) {
+        let ratio = match compute_maintenance_ratio(
+            account.current_balance,
+            &positions_with_all_prices_known,
+        ) {
             Some(r) => r,
-            None => continue, // required=0、open 無し
+            None => continue,
         };
 
-        if ratio < threshold {
+        if is_below_liquidation_threshold(ratio, threshold) {
             tracing::warn!(
-                "liquidation: account {account_id} maintenance_ratio={ratio} < threshold={threshold} \
-                 — force-closing {} trade(s)",
-                trades_in_account.len()
+                account_id = %account_id,
+                maintenance_ratio = %ratio,
+                threshold = %threshold,
+                trade_count = trades_in_account.len(),
+                "maintenance ratio below threshold, force-closing account"
             );
             let trade_ids: Vec<Uuid> = trades_in_account.iter().map(|t| t.trade.id).collect();
             results.push((account_id, trade_ids));

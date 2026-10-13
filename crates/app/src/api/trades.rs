@@ -49,9 +49,6 @@ pub struct TradeEventsResponse {
     pub events: Vec<TradeEvent>,
 }
 
-/// `GET /api/trades/{id}/events` — return the chronological event
-/// timeline (OPEN → overnight fees → CLOSE) for a single trade. Used
-/// by the trade-history table's expandable row.
 pub async fn events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -59,6 +56,11 @@ pub async fn events(
     let events = trades_db::get_trade_events(&state.pool, id)
         .await
         .map_err(ApiError::from)?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "trade not found".to_string()))?;
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "invalid trade: not found".to_string(),
+            )
+        })?;
     Ok(Json(TradeEventsResponse { events }))
 }

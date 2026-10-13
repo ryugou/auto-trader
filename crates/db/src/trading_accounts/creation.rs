@@ -53,16 +53,28 @@ pub struct CreateTradingAccount {
     pub currency: String,
 }
 
-pub(super) fn translate_unique_violation(e: sqlx::Error) -> anyhow::Error {
+pub const CREATE_ACCOUNT_OPERATION: &str = "create account";
+pub const REACTIVATE_ACCOUNT_OPERATION: &str = "reactivate account";
+
+pub fn build_one_live_per_exchange_conflict_message(operation: &str, exchange: &str) -> String {
+    format!(
+        "failed to {operation}: live account already exists for exchange \"{exchange}\"; \
+         only 1 live account per exchange is supported"
+    )
+}
+
+pub(super) fn translate_unique_violation(
+    e: sqlx::Error,
+    operation: &str,
+    exchange: &str,
+) -> anyhow::Error {
     let constraint = match &e {
         sqlx::Error::Database(db_err) => db_err.constraint().map(str::to_string),
         _ => None,
     };
     let message = match constraint.as_deref() {
         Some("trading_accounts_one_live_per_exchange") => Some(
-            "invalid exchange: live account already exists; \
-             only 1 active live account per exchange is supported"
-                .to_string(),
+            build_one_live_per_exchange_conflict_message(operation, exchange),
         ),
         Some("trading_accounts_exchange_normalized") => {
             Some("invalid exchange: must match ^[a-z0-9_]+$".to_string())
@@ -125,7 +137,7 @@ pub async fn create_account(
         .bind(&currency)
         .fetch_one(pool)
         .await
-        .map_err(translate_unique_violation)?;
+        .map_err(|e| translate_unique_violation(e, CREATE_ACCOUNT_OPERATION, &exchange))?;
     Ok(TradingAccount::from(row))
 }
 
@@ -141,11 +153,11 @@ async fn reject_if_live_account_exists_for_exchange(
     .bind(exchange)
     .fetch_optional(pool)
     .await?;
-    if let Some((existing_id,)) = existing {
-        anyhow::bail!(
-            "invalid exchange: live account already exists (id={existing_id}); \
-             only 1 live account per exchange is supported"
-        );
+    if existing.is_some() {
+        anyhow::bail!(build_one_live_per_exchange_conflict_message(
+            CREATE_ACCOUNT_OPERATION,
+            exchange
+        ));
     }
     Ok(())
 }

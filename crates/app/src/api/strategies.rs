@@ -7,11 +7,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-    /// Optional `fx` / `crypto` filter to scope the dropdown by exchange.
     pub category: Option<String>,
 }
 
-/// `GET /api/strategies` — read-only catalog list. Optional `?category=`.
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
@@ -23,8 +21,6 @@ pub async fn list(
     Ok(Json(rows))
 }
 
-/// `GET /api/strategies/{name}` — single-strategy lookup for the catalog
-/// detail view.
 pub async fn get_one(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -35,6 +31,6 @@ pub async fn get_one(
         .map(Json)
         .ok_or(ApiError(
             StatusCode::NOT_FOUND,
-            format!("strategy '{name}' not found"),
+            "invalid strategy: not found".to_string(),
         ))
 }
