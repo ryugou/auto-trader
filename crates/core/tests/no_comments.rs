@@ -2,7 +2,13 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CHECKED_CRATES: &[&str] = &["core"];
+const CHECKED_CRATES: &[&str] = &[
+    "core",
+    "notify",
+    "vegapunk-client",
+    "macro-analyst",
+    "backtest",
+];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")

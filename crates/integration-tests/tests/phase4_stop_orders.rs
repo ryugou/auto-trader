@@ -427,7 +427,7 @@ async fn stop_placement_failure_does_not_fail_open_and_alerts(pool: sqlx::PgPool
         "stop_fail_test".to_string(),
         api,
         price_store,
-        Arc::new(Notifier::new(Some(webhook_url))),
+        Arc::new(Notifier::new(Some(webhook_url)).unwrap()),
         usd_jpy_sizer_with_tick(),
         dec!(1.00),
         false,

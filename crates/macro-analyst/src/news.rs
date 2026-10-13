@@ -13,14 +13,9 @@ pub struct NewsItem {
 }
 
 impl NewsFetcher {
-    pub fn new(sources: Vec<String>) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
-            sources,
-        }
+    pub fn new(sources: Vec<String>) -> anyhow::Result<Self> {
+        let client = crate::http_client::build_http_client()?;
+        Ok(Self { client, sources })
     }
 
     pub async fn fetch_latest(&self) -> Vec<NewsItem> {
@@ -28,7 +23,7 @@ impl NewsFetcher {
         for source in &self.sources {
             match self.fetch_feed(source).await {
                 Ok(mut feed_items) => items.append(&mut feed_items),
-                Err(e) => tracing::warn!("failed to fetch news from {source}: {e}"),
+                Err(e) => tracing::warn!(source = %source, error = %e, "failed to fetch news"),
             }
         }
         items

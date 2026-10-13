@@ -12,24 +12,13 @@ pub struct EconomicEvent {
 }
 
 impl EconomicCalendar {
-    pub fn new() -> Self {
-        Self {
-            _client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
-        }
+    pub fn new() -> anyhow::Result<Self> {
+        let _client = crate::http_client::build_http_client()?;
+        Ok(Self { _client })
     }
 
     pub async fn fetch_upcoming(&self) -> Vec<EconomicEvent> {
-        // Phase 0 stub: concrete source to be selected at runtime
-        tracing::warn!("economic calendar: using stub implementation");
+        tracing::warn!("using stub implementation");
         Vec::new()
-    }
-}
-
-impl Default for EconomicCalendar {
-    fn default() -> Self {
-        Self::new()
     }
 }

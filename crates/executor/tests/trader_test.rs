@@ -104,7 +104,7 @@ fn build_live_trader(
         "k".to_string(),
         "s".to_string(),
     ));
-    let notifier = Arc::new(Notifier::new(None));
+    let notifier = Arc::new(Notifier::new(None).unwrap());
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
         rust_decimal::Decimal::ZERO,
@@ -133,7 +133,7 @@ fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceSt
         "k".to_string(),
         "s".to_string(),
     ));
-    let notifier = Arc::new(Notifier::new(None));
+    let notifier = Arc::new(Notifier::new(None).unwrap());
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
         rust_decimal::Decimal::ZERO,

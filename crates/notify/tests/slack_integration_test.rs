@@ -19,7 +19,7 @@ async fn notifier_posts_text_payload_to_slack_url() {
         .mount(&server)
         .await;
 
-    let notifier = Notifier::new(Some(server.uri()));
+    let notifier = Notifier::new(Some(server.uri())).unwrap();
     let ev = NotifyEvent::OrderFilled(OrderFilledEvent {
         account_name: "通常".into(),
         exchange: Exchange::BitflyerCfd,
@@ -68,7 +68,7 @@ async fn notifier_posts_system_alert_with_title() {
         .mount(&server)
         .await;
 
-    let notifier = Notifier::new(Some(server.uri()));
+    let notifier = Notifier::new(Some(server.uri())).unwrap();
     let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
         title: "margin critical".into(),
         account_name: "本番".into(),
@@ -105,7 +105,7 @@ async fn notifier_returns_error_on_5xx() {
         .mount(&server)
         .await;
 
-    let notifier = Notifier::new(Some(server.uri()));
+    let notifier = Notifier::new(Some(server.uri())).unwrap();
     let ev = NotifyEvent::OrderFailed(OrderFailedEvent {
         account_name: "通常".into(),
         exchange: Exchange::BitflyerCfd,
@@ -122,7 +122,7 @@ async fn notifier_returns_error_on_5xx() {
 
 #[tokio::test]
 async fn notifier_noop_when_url_none() {
-    let notifier = Notifier::new(None);
+    let notifier = Notifier::new(None).unwrap();
     let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
         exchange: Exchange::BitflyerCfd,
@@ -178,7 +178,7 @@ async fn notifier_http_error_does_not_leak_webhook_url() {
     // 127.0.0.1:1 は通常 connection refused。path に secret マーカーを
     // 入れることで、redact が効いていない場合に検出できる。
     let url_with_secret_marker = "http://127.0.0.1:1/services/SECRET_TOKEN_NEVER_LEAK".to_string();
-    let notifier = Notifier::new(Some(url_with_secret_marker));
+    let notifier = Notifier::new(Some(url_with_secret_marker)).unwrap();
 
     let ev = NotifyEvent::PositionClosed(PositionClosedEvent {
         account_name: "通常".into(),
