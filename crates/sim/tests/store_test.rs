@@ -1,17 +1,3 @@
-//! `sim_scripts`・`sim_batches`・`sim_runs` の読み書きの結合テスト(ホストの PostgreSQL に
-//! 接続する)。`DATABASE_URL` が設定済みであることを前提とする(`#[sqlx::test]` が利用する)。
-//!
-//! 計画 Task 8 Step 4 の確認項目:
-//! - 同じソースを 2 回 `register_script` すると、同じ `id` が返り、`sim_scripts` が 1 行で、
-//!   2 回目に渡した `name` で上書きされない
-//! - `create_batch` の直後は `status = 'running'`、`finished_at` が NULL。
-//!   `finish_batch(Completed)`/`finish_batch(Failed)` でそれぞれ遷移し `finished_at` が入る
-//! - `save_run` で、`Ok` の行は指標の列と `metrics` が入り `error` が NULL。`ScriptError` の
-//!   行は `error` が `<RFC 3339> <メッセージ>` の形で、指標の列と `metrics` が NULL
-//! - 同じ `batch_id` と `params` の `save_run` が 2 回目でエラーになる
-//! - `top_runs` が、`running`・`failed` のバッチでは空を返し、`completed` のバッチでは
-//!   `total_pips` の降順、同値は `params` の文字列の昇順で返す
-
 use auto_trader_sim::config::SimConfig;
 use auto_trader_sim::engine::{ExitReason, RunStatus, SimOutcome, SimTrade};
 use auto_trader_sim::error::SimError;
@@ -23,8 +9,6 @@ use auto_trader_sim::types::Bar;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// 登録検証(spec 8.1)を満たす最小スクリプトを都度コンパイルする。`CompiledScript` は
-/// `Clone`/`Copy` を持たないため、呼び出し側ごとに新しくコンパイルする。
 fn compile_minimal_script(source: &str) -> auto_trader_sim::script::CompiledScript {
     let host = ScriptHost::new(&SimConfig::default());
     host.compile(source).expect("test script must be valid")
@@ -32,8 +16,6 @@ fn compile_minimal_script(source: &str) -> auto_trader_sim::script::CompiledScri
 
 const MINIMAL_SCRIPT: &str = "fn params() { #{} }\nfn on_bar(ctx, p) { 0 }\n";
 
-/// 1 件の売買から `Metrics` を作る(`eval::evaluate` を経由して、実際に保存される形と同じ
-/// 構造にする)。`total_pips` はちょうど表せる値(0.1 pip = 1 ミリ円単位)を渡すこと。
 fn sample_metrics(total_pips: f64) -> Metrics {
     let bar = Bar {
         open_time: 0,
@@ -78,8 +60,6 @@ fn ok_record(entry: i64, total_pips: f64) -> RunRecord {
     }
 }
 
-/// スクリプトを登録し、バッチを 1 つ作る(`period_from=0, period_to=300, bar_count=1,
-/// total_runs=1, config={}`。テストの関心はバッチの中身ではなく状態遷移・保存結果にある)。
 async fn setup_script_and_batch(pool: &PgPool) -> (Uuid, Uuid) {
     let script = compile_minimal_script(MINIMAL_SCRIPT);
     let script_id = store::register_script(pool, "minimal", &script, "human", None)
@@ -100,8 +80,6 @@ async fn setup_script_and_batch(pool: &PgPool) -> (Uuid, Uuid) {
     .expect("create_batch must succeed");
     (script_id, batch_id)
 }
-
-// ---- register_script ------------------------------------------------------
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn register_script_is_idempotent_by_source_sha256_and_keeps_the_first_name(pool: PgPool) {
@@ -133,8 +111,6 @@ async fn register_script_is_idempotent_by_source_sha256_and_keeps_the_first_name
     );
 }
 
-// ---- create_batch / finish_batch ------------------------------------------
-
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_batch_starts_running_with_no_finished_at(pool: PgPool) {
     let (_, batch_id) = setup_script_and_batch(&pool).await;
@@ -148,6 +124,30 @@ async fn create_batch_starts_running_with_no_finished_at(pool: PgPool) {
 
     assert_eq!(status, "running");
     assert!(finished_at.is_none());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn create_batch_rejects_a_period_that_is_not_a_representable_instant(pool: PgPool) {
+    let script = compile_minimal_script(MINIMAL_SCRIPT);
+    let script_id = store::register_script(&pool, "minimal", &script, "human", None)
+        .await
+        .expect("register_script must succeed");
+
+    let err = store::create_batch(
+        &pool,
+        &NewBatch {
+            script_id,
+            period_from: i64::MAX,
+            period_to: i64::MAX,
+            bar_count: 1,
+            total_runs: 1,
+            config: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect_err("an unrepresentable period_from must be rejected, not panic");
+
+    assert!(matches!(err, SimError::Other(_)), "got {err:?}");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -226,8 +226,6 @@ async fn finish_batch_with_running_is_an_error(pool: PgPool) {
         .expect_err("transition to running must be rejected");
     assert!(matches!(err, SimError::Args(_)), "got {err:?}");
 }
-
-// ---- save_run --------------------------------------------------------------
 
 #[derive(sqlx::FromRow)]
 struct SimRunRow {
@@ -452,8 +450,6 @@ async fn save_run_rejects_a_second_row_with_the_same_batch_id_and_params(pool: P
     );
 }
 
-// ---- top_runs ---------------------------------------------------------------
-
 #[sqlx::test(migrations = "../../migrations")]
 async fn top_runs_is_empty_for_a_running_batch(pool: PgPool) {
     let (_, batch_id) = setup_script_and_batch(&pool).await;
@@ -487,7 +483,6 @@ async fn top_runs_orders_by_total_pips_desc_then_params_text_asc_for_a_completed
     pool: PgPool,
 ) {
     let (_, batch_id) = setup_script_and_batch(&pool).await;
-    // entry=10 と entry=20 は total_pips が同値(30.0)の組。entry=30 は最下位(10.0)。
     store::save_run(&pool, batch_id, &ok_record(10, 30.0))
         .await
         .unwrap();
@@ -506,7 +501,6 @@ async fn top_runs_orders_by_total_pips_desc_then_params_text_asc_for_a_completed
     assert_eq!(top[0].total_pips, 30.0);
     assert_eq!(top[1].total_pips, 30.0);
     assert_eq!(top[2].total_pips, 10.0);
-    // 同値 (30.0) の組は params の文字列昇順: {"entry":10} の "10" が {"entry":20} の "20" より先。
     assert_eq!(top[0].params["entry"], 10);
     assert_eq!(top[1].params["entry"], 20);
     assert_eq!(top[2].params["entry"], 30);
