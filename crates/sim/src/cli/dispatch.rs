@@ -6,7 +6,8 @@ use super::args::{Cli, Command};
 use super::backfill::run_backfill;
 use super::benchmark::run_benchmark;
 use super::migrate::run_migrate;
-use super::{run_run, run_sweep_cmd};
+use super::run_cmd::run_run;
+use super::run_sweep_cmd;
 use crate::config;
 
 pub async fn run_args<I, T>(args: I) -> i32
