@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Context;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::strategy::{MacroUpdate, Strategy};
 use auto_trader_core::types::{Direction, Pair, Signal};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+
+type SignalParams = (Direction, Decimal, Decimal, Decimal, f64);
 
 fn pip_offsets_are_tradable(sl_pips: f64, tp_pips: f64) -> bool {
     const MAX_PIPS: f64 = 10_000.0;
@@ -55,12 +58,12 @@ impl SwingLLMv1 {
         gemini_api_url: String,
         gemini_api_key: String,
         gemini_model: String,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let gemini_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("failed to build Gemini HTTP client");
-        Self {
+            .context("failed to build gemini http client")?;
+        Ok(Self {
             name,
             pairs,
             holding_days_max,
@@ -74,7 +77,7 @@ impl SwingLLMv1 {
             consecutive_failures: HashMap::new(),
             check_interval: chrono::Duration::hours(4),
             latest_macro: None,
-        }
+        })
     }
 
     fn should_check(&self, pair: &str) -> bool {
@@ -95,11 +98,11 @@ impl SwingLLMv1 {
         }
     }
 
-    async fn query_vegapunk_and_llm(
+    async fn fetch_llm_decision(
         &self,
         pair: &Pair,
         current_price: Decimal,
-    ) -> anyhow::Result<Option<(Direction, Decimal, Decimal, Decimal, f64)>> {
+    ) -> anyhow::Result<serde_json::Value> {
         let search_result = self
             .knowledge
             .search_similar_patterns(pair, current_price, 5)
@@ -151,48 +154,65 @@ impl SwingLLMv1 {
 
         let decision: serde_json::Value = serde_json::from_str(json_text)?;
 
-        let action = decision["action"].as_str().unwrap_or("none");
-        let confidence = decision["confidence"].as_f64().unwrap_or(0.0);
-        let sl_pips = decision["sl_pips"].as_f64().unwrap_or(100.0);
-        let tp_pips = decision["tp_pips"].as_f64().unwrap_or(200.0);
-
-        if action == "none" || confidence < 0.6 {
-            return Ok(None);
-        }
-
-        if !pip_offsets_are_tradable(sl_pips, tp_pips) {
-            tracing::warn!(
-                sl_pips = sl_pips,
-                tp_pips = tp_pips,
-                "invalid pip offsets: out of tradable range"
-            );
-            return Ok(None);
-        }
-        if !entry_price_is_tradable(current_price) {
-            tracing::warn!(
-                entry_price = %current_price,
-                "invalid entry price: non-positive"
-            );
-            return Ok(None);
-        }
-
-        let direction = match action {
-            "long" => Direction::Long,
-            "short" => Direction::Short,
-            _ => return Ok(None),
-        };
-
-        let pip_size = if pair.0.contains("JPY") {
-            dec!(0.01)
-        } else {
-            dec!(0.0001)
-        };
-
-        let sl = pip_size * Decimal::try_from(sl_pips)?;
-        let tp = pip_size * Decimal::try_from(tp_pips)?;
-
-        Ok(Some((direction, current_price, sl, tp, confidence)))
+        Ok(decision)
     }
+
+    async fn query_vegapunk_and_llm(
+        &self,
+        pair: &Pair,
+        current_price: Decimal,
+    ) -> anyhow::Result<Option<SignalParams>> {
+        let decision = self.fetch_llm_decision(pair, current_price).await?;
+        decision_to_signal_params(&decision, pair, current_price)
+    }
+}
+
+fn decision_to_signal_params(
+    decision: &serde_json::Value,
+    pair: &Pair,
+    current_price: Decimal,
+) -> anyhow::Result<Option<SignalParams>> {
+    let action = decision["action"].as_str().unwrap_or("none");
+    let confidence = decision["confidence"].as_f64().unwrap_or(0.0);
+    let sl_pips = decision["sl_pips"].as_f64().unwrap_or(100.0);
+    let tp_pips = decision["tp_pips"].as_f64().unwrap_or(200.0);
+
+    if action == "none" || confidence < 0.6 {
+        return Ok(None);
+    }
+
+    if !pip_offsets_are_tradable(sl_pips, tp_pips) {
+        tracing::warn!(
+            sl_pips = sl_pips,
+            tp_pips = tp_pips,
+            "invalid pip offsets: out of tradable range"
+        );
+        return Ok(None);
+    }
+    if !entry_price_is_tradable(current_price) {
+        tracing::warn!(
+            entry_price = %current_price,
+            "invalid entry price: non-positive"
+        );
+        return Ok(None);
+    }
+
+    let direction = match action {
+        "long" => Direction::Long,
+        "short" => Direction::Short,
+        _ => return Ok(None),
+    };
+
+    let pip_size = if pair.0.contains("JPY") {
+        dec!(0.01)
+    } else {
+        dec!(0.0001)
+    };
+
+    let sl = pip_size * Decimal::try_from(sl_pips)?;
+    let tp = pip_size * Decimal::try_from(tp_pips)?;
+
+    Ok(Some((direction, current_price, sl, tp, confidence)))
 }
 
 #[async_trait::async_trait]

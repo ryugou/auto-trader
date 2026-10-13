@@ -291,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
         &knowledge_store,
         config.gemini.as_ref(),
     )
-    .await;
+    .await?;
 
     // Drift check: every strategy actually registered with the engine MUST
     // exist in the catalog table so the UI dropdown / API validation are

@@ -10,6 +10,7 @@ use rust_decimal_macros::dec;
 const ENTRY_CHANNEL: usize = 16;
 const EXIT_CHANNEL: usize = 8;
 const M15_MINUTES: i64 = 15;
+const M15_SECONDS: i64 = M15_MINUTES * 60;
 const ATR_PERIOD: usize = 14;
 const ATR_BASELINE: usize = 20;
 const H1_FAST: usize = 20;
@@ -17,6 +18,7 @@ const H1_SLOW: usize = 50;
 const ATR_MULT: Decimal = dec!(2);
 const SL_CAP: Decimal = dec!(0.02);
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
+const SIGNAL_CONFIDENCE: f64 = 0.65;
 pub const GMO_FX_LEVERAGE: Decimal = dec!(10);
 pub const FX_NEW_EXCHANGE: Exchange = Exchange::GmoFx;
 const M15_BARS_PER_TRADING_DAY: usize = 96;
@@ -84,11 +86,11 @@ impl FxNewV1 {
 
     fn aggregate_m15(&mut self, event: &PriceEvent) -> Option<Candle> {
         let ts = event.candle.timestamp.timestamp();
-        let bucket = ts - ts.rem_euclid(900);
+        let bucket = ts - ts.rem_euclid(M15_SECONDS);
         let pending = self.m5_pending.entry(event.pair.0.clone()).or_default();
 
         if pending.first().is_some_and(|c| {
-            c.timestamp.timestamp() - c.timestamp.timestamp().rem_euclid(900) != bucket
+            c.timestamp.timestamp() - c.timestamp.timestamp().rem_euclid(M15_SECONDS) != bucket
         }) {
             pending.clear();
         }
@@ -248,7 +250,7 @@ impl Strategy for FxNewV1 {
             direction,
             stop_loss_pct,
             take_profit_pct: None,
-            confidence: 0.65,
+            confidence: SIGNAL_CONFIDENCE,
             timestamp: candle.timestamp,
             allocation_pct: Self::allocation_for(stop_loss_pct),
             max_hold_until: None,

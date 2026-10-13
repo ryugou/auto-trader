@@ -20,3 +20,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+
+[lints]
+workspace = true
