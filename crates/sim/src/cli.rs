@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::NaiveDate;
-use clap::Parser;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -16,154 +15,19 @@ use crate::script::{CompiledScript, ParamSet, ScriptHost};
 use crate::series::{self, Dataset};
 use crate::store::{self, BatchStatus, NewBatch};
 use crate::sweep::{self, RunRecord, run_sweep};
-use crate::types::{Bar, milli_to_pips};
+use crate::types::Bar;
+
+mod args;
+mod dispatch;
+mod migrate;
+mod output;
+
+pub use args::{Cli, Command};
+pub use dispatch::{run, run_args, run_with_config_path, run_with_config_path_and_output};
+
+use output::{output_failed, print_backfill, print_benchmark, print_run, print_sweep};
 
 const SWEEP_TOP_RUNS_LIMIT: i64 = 10;
-
-const MAX_RUNS_LIMIT: i64 = 1_000_000;
-
-#[derive(Debug, clap::Parser)]
-#[command(name = "auto-trader-sim")]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Debug, clap::Subcommand)]
-pub enum Command {
-    Migrate,
-    Backfill {
-        #[arg(long)]
-        from: NaiveDate,
-        #[arg(long)]
-        to: NaiveDate,
-        #[arg(long)]
-        json: bool,
-    },
-    Benchmark {
-        #[arg(long)]
-        from: Option<NaiveDate>,
-        #[arg(long)]
-        to: Option<NaiveDate>,
-        #[arg(long)]
-        json: bool,
-    },
-    Run {
-        #[arg(long)]
-        script: PathBuf,
-        #[arg(long)]
-        params: Option<String>,
-        #[arg(long)]
-        from: Option<NaiveDate>,
-        #[arg(long)]
-        to: Option<NaiveDate>,
-        #[arg(long)]
-        json: bool,
-    },
-    Sweep {
-        #[arg(long)]
-        script: PathBuf,
-        #[arg(long)]
-        from: Option<NaiveDate>,
-        #[arg(long)]
-        to: Option<NaiveDate>,
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_RUNS_LIMIT))]
-        max_runs: u32,
-        #[arg(long, default_value_t = 42)]
-        seed: u64,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-        jobs: Option<u64>,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-pub async fn run_args<I, T>(args: I) -> i32
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
-    match Cli::try_parse_from(args) {
-        Ok(cli) => run(cli).await,
-        Err(e) => {
-            if let Err(print_err) = e.print() {
-                tracing::error!(
-                    error = %print_err,
-                    "failed to print clap help or usage error output"
-                );
-            }
-            if e.exit_code() == 0 { 0 } else { 1 }
-        }
-    }
-}
-
-pub async fn run(cli: Cli) -> i32 {
-    run_with_config_path(cli, &config::config_path()).await
-}
-
-pub async fn run_with_config_path(cli: Cli, config_path: &Path) -> i32 {
-    run_with_config_path_and_output(cli, config_path, &mut std::io::stdout()).await
-}
-
-pub async fn run_with_config_path_and_output(
-    cli: Cli,
-    config_path: &Path,
-    out: &mut (dyn std::io::Write + Send),
-) -> i32 {
-    match cli.command {
-        Command::Migrate => run_migrate(config_path).await,
-        Command::Backfill { from, to, json } => {
-            run_backfill(config_path, from, to, json, out).await
-        }
-        Command::Benchmark { from, to, json } => {
-            run_benchmark(config_path, from, to, json, out).await
-        }
-        Command::Run {
-            script,
-            params,
-            from,
-            to,
-            json,
-        } => run_run(config_path, script, params, from, to, json, out).await,
-        Command::Sweep {
-            script,
-            from,
-            to,
-            max_runs,
-            seed,
-            jobs,
-            json,
-        } => {
-            run_sweep_cmd(
-                config_path,
-                script,
-                from,
-                to,
-                max_runs,
-                seed,
-                jobs,
-                json,
-                out,
-            )
-            .await
-        }
-    }
-}
-
-fn output_failed(e: std::io::Error) -> i32 {
-    tracing::error!(
-        error = %e,
-        "failed to write result to output stream: \
-         any database writes made before this point are already committed"
-    );
-    1
-}
-
-fn flush_because_drop_does_not_report_write_errors(
-    out: &mut dyn std::io::Write,
-) -> std::io::Result<()> {
-    out.flush()
-}
 
 pub fn resolve_period(
     all_bars: &[Bar],
@@ -424,47 +288,6 @@ fn effective_jobs(requested: usize, run_count: usize, available: usize) -> usize
     requested.min(run_count).min(available).max(1)
 }
 
-fn format_utc_rfc3339(epoch_secs: i64) -> String {
-    crate::data::format_epoch_secs_rfc3339(epoch_secs).unwrap_or_else(|| {
-            tracing::warn!(
-                epoch_secs,
-                "failed to convert epoch seconds to rfc3339: falling back to the raw epoch-seconds representation"
-            );
-            epoch_secs.to_string()
-        })
-}
-
-async fn run_migrate(config_path: &Path) -> i32 {
-    let settings = match config::load(config_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                config_path = %config_path.display(),
-                error = %e,
-                "failed to load or validate sim config"
-            );
-            return 1;
-        }
-    };
-    let pool = match data::connect(&settings.database_url).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to connect to database");
-            return 1;
-        }
-    };
-    match sqlx::migrate!("../../migrations").run(&pool).await {
-        Ok(()) => {
-            tracing::info!("applied migrations");
-            0
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to apply migrations");
-            1
-        }
-    }
-}
-
 async fn run_backfill(
     config_path: &Path,
     from: NaiveDate,
@@ -555,38 +378,6 @@ async fn run_backfill(
     0
 }
 
-fn backfill_json(report: &fetch::BackfillReport) -> serde_json::Value {
-    serde_json::json!({
-        "days": report.days,
-        "saved": report.saved,
-        "one_sided": report.one_sided,
-        "invalid": report.invalid,
-        "failed": report.failed,
-    })
-}
-
-fn print_backfill(
-    out: &mut dyn std::io::Write,
-    json: bool,
-    report: &fetch::BackfillReport,
-) -> std::io::Result<()> {
-    if json {
-        writeln!(out, "{}", backfill_json(report))?;
-    } else {
-        print_kv_table(
-            out,
-            &[
-                ("days".to_string(), report.days.to_string()),
-                ("saved".to_string(), report.saved.to_string()),
-                ("one_sided".to_string(), report.one_sided.to_string()),
-                ("invalid".to_string(), report.invalid.to_string()),
-                ("failed".to_string(), report.failed.join(", ")),
-            ],
-        )?;
-    }
-    flush_because_drop_does_not_report_write_errors(out)
-}
-
 async fn run_benchmark(
     config_path: &Path,
     from: Option<NaiveDate>,
@@ -607,51 +398,6 @@ async fn run_benchmark(
         Ok(()) => 0,
         Err(e) => output_failed(e),
     }
-}
-
-fn benchmark_json(benchmarks: &[Benchmark]) -> serde_json::Value {
-    let by_theta: std::collections::BTreeMap<String, serde_json::Value> = benchmarks
-        .iter()
-        .map(|b| {
-            (
-                b.theta_pips.to_string(),
-                serde_json::json!({
-                    "leg_count": b.legs.len(),
-                    "ideal_pips": milli_to_pips(b.ideal_milli),
-                    "realizable_pips": milli_to_pips(b.realizable_milli),
-                }),
-            )
-        })
-        .collect();
-    serde_json::json!({ "by_theta": by_theta })
-}
-
-fn print_benchmark(
-    out: &mut dyn std::io::Write,
-    benchmarks: &[Benchmark],
-    json: bool,
-) -> std::io::Result<()> {
-    if json {
-        writeln!(out, "{}", benchmark_json(benchmarks))?;
-    } else {
-        let rows: Vec<Vec<String>> = benchmarks
-            .iter()
-            .map(|b| {
-                vec![
-                    b.theta_pips.to_string(),
-                    b.legs.len().to_string(),
-                    format!("{:.2}", milli_to_pips(b.ideal_milli)),
-                    format!("{:.2}", milli_to_pips(b.realizable_milli)),
-                ]
-            })
-            .collect();
-        print_columns(
-            out,
-            &["theta_pips", "leg_count", "ideal_pips", "realizable_pips"],
-            &rows,
-        )?;
-    }
-    flush_because_drop_does_not_report_write_errors(out)
 }
 
 async fn run_run(
@@ -806,87 +552,6 @@ pub async fn run_run_with_hooks(
         RunStatus::Ok => 0,
         RunStatus::ScriptError { .. } => 1,
     }
-}
-
-fn run_json(
-    record: &RunRecord,
-    elapsed: f64,
-    script_id: Uuid,
-    batch_id: Uuid,
-) -> serde_json::Value {
-    let (status, error) = run_status_and_error_message(record);
-
-    let mut obj = serde_json::json!({
-        "status": status,
-        "elapsed_secs": elapsed,
-        "script_id": script_id,
-        "batch_id": batch_id,
-    });
-    if let Some(err) = &error {
-        obj["error"] = serde_json::Value::String(err.clone());
-    }
-    if let Some(metrics) = &record.metrics {
-        obj["metrics"] = serde_json::to_value(metrics)
-            .expect("Metrics only contains finite numbers/strings and must serialize");
-    }
-    obj
-}
-
-fn run_status_and_error_message(record: &RunRecord) -> (&'static str, Option<String>) {
-    match &record.status {
-        RunStatus::Ok => ("ok", None),
-        RunStatus::ScriptError { open_time, message } => (
-            "script_error",
-            Some(format!("{} {message}", format_utc_rfc3339(*open_time))),
-        ),
-    }
-}
-
-fn print_run(
-    out: &mut dyn std::io::Write,
-    record: &RunRecord,
-    elapsed: f64,
-    script_id: Uuid,
-    batch_id: Uuid,
-    json: bool,
-) -> std::io::Result<()> {
-    if json {
-        writeln!(out, "{}", run_json(record, elapsed, script_id, batch_id))?;
-        return flush_because_drop_does_not_report_write_errors(out);
-    }
-    let (status, error) = run_status_and_error_message(record);
-
-    let mut rows = vec![
-        ("status".to_string(), status.to_string()),
-        ("elapsed_secs".to_string(), format!("{elapsed:.2}")),
-        ("script_id".to_string(), script_id.to_string()),
-        ("batch_id".to_string(), batch_id.to_string()),
-    ];
-    if let Some(err) = &error {
-        rows.push(("error".to_string(), err.clone()));
-    }
-    if let Some(metrics) = &record.metrics {
-        rows.push((
-            "total_pips".to_string(),
-            format!("{:.2}", metrics.total_pips),
-        ));
-        rows.push(("trade_count".to_string(), metrics.trade_count.to_string()));
-        rows.push(("win_rate".to_string(), format!("{:.4}", metrics.win_rate)));
-        rows.push((
-            "max_drawdown_pips".to_string(),
-            format!("{:.2}", metrics.max_drawdown_pips),
-        ));
-        rows.push((
-            "time_in_market".to_string(),
-            format!("{:.4}", metrics.time_in_market),
-        ));
-        rows.push((
-            "protective_stop_count".to_string(),
-            metrics.protective_stop_count.to_string(),
-        ));
-    }
-    print_kv_table(out, &rows)?;
-    flush_because_drop_does_not_report_write_errors(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1089,114 +754,6 @@ pub async fn run_sweep_cmd_with_hooks(
         Ok(()) => 0,
         Err(e) => output_failed(e),
     }
-}
-
-fn sweep_json(
-    top: &[store::RunSummary],
-    elapsed: f64,
-    script_id: Uuid,
-    batch_id: Uuid,
-    total_runs: usize,
-) -> serde_json::Value {
-    let top_json: Vec<serde_json::Value> = top
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "params": r.params,
-                "total_pips": r.total_pips,
-                "trade_count": r.trade_count,
-                "metrics": r.metrics,
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "elapsed_secs": elapsed,
-        "script_id": script_id,
-        "batch_id": batch_id,
-        "total_runs": total_runs,
-        "top_runs": top_json,
-    })
-}
-
-fn print_sweep(
-    out: &mut dyn std::io::Write,
-    top: &[store::RunSummary],
-    elapsed: f64,
-    script_id: Uuid,
-    batch_id: Uuid,
-    total_runs: usize,
-    json: bool,
-) -> std::io::Result<()> {
-    if json {
-        writeln!(
-            out,
-            "{}",
-            sweep_json(top, elapsed, script_id, batch_id, total_runs)
-        )?;
-        return flush_because_drop_does_not_report_write_errors(out);
-    }
-    print_kv_table(
-        out,
-        &[
-            ("elapsed_secs".to_string(), format!("{elapsed:.2}")),
-            ("script_id".to_string(), script_id.to_string()),
-            ("batch_id".to_string(), batch_id.to_string()),
-            ("total_runs".to_string(), total_runs.to_string()),
-        ],
-    )?;
-    let rows: Vec<Vec<String>> = top
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            vec![
-                (i + 1).to_string(),
-                format!("{:.2}", r.total_pips),
-                r.trade_count.to_string(),
-                r.params.to_string(),
-            ]
-        })
-        .collect();
-    print_columns(out, &["rank", "total_pips", "trade_count", "params"], &rows)?;
-    flush_because_drop_does_not_report_write_errors(out)
-}
-
-fn print_kv_table(out: &mut dyn std::io::Write, rows: &[(String, String)]) -> std::io::Result<()> {
-    let width = rows
-        .iter()
-        .map(|(k, _)| k.chars().count())
-        .max()
-        .unwrap_or(0);
-    for (k, v) in rows {
-        writeln!(out, "{k:<width$}  {v}")?;
-    }
-    Ok(())
-}
-
-fn print_columns(
-    out: &mut dyn std::io::Write,
-    headers: &[&str],
-    rows: &[Vec<String>],
-) -> std::io::Result<()> {
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
-    for row in rows {
-        for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(cell.chars().count());
-        }
-    }
-    let line = |cells: &[String]| -> String {
-        cells
-            .iter()
-            .zip(&widths)
-            .map(|(c, w)| format!("{c:<w$}"))
-            .collect::<Vec<_>>()
-            .join("  ")
-    };
-    let header_cells: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
-    writeln!(out, "{}", line(&header_cells))?;
-    for row in rows {
-        writeln!(out, "{}", line(row))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
