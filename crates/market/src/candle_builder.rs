@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use auto_trader_core::types::{Candle, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -44,7 +46,12 @@ impl CandleBuilder {
     fn period_start(&self, ts: DateTime<Utc>) -> DateTime<Utc> {
         let secs = ts.timestamp();
         let truncated = secs - (secs % self.period_secs);
-        DateTime::from_timestamp(truncated, 0).unwrap()
+        let Some(start) = DateTime::from_timestamp(truncated, 0) else {
+            unreachable!(
+                "truncating a timestamp towards its period boundary cannot leave DateTime<Utc>'s representable range"
+            )
+        };
+        start
     }
 
     pub fn on_tick(
@@ -76,10 +83,16 @@ impl CandleBuilder {
             self.close = Some(price);
             self.volume = size;
         } else {
-            if price > self.high.unwrap() {
+            let Some(high) = self.high else {
+                unreachable!("high is set whenever current_period_start is set")
+            };
+            if price > high {
                 self.high = Some(price);
             }
-            if price < self.low.unwrap() {
+            let Some(low) = self.low else {
+                unreachable!("low is set whenever current_period_start is set")
+            };
+            if price < low {
                 self.low = Some(price);
             }
             self.close = Some(price);
@@ -127,6 +140,31 @@ impl CandleBuilder {
         }
         self.complete_current()
     }
+}
+
+pub(crate) fn build_primary_and_h1_builders<'a>(
+    pairs: impl IntoIterator<Item = &'a Pair>,
+    exchange: Exchange,
+    primary_timeframe: &str,
+) -> (
+    HashMap<String, CandleBuilder>,
+    HashMap<String, CandleBuilder>,
+) {
+    let mut builders: HashMap<String, CandleBuilder> = HashMap::new();
+    let mut h1_builders: HashMap<String, CandleBuilder> = HashMap::new();
+    for pair in pairs {
+        builders.insert(
+            pair.0.clone(),
+            CandleBuilder::new(pair.clone(), exchange, primary_timeframe.to_string()),
+        );
+        if primary_timeframe != "H1" {
+            h1_builders.insert(
+                pair.0.clone(),
+                CandleBuilder::new(pair.clone(), exchange, "H1".to_string()),
+            );
+        }
+    }
+    (builders, h1_builders)
 }
 
 fn checked_period_end(start: DateTime<Utc>, period_secs: i64) -> Option<DateTime<Utc>> {

@@ -58,23 +58,21 @@ impl OandaClient {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<T>>,
     {
-        let mut last_err = None;
-        for attempt in 0..3 {
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut attempt: u32 = 0;
+        loop {
             match f().await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     tracing::warn!(attempt = attempt + 1, error = %e, "failed to call oanda api");
-                    last_err = Some(e);
-                    if attempt < 2 {
-                        tokio::time::sleep(std::time::Duration::from_secs(
-                            2u64.pow(attempt as u32),
-                        ))
-                        .await;
+                    attempt += 1;
+                    if attempt >= MAX_ATTEMPTS {
+                        return Err(e);
                     }
+                    tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt - 1))).await;
                 }
             }
         }
-        Err(last_err.unwrap())
     }
 
     pub async fn get_candles(
