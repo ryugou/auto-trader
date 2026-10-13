@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 
 const JST_OFFSET_HOURS: i64 = 9;
@@ -43,10 +43,7 @@ pub fn eval_price_freshness(price_freshness_secs: u64, age_secs: u64) -> GateDec
 
 pub fn jst_day_start(now: DateTime<Utc>) -> DateTime<Utc> {
     let jst = now + Duration::hours(JST_OFFSET_HOURS);
-    let day_start_jst = jst
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("00:00:00 is valid");
+    let day_start_jst = jst.date_naive().and_time(NaiveTime::MIN);
     Utc.from_utc_datetime(&(day_start_jst - Duration::hours(JST_OFFSET_HOURS)))
 }
 
