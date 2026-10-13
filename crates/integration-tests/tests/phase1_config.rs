@@ -34,10 +34,17 @@ fn config_missing_vegapunk_fails() {
         result.is_err(),
         "config without vegapunk section should fail to parse"
     );
-    let err_msg = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    let err_msg = format!("{err:#}");
     assert!(
-        err_msg.contains("vegapunk"),
+        err_msg.contains("missing field `vegapunk`"),
         "error should mention missing vegapunk: {err_msg}"
+    );
+    assert!(
+        err.chain()
+            .nth(1)
+            .is_some_and(|source| source.downcast_ref::<toml::de::Error>().is_some()),
+        "parse failure should keep toml::de::Error as the source: {err_msg}"
     );
 }
 
