@@ -31,7 +31,7 @@ fn floor_to_hour_zeroes_minutes_seconds_and_nanos() {
     use chrono::TimeZone;
     let ts = Utc.with_ymd_and_hms(2026, 1, 1, 10, 45, 30).unwrap();
     let expected = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
-    assert_eq!(SqueezeMomentumV1::floor_to_hour(ts), expected);
+    assert_eq!(SqueezeMomentumV1::floor_to_hour(ts), Some(expected));
 }
 
 #[tokio::test]

@@ -347,77 +347,85 @@ fn h1_direction_is_short_when_fast_sma_below_slow_sma() {
     assert_eq!(s.h1_direction("USD_JPY"), Some(Direction::Short));
 }
 
-#[tokio::test]
-async fn accepts_rejects_oanda_events_for_a_pair_the_strategy_also_trades_on_gmo_fx() {
-    let oanda_m5_bars = [
+fn oanda_m5_bars() -> [(i64, (Decimal, Decimal, Decimal, Decimal)); 3] {
+    [
         (0_i64, (dec!(100), dec!(101), dec!(99), dec!(100.5))),
         (5, (dec!(100.5), dec!(103), dec!(100), dec!(102))),
         (10, (dec!(102), dec!(102.5), dec!(98), dec!(101))),
-    ];
-    let make_oanda_m5 = |minute: i64, ohlc: (Decimal, Decimal, Decimal, Decimal)| {
-        price_event_with_exchange(
-            "USD_JPY",
-            Exchange::Oanda,
-            "M5",
-            m15_bucket_aligned_base_time() + Duration::minutes(minute),
-            ohlc,
-            1,
-        )
-    };
-    let oanda_h1 = price_event_with_exchange(
+    ]
+}
+
+fn make_oanda_m5(minute: i64, ohlc: (Decimal, Decimal, Decimal, Decimal)) -> PriceEvent {
+    price_event_with_exchange(
+        "USD_JPY",
+        Exchange::Oanda,
+        "M5",
+        m15_bucket_aligned_base_time() + Duration::minutes(minute),
+        ohlc,
+        1,
+    )
+}
+
+fn oanda_h1() -> PriceEvent {
+    price_event_with_exchange(
         "USD_JPY",
         Exchange::Oanda,
         "H1",
         m15_bucket_aligned_base_time(),
         (dec!(100), dec!(100), dec!(100), dec!(100)),
         0,
-    );
+    )
+}
 
-    let mut on_price_s = strategy();
-    for (minute, ohlc) in oanda_m5_bars {
-        assert!(
-            on_price_s
-                .on_price(&make_oanda_m5(minute, ohlc))
-                .await
-                .is_none()
-        );
+#[tokio::test]
+async fn on_price_ignores_oanda_events_for_a_pair_the_strategy_also_trades_on_gmo_fx() {
+    let mut s = strategy();
+    for (minute, ohlc) in oanda_m5_bars() {
+        assert!(s.on_price(&make_oanda_m5(minute, ohlc)).await.is_none());
     }
-    assert!(on_price_s.on_price(&oanda_h1).await.is_none());
+    assert!(s.on_price(&oanda_h1()).await.is_none());
     assert!(
-        on_price_s.m5_pending.is_empty(),
+        s.m5_pending.is_empty(),
         "OANDA M5 bars must not be buffered by the GMO-FX-only strategy"
     );
     assert!(
-        on_price_s.h1.is_empty(),
+        s.h1.is_empty(),
         "OANDA H1 bar must not be stored by the GMO-FX-only strategy"
     );
     assert!(
-        on_price_s.m15.is_empty(),
+        s.m15.is_empty(),
         "OANDA M5 bars must not complete an M15 candle for the GMO-FX-only strategy"
     );
+}
 
-    let mut warmup_events: Vec<PriceEvent> = oanda_m5_bars
+#[tokio::test]
+async fn warmup_ignores_oanda_events_for_a_pair_the_strategy_also_trades_on_gmo_fx() {
+    let mut warmup_events: Vec<PriceEvent> = oanda_m5_bars()
         .iter()
         .map(|(minute, ohlc)| make_oanda_m5(*minute, *ohlc))
         .collect();
-    warmup_events.push(oanda_h1.clone());
-    let mut warmup_s = strategy();
-    warmup_s.warmup(&warmup_events).await;
+    warmup_events.push(oanda_h1());
+    let mut s = strategy();
+    s.warmup(&warmup_events).await;
     assert!(
-        warmup_s.m5_pending.is_empty(),
+        s.m5_pending.is_empty(),
         "OANDA M5 bars must not be buffered during warmup"
     );
     assert!(
-        warmup_s.h1.is_empty(),
+        s.h1.is_empty(),
         "OANDA H1 bar must not be stored during warmup"
     );
     assert!(
-        warmup_s.m15.is_empty(),
+        s.m15.is_empty(),
         "OANDA M5 bars must not complete an M15 candle during warmup"
     );
+}
 
-    let mut gmo_s = strategy();
-    let (first_minute, first_ohlc) = oanda_m5_bars[0];
+#[tokio::test]
+async fn on_price_buffers_gmo_fx_events_for_the_same_pair() {
+    let mut s = strategy();
+    let bars = oanda_m5_bars();
+    let (first_minute, first_ohlc) = bars[0];
     let gmo_m5_first = price_event(
         "USD_JPY",
         "M5",
@@ -425,9 +433,9 @@ async fn accepts_rejects_oanda_events_for_a_pair_the_strategy_also_trades_on_gmo
         first_ohlc,
         1,
     );
-    assert!(gmo_s.on_price(&gmo_m5_first).await.is_none());
+    assert!(s.on_price(&gmo_m5_first).await.is_none());
     assert_eq!(
-        gmo_s.m5_pending.get("USD_JPY").map(Vec::len),
+        s.m5_pending.get("USD_JPY").map(Vec::len),
         Some(1),
         "GMO FX M5 bar must be buffered"
     );
@@ -439,14 +447,14 @@ async fn accepts_rejects_oanda_events_for_a_pair_the_strategy_also_trades_on_gmo
         (dec!(100), dec!(100), dec!(100), dec!(100)),
         0,
     );
-    assert!(gmo_s.on_price(&gmo_h1).await.is_none());
+    assert!(s.on_price(&gmo_h1).await.is_none());
     assert_eq!(
-        gmo_s.h1.get("USD_JPY").map(VecDeque::len),
+        s.h1.get("USD_JPY").map(VecDeque::len),
         Some(1),
         "GMO FX H1 bar must be stored"
     );
 
-    for (minute, ohlc) in &oanda_m5_bars[1..] {
+    for (minute, ohlc) in &bars[1..] {
         let event = price_event(
             "USD_JPY",
             "M5",
@@ -454,10 +462,10 @@ async fn accepts_rejects_oanda_events_for_a_pair_the_strategy_also_trades_on_gmo
             *ohlc,
             1,
         );
-        gmo_s.on_price(&event).await;
+        s.on_price(&event).await;
     }
     assert_eq!(
-        gmo_s.m15.get("USD_JPY").map(VecDeque::len),
+        s.m15.get("USD_JPY").map(VecDeque::len),
         Some(1),
         "GMO FX M5 bars must complete an M15 candle"
     );

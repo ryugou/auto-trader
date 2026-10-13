@@ -58,14 +58,9 @@ impl SqueezeMomentumV1 {
         squeeze_count.insert(key.to_string(), new_count);
     }
 
-    fn floor_to_hour(ts: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    fn floor_to_hour(ts: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
         use chrono::Timelike;
-        ts.with_minute(0)
-            .unwrap()
-            .with_second(0)
-            .unwrap()
-            .with_nanosecond(0)
-            .unwrap()
+        ts.with_minute(0)?.with_second(0)?.with_nanosecond(0)
     }
 
     fn is_in_squeeze(history: &VecDeque<Candle>) -> Option<bool> {
@@ -76,6 +71,87 @@ impl SqueezeMomentumV1 {
         let (kc_lo, _, kc_up) =
             indicators::keltner_channels(&highs, &lows, &closes, KC_PERIOD, KC_ATR_MULT)?;
         Some(bb_lo >= kc_lo && bb_up <= kc_up)
+    }
+
+    fn exit_check_inputs(
+        &self,
+        event: &PriceEvent,
+    ) -> Option<(&VecDeque<Candle>, Decimal, Decimal, Decimal)> {
+        if event.candle.timeframe != TIMEFRAME {
+            return None;
+        }
+        let history = self.history.get(&event.pair.0)?;
+        let highs = candle_history::highs(history);
+        let lows = candle_history::lows(history);
+        let closes = candle_history::closes(history);
+        let close = event.candle.close;
+
+        let atr = indicators::atr(&highs, &lows, &closes, ATR_PERIOD)?;
+        if atr <= Decimal::ZERO {
+            return None;
+        }
+
+        if highs.len() < CHANDELIER_PERIOD || lows.len() < CHANDELIER_PERIOD {
+            return None;
+        }
+        let recent_highs = &highs[highs.len() - CHANDELIER_PERIOD..];
+        let recent_lows = &lows[lows.len() - CHANDELIER_PERIOD..];
+        let highest_high = recent_highs.iter().copied().max().unwrap_or(close);
+        let lowest_low = recent_lows.iter().copied().min().unwrap_or(close);
+        let chandelier_offset = atr * CHANDELIER_ATR_MULT;
+
+        Some((history, highest_high, lowest_low, chandelier_offset))
+    }
+
+    fn exit_signal_for_position(
+        pos: &Position,
+        event: &PriceEvent,
+        history: &VecDeque<Candle>,
+        highest_high: Decimal,
+        lowest_low: Decimal,
+        chandelier_offset: Decimal,
+        strategy_name: &str,
+    ) -> Option<ExitSignal> {
+        if pos.trade.strategy_name != strategy_name {
+            return None;
+        }
+        if pos.trade.pair.0 != event.pair.0 {
+            return None;
+        }
+        let close = event.candle.close;
+
+        let entry_hour = Self::floor_to_hour(pos.trade.entry_at)?;
+        let bars_held = history
+            .iter()
+            .filter(|c| c.timestamp >= entry_hour)
+            .count()
+            .saturating_sub(1);
+        if bars_held < DELAY_BARS {
+            return None;
+        }
+
+        if !has_reached_one_r(
+            &pos.trade.direction,
+            pos.trade.entry_price,
+            pos.trade.stop_loss,
+            close,
+        ) {
+            return None;
+        }
+
+        let trail_break = match pos.trade.direction {
+            Direction::Long => close < highest_high - chandelier_offset,
+            Direction::Short => close > lowest_low + chandelier_offset,
+        };
+        if !trail_break {
+            return None;
+        }
+
+        Some(ExitSignal {
+            trade_id: pos.trade.id,
+            reason: StrategyExitReason::TrailingMa,
+            close_price: close,
+        })
     }
 }
 
@@ -184,82 +260,25 @@ impl Strategy for SqueezeMomentumV1 {
         positions: &[Position],
         event: &PriceEvent,
     ) -> Vec<ExitSignal> {
-        if event.candle.timeframe != TIMEFRAME {
-            return Vec::new();
-        }
-        let key = event.pair.0.clone();
-        let Some(history) = self.history.get(&key) else {
+        let Some((history, highest_high, lowest_low, chandelier_offset)) =
+            self.exit_check_inputs(event)
+        else {
             return Vec::new();
         };
-        let highs = candle_history::highs(history);
-        let lows = candle_history::lows(history);
-        let closes = candle_history::closes(history);
-        let close = event.candle.close;
-
-        let Some(atr) = indicators::atr(&highs, &lows, &closes, ATR_PERIOD) else {
-            return Vec::new();
-        };
-        if atr <= Decimal::ZERO {
-            return Vec::new();
-        }
-
-        if highs.len() < CHANDELIER_PERIOD || lows.len() < CHANDELIER_PERIOD {
-            return Vec::new();
-        }
-        let recent_highs = &highs[highs.len() - CHANDELIER_PERIOD..];
-        let recent_lows = &lows[lows.len() - CHANDELIER_PERIOD..];
-        let highest_high = recent_highs.iter().copied().max().unwrap_or(close);
-        let lowest_low = recent_lows.iter().copied().min().unwrap_or(close);
-
-        let chandelier_offset = atr * CHANDELIER_ATR_MULT;
-
-        let mut exits = Vec::new();
-        for pos in positions {
-            if pos.trade.strategy_name != self.name {
-                continue;
-            }
-            if pos.trade.pair.0 != key {
-                continue;
-            }
-
-            let entry_hour = Self::floor_to_hour(pos.trade.entry_at);
-            let bars_held = history
-                .iter()
-                .filter(|c| c.timestamp >= entry_hour)
-                .count()
-                .saturating_sub(1);
-            if bars_held < DELAY_BARS {
-                continue;
-            }
-
-            if !has_reached_one_r(
-                &pos.trade.direction,
-                pos.trade.entry_price,
-                pos.trade.stop_loss,
-                close,
-            ) {
-                continue;
-            }
-
-            let trail_break = match pos.trade.direction {
-                Direction::Long => {
-                    let stop = highest_high - chandelier_offset;
-                    close < stop
-                }
-                Direction::Short => {
-                    let stop = lowest_low + chandelier_offset;
-                    close > stop
-                }
-            };
-            if trail_break {
-                exits.push(ExitSignal {
-                    trade_id: pos.trade.id,
-                    reason: StrategyExitReason::TrailingMa,
-                    close_price: close,
-                });
-            }
-        }
-        exits
+        positions
+            .iter()
+            .filter_map(|pos| {
+                Self::exit_signal_for_position(
+                    pos,
+                    event,
+                    history,
+                    highest_high,
+                    lowest_low,
+                    chandelier_offset,
+                    &self.name,
+                )
+            })
+            .collect()
     }
 }
 

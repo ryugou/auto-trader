@@ -34,7 +34,8 @@ async fn register_all_standard_strategies(pool: sqlx::PgPool) {
         &None, // no vegapunk
         None,  // no gemini config
     )
-    .await;
+    .await
+    .expect("register_strategies failed");
 
     // 4 strategies registered (swing_llm excluded from input).
     assert_eq!(engine.registered_names().len(), 4);
@@ -50,7 +51,9 @@ async fn register_disabled_strategies_skipped(pool: sqlx::PgPool) {
         strategy_cfg("donchian_trend_v1", false, &["USD_JPY"]),
     ];
 
-    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None).await;
+    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None)
+        .await
+        .expect("register_strategies failed");
 
     assert_eq!(engine.registered_names().len(), 0);
 }
@@ -62,7 +65,9 @@ async fn register_unknown_strategy_skipped(pool: sqlx::PgPool) {
     let mut engine = StrategyEngine::new(signal_tx);
     let strategies = vec![strategy_cfg("totally_unknown_v99", true, &["USD_JPY"])];
 
-    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None).await;
+    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None)
+        .await
+        .expect("register_strategies failed");
 
     assert_eq!(engine.registered_names().len(), 0);
 }
@@ -90,7 +95,8 @@ async fn register_swing_llm_skipped_without_gemini_key(pool: sqlx::PgPool) {
         &None,
         Some(&gemini),
     )
-    .await;
+    .await
+    .expect("register_strategies failed");
 
     assert_eq!(engine.registered_names().len(), 0);
 }
@@ -118,7 +124,8 @@ async fn register_swing_llm_skipped_without_vegapunk(pool: sqlx::PgPool) {
         &None,
         Some(&gemini),
     )
-    .await;
+    .await
+    .expect("register_strategies failed");
 
     assert_eq!(engine.registered_names().len(), 0);
 
@@ -137,7 +144,9 @@ async fn register_donchian_evolve_fallback_on_missing_params(pool: sqlx::PgPool)
     let strategies = vec![strategy_cfg("donchian_trend_evolve_v1", true, &["USD_JPY"])];
 
     // No strategy_params row inserted — should fallback to defaults.
-    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None).await;
+    auto_trader::startup::register_strategies(&mut engine, &strategies, &pool, &None, None)
+        .await
+        .expect("register_strategies failed");
 
     assert_eq!(engine.registered_names().len(), 1);
 }

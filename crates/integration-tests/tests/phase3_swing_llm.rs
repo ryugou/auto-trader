@@ -57,6 +57,7 @@ async fn create_strategy(gemini_url: &str, store: Arc<dyn KnowledgeStore>) -> Sw
         "test-api-key".to_string(),
         "gemini-2.0-flash".to_string(),
     )
+    .expect("failed to build gemini http client")
 }
 
 fn make_store(search_text: &str) -> Arc<dyn KnowledgeStore> {

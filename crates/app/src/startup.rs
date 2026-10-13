@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use auto_trader_core::config::{AppConfig, GeminiConfig, StrategyConfig};
 use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::types::{Exchange, Pair};
@@ -276,7 +277,7 @@ pub async fn register_strategies(
     pool: &PgPool,
     knowledge: &Option<Arc<dyn KnowledgeStore>>,
     gemini_config: Option<&GeminiConfig>,
-) {
+) -> anyhow::Result<()> {
     for sc in strategies {
         if !sc.enabled {
             continue;
@@ -319,18 +320,17 @@ pub async fn register_strategies(
                     }
                 };
 
-                engine.add_strategy(
-                    Box::new(auto_trader_strategy::swing_llm::SwingLLMv1::new(
-                        sc.name.clone(),
-                        pairs,
-                        holding_days_max,
-                        store,
-                        gemini.api_url.clone(),
-                        gemini_api_key,
-                        gemini.model.clone(),
-                    )),
-                    sc.mode.clone(),
-                );
+                let strategy = auto_trader_strategy::swing_llm::SwingLLMv1::new(
+                    sc.name.clone(),
+                    pairs,
+                    holding_days_max,
+                    store,
+                    gemini.api_url.clone(),
+                    gemini_api_key,
+                    gemini.model.clone(),
+                )
+                .with_context(|| format!("failed to build strategy {}", sc.name))?;
+                engine.add_strategy(Box::new(strategy), sc.mode.clone());
                 tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
             }
             // Strategies with hardcoded Rust const parameters.
@@ -428,6 +428,7 @@ pub async fn register_strategies(
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
