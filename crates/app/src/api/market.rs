@@ -17,11 +17,6 @@ pub struct MarketPricesResponse {
     pub prices: Vec<MarketPrice>,
 }
 
-/// `GET /api/market/prices` — current snapshot of every (exchange,
-/// pair) tuple that has at least one observed tick. Used by the
-/// Positions page to compute unrealized P&L. Paging and large
-/// historical pulls are intentionally not supported here — this
-/// endpoint exists to be cheap and frequently polled.
 pub async fn prices(State(state): State<AppState>) -> Result<Json<MarketPricesResponse>, ApiError> {
     let snapshot = state.price_store.snapshot().await;
     let prices = snapshot

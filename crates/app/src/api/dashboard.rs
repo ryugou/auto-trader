@@ -50,7 +50,6 @@ pub async fn summary(
     };
     let net_pnl = stats.total_pnl - stats.total_fees;
     let expected_value = if stats.total_trades > 0 {
-        // Convert net_pnl Decimal to f64 for expected value calculation
         let pnl_f64: f64 = net_pnl.to_string().parse().unwrap_or(0.0);
         pnl_f64 / stats.total_trades as f64
     } else {

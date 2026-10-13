@@ -19,11 +19,27 @@ pub struct PositionResponse {
     pub stop_loss: Decimal,
     pub take_profit: Option<Decimal>,
     pub quantity: Decimal,
-    /// Accumulated fees on this open position (overnight fees, etc.).
-    /// Used by the Positions page to compute 純損益 = 含み損益 - fees.
     pub fees: Decimal,
     pub entry_at: DateTime<Utc>,
     pub account_id: Uuid,
+}
+
+fn exclude_unreachable_take_profit_sentinel(
+    entry_price: Decimal,
+    take_profit: Option<Decimal>,
+) -> Option<Decimal> {
+    take_profit.and_then(|tp| {
+        if entry_price.is_zero() {
+            Some(tp)
+        } else {
+            let ratio = tp / entry_price;
+            if ratio > Decimal::from(100) || ratio < Decimal::from(1) / Decimal::from(100) {
+                None
+            } else {
+                Some(tp)
+            }
+        }
+    })
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PositionResponse>>, ApiError> {
@@ -41,23 +57,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PositionResp
         .map(|row| {
             let t = row.trade;
             let direction = t.direction.as_str().to_string();
-            // Strategies that exit dynamically (mean-revert, trailing
-            // channel, etc.) may have no take_profit set.
-            // Also filter out unreachable sentinel values (entry × 1000
-            // for Long, entry / 1000 for Short) so the UI shows "-"
-            // instead of nonsense.
-            let take_profit = t.take_profit.and_then(|tp| {
-                if t.entry_price.is_zero() {
-                    Some(tp)
-                } else {
-                    let ratio = tp / t.entry_price;
-                    if ratio > Decimal::from(100) || ratio < Decimal::from(1) / Decimal::from(100) {
-                        None
-                    } else {
-                        Some(tp)
-                    }
-                }
-            });
+            let take_profit =
+                exclude_unreachable_take_profit_sentinel(t.entry_price, t.take_profit);
 
             PositionResponse {
                 trade_id: t.id,

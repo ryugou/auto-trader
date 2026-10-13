@@ -34,11 +34,6 @@ pub struct MarkReadResponse {
     pub marked: u64,
 }
 
-/// Parse an optional `YYYY-MM-DD` query parameter. An absent or empty
-/// string yields `Ok(None)` so callers can clear the filter; a present
-/// but malformed value yields `Err(400)` so the user gets a clear
-/// signal instead of "you asked for a filter and silently got the
-/// unfiltered result set".
 fn parse_opt_date(s: Option<&str>, field: &str) -> Result<Option<NaiveDate>, ApiError> {
     match s {
         None | Some("") => Ok(None),
@@ -47,7 +42,7 @@ fn parse_opt_date(s: Option<&str>, field: &str) -> Result<Option<NaiveDate>, Api
             .map_err(|_| {
                 ApiError(
                     axum::http::StatusCode::BAD_REQUEST,
-                    format!("invalid {field} (expected YYYY-MM-DD)"),
+                    format!("invalid query parameter \"{field}\": expected YYYY-MM-DD"),
                 )
             }),
     }
@@ -64,15 +59,13 @@ pub async fn list(
     let from = parse_opt_date(filter.from.as_deref(), "from")?;
     let to = parse_opt_date(filter.to.as_deref(), "to")?;
 
-    // kind must be one of the two known values or None — reject
-    // anything else so a typo can't silently collapse to "no match".
     let kind = match filter.kind.as_deref() {
         None | Some("") => None,
         Some(k @ "trade_opened") | Some(k @ "trade_closed") => Some(k),
         Some(_) => {
             return Err(ApiError(
                 axum::http::StatusCode::BAD_REQUEST,
-                "invalid kind (expected trade_opened | trade_closed)".to_string(),
+                "invalid kind: expected trade_opened or trade_closed".to_string(),
             ));
         }
     };

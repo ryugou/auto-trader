@@ -3,8 +3,6 @@ use auto_trader_core::types::{Direction, ExitReason, Trade};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
-/// Format an enriched ingest text for trade OPEN events.
-/// Includes indicators, regime classification, and SMA deviation.
 pub fn format_trade_open(
     trade: &Trade,
     indicators: &HashMap<String, Decimal>,
@@ -59,9 +57,6 @@ pub fn format_trade_open(
     text
 }
 
-/// Format an enriched ingest text for trade CLOSE events.
-/// Includes outcome, holding time, entry indicators from DB, and
-/// a rule-based post-mortem hint.
 pub fn format_trade_close(
     trade: &Trade,
     entry_indicators: Option<&serde_json::Value>,
@@ -127,7 +122,6 @@ pub fn format_trade_close(
         text.push_str(&format!(" (変動率: {}%)", pct));
     }
 
-    // Account balance context
     if let (Some(bal), Some(init)) = (account_balance, account_initial)
         && init > Decimal::ZERO
     {
@@ -135,7 +129,6 @@ pub fn format_trade_close(
         text.push_str(&format!("\n▸ 口座残高: {} (初期比: {}%)", bal, bal_pct));
     }
 
-    // Entry indicators from JSONB
     if let Some(ind) = entry_indicators {
         if let Some(regime_str) = ind.get("regime").and_then(|v| v.as_str()) {
             text.push_str(&format!("\n▸ エントリー時レジーム: {}", regime_str));
@@ -151,7 +144,6 @@ pub fn format_trade_close(
         }
     }
 
-    // Rule-based post-mortem
     text.push_str(&format!(
         "\n▸ 反省材料: {}",
         post_mortem(trade, entry_indicators)
@@ -160,8 +152,6 @@ pub fn format_trade_close(
     text
 }
 
-/// Compute a 1–5 feedback rating for a completed trade.
-/// Used for automatic Vegapunk search feedback after trade close.
 pub fn compute_feedback_rating(trade: &Trade) -> i32 {
     let is_profit = trade.pnl_amount.map(|p| p > Decimal::ZERO).unwrap_or(false);
     match trade.exit_reason {
