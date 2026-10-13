@@ -160,7 +160,8 @@ async fn run_for_strategy(
             tracing::warn!(strategy_name = %strategy_name, error = %e, "validation failed");
             tracing::warn!(strategy_name = %strategy_name, params = %proposal.params, "rejected params");
             let msg = format!(
-                "週次進化バッチ: {strategy_name} は LLM 提案の検証に失敗したため現状パラメータを維持します。理由: {e}"
+                "週次進化バッチ: {strategy_name} は LLM 提案の検証に失敗したため現状パラメータを維持します。理由: {e} 提案パラメータ: {}",
+                proposal.params
             );
             insert_system_notification(pool, &msg)
                 .await

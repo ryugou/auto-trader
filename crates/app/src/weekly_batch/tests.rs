@@ -114,7 +114,11 @@ fn validate_params_donchian_rejects_out_of_range() {
         "atr_baseline_bars": 50,
     });
     let current = serde_json::json!({});
-    assert!(validate_params("donchian_trend_evolve_v1", &proposed, &current).is_err());
+    let err = validate_params("donchian_trend_evolve_v1", &proposed, &current).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "invalid entry_channel: out of range [10, 30]"
+    );
 }
 
 #[test]
@@ -125,7 +129,11 @@ fn validate_params_donchian_rejects_exit_ge_entry() {
         "atr_baseline_bars": 50,
     });
     let current = serde_json::json!({});
-    assert!(validate_params("donchian_trend_evolve_v1", &proposed, &current).is_err());
+    let err = validate_params("donchian_trend_evolve_v1", &proposed, &current).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "invalid exit_channel: must be less than entry_channel"
+    );
 }
 
 #[test]
@@ -381,4 +389,80 @@ async fn gemini_failure_records_system_notification_and_keeps_params(pool: PgPoo
         notif_count >= 1,
         "a gemini call failure must be recorded in system_notifications"
     );
+}
+
+async fn spawn_gemini_server_proposing(
+    proposal_json: &str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let body = serde_json::json!({
+        "candidates": [{"content": {"parts": [{"text": proposal_json}]}}]
+    });
+    let router = axum::Router::new().fallback(move || {
+        let body = body.clone();
+        async move { axum::Json(body) }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind gemini mock server");
+    let addr = listener.local_addr().expect("local_addr failed");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("gemini mock server stopped with an error");
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn validation_failure_records_rejected_params_in_system_notification(pool: PgPool) {
+    let strategy = "donchian_trend_evolve_v1";
+    let initial_params =
+        serde_json::json!({"entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50});
+    persist_params(&pool, strategy, &initial_params)
+        .await
+        .expect("persist_params failed");
+
+    let account_id = seed_paper_account(&pool, strategy).await;
+    seed_closed_trades(&pool, account_id, strategy, MIN_TRADES_FOR_EVOLUTION).await;
+
+    let proposal = r#"{"params":{"entry_channel":100,"exit_channel":10,"atr_baseline_bars":50},"rationale":"r","expected_effect":"e"}"#;
+    let (api_url, server) = spawn_gemini_server_proposing(proposal).await;
+
+    let result = run_for_strategy(&pool, None, &api_url, "test-key", "test-model", strategy).await;
+    assert!(
+        result.is_ok(),
+        "a validation failure must not propagate as an error: {:?}",
+        result.err()
+    );
+
+    let params_after = load_current_params(&pool, strategy)
+        .await
+        .expect("load_current_params failed");
+    assert_eq!(
+        params_after, initial_params,
+        "params must be kept unchanged when validation rejects the proposal"
+    );
+
+    let message: String = sqlx::query_scalar(
+        "SELECT message FROM system_notifications WHERE message LIKE '%検証に失敗%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("validation failure notification not found");
+    assert!(
+        message.contains("invalid entry_channel: out of range [10, 30]"),
+        "notification must carry the rejection reason: {message}"
+    );
+    assert!(
+        message.contains(r#""entry_channel":100"#),
+        "notification must carry the rejected proposal params: {message}"
+    );
+
+    assert!(
+        !server.is_finished(),
+        "gemini mock server must still be serving"
+    );
+    server.abort();
+    let result = server.await;
+    assert!(result.as_ref().is_err_and(|e| e.is_cancelled()));
 }
