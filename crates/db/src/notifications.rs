@@ -5,6 +5,8 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::jst_day_start::{jst_day_start_utc, jst_next_day_start_utc};
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Notification {
     pub id: Uuid,
@@ -85,25 +87,8 @@ pub async fn list(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> anyhow::Result<(Vec<Notification>, i64)> {
-    let jst_offset =
-        chrono::FixedOffset::east_opt(9 * 3600).expect("9-hour offset is always valid");
-    let from_ts = from.map(|d| {
-        d.and_hms_opt(0, 0, 0)
-            .expect("midnight is always valid in fixed-offset JST")
-            .and_local_timezone(jst_offset)
-            .single()
-            .expect("midnight in JST fixed-offset is always valid")
-            .with_timezone(&Utc)
-    });
-    let to_ts = to.map(|d| {
-        (d + chrono::Duration::days(1))
-            .and_hms_opt(0, 0, 0)
-            .expect("midnight is always valid in fixed-offset JST")
-            .and_local_timezone(jst_offset)
-            .single()
-            .expect("midnight in JST fixed-offset is always valid")
-            .with_timezone(&Utc)
-    });
+    let from_ts = from.map(jst_day_start_utc).transpose()?;
+    let to_ts = to.map(jst_next_day_start_utc).transpose()?;
 
     fn apply_filters<'a>(
         qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
