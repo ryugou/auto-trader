@@ -733,9 +733,9 @@ impl crate::exchange_api::ExchangeApi for BitflyerPrivateApi {
     }
 }
 
-const MAX_ERROR_BODY_CHARS: usize = 512;
+pub(crate) const MAX_ERROR_BODY_CHARS: usize = 512;
 
-fn truncate_body(text: &str) -> String {
+pub(crate) fn truncate_body(text: &str) -> String {
     text.chars().take(MAX_ERROR_BODY_CHARS).collect()
 }
 

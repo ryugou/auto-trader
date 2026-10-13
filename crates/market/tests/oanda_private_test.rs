@@ -1,8 +1,11 @@
 //! wiremock-based tests for OandaPrivateApi. Does NOT hit live OANDA.
 
+use std::str::FromStr;
+
 use auto_trader_market::bitflyer_private::{ChildOrderType, SendChildOrderRequest, Side};
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::oanda_private::OandaPrivateApi;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -138,7 +141,11 @@ async fn send_child_order_rejects_zero_size() {
         })
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("size"));
+    assert!(
+        err.to_string()
+            .contains("invalid size: must be positive non-zero"),
+        "err={err}"
+    );
 }
 
 #[tokio::test]
@@ -158,7 +165,7 @@ async fn send_child_order_rejects_limit() {
         })
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("MARKET") || err.to_string().contains("LIMIT"));
+    assert!(err.to_string().contains("unsupported order type: LIMIT"));
 }
 
 #[tokio::test]
@@ -257,7 +264,11 @@ async fn send_child_order_rejects_fractional_size() {
         })
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("integer"), "err={err}");
+    assert!(
+        err.to_string()
+            .contains("invalid size: must be an integer number of units"),
+        "err={err}"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +288,11 @@ async fn send_child_order_rejects_negative_size() {
         })
         .await
         .unwrap_err();
-    assert!(err.to_string().to_lowercase().contains("size"), "err={err}");
+    assert!(
+        err.to_string()
+            .contains("invalid size: must be positive non-zero"),
+        "err={err}"
+    );
 }
 
 #[tokio::test]
@@ -397,8 +412,10 @@ async fn get_executions_errors_on_cancelled_order() {
     let api = api(&server.uri());
     let err = api.get_executions("USD_JPY", "6600").await.unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("CANCELLED"), "expected CANCELLED in: {msg}");
-    assert!(msg.contains("6600"), "expected order id 6600 in: {msg}");
+    assert!(
+        msg.contains("invalid order 6600: reached terminal state CANCELLED"),
+        "msg: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -419,4 +436,28 @@ async fn get_executions_errors_when_filled_without_transaction_ids() {
     let api = api(&server.uri());
     let err = api.get_executions("USD_JPY", "6700").await.unwrap_err();
     assert!(err.to_string().contains("missing fillingTransaction"));
+}
+
+#[tokio::test]
+async fn send_child_order_rejects_size_that_does_not_fit_in_i64() {
+    let server = MockServer::start().await;
+    let api = api(&server.uri());
+    let err = api
+        .send_child_order(SendChildOrderRequest {
+            product_code: "USD_JPY".to_string(),
+            child_order_type: ChildOrderType::Market,
+            side: Side::Buy,
+            size: Decimal::from_str("100000000000000000000").unwrap(),
+            price: None,
+            minute_to_expire: None,
+            time_in_force: None,
+            close_position_id: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("invalid size: does not fit in i64"),
+        "err={err}"
+    );
 }
