@@ -1,18 +1,18 @@
-//! live account の維持率アラート。paper のロスカット (liquidation.rs) と
-//! 対になる live 側の監視。**close はしない** — live のロスカット執行は
-//! 取引所の責務。bot は接近を運用者に知らせるだけ。
-//! 注意: ここで使う残高は DB 管理値であり、取引所実残高とはドリフトしうる。
+use std::collections::HashMap;
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::margin::compute_maintenance_ratio;
 use auto_trader_db::trades::OpenTradeWithAccount;
 use auto_trader_market::price_store::FeedKey;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use rust_decimal_macros::dec;
 use uuid::Uuid;
 
 use crate::liquidation::LiquidationContext;
 use crate::positions::build_close_side_positions;
+
+const CRITICAL_MAINTENANCE_RATIO_MULTIPLIER: Decimal = dec!(1.1);
+const WARN_MAINTENANCE_RATIO_MULTIPLIER: Decimal = dec!(1.3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertLevel {
@@ -29,7 +29,6 @@ impl AlertLevel {
     }
 }
 
-/// 検出された 1 件の維持率アラート。close はせず、運用者通知の材料にする。
 #[derive(Debug, Clone)]
 pub struct MarginAlert {
     pub account_id: Uuid,
@@ -39,11 +38,9 @@ pub struct MarginAlert {
     pub level: AlertLevel,
 }
 
-/// 維持率 ratio をアラートレベルに分類する。pure 関数。
-/// `Decimal::new(11, 1)` = 1.1, `Decimal::new(13, 1)` = 1.3。
 pub fn classify_alert_level(ratio: Decimal, liquidation_level: Decimal) -> Option<AlertLevel> {
-    let critical = liquidation_level * Decimal::new(11, 1); // Y × 1.1
-    let warn = liquidation_level * Decimal::new(13, 1); // Y × 1.3
+    let critical = liquidation_level * CRITICAL_MAINTENANCE_RATIO_MULTIPLIER;
+    let warn = liquidation_level * WARN_MAINTENANCE_RATIO_MULTIPLIER;
     if ratio < critical {
         Some(AlertLevel::Critical)
     } else if ratio < warn {
@@ -53,18 +50,6 @@ pub fn classify_alert_level(ratio: Decimal, liquidation_level: Decimal) -> Optio
     }
 }
 
-/// `event` の tick が来た時、同 exchange の **live** account を walk して、
-/// 維持率が warn/critical 帯に入った account の [`MarginAlert`] を返す。
-///
-/// [`detect_liquidation_targets`](crate::liquidation::detect_liquidation_targets)
-/// の live 版ミラー。ただし **close はしない**。
-///
-/// 仕様:
-/// - live account のみ対象 (`effective_dry_run == false`)。paper は
-///   liquidation.rs が扱う。
-/// - 同 account の trade のうち PriceStore に最新 bid/ask が無いものが
-///   1 つでもあればその account 全体を skip (false-positive alert を避ける)。
-/// - 維持率は `classify_alert_level` の帯 (Y×1.1 / Y×1.3) で分類する。
 pub async fn detect_margin_alerts(
     ctx: &LiquidationContext,
     open_trades: &[OpenTradeWithAccount],
@@ -72,10 +57,9 @@ pub async fn detect_margin_alerts(
 ) -> Vec<MarginAlert> {
     let threshold = match ctx.exchange_liquidation_levels.get(&event.exchange) {
         Some(t) => *t,
-        None => return vec![], // 設定無しなら判定しない
+        None => return vec![],
     };
 
-    // tick の exchange の open trade を account_id で bucketing (1 pass)。
     let mut buckets: HashMap<Uuid, Vec<&OpenTradeWithAccount>> = HashMap::new();
     for owned in open_trades
         .iter()
@@ -87,12 +71,10 @@ pub async fn detect_margin_alerts(
             .push(owned);
     }
 
-    // 同 pair の bid/ask 取得は read lock を取るので、tick 内で 1 回キャッシュ。
     let mut price_cache: HashMap<FeedKey, Option<(Decimal, Decimal)>> = HashMap::new();
     let mut results = Vec::new();
 
     for (account_id, trades_in_account) in buckets {
-        // account_type 判定。live のみ対象 (liquidation.rs と逆)。
         let account_type = trades_in_account
             .first()
             .and_then(|t| t.account_type.as_deref())
@@ -102,24 +84,26 @@ pub async fn detect_margin_alerts(
             continue;
         }
 
-        // account row を read
         let account =
             match auto_trader_db::trading_accounts::get_account(&ctx.pool, account_id).await {
                 Ok(Some(a)) => a,
                 Ok(None) => {
                     tracing::warn!(
-                        "margin_alert: account {account_id} not found (delete race?), skipping"
+                        account_id = %account_id,
+                        "account not found (delete race?), skipping"
                     );
                     continue;
                 }
                 Err(e) => {
-                    tracing::warn!("margin_alert: failed to read account {account_id}: {e}");
+                    tracing::warn!(
+                        account_id = %account_id,
+                        error = %e,
+                        "failed to read account"
+                    );
                     continue;
                 }
             };
 
-        // OpenPosition vec を組む。price 不在の trade があったら account 判定 skip
-        // (false-positive alert を避ける、保守的)。
         let ctx_label = format!("margin_alert: account {account_id}");
         let positions = match build_close_side_positions(
             trades_in_account.iter().map(|owned| &owned.trade),
@@ -133,10 +117,9 @@ pub async fn detect_margin_alerts(
             None => continue,
         };
 
-        // 維持率計算
         let ratio = match compute_maintenance_ratio(account.current_balance, &positions) {
             Some(r) => r,
-            None => continue, // required=0、open 無し
+            None => continue,
         };
 
         if let Some(level) = classify_alert_level(ratio, threshold) {
@@ -145,9 +128,11 @@ pub async fn detect_margin_alerts(
                 .and_then(|t| t.account_name.clone())
                 .unwrap_or_else(|| account_id.to_string());
             tracing::warn!(
-                "margin_alert: live account {account_id} maintenance_ratio={ratio} \
-                 threshold={threshold} level={} — alerting (no auto-close)",
-                level.as_str()
+                account_id = %account_id,
+                maintenance_ratio = %ratio,
+                threshold = %threshold,
+                level = level.as_str(),
+                "live account maintenance ratio alert, no auto-close"
             );
             results.push(MarginAlert {
                 account_id,
@@ -163,27 +148,4 @@ pub async fn detect_margin_alerts(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    #[test]
-    fn classify_levels() {
-        let y = dec!(0.50); // bitflyer_cfd
-        assert_eq!(classify_alert_level(dec!(0.70), y), None); // >= 0.65 (Y×1.3)
-        assert_eq!(classify_alert_level(dec!(0.64), y), Some(AlertLevel::Warn)); // < 0.65, >= 0.55
-        assert_eq!(
-            classify_alert_level(dec!(0.54), y),
-            Some(AlertLevel::Critical)
-        ); // < 0.55 (Y×1.1)
-    }
-
-    #[test]
-    fn classify_boundaries_are_exclusive_upper() {
-        let y = dec!(0.50);
-        // Y×1.3 = 0.65 ちょうどは None (>= warn 閾値)。
-        assert_eq!(classify_alert_level(dec!(0.65), y), None);
-        // Y×1.1 = 0.55 ちょうどは Warn (>= critical 閾値、< warn 閾値)。
-        assert_eq!(classify_alert_level(dec!(0.55), y), Some(AlertLevel::Warn));
-    }
-}
+mod tests;
