@@ -234,7 +234,7 @@ pub(super) async fn load_eval_inputs(
     })
 }
 
-pub(super) fn script_name_from_path(path: &Path) -> Result<String, SimError> {
+fn script_name_from_path(path: &Path) -> Result<String, SimError> {
     path.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
