@@ -1,3 +1,6 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use anyhow::Context as _;
 use auto_trader_core::config::{AppConfig, GeminiConfig, StrategyConfig};
 use auto_trader_core::knowledge::KnowledgeStore;
@@ -6,33 +9,7 @@ use auto_trader_db::trading_accounts::TradingAccount;
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
-/// Resolve broker liquidation thresholds per exchange from config, validated
-/// against active trading accounts.
-///
-/// Returns `Err` when:
-/// - a config key (`[exchange_margin.<name>]`) fails to parse as `Exchange`,
-/// - an active account's exchange has no matching config entry, or
-/// - an active account's exchange has a `liquidation_margin_level` that is
-///   not strictly positive.
-///
-/// Non-positive values on exchanges that have no active account are
-/// **tolerated** — a stale TOML left at 0 for an unused exchange should not
-/// brick startup. The `accounts::create` handler re-checks `> 0` when an
-/// account is later created on such an exchange (defense in depth).
-///
-/// This is the startup half of a defense-in-depth fail-closed design:
-/// - At startup: missing/invalid entries for exchanges in use abort the
-///   process here, before any trading task spawns.
-/// - At runtime: the API rejects new account creation and account
-///   reinstatement for exchanges absent from the resolved map or with a
-///   non-positive value (`accounts::create`, `accounts::update`), and the
-///   worker tasks log + skip the affected
-///   signal/exit/close instead of panicking when an entry is missing for an
-///   in-flight trade. Together these prevent the position sizer from
-///   running without a valid `liquidation_margin_level`.
 pub fn resolve_exchange_liquidation_levels(
     accounts: &[TradingAccount],
     config: &AppConfig,
@@ -45,9 +22,8 @@ pub fn resolve_exchange_liquidation_levels(
             }
             Err(e) => {
                 anyhow::bail!(
-                    "trading_accounts row {} has unrecognised exchange '{}': {e}",
-                    acct.id,
-                    acct.exchange
+                    "failed to parse exchange for trading_accounts row {}: {e}",
+                    acct.id
                 );
             }
         }
@@ -59,7 +35,7 @@ pub fn resolve_exchange_liquidation_levels(
                 map.insert(ex, cfg.liquidation_margin_level);
             }
             Err(e) => {
-                anyhow::bail!("config: [exchange_margin.{key}] is not a recognised exchange: {e}");
+                anyhow::bail!("invalid option \"exchange_margin.{key}\": {e}");
             }
         }
     }
@@ -70,49 +46,37 @@ pub fn resolve_exchange_liquidation_levels(
         .collect();
     missing.sort();
     if !missing.is_empty() {
+        let quoted_missing: Vec<String> = missing
+            .iter()
+            .map(|name| format!("\"exchange_margin.{name}\""))
+            .collect();
         anyhow::bail!(
-            "config: [exchange_margin.<name>] missing for active accounts: {}. \
-             Add `[exchange_margin.<name>] liquidation_margin_level = <value>` for each.",
-            missing.join(", ")
+            "invalid option {}: missing for active accounts; add [exchange_margin.<name>] liquidation_margin_level = <value> for each",
+            quoted_missing.join(", ")
         );
     }
-    // Fail-closed: a non-positive `liquidation_margin_level` would let the
-    // PositionSizer silently return None at runtime ("account too small")
-    // because `1 / (Y + L*s)` with `Y <= 0` produces nonsense. Validate only
-    // the entries actually used by an active account — entries for unused
-    // exchanges may sit at 0 / negative without breaking this run, and we
-    // don't want to crash startup over config a future operator left there.
-    for ex in &required {
+    reject_non_positive_margin_for_exchanges_in_use(&required, &map)?;
+    Ok(map)
+}
+
+fn reject_non_positive_margin_for_exchanges_in_use(
+    required: &HashSet<Exchange>,
+    map: &HashMap<Exchange, Decimal>,
+) -> anyhow::Result<()> {
+    for ex in required {
         let value = map
             .get(ex)
             .expect("required entries are present after the missing check");
         if *value <= Decimal::ZERO {
             anyhow::bail!(
-                "config: [exchange_margin.{}] liquidation_margin_level must be > 0, got {} \
-                 (received non-positive value for exchange {:?})",
-                ex.as_str(),
-                value,
-                ex
+                "invalid option \"exchange_margin.{}.liquidation_margin_level\": must be positive, got {value}",
+                ex.as_str()
             );
         }
     }
-    Ok(map)
+    Ok(())
 }
 
-/// Look up `liquidation_margin_level` for `exchange` in the resolved map, or
-/// log a context-rich error and return `None`.
-///
-/// Worker tasks that need a sizing input call this on every iteration. The
-/// startup gate (`resolve_exchange_liquidation_levels`) validates the map
-/// against accounts at boot, and the account-create/reinstate API rejects
-/// exchanges not present in the map, but this helper is the runtime fallback
-/// if a row snuck in another way (e.g. direct SQL). Returning `None` lets the
-/// caller `continue` instead of panicking.
-///
-/// `context` is rendered into the log only on the miss path so the operator
-/// can correlate the skip with a specific trade or signal. Pass a closure
-/// that builds a terse identifier (e.g. `|| format!("close trade {id}")`)
-/// — it runs at most once and only when the entry is missing.
 pub fn liquidation_level_or_log<F>(
     map: &HashMap<Exchange, Decimal>,
     exchange: Exchange,
@@ -124,88 +88,47 @@ where
     match map.get(&exchange).copied() {
         Some(y) if y > Decimal::ZERO => Some(y),
         Some(y) => {
-            // Resolver tolerates non-positive entries on *unused* exchanges
-            // so a stale TOML cannot brick startup, and the create-account
-            // API rejects when an account is added against such an entry.
-            // If a row still reaches here (e.g. created via direct SQL,
-            // bypassing the API), treat the bad value as missing rather
-            // than passing it to PositionSizer — which would surface as a
-            // confusing "balance too small" error.
             tracing::error!(
-                "exchange_liquidation_levels for {:?} is non-positive ({}) ({}) — skipping; \
-                 fix the value in `[exchange_margin.{}]` and restart, or recreate the \
-                 account via the API which validates this constraint",
-                exchange,
-                y,
-                context(),
-                exchange.as_str()
+                exchange = %exchange,
+                liquidation_margin_level = %y,
+                context = %context(),
+                "liquidation_margin_level is non-positive, skipping; fix the exchange_margin config and restart, or recreate the account via the API which validates this constraint"
             );
             None
         }
         None => {
             tracing::error!(
-                "exchange_liquidation_levels missing entry for {:?} ({}) — skipping; \
-                 this indicates a runtime account was created without an [exchange_margin] \
-                 entry, which the API should now reject",
-                exchange,
-                context()
+                exchange = %exchange,
+                context = %context(),
+                "liquidation_margin_level entry missing, skipping; this indicates a runtime account was created without an exchange_margin entry, which the API should now reject"
             );
             None
         }
     }
 }
 
-/// Which of the `fx_new` strategy's hardcoded assumptions an account
-/// violates. An account can appear in the result of
-/// `check_fx_new_account_assumptions` up to twice (once per kind) because
-/// the two checks are independent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FxNewMismatchKind {
-    /// `leverage` does not match `fx_new::GMO_FX_LEVERAGE`, the value the
-    /// strategy's 1%-of-equity stop-loss sizing assumes.
     Leverage {
         account_leverage: Decimal,
         expected_leverage: Decimal,
     },
-    /// `exchange` does not parse to `fx_new::FX_NEW_EXCHANGE` (or does not
-    /// parse as an `Exchange` at all). `FxNewV1::accepts` only processes
-    /// price events from that exchange, and the executor's dispatch loop
-    /// excludes such an account via `fx_new_dispatch_allowed` (logging a
-    /// warning each time), so no order is ever placed for it.
-    Exchange { expected_exchange: Exchange },
+    Exchange {
+        expected_exchange: Exchange,
+    },
 }
 
-/// Active account whose configuration violates one of the `fx_new`
-/// strategy's hardcoded assumptions (see `FxNewMismatchKind`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FxNewAccountMismatch {
     pub account_name: String,
-    /// `account.exchange` verbatim, always populated regardless of whether
-    /// it parses as `Exchange` — the operator needs to see exactly what is
-    /// stored in the database, not a fallback value.
     pub account_exchange: String,
     pub kind: FxNewMismatchKind,
 }
 
-/// Single definition of "is this strategy name part of the `fx_new` family".
-/// Shared by `check_fx_new_account_assumptions` (startup report),
-/// `fx_new_dispatch_allowed` (per-dispatch gate) and the strategy
-/// registration that instantiates `FxNewV1`, so these cannot silently drift
-/// apart by each hardcoding the `"fx_new"` prefix separately.
 fn is_fx_new_strategy(strategy_name: &str) -> bool {
     strategy_name.starts_with("fx_new")
 }
 
-/// Pure check: active accounts whose `strategy` starts with `"fx_new"` must
-/// have `leverage == fx_new::GMO_FX_LEVERAGE` and an `exchange` that parses
-/// to `fx_new::FX_NEW_EXCHANGE`. Called once at startup; mismatches are
-/// logged and notified but do not abort the process. A leverage mismatch
-/// still lets the account trade, with the wrong risk sizing. An exchange
-/// mismatch is enforced on every signal dispatch by `fx_new_dispatch_allowed`
-/// (checked in the executor's dispatch loop in `main.rs`), which excludes
-/// the account from dispatch — so this report flags the misconfiguration up
-/// front, but the dispatch loop is what actually keeps the account from
-/// trading on the wrong exchange.
 pub fn check_fx_new_account_assumptions(accounts: &[TradingAccount]) -> Vec<FxNewAccountMismatch> {
     let mut mismatches = Vec::new();
     for a in accounts
@@ -239,38 +162,19 @@ pub fn check_fx_new_account_assumptions(accounts: &[TradingAccount]) -> Vec<FxNe
     mismatches
 }
 
-/// Fail-closed gate for the executor's signal-dispatch loop (see `main.rs`,
-/// the loop below the "Dispatch signal to all accounts bound to this
-/// strategy" comment). `fx_new` strategies only ever derive signals from
-/// `fx_new::FX_NEW_EXCHANGE` price events (`FxNewV1::accepts`), so
-/// dispatching one of those signals to an account on a different exchange
-/// would place an order sized and timed off a price move that never
-/// happened on that account's actual exchange. Returns `false` to exclude
-/// such an account from dispatch.
-///
-/// Called on every dispatch, not just at startup, so an account added or
-/// reinstated via REST after boot is covered by the same gate — unlike
-/// `check_fx_new_account_assumptions`, which only runs once at startup and
-/// therefore cannot see accounts that did not exist yet at that point.
 pub fn fx_new_dispatch_allowed(strategy: &str, account_exchange: Exchange) -> bool {
     !is_fx_new_strategy(strategy)
         || account_exchange == auto_trader_strategy::fx_new::FX_NEW_EXCHANGE
 }
 
-/// paper/live 判定の唯一の定義。`account_type == "paper"` もしくは
-/// LIVE_DRY_RUN 強制時に dry_run。この式を呼び出し側にコピーしないこと
-/// (判定が分岐すると paper=live 契約が壊れる)。
 pub fn effective_dry_run(account_type: &str, live_forces_dry_run: bool) -> bool {
     account_type == "paper" || live_forces_dry_run
 }
 
-/// Register all enabled strategies from config into the engine.
-///
-/// This function iterates `config.strategies`, constructs each strategy
-/// instance, and adds it to the engine via `engine.add_strategy`.
-/// Strategies that require external resources (a `KnowledgeStore`, Gemini,
-/// or DB-loaded params) are skipped with a warning if those resources are
-/// unavailable.
+fn log_strategy_registered(name: &str, mode: &str) {
+    tracing::info!(strategy_name = name, mode = mode, "strategy registered");
+}
+
 pub async fn register_strategies(
     engine: &mut StrategyEngine,
     strategies: &[StrategyConfig],
@@ -295,8 +199,8 @@ pub async fn register_strategies(
                     Ok(value) if !value.trim().is_empty() => value,
                     _ => {
                         tracing::warn!(
-                            "GEMINI_API_KEY not set or empty, skipping strategy: {}",
-                            sc.name
+                            strategy_name = %sc.name,
+                            "gemini api key not set or empty, skipping strategy"
                         );
                         continue;
                     }
@@ -304,7 +208,7 @@ pub async fn register_strategies(
                 let gemini = match gemini_config {
                     Some(c) => c,
                     None => {
-                        tracing::warn!("gemini config missing, skipping strategy: {}", sc.name);
+                        tracing::warn!(strategy_name = %sc.name, "gemini config missing, skipping strategy");
                         continue;
                     }
                 };
@@ -312,10 +216,7 @@ pub async fn register_strategies(
                 let store = match knowledge {
                     Some(s) => Arc::clone(s),
                     None => {
-                        tracing::warn!(
-                            "knowledge_store unavailable, skipping strategy: {}",
-                            sc.name
-                        );
+                        tracing::warn!(strategy_name = %sc.name, "knowledge_store unavailable, skipping strategy");
                         continue;
                     }
                 };
@@ -331,11 +232,8 @@ pub async fn register_strategies(
                 )
                 .with_context(|| format!("failed to build strategy {}", sc.name))?;
                 engine.add_strategy(Box::new(strategy), sc.mode.clone());
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+                log_strategy_registered(&sc.name, &sc.mode);
             }
-            // Strategies with hardcoded Rust const parameters.
-            // Tuning requires changing the const in the strategy source
-            // and rebuilding. See config/default.toml SoT header.
             name if name.starts_with("bb_mean_revert") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
                 engine.add_strategy(
@@ -345,7 +243,7 @@ pub async fn register_strategies(
                     )),
                     sc.mode.clone(),
                 );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+                log_strategy_registered(&sc.name, &sc.mode);
             }
             name if name.starts_with("donchian_trend_evolve") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
@@ -361,15 +259,16 @@ pub async fn register_strategies(
                 {
                     Ok(Some(j)) => j.0,
                     Ok(None) => {
-                        tracing::warn!("no strategy_params row for '{}', using defaults", sc.name);
+                        tracing::warn!(strategy_name = %sc.name, "no strategy_params row, using defaults");
                         serde_json::json!({
                             "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
                         })
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "failed to load strategy_params for '{}': {e}, using defaults",
-                            sc.name
+                            strategy_name = %sc.name,
+                            error = %e,
+                            "failed to load strategy_params, using defaults"
                         );
                         serde_json::json!({
                             "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
@@ -386,7 +285,7 @@ pub async fn register_strategies(
                     ),
                     sc.mode.clone(),
                 );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+                log_strategy_registered(&sc.name, &sc.mode);
             }
             name if name.starts_with("donchian_trend") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
@@ -397,7 +296,7 @@ pub async fn register_strategies(
                     )),
                     sc.mode.clone(),
                 );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+                log_strategy_registered(&sc.name, &sc.mode);
             }
             name if name.starts_with("squeeze_momentum") => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
@@ -410,7 +309,7 @@ pub async fn register_strategies(
                     ),
                     sc.mode.clone(),
                 );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+                log_strategy_registered(&sc.name, &sc.mode);
             }
             name if is_fx_new_strategy(name) => {
                 let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
@@ -421,10 +320,10 @@ pub async fn register_strategies(
                     )),
                     sc.mode.clone(),
                 );
-                tracing::info!("strategy registered: {} (mode={})", sc.name, sc.mode);
+                log_strategy_registered(&sc.name, &sc.mode);
             }
             other => {
-                tracing::warn!("unknown strategy: {other}, skipping");
+                tracing::warn!(strategy_name = %other, "unknown strategy, skipping");
             }
         }
     }
@@ -432,185 +331,4 @@ pub async fn register_strategies(
 }
 
 #[cfg(test)]
-mod effective_dry_run_tests {
-    use super::effective_dry_run;
-
-    #[test]
-    fn paper_is_always_dry_run() {
-        assert!(effective_dry_run("paper", false));
-        assert!(effective_dry_run("paper", true));
-    }
-
-    #[test]
-    fn live_is_dry_run_only_when_forced() {
-        assert!(!effective_dry_run("live", false));
-        assert!(effective_dry_run("live", true));
-    }
-}
-
-#[cfg(test)]
-mod fx_new_dispatch_allowed_tests {
-    use super::fx_new_dispatch_allowed;
-    use auto_trader_core::types::Exchange;
-
-    #[test]
-    fn fx_new_strategy_on_gmo_fx_account_is_allowed() {
-        assert!(fx_new_dispatch_allowed("fx_new_v1", Exchange::GmoFx));
-    }
-
-    #[test]
-    fn fx_new_strategy_on_oanda_account_is_rejected() {
-        assert!(!fx_new_dispatch_allowed("fx_new_v1", Exchange::Oanda));
-    }
-
-    #[test]
-    fn fx_new_strategy_on_bitflyer_cfd_account_is_rejected() {
-        assert!(!fx_new_dispatch_allowed("fx_new_v1", Exchange::BitflyerCfd));
-    }
-
-    #[test]
-    fn non_fx_new_strategy_is_allowed_on_any_exchange() {
-        assert!(fx_new_dispatch_allowed(
-            "donchian_trend_v1",
-            Exchange::Oanda
-        ));
-        assert!(fx_new_dispatch_allowed(
-            "donchian_trend_v1",
-            Exchange::BitflyerCfd
-        ));
-        assert!(fx_new_dispatch_allowed(
-            "donchian_trend_v1",
-            Exchange::GmoFx
-        ));
-    }
-}
-
-#[cfg(test)]
-mod fx_new_account_assumption_tests {
-    use super::{FxNewMismatchKind, check_fx_new_account_assumptions};
-    use auto_trader_db::trading_accounts::TradingAccount;
-    use chrono::Utc;
-    use rust_decimal_macros::dec;
-    use uuid::Uuid;
-
-    /// Build a `TradingAccount` with every field filled, varying only the
-    /// four fields each test case cares about (`strategy`, `exchange`,
-    /// `leverage`, `active`).
-    fn account(
-        strategy: &str,
-        exchange: &str,
-        leverage: rust_decimal::Decimal,
-        active: bool,
-    ) -> TradingAccount {
-        TradingAccount {
-            id: Uuid::new_v4(),
-            name: format!("{strategy}-account"),
-            account_type: "paper".to_string(),
-            exchange: exchange.to_string(),
-            strategy: strategy.to_string(),
-            initial_balance: dec!(100000),
-            current_balance: dec!(100000),
-            leverage,
-            currency: "JPY".to_string(),
-            created_at: Utc::now(),
-            active,
-        }
-    }
-
-    #[test]
-    fn matching_leverage_and_exchange_on_active_fx_new_account_has_no_mismatch() {
-        let accounts = vec![account("fx_new_v1", "gmo_fx", dec!(10), true)];
-        assert!(check_fx_new_account_assumptions(&accounts).is_empty());
-    }
-
-    #[test]
-    fn wrong_exchange_on_active_fx_new_account_is_reported_as_exchange_mismatch() {
-        let accounts = vec![account("fx_new_v1", "oanda", dec!(10), true)];
-        let mismatches = check_fx_new_account_assumptions(&accounts);
-        assert_eq!(mismatches.len(), 1, "expected exactly one mismatch");
-        let m = &mismatches[0];
-        assert_eq!(m.account_name, "fx_new_v1-account");
-        assert_eq!(m.account_exchange, "oanda");
-        assert_eq!(
-            m.kind,
-            FxNewMismatchKind::Exchange {
-                expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
-            }
-        );
-    }
-
-    #[test]
-    fn wrong_leverage_on_active_fx_new_account_is_reported_as_leverage_mismatch() {
-        let accounts = vec![account("fx_new_v1", "gmo_fx", dec!(5), true)];
-        let mismatches = check_fx_new_account_assumptions(&accounts);
-        assert_eq!(mismatches.len(), 1, "expected exactly one mismatch");
-        let m = &mismatches[0];
-        assert_eq!(m.account_name, "fx_new_v1-account");
-        assert_eq!(m.account_exchange, "gmo_fx");
-        assert_eq!(
-            m.kind,
-            FxNewMismatchKind::Leverage {
-                account_leverage: dec!(5),
-                expected_leverage: dec!(10),
-            }
-        );
-    }
-
-    #[test]
-    fn wrong_leverage_and_exchange_on_active_fx_new_account_reports_both_mismatches() {
-        let accounts = vec![account("fx_new_v1", "oanda", dec!(5), true)];
-        let mismatches = check_fx_new_account_assumptions(&accounts);
-        assert_eq!(mismatches.len(), 2, "expected one mismatch per kind");
-        assert!(
-            mismatches.iter().any(|m| m.kind
-                == FxNewMismatchKind::Leverage {
-                    account_leverage: dec!(5),
-                    expected_leverage: dec!(10),
-                }),
-            "missing leverage mismatch: {mismatches:?}"
-        );
-        assert!(
-            mismatches.iter().any(|m| m.kind
-                == FxNewMismatchKind::Exchange {
-                    expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
-                }),
-            "missing exchange mismatch: {mismatches:?}"
-        );
-    }
-
-    #[test]
-    fn unrecognised_exchange_string_on_active_fx_new_account_is_reported_with_raw_value() {
-        let accounts = vec![account("fx_new_v1", "unknown_fx", dec!(10), true)];
-        let mismatches = check_fx_new_account_assumptions(&accounts);
-        assert_eq!(mismatches.len(), 1, "expected exactly one mismatch");
-        let m = &mismatches[0];
-        assert_eq!(
-            m.account_exchange, "unknown_fx",
-            "raw unparseable exchange string must be preserved verbatim"
-        );
-        assert_eq!(
-            m.kind,
-            FxNewMismatchKind::Exchange {
-                expected_exchange: auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
-            }
-        );
-    }
-
-    #[test]
-    fn mismatches_on_inactive_fx_new_account_are_ignored() {
-        let accounts = vec![account("fx_new_v1", "oanda", dec!(5), false)];
-        assert!(
-            check_fx_new_account_assumptions(&accounts).is_empty(),
-            "inactive accounts must not be flagged regardless of leverage/exchange"
-        );
-    }
-
-    #[test]
-    fn mismatches_on_non_fx_new_strategy_are_ignored() {
-        let accounts = vec![account("donchian_trend_v1", "oanda", dec!(5), true)];
-        assert!(
-            check_fx_new_account_assumptions(&accounts).is_empty(),
-            "strategies not prefixed with fx_new must not be checked"
-        );
-    }
-}
+mod tests;

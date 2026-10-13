@@ -1,12 +1,5 @@
-//! Startup-time reconciliation for live trading accounts.
-//!
-//! When the process restarts (deploy, crash, OS restart), DB rows for
-//! `status IN ('open', 'closing')` on live accounts may not match the
-//! exchange's actual state. This module runs once at startup to detect
-//! and repair the mismatch. Paper accounts are skipped (no exchange).
-//!
-//! NOT periodic — only at startup. A mid-session reconciler would be a
-//! separate concern.
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use auto_trader_core::types::{Direction, ExitReason};
 use auto_trader_db::trades;
@@ -15,8 +8,6 @@ use auto_trader_market::price_store::{FeedKey, PriceStore};
 use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 pub async fn reconcile_live_accounts_at_startup(
     pool: &PgPool,
@@ -29,19 +20,16 @@ pub async fn reconcile_live_accounts_at_startup(
         let exchange: auto_trader_core::types::Exchange =
             account.exchange.parse().map_err(|e| {
                 anyhow::anyhow!(
-                    "startup reconcile: live account '{}' has unknown exchange '{}': {e}; \
-                 cannot reconcile — refusing to start",
-                    account.name,
-                    account.exchange
+                    "failed to parse exchange for live account \"{}\": {e}",
+                    account.name
                 )
             })?;
 
         let Some(api) = apis.get(&exchange) else {
             anyhow::bail!(
-                "startup reconcile: live account '{}' references exchange '{}' but no ExchangeApi \
-                 is registered for it; cannot reconcile live state — refusing to start",
-                account.name,
-                account.exchange
+                "failed to find a registered ExchangeApi for exchange \"{}\" used by account \"{}\"",
+                account.exchange,
+                account.name
             );
         };
 
@@ -50,38 +38,35 @@ pub async fn reconcile_live_accounts_at_startup(
     Ok(())
 }
 
-/// Fetch exchange positions with bounded retry + exponential backoff.
-///
-/// Attempts up to `MAX_ATTEMPTS` times (2s → 4s between tries) to absorb
-/// brief API blips without triggering a docker restart-storm. Fatals cleanly
-/// on sustained outage after all attempts are exhausted.
 async fn get_positions_with_retry(
     api: &dyn ExchangeApi,
     pair: &str,
     account_name: &str,
 ) -> anyhow::Result<Vec<auto_trader_market::bitflyer_private::ExchangePosition>> {
-    const MAX_ATTEMPTS: u32 = 3;
+    const MAX_ATTEMPTS_TO_ABSORB_API_BLIPS: u32 = 3;
     let mut delay = std::time::Duration::from_secs(2);
     let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 1..=MAX_ATTEMPTS {
+    for attempt in 1..=MAX_ATTEMPTS_TO_ABSORB_API_BLIPS {
         match api.get_positions(pair).await {
             Ok(ps) => return Ok(ps),
             Err(e) => {
                 tracing::warn!(
-                    "startup reconcile: get_positions({pair}) attempt {}/{} for {} failed: {e}",
-                    attempt,
-                    MAX_ATTEMPTS,
-                    account_name
+                    pair = %pair,
+                    attempt = attempt,
+                    max_attempts = MAX_ATTEMPTS_TO_ABSORB_API_BLIPS,
+                    account_name = %account_name,
+                    error = %e,
+                    "failed to get_positions"
                 );
                 last_err = Some(e);
-                if attempt < MAX_ATTEMPTS {
+                if attempt < MAX_ATTEMPTS_TO_ABSORB_API_BLIPS {
                     tokio::time::sleep(delay).await;
                     delay *= 2;
                 }
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("get_positions retry exhausted")))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("failed to get_positions: retries exhausted")))
 }
 
 async fn reconcile_one_account(
@@ -93,14 +78,10 @@ async fn reconcile_one_account(
 ) -> anyhow::Result<()> {
     let db_trades = trades::list_open_or_closing_by_account(pool, account.id).await?;
     if db_trades.is_empty() {
-        tracing::info!(
-            "startup reconcile: {} has no open/closing trades",
-            account.name
-        );
+        tracing::info!(account_name = %account.name, "no open or closing trades");
         return Ok(());
     }
 
-    // Gather unique pairs, fetch exchange positions for each — concurrently.
     let mut pairs_set = std::collections::HashSet::new();
     for t in &db_trades {
         pairs_set.insert(t.pair.0.clone());
@@ -114,8 +95,7 @@ async fn reconcile_one_account(
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
-                        "startup reconcile: get_positions({pair}) exhausted retries for {}: {e}",
-                        account_name
+                        "failed to get_positions: retries exhausted for account \"{account_name}\" pair \"{pair}\": {e}"
                     )
                 })?;
             Ok::<_, anyhow::Error>((pair.clone(), ps))
@@ -127,24 +107,11 @@ async fn reconcile_one_account(
         Vec<auto_trader_market::bitflyer_private::ExchangePosition>,
     > = results.into_iter().collect();
 
-    // Group DB trades by (pair, direction) for aggregate comparison.
-    // Multiple DB trades can share the same (pair, direction) while the exchange
-    // holds one aggregated position — compare totals, not per-trade quantities.
-    let mut db_groups: HashMap<
-        (String, Direction),
-        (Decimal, Vec<&auto_trader_core::types::Trade>),
-    > = HashMap::new();
-    for trade in &db_trades {
-        let key = (trade.pair.0.clone(), trade.direction);
-        let entry = db_groups.entry(key).or_insert((Decimal::ZERO, Vec::new()));
-        entry.0 += trade.quantity;
-        entry.1.push(trade);
-    }
+    let db_groups = group_trades_for_aggregate_comparison(&db_trades);
 
     for ((pair, direction), (db_total_qty, trades)) in &db_groups {
         let pair_positions = exchange_positions.get(pair).cloned().unwrap_or_default();
 
-        // Check for conflicting positions (opposite-side or unknown side).
         let mut exchange_has_conflicting = false;
         let mut matching_exchange_size = Decimal::ZERO;
         for p in &pair_positions {
@@ -156,9 +123,9 @@ async fn reconcile_one_account(
                 Some(false) => exchange_has_conflicting = true,
                 None => {
                     tracing::warn!(
-                        "startup reconcile: unknown side '{}' for {} — treating as conflict",
-                        p.side,
-                        p.product_code
+                        side = %p.side,
+                        product_code = %p.product_code,
+                        "unknown side, treating as conflict"
                     );
                     exchange_has_conflicting = true;
                 }
@@ -167,100 +134,44 @@ async fn reconcile_one_account(
 
         if exchange_has_conflicting {
             anyhow::bail!(
-                "startup reconcile: conflicting exchange position for {} {:?} on account {}; \
-                 manual intervention required",
-                pair,
-                direction,
+                "failed to reconcile: conflicting exchange position for pair \"{pair}\" direction {direction:?} on account \"{}\"; manual intervention required",
                 account.name
             );
         }
 
-        // Compare aggregate sizes only when exchange has a matching position.
         if matching_exchange_size > Decimal::ZERO && matching_exchange_size != *db_total_qty {
             anyhow::bail!(
-                "startup reconcile: size mismatch for {} {:?} — DB total={} but exchange has {}; \
-                 manual intervention required",
-                pair,
-                direction,
-                db_total_qty,
-                matching_exchange_size
+                "failed to reconcile: size mismatch for pair \"{pair}\" direction {direction:?} (db_total={db_total_qty}, exchange={matching_exchange_size}) on account \"{}\"; manual intervention required",
+                account.name
             );
         }
 
-        // Aggregate is consistent; now process individual trades.
         let exchange_has_matching = matching_exchange_size > Decimal::ZERO;
         for trade in trades {
             match (trade.status.as_str(), exchange_has_matching) {
                 ("open", true) => {
-                    // 正常ケース。ただし stop_order_id があるのに取引所側で
-                    // 消えている (Gone) 場合、ポジションは無防備なので運用者に
-                    // SystemAlert を出す (Phase 4 / Task 4.6)。
                     if let Some(stop_id) = &trade.stop_order_id {
-                        match api.stop_order_status(&trade.pair.0, stop_id).await {
-                            Ok(StopOrderStatus::Gone) => {
-                                tracing::error!(
-                                    "startup reconcile: trade {} has an open position but its stop \
-                                     order {stop_id} is GONE — position is UNPROTECTED",
-                                    trade.id
-                                );
-                                let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
-                                    title: "stop order lost".to_string(),
-                                    account_name: account.name.clone(),
-                                    exchange: trade.exchange,
-                                    body: format!(
-                                        "trade {} on {} has an open exchange position but its SL \
-                                         stop order ({stop_id}) is gone (canceled/expired). The \
-                                         position is unprotected — replace the stop or close manually.",
-                                        trade.id, trade.pair
-                                    ),
-                                });
-                                if let Err(e) = notifier.send(ev).await {
-                                    tracing::warn!("stop-order-lost alert send failed: {e}");
-                                }
-                            }
-                            Ok(_) => {
-                                tracing::info!(
-                                    "startup reconcile: trade {} consistent (DB=open, exchange=open, stop present)",
-                                    trade.id
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "startup reconcile: stop_order_status failed for trade {}: {e}",
-                                    trade.id
-                                );
-                            }
-                        }
+                        alert_if_protective_stop_is_gone(api, account, trade, stop_id, notifier)
+                            .await;
                     } else {
-                        tracing::info!(
-                            "startup reconcile: trade {} consistent (DB=open, exchange=open)",
-                            trade.id
-                        );
+                        tracing::info!(trade_id = %trade.id, "consistent, db open and exchange open");
                     }
                 }
                 ("open", false) => {
-                    // 取引所に position が無い。stop_order_id があれば、まず
-                    // 取引所側ストップが Executed になっていないか確認する。
-                    // Executed なら正確な約定価格/手数料で SlHit close する
-                    // (従来の best-effort reconciled より正確)。
                     if let Some((price, commission)) = stop_executed_fill(api, trade).await {
                         tracing::info!(
-                            "startup reconcile: trade {} closed by exchange stop at {price}; \
-                             recording as sl_hit",
-                            trade.id
+                            trade_id = %trade.id,
+                            price = %price,
+                            "closed by exchange stop, recording as sl_hit"
                         );
                         close_reconciled_with(pool, trade, price, ExitReason::SlHit, commission)
                             .await?;
                     } else {
                         tracing::warn!(
-                            "startup reconcile: trade {} DB=open but exchange has no matching position; \
-                             closing with best-effort exit price",
-                            trade.id
+                            trade_id = %trade.id,
+                            "db open but exchange has no matching position, closing with best-effort exit price"
                         );
-                        tracing::warn!(
-                            "startup reconcile: trade {} force-closed (reason=orphan)",
-                            trade.id
-                        );
+                        tracing::warn!(trade_id = %trade.id, reason = "orphan", "force-closed");
                         let exit_price = best_effort_exit_price(price_store, trade).await;
                         close_reconciled_with(
                             pool,
@@ -274,23 +185,17 @@ async fn reconcile_one_account(
                 }
                 ("closing", true) => {
                     tracing::warn!(
-                        "startup reconcile: trade {} DB=closing but exchange position still open — \
-                         resetting to open for retry by normal close monitor",
-                        trade.id
+                        trade_id = %trade.id,
+                        "db closing but exchange position still open, resetting to open for retry by normal close monitor"
                     );
-                    // Revert closing → open so the normal monitor loop will retry close.
                     trades::release_close_lock(pool, trade.id).await?;
                 }
                 ("closing", false) => {
                     tracing::warn!(
-                        "startup reconcile: trade {} DB=closing and exchange shows no position — \
-                         completing Phase 3 with best-effort exit price",
-                        trade.id
+                        trade_id = %trade.id,
+                        "db closing and exchange shows no position, completing phase3 with best-effort exit price"
                     );
-                    tracing::warn!(
-                        "startup reconcile: trade {} force-closed (reason=phase3)",
-                        trade.id
-                    );
+                    tracing::warn!(trade_id = %trade.id, reason = "phase3", "force-closed");
                     let exit_price = best_effort_exit_price(price_store, trade).await;
                     close_reconciled_with(
                         pool,
@@ -302,11 +207,8 @@ async fn reconcile_one_account(
                     .await?;
                 }
                 (other, _) => {
-                    // Should never happen — list_open_or_closing_by_account filters to
-                    // status IN ('open', 'closing'). Bail rather than silently skipping.
                     anyhow::bail!(
-                        "startup reconcile: unexpected status '{}' for trade {}",
-                        other,
+                        "unsupported trade_status for trade \"{}\": {other}",
                         trade.id
                     );
                 }
@@ -316,7 +218,60 @@ async fn reconcile_one_account(
     Ok(())
 }
 
-/// Best-effort exit price: PriceStore mid, fallback to entry_price.
+fn group_trades_for_aggregate_comparison(
+    db_trades: &[auto_trader_core::types::Trade],
+) -> HashMap<(String, Direction), (Decimal, Vec<&auto_trader_core::types::Trade>)> {
+    let mut db_groups: HashMap<
+        (String, Direction),
+        (Decimal, Vec<&auto_trader_core::types::Trade>),
+    > = HashMap::new();
+    for trade in db_trades {
+        let key = (trade.pair.0.clone(), trade.direction);
+        let entry = db_groups.entry(key).or_insert((Decimal::ZERO, Vec::new()));
+        entry.0 += trade.quantity;
+        entry.1.push(trade);
+    }
+    db_groups
+}
+
+async fn alert_if_protective_stop_is_gone(
+    api: &dyn ExchangeApi,
+    account: &auto_trader_db::trading_accounts::TradingAccount,
+    trade: &auto_trader_core::types::Trade,
+    stop_id: &str,
+    notifier: &Notifier,
+) {
+    match api.stop_order_status(&trade.pair.0, stop_id).await {
+        Ok(StopOrderStatus::Gone) => {
+            tracing::error!(
+                trade_id = %trade.id,
+                stop_id = %stop_id,
+                "protective stop order is gone, position is unprotected"
+            );
+            let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
+                title: "stop order lost".to_string(),
+                account_name: account.name.clone(),
+                exchange: trade.exchange,
+                body: format!(
+                    "trade {} on {} has an open exchange position but its SL \
+                     stop order ({stop_id}) is gone (canceled/expired). The \
+                     position is unprotected — replace the stop or close manually.",
+                    trade.id, trade.pair
+                ),
+            });
+            if let Err(e) = notifier.send(ev).await {
+                tracing::warn!(error = %e, "failed to send stop-order-lost alert");
+            }
+        }
+        Ok(_) => {
+            tracing::info!(trade_id = %trade.id, "consistent, db open and exchange open with stop present");
+        }
+        Err(e) => {
+            tracing::warn!(trade_id = %trade.id, error = %e, "failed to check stop_order_status");
+        }
+    }
+}
+
 async fn best_effort_exit_price(
     price_store: &PriceStore,
     trade: &auto_trader_core::types::Trade,
@@ -326,19 +281,16 @@ async fn best_effort_exit_price(
         Some((bid, ask)) => (bid + ask) / Decimal::from(2),
         None => {
             tracing::warn!(
-                "startup reconcile: no PriceStore data for {:?} {}; \
-                 using entry_price as exit_price for trade {} (approximate)",
-                trade.exchange,
-                trade.pair,
-                trade.id
+                exchange = %trade.exchange,
+                pair = %trade.pair,
+                trade_id = %trade.id,
+                "no price_store data, using entry_price as exit_price (approximate)"
             );
             trade.entry_price
         }
     }
 }
 
-/// 取引所側ストップの状態を確認し、`Executed` なら `(約定価格, 手数料)` を返す。
-/// それ以外 (Active / Gone / stop_order_id 無し / API エラー) は `None`。
 async fn stop_executed_fill(
     api: &dyn ExchangeApi,
     trade: &auto_trader_core::types::Trade,
@@ -348,17 +300,12 @@ async fn stop_executed_fill(
         Ok(StopOrderStatus::Executed { price, commission }) => Some((price, commission)),
         Ok(_) => None,
         Err(e) => {
-            tracing::warn!(
-                "startup reconcile: stop_order_status failed for trade {}: {e}",
-                trade.id
-            );
+            tracing::warn!(trade_id = %trade.id, error = %e, "failed to check stop_order_status");
             None
         }
     }
 }
 
-/// `trade` を確定した exit_price / exit_reason で close する共通ルーチン。
-/// `extra_fees` は取引所側ストップ約定の手数料など、close 時に fees へ積む額。
 async fn close_reconciled_with(
     pool: &PgPool,
     trade: &auto_trader_core::types::Trade,
@@ -370,19 +317,24 @@ async fn close_reconciled_with(
         Direction::Long => (exit_price - trade.entry_price) * trade.quantity,
         Direction::Short => (trade.entry_price - exit_price) * trade.quantity,
     };
-    // Truncate pnl to whole yen.
     let pnl = pnl.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
 
-    // 取引所側ストップ約定の手数料を fees に積む (正確な台帳記録)。
     if extra_fees != Decimal::ZERO {
         trades::add_fees(pool, trade.id, extra_fees).await?;
     }
 
     trades::close_trade_reconciled(pool, trade.id, exit_price, pnl, exit_reason).await?;
 
-    // Update daily_summary so the reconciled close is reflected in
-    // aggregated stats — the normal close path goes through the trade
-    // recorder task which is not running during startup reconciliation.
+    backfill_daily_summary_for_reconciled_close(pool, trade, pnl).await?;
+
+    Ok(())
+}
+
+async fn backfill_daily_summary_for_reconciled_close(
+    pool: &PgPool,
+    trade: &auto_trader_core::types::Trade,
+    pnl: Decimal,
+) -> anyhow::Result<()> {
     let exit_date = chrono::Utc::now().date_naive();
     let win = if pnl > Decimal::ZERO { 1 } else { 0 };
     let account_type: String =
@@ -406,10 +358,7 @@ async fn close_reconciled_with(
     )
     .await
     {
-        tracing::warn!(
-            "startup reconcile: failed to update daily_summary for trade {}: {e}",
-            trade.id
-        );
+        tracing::warn!(trade_id = %trade.id, error = %e, "failed to update daily_summary");
     }
 
     Ok(())
@@ -424,593 +373,4 @@ fn matches_direction(side: &str, direction: &Direction) -> Option<bool> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use auto_trader_core::types::Direction;
-
-    #[test]
-    fn matches_direction_long() {
-        assert_eq!(matches_direction("BUY", &Direction::Long), Some(true));
-        assert_eq!(matches_direction("buy", &Direction::Long), Some(true));
-        assert_eq!(matches_direction("SELL", &Direction::Long), Some(false));
-    }
-
-    #[test]
-    fn matches_direction_short() {
-        assert_eq!(matches_direction("SELL", &Direction::Short), Some(true));
-        assert_eq!(matches_direction("sell", &Direction::Short), Some(true));
-        assert_eq!(matches_direction("BUY", &Direction::Short), Some(false));
-    }
-
-    #[test]
-    fn matches_direction_unknown_side() {
-        assert_eq!(matches_direction("UNKNOWN", &Direction::Long), None);
-        assert_eq!(matches_direction("", &Direction::Short), None);
-    }
-
-    #[test]
-    fn exchange_from_str_known() {
-        assert!(
-            "bitflyer_cfd"
-                .parse::<auto_trader_core::types::Exchange>()
-                .is_ok()
-        );
-        assert!("oanda".parse::<auto_trader_core::types::Exchange>().is_ok());
-        assert!(
-            "gmo_fx"
-                .parse::<auto_trader_core::types::Exchange>()
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn exchange_from_str_unknown() {
-        assert!(
-            "unknown_exchange"
-                .parse::<auto_trader_core::types::Exchange>()
-                .is_err()
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// S2: startup_reconcile integration tests (sqlx::test + MockExchangeApi)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod reconcile_tests {
-    use super::*;
-    use async_trait::async_trait;
-    use auto_trader_core::types::{Exchange, Pair, Trade, TradeStatus};
-    use auto_trader_market::bitflyer_private::{
-        ChildOrder, Collateral, ExchangePosition, Execution, SendChildOrderRequest,
-        SendChildOrderResponse,
-    };
-    use auto_trader_market::exchange_api::ExchangeApi;
-    use chrono::Utc;
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-    use sqlx::PgPool;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use uuid::Uuid;
-
-    // -----------------------------------------------------------------------
-    // MockExchangeApi
-    // -----------------------------------------------------------------------
-
-    /// Minimal mock for `ExchangeApi`. `get_positions` + `stop_order_status`
-    /// are implemented; all other methods panic (reconciler never calls them).
-    struct MockExchangeApi {
-        /// Map from pair → positions to return once get_positions_failures is
-        /// exhausted.
-        positions: HashMap<String, Vec<ExchangePosition>>,
-        /// How many times `get_positions` should fail before succeeding.
-        get_positions_failures_remaining: AtomicU32,
-        /// Response for `stop_order_status` (None → method bails).
-        stop_status: Option<StopOrderStatus>,
-    }
-
-    impl MockExchangeApi {
-        fn new(positions: HashMap<String, Vec<ExchangePosition>>, failures: u32) -> Arc<Self> {
-            Arc::new(Self {
-                positions,
-                get_positions_failures_remaining: AtomicU32::new(failures),
-                stop_status: None,
-            })
-        }
-
-        fn new_with_stop(
-            positions: HashMap<String, Vec<ExchangePosition>>,
-            stop_status: StopOrderStatus,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                positions,
-                get_positions_failures_remaining: AtomicU32::new(0),
-                stop_status: Some(stop_status),
-            })
-        }
-    }
-
-    fn test_notifier() -> Arc<Notifier> {
-        Arc::new(Notifier::new_disabled())
-    }
-
-    #[async_trait]
-    impl ExchangeApi for MockExchangeApi {
-        async fn get_positions(&self, product_code: &str) -> anyhow::Result<Vec<ExchangePosition>> {
-            if self
-                .get_positions_failures_remaining
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                    if v > 0 { Some(v - 1) } else { None }
-                })
-                .is_ok()
-            {
-                anyhow::bail!("mock get_positions failure");
-            }
-            Ok(self
-                .positions
-                .get(product_code)
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        async fn send_child_order(
-            &self,
-            _req: SendChildOrderRequest,
-        ) -> anyhow::Result<SendChildOrderResponse> {
-            unimplemented!("MockExchangeApi: send_child_order not used in reconciler tests")
-        }
-
-        async fn get_child_orders(
-            &self,
-            _product_code: &str,
-            _child_order_acceptance_id: &str,
-        ) -> anyhow::Result<Vec<ChildOrder>> {
-            unimplemented!("MockExchangeApi: get_child_orders not used in reconciler tests")
-        }
-
-        async fn get_executions(
-            &self,
-            _product_code: &str,
-            _child_order_acceptance_id: &str,
-        ) -> anyhow::Result<Vec<Execution>> {
-            unimplemented!("MockExchangeApi: get_executions not used in reconciler tests")
-        }
-
-        async fn get_collateral(&self) -> anyhow::Result<Collateral> {
-            unimplemented!("MockExchangeApi: get_collateral not used in reconciler tests")
-        }
-
-        async fn cancel_child_order(
-            &self,
-            _product_code: &str,
-            _child_order_acceptance_id: &str,
-        ) -> anyhow::Result<()> {
-            unimplemented!("MockExchangeApi: cancel_child_order not used in reconciler tests")
-        }
-
-        async fn resolve_position_id(
-            &self,
-            _product_code: &str,
-            _after: chrono::DateTime<chrono::Utc>,
-            _expected_side: auto_trader_market::bitflyer_private::Side,
-            _expected_size: rust_decimal::Decimal,
-        ) -> anyhow::Result<Option<String>> {
-            Ok(None)
-        }
-
-        async fn stop_order_status(
-            &self,
-            _product_code: &str,
-            _stop_order_id: &str,
-        ) -> anyhow::Result<StopOrderStatus> {
-            self.stop_status
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("MockExchangeApi: stop_status not configured"))
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
-    fn make_exchange_position(side: &str, size: Decimal) -> ExchangePosition {
-        ExchangePosition {
-            product_code: "FX_BTC_JPY".to_string(),
-            side: side.to_string(),
-            price: dec!(11_500_000),
-            size,
-            commission: dec!(0),
-            swap_point_accumulate: dec!(0),
-            require_collateral: dec!(0),
-            open_date: "2026-01-01T00:00:00".to_string(),
-            leverage: dec!(2),
-            pnl: dec!(0),
-            sfd: dec!(0),
-        }
-    }
-
-    async fn seed_live_account(pool: &PgPool) -> Uuid {
-        let id = Uuid::new_v4();
-        sqlx::query(
-            r#"INSERT INTO trading_accounts
-                   (id, name, account_type, exchange, strategy,
-                    initial_balance, current_balance, leverage, currency)
-               VALUES ($1, 'reconcile_test', 'live', 'bitflyer_cfd', 'bb_mean_revert_v1',
-                       30000, 30000, 2, 'JPY')"#,
-        )
-        .bind(id)
-        .execute(pool)
-        .await
-        .expect("seed_live_account failed");
-        id
-    }
-
-    async fn seed_open_trade(pool: &PgPool, account_id: Uuid) -> Trade {
-        let trade = Trade {
-            id: Uuid::new_v4(),
-            account_id,
-            strategy_name: "bb_mean_revert_v1".to_string(),
-            pair: Pair::new("FX_BTC_JPY"),
-            exchange: Exchange::BitflyerCfd,
-            direction: Direction::Long,
-            entry_price: dec!(11_500_000),
-            exit_price: None,
-            stop_loss: dec!(11_155_000),
-            take_profit: None,
-            quantity: dec!(0.001),
-            leverage: dec!(2),
-            fees: dec!(0),
-            entry_at: Utc::now(),
-            exit_at: None,
-            pnl_amount: None,
-            exit_reason: None,
-            status: TradeStatus::Open,
-            max_hold_until: None,
-            exchange_position_id: None,
-            stop_order_id: None,
-        };
-        sqlx::query(
-            r#"INSERT INTO trades
-                   (id, account_id, strategy_name, pair, exchange, direction,
-                    entry_price, exit_price, stop_loss, take_profit,
-                    quantity, leverage, fees, entry_at, exit_at,
-                    pnl_amount, exit_reason, status, max_hold_until)
-               VALUES ($1, $2, $3, $4, $5, $6,
-                       $7, $8, $9, $10,
-                       $11, $12, $13, $14, $15,
-                       $16, $17, $18, $19)"#,
-        )
-        .bind(trade.id)
-        .bind(trade.account_id)
-        .bind(&trade.strategy_name)
-        .bind(&trade.pair.0)
-        .bind(trade.exchange.as_str())
-        .bind("long")
-        .bind(trade.entry_price)
-        .bind(trade.exit_price)
-        .bind(trade.stop_loss)
-        .bind(trade.take_profit)
-        .bind(trade.quantity)
-        .bind(trade.leverage)
-        .bind(trade.fees)
-        .bind(trade.entry_at)
-        .bind(trade.exit_at)
-        .bind(trade.pnl_amount)
-        .bind(Option::<String>::None)
-        .bind("open")
-        .bind(trade.max_hold_until)
-        .execute(pool)
-        .await
-        .expect("seed_open_trade failed");
-        trade
-    }
-
-    /// seed_open_trade then set its `stop_order_id` (exchange-side SL present).
-    async fn seed_open_trade_with_stop(
-        pool: &PgPool,
-        account_id: Uuid,
-        stop_order_id: &str,
-    ) -> Trade {
-        let mut trade = seed_open_trade(pool, account_id).await;
-        sqlx::query("UPDATE trades SET stop_order_id = $1 WHERE id = $2")
-            .bind(stop_order_id)
-            .bind(trade.id)
-            .execute(pool)
-            .await
-            .expect("set stop_order_id failed");
-        trade.stop_order_id = Some(stop_order_id.to_string());
-        trade
-    }
-
-    async fn seed_closing_trade(pool: &PgPool, account_id: Uuid) -> Trade {
-        let trade = seed_open_trade(pool, account_id).await;
-        // Manually transition to 'closing' (mimics acquire_close_lock)
-        sqlx::query("UPDATE trades SET status = 'closing' WHERE id = $1")
-            .bind(trade.id)
-            .execute(pool)
-            .await
-            .expect("seed_closing_trade: status update failed");
-        trade
-    }
-
-    fn build_apis(api: Arc<dyn ExchangeApi>) -> HashMap<Exchange, Arc<dyn ExchangeApi>> {
-        let mut m = HashMap::new();
-        m.insert(Exchange::BitflyerCfd, api);
-        m
-    }
-
-    fn empty_price_store() -> Arc<PriceStore> {
-        PriceStore::new(vec![]) // PriceStore::new already returns Arc<PriceStore>
-    }
-
-    // -----------------------------------------------------------------------
-    // S2-1: DB=open, exchange has position → noop (consistent)
-    // -----------------------------------------------------------------------
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn db_open_exchange_has_position_is_noop(pool: PgPool) {
-        let account_id = seed_live_account(&pool).await;
-        let trade = seed_open_trade(&pool, account_id).await;
-
-        let mut positions = HashMap::new();
-        positions.insert(
-            "FX_BTC_JPY".to_string(),
-            vec![make_exchange_position("BUY", dec!(0.001))],
-        );
-        let api = MockExchangeApi::new(positions, 0);
-        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let accounts = vec![account];
-        let apis = build_apis(api);
-        let price_store = empty_price_store();
-
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
-            .await
-            .expect("reconcile must succeed");
-
-        // Trade must remain open
-        let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE id = $1")
-            .bind(trade.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "open", "consistent trade must remain open");
-    }
-
-    // -----------------------------------------------------------------------
-    // S2-2: DB=open, exchange has no position → force close DB row
-    // -----------------------------------------------------------------------
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn db_open_exchange_empty_force_closes_db(pool: PgPool) {
-        let account_id = seed_live_account(&pool).await;
-        let trade = seed_open_trade(&pool, account_id).await;
-
-        // Exchange returns empty positions (position already gone)
-        let api = MockExchangeApi::new(HashMap::new(), 0);
-        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let accounts = vec![account];
-        let apis = build_apis(api);
-        let price_store = empty_price_store();
-
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
-            .await
-            .expect("reconcile must succeed");
-
-        // Trade must now be closed
-        let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE id = $1")
-            .bind(trade.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "closed", "orphan-open trade must be force-closed");
-
-        let exit_reason: String =
-            sqlx::query_scalar("SELECT exit_reason FROM trades WHERE id = $1")
-                .bind(trade.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            exit_reason, "reconciled",
-            "exit_reason must be 'reconciled' for startup-reconcile force-close"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // S2-2b: DB=open, exchange empty, stop Executed → close as sl_hit at
-    //        the exact stop fill price (more accurate than best-effort).
-    // -----------------------------------------------------------------------
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn db_open_exchange_empty_stop_executed_closes_as_sl_hit(pool: PgPool) {
-        let account_id = seed_live_account(&pool).await;
-        let trade = seed_open_trade_with_stop(&pool, account_id, "stop-xyz").await;
-
-        // Exchange has no position, but the SL stop order executed at 11_100_000.
-        let api = MockExchangeApi::new_with_stop(
-            HashMap::new(),
-            StopOrderStatus::Executed {
-                price: dec!(11_100_000),
-                commission: dec!(50),
-            },
-        );
-        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let accounts = vec![account];
-        let apis = build_apis(api);
-        let price_store = empty_price_store();
-
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
-            .await
-            .expect("reconcile must succeed");
-
-        let row: (String, Option<String>, Option<Decimal>, Decimal) = sqlx::query_as(
-            "SELECT status, exit_reason, exit_price, fees FROM trades WHERE id = $1",
-        )
-        .bind(trade.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, "closed");
-        assert_eq!(
-            row.1.as_deref(),
-            Some("sl_hit"),
-            "stop-executed reconcile records exit_reason=sl_hit"
-        );
-        assert_eq!(
-            row.2,
-            Some(dec!(11_100_000)),
-            "exit_price is the exact stop fill price"
-        );
-        assert_eq!(row.3, dec!(50), "commission is added to fees");
-    }
-
-    // -----------------------------------------------------------------------
-    // S2-3: DB=closing, exchange has position → reset to open
-    // -----------------------------------------------------------------------
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn db_closing_exchange_has_position_resets_to_open(pool: PgPool) {
-        let account_id = seed_live_account(&pool).await;
-        let trade = seed_closing_trade(&pool, account_id).await;
-
-        let mut positions = HashMap::new();
-        positions.insert(
-            "FX_BTC_JPY".to_string(),
-            vec![make_exchange_position("BUY", dec!(0.001))],
-        );
-        let api = MockExchangeApi::new(positions, 0);
-        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let accounts = vec![account];
-        let apis = build_apis(api);
-        let price_store = empty_price_store();
-
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
-            .await
-            .expect("reconcile must succeed");
-
-        // Trade must be reverted to open
-        let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE id = $1")
-            .bind(trade.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            status, "open",
-            "closing trade with exchange position should be reset to open"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // S2-4: DB=closing, exchange has no position → complete Phase 3 (close DB)
-    // -----------------------------------------------------------------------
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn db_closing_exchange_empty_completes_phase3(pool: PgPool) {
-        let account_id = seed_live_account(&pool).await;
-        let trade = seed_closing_trade(&pool, account_id).await;
-
-        // Exchange shows no position → Phase 2 completed before crash
-        let api = MockExchangeApi::new(HashMap::new(), 0);
-        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let accounts = vec![account];
-        let apis = build_apis(api);
-        let price_store = empty_price_store();
-
-        reconcile_live_accounts_at_startup(&pool, &accounts, &apis, price_store, test_notifier())
-            .await
-            .expect("reconcile must succeed");
-
-        let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE id = $1")
-            .bind(trade.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            status, "closed",
-            "closing trade with no exchange position must be force-closed"
-        );
-
-        let exit_reason: String =
-            sqlx::query_scalar("SELECT exit_reason FROM trades WHERE id = $1")
-                .bind(trade.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            exit_reason, "reconciled",
-            "exit_reason must be 'reconciled' for startup-reconcile phase3 force-close"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // S2-5: get_positions retry exhausted → bail
-    // -----------------------------------------------------------------------
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn get_positions_retry_exhausted_bails(pool: PgPool) {
-        let account_id = seed_live_account(&pool).await;
-        // Seed a trade so the reconciler actually calls get_positions
-        let _trade = seed_open_trade(&pool, account_id).await;
-
-        // Fail all 3 attempts (MAX_ATTEMPTS = 3)
-        let api = MockExchangeApi::new(HashMap::new(), 3);
-        let account = auto_trader_db::trading_accounts::get_account(&pool, account_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        // Time is intentionally NOT virtualized here: `reconcile_one_account`
-        // still issues a real DB query (list_open_or_closing_by_account) before
-        // the retry loop runs, and every sqlx pool acquire() performs a live
-        // ping() by default (test_before_acquire). Pausing tokio's clock while
-        // that real network round trip is outstanding races the paused-clock
-        // auto-advance (which fast-forwards to the next pending timer, i.e. the
-        // pool's acquire_timeout, as soon as a single non-blocking IO poll finds
-        // nothing ready) against the ping response, intermittently producing a
-        // spurious "pool timed out" instead of the intended retry-exhaustion
-        // error. The retry backoff (2s → 4s) below therefore sleeps in real
-        // time (~6s total for this test).
-        let accounts = vec![account];
-        let apis = build_apis(api);
-        let price_store = empty_price_store();
-
-        let result = reconcile_live_accounts_at_startup(
-            &pool,
-            &accounts,
-            &apis,
-            price_store,
-            test_notifier(),
-        )
-        .await;
-
-        assert!(
-            result.is_err(),
-            "reconcile must fail when get_positions exhausts retries"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("exhausted")
-                || err_msg.contains("retry")
-                || err_msg.contains("retries"),
-            "error must mention retry exhaustion: {err_msg}"
-        );
-    }
-}
+mod tests;
