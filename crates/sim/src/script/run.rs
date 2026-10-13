@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use rhai::{CallFnOptions, Dynamic, Scope};
 
 use super::ctx::RhaiCtx;
+use super::host::{ScriptHost, describe_rhai_error, reset_ops_relay, take_last_call_ops};
+use super::params::{CompiledScript, param_set_to_rhai_map};
 use super::types::{BarState, Decider, ParamSet};
-use super::{CompiledScript, param_set_to_rhai_map};
-use super::{ScriptHost, describe_rhai_error, reset_ops_relay, take_last_call_ops};
 use crate::config::SimConfig;
 use crate::indicators::IndicatorKey;
 use crate::series::Dataset;
@@ -66,10 +66,10 @@ impl Decider for ScriptRun<'_> {
         let options = CallFnOptions::new()
             .eval_ast(false)
             .bind_this_ptr(&mut self.this);
-        let result = self.host.engine.call_fn_with_options::<Dynamic>(
+        let result = self.host.engine().call_fn_with_options::<Dynamic>(
             options,
             &mut scope,
-            &self.script.ast,
+            self.script.ast(),
             "on_bar",
             args,
         );

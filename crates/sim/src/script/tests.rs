@@ -1243,3 +1243,17 @@ fn concurrent_script_runs_on_different_threads_do_not_mix_run_totals_or_this() {
         "thread B (large run budget) must not be affected by thread A's small budget: {results_b:?}"
     );
 }
+
+#[test]
+fn bar_end_time_adds_bar_length() {
+    assert_eq!(ctx::bar_end_time(1_000).unwrap(), 1_000 + M5_SECS);
+}
+
+#[test]
+fn bar_end_time_rejects_i64_overflow() {
+    let err = ctx::bar_end_time(i64::MAX).unwrap_err().to_string();
+    assert!(
+        err.contains("invalid ctx.time: open_time plus the bar length overflows i64"),
+        "{err}"
+    );
+}
