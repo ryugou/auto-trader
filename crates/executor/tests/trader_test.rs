@@ -92,17 +92,16 @@ fn btc_pair_configs() -> HashMap<auto_trader_core::types::Pair, Decimal> {
 }
 
 /// Build a Trader in live mode using a wiremock server URI.
+#[cfg(test)]
 fn build_live_trader(
     pool: PgPool,
     account_id: Uuid,
     server_uri: String,
     price_store: Arc<PriceStore>,
 ) -> Trader {
-    let api = Arc::new(BitflyerPrivateApi::new_for_test(
-        server_uri,
-        "k".to_string(),
-        "s".to_string(),
-    ));
+    let api = Arc::new(
+        BitflyerPrivateApi::new_for_test(server_uri, "k".to_string(), "s".to_string()).unwrap(),
+    );
     let notifier = Arc::new(Notifier::new_disabled());
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
@@ -123,15 +122,19 @@ fn build_live_trader(
 }
 
 /// Build a Trader in dry_run mode (no API calls; fill price comes from PriceStore).
+#[cfg(test)]
 fn build_dry_run_trader(pool: PgPool, account_id: Uuid, price_store: Arc<PriceStore>) -> Trader {
     // In dry_run mode the BitflyerPrivateApi is never called, but Trader::new
     // still requires an instance. Point it at a non-existent localhost address
     // so any accidental call fails fast rather than hanging.
-    let api = Arc::new(BitflyerPrivateApi::new_for_test(
-        "http://127.0.0.1:1".to_string(),
-        "k".to_string(),
-        "s".to_string(),
-    ));
+    let api = Arc::new(
+        BitflyerPrivateApi::new_for_test(
+            "http://127.0.0.1:1".to_string(),
+            "k".to_string(),
+            "s".to_string(),
+        )
+        .unwrap(),
+    );
     let notifier = Arc::new(Notifier::new_disabled());
     let position_sizer = Arc::new(auto_trader_executor::position_sizer::PositionSizer::new(
         btc_pair_configs(),
