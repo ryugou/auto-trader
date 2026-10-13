@@ -312,8 +312,11 @@ async fn null_exchange_api_returns_error_on_all_methods() {
         .await;
     assert!(result.is_err(), "send_child_order should return error");
     assert!(
-        result.unwrap_err().to_string().contains("NullExchangeApi"),
-        "error should mention NullExchangeApi"
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported operation: "),
+        "error should be an unsupported operation"
     );
 
     // get_child_orders

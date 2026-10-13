@@ -1,24 +1,20 @@
-//! GMO Coin FX Market Feed — REST polling ticker → CandleBuilder.
-//!
-//! Uses the Public API (no auth required) to poll bid/ask prices
-//! at a fixed 5-second interval, then builds M5 + H1 candles via
-//! CandleBuilder — same pattern as BitflyerMonitor.
-
-use crate::candle_builder::CandleBuilder;
-use crate::market_feed::MarketFeed;
-use crate::price_store::{FeedKey, LatestTick, PriceStore};
-use async_trait::async_trait;
-use auto_trader_core::event::PriceEvent;
-use auto_trader_core::types::{Exchange, Pair};
-use reqwest::Client;
-use rust_decimal::Decimal;
-use serde::Deserialize;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use auto_trader_core::event::PriceEvent;
+use auto_trader_core::types::{Candle, Exchange, Pair};
+use reqwest::Client;
+use rust_decimal::Decimal;
+use serde::Deserialize;
+use sqlx::PgPool;
 use tokio::sync::mpsc;
+
+use crate::candle_builder::CandleBuilder;
+use crate::market_feed::MarketFeed;
+use crate::price_store::{FeedKey, LatestTick, PriceStore};
 
 const POLL_INTERVAL_SECS: u64 = 5;
 const BASE_URL: &str = "https://forex-api.coin.z.com/public";
@@ -39,15 +35,35 @@ struct TickerData {
     status: String,
 }
 
-/// GMO FX ticker API の `status` 値で保守中を表す。
 const GMO_FX_STATUS_MAINTENANCE: i32 = 5;
+const GMO_FX_TICKER_VOLUME_UNAVAILABLE: Decimal = Decimal::ZERO;
 
-/// GMO FX ticker の `status` が保守中 (`GMO_FX_STATUS_MAINTENANCE`) のときだけ全ペアを休場として記録する。
-/// それ以外の非ゼロ status (API 障害・一時的な不正応答等) まで休場扱いすると、
-/// API がエラーを返し続ける間 feed watchdog が「正常な休場」と誤認し、本当の
-/// 途絶を検知できなくなる (Issue #109 item 3)。
 fn should_mark_market_closed(status: i32) -> bool {
     status == GMO_FX_STATUS_MAINTENANCE
+}
+
+async fn save_and_send_candle(
+    pool: Option<&PgPool>,
+    candle: Candle,
+    price_tx: &mpsc::Sender<PriceEvent>,
+) -> bool {
+    if let Some(pool) = pool
+        && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
+    {
+        tracing::warn!(error = %e, timeframe = %candle.timeframe, "failed to save candle");
+    }
+    let event = PriceEvent {
+        pair: candle.pair.clone(),
+        exchange: Exchange::GmoFx,
+        timestamp: candle.timestamp,
+        candle,
+        indicators: HashMap::new(),
+    };
+    if price_tx.send(event).await.is_err() {
+        tracing::info!("price channel closed, stopping gmo fx feed");
+        return false;
+    }
+    true
 }
 
 pub struct GmoFxFeed {
@@ -80,9 +96,6 @@ impl MarketFeed for GmoFxFeed {
     ) -> anyhow::Result<()> {
         let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
-        // Build CandleBuilders per pair — primary timeframe (M5) + H1 secondary.
-        // Only create H1 builders when the primary is not already H1 to avoid
-        // duplicate events (same pattern as BitflyerMonitor).
         let mut builders: HashMap<String, CandleBuilder> = HashMap::new();
         let mut h1_builders: HashMap<String, CandleBuilder> = HashMap::new();
         for pair in &self.pairs {
@@ -102,7 +115,6 @@ impl MarketFeed for GmoFxFeed {
             }
         }
 
-        // Precompute Pair + FeedKey per symbol to avoid per-tick allocations.
         let pair_map: HashMap<String, (Pair, FeedKey)> = self
             .pairs
             .iter()
@@ -114,29 +126,26 @@ impl MarketFeed for GmoFxFeed {
         let symbols: std::collections::HashSet<String> = pair_map.keys().cloned().collect();
 
         let mut interval = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
-        // Prevent burst catch-up if a poll takes longer than the interval
-        // (e.g. slow HTTP response). Delay shifts subsequent ticks forward.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             interval.tick().await;
 
             if price_tx.is_closed() {
-                tracing::info!("GMO FX feed: price channel closed, stopping");
+                tracing::info!("price channel closed, stopping gmo fx feed");
                 return Ok(());
             }
 
-            // Poll the public ticker endpoint (no auth required).
             let resp = match client.get(format!("{BASE_URL}/v1/ticker")).send().await {
                 Ok(r) => match r.error_for_status() {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!("GMO FX ticker HTTP error: {e}");
+                        tracing::warn!(error = %e, "failed to call gmo fx ticker api: non-2xx response");
                         continue;
                     }
                 },
                 Err(e) => {
-                    tracing::warn!("GMO FX ticker poll failed: {e}");
+                    tracing::warn!(error = %e, "failed to call gmo fx ticker api: send failed");
                     continue;
                 }
             };
@@ -144,20 +153,21 @@ impl MarketFeed for GmoFxFeed {
             let ticker: TickerResponse = match resp.json().await {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("GMO FX ticker parse failed: {e}");
+                    tracing::warn!(error = %e, "failed to parse gmo fx ticker response");
                     continue;
                 }
             };
 
             if ticker.status != 0 {
-                // status=5 is maintenance — log at debug to avoid spam.
                 if ticker.status == GMO_FX_STATUS_MAINTENANCE {
-                    tracing::debug!("GMO FX: maintenance (status=5), waiting");
+                    tracing::debug!(
+                        status = ticker.status,
+                        "gmo fx ticker reports maintenance, waiting"
+                    );
                 } else {
-                    tracing::warn!("GMO FX ticker non-zero status: {}", ticker.status);
+                    tracing::warn!(status = ticker.status, "invalid ticker status: non-zero");
                 }
                 if should_mark_market_closed(ticker.status) {
-                    // Mark all pairs as market closed so health shows the correct status.
                     for (_, fk) in pair_map.values() {
                         price_store.mark_market_closed(fk.clone()).await;
                     }
@@ -170,58 +180,20 @@ impl MarketFeed for GmoFxFeed {
                     continue;
                 }
                 if item.status != "OPEN" {
-                    // Market closed (weekend / holiday) — mark in PriceStore so health
-                    // endpoint shows "market_closed" instead of "missing" or "stale".
                     let (_pair, feed_key) = &pair_map[&item.symbol];
                     price_store.mark_market_closed(feed_key.clone()).await;
-                    // Flush any in-progress candle so it doesn't linger until next
-                    // market open (could be days for weekend).
                     let now = chrono::Utc::now();
                     if let Some(builder) = builders.get_mut(&item.symbol)
                         && let Some(candle) = builder.try_complete(now, None, None)
+                        && !save_and_send_candle(self.pool.as_ref(), candle, &price_tx).await
                     {
-                        if let Some(pool) = &self.pool
-                            && let Err(e) =
-                                auto_trader_db::candles::upsert_candle(pool, &candle).await
-                        {
-                            tracing::warn!("GMO FX: failed to save candle on market close: {e}");
-                        }
-                        let event = PriceEvent {
-                            pair: candle.pair.clone(),
-                            exchange: Exchange::GmoFx,
-                            timestamp: candle.timestamp,
-                            candle,
-                            indicators: HashMap::new(),
-                        };
-                        if price_tx.send(event).await.is_err() {
-                            tracing::info!(
-                                "GMO FX feed: price channel closed during M5 flush, stopping"
-                            );
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
                     if let Some(h1_builder) = h1_builders.get_mut(&item.symbol)
                         && let Some(h1_candle) = h1_builder.try_complete(now, None, None)
+                        && !save_and_send_candle(self.pool.as_ref(), h1_candle, &price_tx).await
                     {
-                        if let Some(pool) = &self.pool
-                            && let Err(e) =
-                                auto_trader_db::candles::upsert_candle(pool, &h1_candle).await
-                        {
-                            tracing::warn!("GMO FX: failed to save H1 candle on market close: {e}");
-                        }
-                        let h1_event = PriceEvent {
-                            pair: h1_candle.pair.clone(),
-                            exchange: Exchange::GmoFx,
-                            timestamp: h1_candle.timestamp,
-                            candle: h1_candle,
-                            indicators: HashMap::new(),
-                        };
-                        if price_tx.send(h1_event).await.is_err() {
-                            tracing::info!(
-                                "GMO FX feed: price channel closed during H1 flush, stopping"
-                            );
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
                     continue;
                 }
@@ -230,9 +202,10 @@ impl MarketFeed for GmoFxFeed {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(
-                            "GMO FX: bid parse error for {}: '{}' — {e}",
-                            item.symbol,
-                            item.bid
+                            symbol = %item.symbol,
+                            bid = %item.bid,
+                            error = %e,
+                            "failed to parse bid price"
                         );
                         continue;
                     }
@@ -241,9 +214,10 @@ impl MarketFeed for GmoFxFeed {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(
-                            "GMO FX: ask parse error for {}: '{}' — {e}",
-                            item.symbol,
-                            item.ask
+                            symbol = %item.symbol,
+                            ask = %item.ask,
+                            error = %e,
+                            "failed to parse ask price"
                         );
                         continue;
                     }
@@ -252,9 +226,10 @@ impl MarketFeed for GmoFxFeed {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(
-                            "GMO FX: timestamp parse error for {}: '{}' — {e}",
-                            item.symbol,
-                            item.timestamp
+                            symbol = %item.symbol,
+                            timestamp = %item.timestamp,
+                            error = %e,
+                            "failed to parse timestamp"
                         );
                         continue;
                     }
@@ -274,52 +249,30 @@ impl MarketFeed for GmoFxFeed {
                     )
                     .await;
 
-                // Feed into primary-timeframe CandleBuilder (e.g. M5).
-                // Volume is not provided by the GMO ticker, so pass zero.
                 if let Some(builder) = builders.get_mut(&item.symbol)
-                    && let Some(candle) =
-                        builder.on_tick(mid, Decimal::ZERO, ts, Some(bid), Some(ask))
+                    && let Some(candle) = builder.on_tick(
+                        mid,
+                        GMO_FX_TICKER_VOLUME_UNAVAILABLE,
+                        ts,
+                        Some(bid),
+                        Some(ask),
+                    )
+                    && !save_and_send_candle(self.pool.as_ref(), candle, &price_tx).await
                 {
-                    if let Some(pool) = &self.pool
-                        && let Err(e) = auto_trader_db::candles::upsert_candle(pool, &candle).await
-                    {
-                        tracing::warn!("GMO FX: failed to save candle: {e}");
-                    }
-                    let event = PriceEvent {
-                        pair: candle.pair.clone(),
-                        exchange: Exchange::GmoFx,
-                        timestamp: candle.timestamp,
-                        candle,
-                        indicators: HashMap::new(),
-                    };
-                    if price_tx.send(event).await.is_err() {
-                        tracing::info!("GMO FX feed: price channel closed, stopping");
-                        return Ok(());
-                    }
+                    return Ok(());
                 }
 
-                // Feed into H1 CandleBuilder (when primary != H1).
                 if let Some(h1_builder) = h1_builders.get_mut(&item.symbol)
-                    && let Some(h1_candle) =
-                        h1_builder.on_tick(mid, Decimal::ZERO, ts, Some(bid), Some(ask))
+                    && let Some(h1_candle) = h1_builder.on_tick(
+                        mid,
+                        GMO_FX_TICKER_VOLUME_UNAVAILABLE,
+                        ts,
+                        Some(bid),
+                        Some(ask),
+                    )
+                    && !save_and_send_candle(self.pool.as_ref(), h1_candle, &price_tx).await
                 {
-                    if let Some(pool) = &self.pool
-                        && let Err(e) =
-                            auto_trader_db::candles::upsert_candle(pool, &h1_candle).await
-                    {
-                        tracing::warn!("GMO FX: failed to save H1 candle: {e}");
-                    }
-                    let h1_event = PriceEvent {
-                        pair: h1_candle.pair.clone(),
-                        exchange: Exchange::GmoFx,
-                        timestamp: h1_candle.timestamp,
-                        candle: h1_candle,
-                        indicators: HashMap::new(),
-                    };
-                    if price_tx.send(h1_event).await.is_err() {
-                        tracing::info!("GMO FX feed: price channel closed, stopping");
-                        return Ok(());
-                    }
+                    return Ok(());
                 }
             }
         }
@@ -327,30 +280,4 @@ impl MarketFeed for GmoFxFeed {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use auto_trader_core::types::{Exchange, Pair};
-
-    #[test]
-    fn gmo_fx_feed_new_has_no_pool() {
-        let pairs = vec![Pair::new("USD_JPY")];
-        let feed = GmoFxFeed::new(pairs.clone(), "M5");
-        assert_eq!(feed.pairs, pairs);
-        assert_eq!(feed.primary_timeframe, "M5");
-        assert!(feed.pool.is_none());
-    }
-
-    #[test]
-    fn exchange_gmo_fx_as_str() {
-        assert_eq!(Exchange::GmoFx.as_str(), "gmo_fx");
-    }
-
-    #[test]
-    fn should_mark_market_closed_true_only_for_maintenance_status() {
-        assert!(!should_mark_market_closed(0));
-        assert!(should_mark_market_closed(GMO_FX_STATUS_MAINTENANCE));
-        assert!(!should_mark_market_closed(1));
-        assert!(!should_mark_market_closed(-1));
-        assert!(!should_mark_market_closed(99));
-    }
-}
+mod tests;

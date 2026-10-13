@@ -1,8 +1,9 @@
+use std::str::FromStr;
+
 use auto_trader_core::types::{Candle, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use std::str::FromStr;
 
 use crate::provider::MarketDataProvider;
 
@@ -62,7 +63,7 @@ impl OandaClient {
             match f().await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    tracing::warn!("OANDA request failed (attempt {}): {e}", attempt + 1);
+                    tracing::warn!(attempt = attempt + 1, error = %e, "failed to call oanda api");
                     last_err = Some(e);
                     if attempt < 2 {
                         tokio::time::sleep(std::time::Duration::from_secs(
@@ -129,7 +130,7 @@ impl OandaClient {
                 low: Decimal::from_str(&c.mid.l)?,
                 close: Decimal::from_str(&c.mid.c)?,
                 volume: c.volume,
-                best_bid: None, // OANDA mid-price candles do not carry bid/ask
+                best_bid: None,
                 best_ask: None,
                 timestamp,
             });

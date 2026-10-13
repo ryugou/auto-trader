@@ -31,8 +31,7 @@ async fn create_gmo_fx_account_with_leverage_30_returns_400(pool: sqlx::PgPool) 
     assert_eq!(resp.status().as_u16(), 400);
     let body: Value = resp.json().await.unwrap();
     let msg = body["error"].as_str().unwrap_or_default();
-    assert!(msg.contains("25"), "error mentions cap: {msg}");
-    assert!(msg.contains("gmo_fx"), "error mentions exchange: {msg}");
+    assert_eq!(msg, "invalid leverage: exceeds regulatory cap 25");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -55,7 +54,7 @@ async fn create_bitflyer_cfd_account_with_leverage_3_returns_400(pool: sqlx::PgP
     assert_eq!(resp.status().as_u16(), 400);
     let body: Value = resp.json().await.unwrap();
     let msg = body["error"].as_str().unwrap_or_default();
-    assert!(msg.contains("2"), "error mentions cap: {msg}");
+    assert_eq!(msg, "invalid leverage: exceeds regulatory cap 2");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -108,5 +107,5 @@ async fn update_gmo_fx_account_to_leverage_30_returns_400(pool: sqlx::PgPool) {
     assert_eq!(resp.status().as_u16(), 400);
     let body: Value = resp.json().await.unwrap();
     let msg = body["error"].as_str().unwrap_or_default();
-    assert!(msg.contains("25"), "error mentions cap: {msg}");
+    assert_eq!(msg, "invalid leverage: exceeds regulatory cap 25");
 }
