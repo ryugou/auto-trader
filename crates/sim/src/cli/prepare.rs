@@ -124,7 +124,7 @@ pub type RunOneFn = fn(
     &ParamSet,
     &[Benchmark],
     &SimConfig,
-) -> RunRecord;
+) -> Result<RunRecord, SimError>;
 
 #[doc(hidden)]
 pub type SaveRunFn = std::sync::Arc<

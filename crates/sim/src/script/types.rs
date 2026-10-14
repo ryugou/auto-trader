@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::error::SimError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
     Int,
@@ -32,6 +34,12 @@ pub struct BarState {
     pub bars_held: u32,
 }
 
+#[derive(Debug)]
+pub enum DeciderError {
+    Script(String),
+    Fatal(SimError),
+}
+
 pub trait Decider {
-    fn on_bar(&mut self, state: BarState) -> Result<i8, String>;
+    fn on_bar(&mut self, state: BarState) -> Result<i8, DeciderError>;
 }

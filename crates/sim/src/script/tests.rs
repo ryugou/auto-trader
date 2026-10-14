@@ -36,7 +36,7 @@ fn run_single(
     let host = ScriptHost::new(cfg);
     let script = host.compile(source).expect("test script must compile");
     let mut run = ScriptRun::new(&host, &script, params, dataset.clone(), cfg);
-    run.on_bar(bar_state)
+    run.on_bar(bar_state).map_err(|e| format!("{e:?}"))
 }
 
 fn deterministic_bars(n: usize) -> Vec<Bar> {
@@ -81,36 +81,19 @@ fn deterministic_dataset(n: usize) -> Arc<Dataset> {
     Arc::new(Dataset::new(bars, from, to, 0, 64).expect("deterministic dataset must build"))
 }
 
-#[test]
-fn registration_rejects_each_8_1_violation() {
-    let cfg = SimConfig::default();
-    let host = ScriptHost::new(&cfg);
-
+fn script_shape_violation_cases() -> Vec<(&'static str, String)> {
     let oversized_padding = "x".repeat(40_000);
-    let thirteen_params = (0..13)
-        .map(|i| format!("p{i}: #{{ min: 0, max: 10, step: 1, \"default\": 0 }}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let cases: Vec<(&str, String)> = vec![
+    vec![
         (
             "syntax error",
             "fn params() { #{} }\nfn on_bar(ctx, p) { ctx.position".to_string(),
         ),
         (
             "source exceeds 32 KiB",
-            format!(
-                "// {oversized_padding}\nfn params() {{ #{{}} }}\nfn on_bar(ctx, p) {{ 0 }}\n"
-            ),
+            format!("// {oversized_padding}\nfn params() {{ #{{}} }}\nfn on_bar(ctx, p) {{ 0 }}\n"),
         ),
-        (
-            "params() undefined",
-            "fn on_bar(ctx, p) { 0 }".to_string(),
-        ),
-        (
-            "on_bar undefined",
-            "fn params() { #{} }".to_string(),
-        ),
+        ("params() undefined", "fn on_bar(ctx, p) { 0 }".to_string()),
+        ("on_bar undefined", "fn params() { #{} }".to_string()),
         (
             "params() has 1 argument",
             "fn params(x) { #{} }\nfn on_bar(ctx, p) { 0 }".to_string(),
@@ -123,6 +106,16 @@ fn registration_rejects_each_8_1_violation() {
             "params() returns a non-map",
             "fn params() { 42 }\nfn on_bar(ctx, p) { 0 }".to_string(),
         ),
+    ]
+}
+
+fn param_spec_violation_cases() -> Vec<(&'static str, String)> {
+    let thirteen_params = (0..13)
+        .map(|i| format!("p{i}: #{{ min: 0, max: 10, step: 1, \"default\": 0 }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    vec![
         (
             "a param spec is not a map",
             "fn params() { #{ entry: 5 } }\nfn on_bar(ctx, p) { 0 }".to_string(),
@@ -179,8 +172,10 @@ fn registration_rejects_each_8_1_violation() {
             "params() infinite loop",
             "fn params() { loop {} }\nfn on_bar(ctx, p) { 0 }".to_string(),
         ),
-    ];
+    ]
+}
 
+fn assert_cases_rejected_as_invalid_script(host: &ScriptHost, cases: Vec<(&str, String)>) {
     for (name, source) in cases {
         match host.compile(&source) {
             Err(SimError::InvalidScript(_)) => {}
@@ -192,6 +187,15 @@ fn registration_rejects_each_8_1_violation() {
             ),
         }
     }
+}
+
+#[test]
+fn registration_rejects_each_8_1_violation() {
+    let cfg = SimConfig::default();
+    let host = ScriptHost::new(&cfg);
+
+    assert_cases_rejected_as_invalid_script(&host, script_shape_violation_cases());
+    assert_cases_rejected_as_invalid_script(&host, param_spec_violation_cases());
 }
 
 #[test]
@@ -616,7 +620,7 @@ fn assert_ctx_single_indicator_matches_dataset(
         period,
         mult_x100: 0,
     };
-    let series = dataset.indicator(key);
+    let series = dataset.indicator(key).unwrap();
     let IndicatorSeries::Single(values) = &*series else {
         panic!("expected Single series for {fn_name}")
     };
@@ -682,7 +686,7 @@ fn ctx_donchian_has_upper_and_lower_keys_matching_dataset_indicator() {
         period,
         mult_x100: 0,
     };
-    let series = dataset.indicator(key);
+    let series = dataset.indicator(key).unwrap();
     let IndicatorSeries::Channel { lower, upper } = &*series else {
         panic!("expected Channel series for donchian")
     };
@@ -728,7 +732,7 @@ fn assert_ctx_band_indicator_matches_dataset(
         period,
         mult_x100: 200,
     };
-    let series = dataset.indicator(key);
+    let series = dataset.indicator(key).unwrap();
     let IndicatorSeries::Band {
         lower,
         middle,
@@ -958,24 +962,28 @@ fn requesting_more_than_64_distinct_indicator_keys_fails_on_the_65th_across_call
         .expect("valid script");
     let mut run = ScriptRun::new(&host, &script, &empty_params(), dataset, &cfg);
 
-    let call1 = run.on_bar(BarState {
-        t: 0,
-        position: 0,
-        entry_price_milli: 0,
-        bars_held: 0,
-    });
+    let call1 = run
+        .on_bar(BarState {
+            t: 0,
+            position: 0,
+            entry_price_milli: 0,
+            bars_held: 0,
+        })
+        .map_err(|e| format!("{e:?}"));
     assert_eq!(
         call1,
         Ok(0),
         "first 60 distinct keys must succeed: {call1:?}"
     );
 
-    let call2 = run.on_bar(BarState {
-        t: 1,
-        position: 0,
-        entry_price_milli: 0,
-        bars_held: 1,
-    });
+    let call2 = run
+        .on_bar(BarState {
+            t: 1,
+            position: 0,
+            entry_price_milli: 0,
+            bars_held: 1,
+        })
+        .map_err(|e| format!("{e:?}"));
     assert_eq!(
         call2,
         Ok(0),
@@ -1003,9 +1011,9 @@ fn this_persists_across_on_bar_calls() {
         .expect("valid script");
     let mut run = ScriptRun::new(&host, &script, &empty_params(), dataset, &cfg);
 
-    let first = run.on_bar(state(0));
+    let first = run.on_bar(state(0)).map_err(|e| format!("{e:?}"));
     assert_eq!(first, Ok(0), "first call: `this.seen` is not set yet");
-    let second = run.on_bar(state(1));
+    let second = run.on_bar(state(1)).map_err(|e| format!("{e:?}"));
     assert_eq!(
         second,
         Ok(1),
@@ -1069,7 +1077,7 @@ fn repeated_calls_eventually_fail_once_max_operations_per_run_is_exhausted() {
         .expect("valid script");
     let mut run = ScriptRun::new(&host, &script, &empty_params(), dataset, &cfg);
 
-    let results: Vec<Result<i8, String>> = (0..20).map(|t| run.on_bar(state(t))).collect();
+    let results: Vec<Result<i8, DeciderError>> = (0..20).map(|t| run.on_bar(state(t))).collect();
     assert!(
         results[0].is_ok(),
         "first call must succeed: {:?}",
@@ -1180,8 +1188,8 @@ fn concurrent_script_runs_on_different_threads_do_not_mix_run_totals_or_this() {
         .expect("valid script");
     let dataset = deterministic_dataset(60);
 
-    let outcome_a: Mutex<Option<Vec<Result<i8, String>>>> = Mutex::new(None);
-    let outcome_b: Mutex<Option<Vec<Result<i8, String>>>> = Mutex::new(None);
+    let outcome_a: Mutex<Option<Vec<Result<i8, DeciderError>>>> = Mutex::new(None);
+    let outcome_b: Mutex<Option<Vec<Result<i8, DeciderError>>>> = Mutex::new(None);
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -1227,11 +1235,11 @@ fn concurrent_script_runs_on_different_threads_do_not_mix_run_totals_or_this() {
     let results_b = outcome_b.into_inner().unwrap().unwrap();
 
     assert!(
-        !results_a.iter().any(|r| r == &Ok(-1)),
+        !results_a.iter().any(|r| r.as_ref().ok() == Some(&-1)),
         "thread A observed a `this` value that does not match its own tag: {results_a:?}"
     );
     assert!(
-        !results_b.iter().any(|r| r == &Ok(-1)),
+        !results_b.iter().any(|r| r.as_ref().ok() == Some(&-1)),
         "thread B observed a `this` value that does not match its own tag: {results_b:?}"
     );
     assert!(

@@ -17,6 +17,7 @@ use sqlx::{PgPool, Row};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[cfg(test)]
 async fn test_database_url(pool: &PgPool) -> String {
     let db_name: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(pool)
@@ -38,6 +39,7 @@ async fn test_database_url(pool: &PgPool) -> String {
     }
 }
 
+#[cfg(test)]
 fn write_config(name: &str, database_url: &str, sim_extra_lines: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "auto-trader-sim-cli-test-{}-{name}.toml",
@@ -48,6 +50,7 @@ fn write_config(name: &str, database_url: &str, sim_extra_lines: &str) -> PathBu
     path
 }
 
+#[cfg(test)]
 fn write_script(name: &str, contents: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "auto-trader-sim-cli-test-{}-{name}.rhai",
@@ -57,6 +60,7 @@ fn write_script(name: &str, contents: &str) -> PathBuf {
     path
 }
 
+#[cfg(test)]
 fn utc_secs(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> i64 {
     NaiveDate::from_ymd_opt(y, m, d)
         .unwrap()
@@ -101,6 +105,7 @@ fn deterministic_bars(n: usize, start_secs: i64) -> Vec<Bar> {
         .collect()
 }
 
+#[cfg(test)]
 async fn run_capturing_json(cli: Cli, config_path: &Path) -> (i32, serde_json::Value) {
     let mut out: Vec<u8> = Vec::new();
     let code = cli::run_with_config_path_and_output(cli, config_path, &mut out).await;
@@ -112,6 +117,7 @@ async fn run_capturing_json(cli: Cli, config_path: &Path) -> (i32, serde_json::V
 
 const EVAL_BAR_COUNT: i32 = 288;
 
+#[cfg(test)]
 async fn seed_deterministic_bars(pool: &PgPool) {
     let bars = deterministic_bars(600, utc_secs(2024, 1, 1, 0, 0));
     data::upsert_bars(pool, &bars)
@@ -119,10 +125,12 @@ async fn seed_deterministic_bars(pool: &PgPool) {
         .expect("seed deterministic bars");
 }
 
+#[cfg(test)]
 fn eval_from() -> NaiveDate {
     NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()
 }
 
+#[cfg(test)]
 fn eval_to() -> NaiveDate {
     NaiveDate::from_ymd_opt(2024, 1, 3).unwrap()
 }
@@ -152,6 +160,7 @@ fn too_many_combinations_script() -> String {
     format!("fn params() {{\n    #{{\n{params}    }}\n}}\n\nfn on_bar(ctx, p) {{ 0 }}\n")
 }
 
+#[cfg(test)]
 async fn batch_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM sim_batches")
         .fetch_one(pool)
@@ -159,6 +168,7 @@ async fn batch_count(pool: &PgPool) -> i64 {
         .expect("count sim_batches")
 }
 
+#[cfg(test)]
 async fn script_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM sim_scripts")
         .fetch_one(pool)
@@ -166,6 +176,7 @@ async fn script_count(pool: &PgPool) -> i64 {
         .expect("count sim_scripts")
 }
 
+#[cfg(test)]
 async fn run_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM sim_runs")
         .fetch_one(pool)
@@ -173,6 +184,7 @@ async fn run_count(pool: &PgPool) -> i64 {
         .expect("count sim_runs")
 }
 
+#[cfg(test)]
 async fn batch_status_and_finished_at(
     pool: &PgPool,
 ) -> (String, Option<chrono::DateTime<chrono::Utc>>) {
@@ -190,7 +202,7 @@ fn panicking_run_one(
     _params: &ParamSet,
     _benchmarks: &[Benchmark],
     _cfg: &SimConfig,
-) -> RunRecord {
+) -> Result<RunRecord, SimError> {
     panic!("forced panic for test: run_one must not take down the process (spec 12 章)")
 }
 
@@ -225,6 +237,7 @@ struct CapturingWriter {
     buf: Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
+#[cfg(test)]
 impl CapturingWriter {
     fn contents(&self) -> String {
         String::from_utf8(self.buf.lock().expect("lock poisoned").clone())
@@ -232,6 +245,7 @@ impl CapturingWriter {
     }
 }
 
+#[cfg(test)]
 impl std::io::Write for CapturingWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.buf

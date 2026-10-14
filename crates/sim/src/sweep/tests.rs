@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
@@ -837,6 +837,51 @@ fn on_result_error_stops_workers_from_starting_unclaimed_runs() {
         started <= bound && started < indices.len(),
         "{started} runs completed after on_result failed on the first record; at most {bound} \
          may already be in flight and none of the {} indices may be claimed afterwards",
+        indices.len()
+    );
+}
+
+#[test]
+fn a_poisoned_indicator_cache_makes_run_sweep_return_err_and_skip_remaining_combinations() {
+    let cfg = SimConfig::default();
+    let host = ScriptHost::new(&cfg);
+    let source = "fn params() { #{ mode: #{ min: 0, max: 4, step: 1, \"default\": 0 } } }\n\
+                   fn on_bar(ctx, p) {\n\
+                   let x = ctx.sma(\"M5\", 1, 0);\n\
+                   0\n\
+                   }\n";
+    let script = host.compile(source).expect("valid script");
+    let dataset = deterministic_dataset(400);
+    dataset.poison_indicator_cache_for_test();
+    let benchmarks: Vec<Benchmark> = Vec::new();
+    let indices = select_indices(&script.params, 5, 42).unwrap();
+    assert_eq!(indices.len(), 5);
+
+    let mut records = Vec::new();
+    let result = run_sweep(
+        &dataset,
+        &host,
+        &script,
+        &benchmarks,
+        &cfg,
+        &indices,
+        1,
+        &mut |record| {
+            records.push(record);
+            Ok(())
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "a poisoned indicator cache is an internal fault, not a script error; run_sweep must \
+         return Err, got {result:?}"
+    );
+    assert!(
+        records.len() < indices.len(),
+        "the fatal error must stop the sweep before every combination is attempted, got \
+         {} of {} records",
+        records.len(),
         indices.len()
     );
 }

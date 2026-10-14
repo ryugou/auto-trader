@@ -1,5 +1,6 @@
 use crate::config::SimConfig;
-use crate::script::{BarState, Decider};
+use crate::error::SimError;
+use crate::script::{BarState, Decider, DeciderError};
 use crate::series::Dataset;
 use crate::types::{Bar, PIP_MILLI};
 
@@ -32,6 +33,25 @@ pub struct SimOutcome {
     pub status: RunStatus,
     pub trades: Vec<SimTrade>,
     pub positions: Vec<i8>,
+}
+
+fn closed_trade(
+    direction: i8,
+    entry_idx: usize,
+    exit_idx: usize,
+    entry_milli: i64,
+    exit_milli: i64,
+    reason: ExitReason,
+) -> SimTrade {
+    SimTrade {
+        direction,
+        entry_idx,
+        exit_idx,
+        entry_milli,
+        exit_milli,
+        pnl_milli: pnl_milli(direction, entry_milli, exit_milli),
+        reason,
+    }
 }
 
 fn closing_price(position: i8, bid_open: i64, ask_open: i64) -> i64 {
@@ -67,15 +87,14 @@ fn apply_signal_pending_from_previous_bar(
     let mut entry_idx = entry_idx;
     if position != 0 {
         let exit_milli = closing_price(position, bar.bid_open, bar.ask_open);
-        trades.push(SimTrade {
-            direction: position,
+        trades.push(closed_trade(
+            position,
             entry_idx,
-            exit_idx: t,
-            entry_milli: entry_price_milli,
+            t,
+            entry_price_milli,
             exit_milli,
-            pnl_milli: pnl_milli(position, entry_price_milli, exit_milli),
-            reason: ExitReason::Signal,
-        });
+            ExitReason::Signal,
+        ));
         position = 0;
     }
     if signal != 0 {
@@ -116,19 +135,69 @@ fn apply_protective_stop_which_can_trigger_on_the_entry_bar(
     } else {
         stop_price.max(bar.ask_open)
     };
-    trades.push(SimTrade {
-        direction: position,
+    trades.push(closed_trade(
+        position,
         entry_idx,
-        exit_idx: t,
-        entry_milli: entry_price_milli,
+        t,
+        entry_price_milli,
         exit_milli,
-        pnl_milli: pnl_milli(position, entry_price_milli, exit_milli),
-        reason: ExitReason::ProtectiveStop,
-    });
+        ExitReason::ProtectiveStop,
+    ));
     0
 }
 
-pub fn simulate(dataset: &Dataset, decider: &mut dyn Decider, cfg: &SimConfig) -> SimOutcome {
+fn build_bar_state(
+    offset: usize,
+    t: usize,
+    position: i8,
+    entry_price_milli: i64,
+    entry_idx: usize,
+) -> BarState {
+    let bars_held = if position == 0 {
+        0
+    } else {
+        (t - entry_idx) as u32
+    };
+    BarState {
+        t: offset + t,
+        position,
+        entry_price_milli,
+        bars_held,
+    }
+}
+
+fn close_at_period_end(
+    position: i8,
+    entry_price_milli: i64,
+    entry_idx: usize,
+    eval_bars: &[Bar],
+    trades: &mut Vec<SimTrade>,
+) {
+    if position == 0 {
+        return;
+    }
+    let n = eval_bars.len();
+    let last = &eval_bars[n - 1];
+    let exit_milli = if position == 1 {
+        last.bid_close
+    } else {
+        last.ask_close
+    };
+    trades.push(closed_trade(
+        position,
+        entry_idx,
+        n - 1,
+        entry_price_milli,
+        exit_milli,
+        ExitReason::EndOfData,
+    ));
+}
+
+pub fn simulate(
+    dataset: &Dataset,
+    decider: &mut dyn Decider,
+    cfg: &SimConfig,
+) -> Result<SimOutcome, SimError> {
     let offset = dataset.eval_start();
     let eval_bars = dataset.eval_bars();
     let n = eval_bars.len();
@@ -144,11 +213,7 @@ pub fn simulate(dataset: &Dataset, decider: &mut dyn Decider, cfg: &SimConfig) -
     let stop_offset_milli = cfg.protective_stop_pips * PIP_MILLI;
 
     for (t, bar) in eval_bars.iter().enumerate() {
-        if t > 0 {
-            let signal = pending_signal.expect(
-                "pending_signal must be Some from t==1 onward: every bar before the last calls \
-                 the decider before the loop advances to the next bar",
-            );
+        if let Some(signal) = pending_signal {
             (position, entry_price_milli, entry_idx) = apply_signal_pending_from_previous_bar(
                 signal,
                 t,
@@ -172,69 +237,39 @@ pub fn simulate(dataset: &Dataset, decider: &mut dyn Decider, cfg: &SimConfig) -
 
         positions.push(position);
 
-        let bars_held = if position == 0 {
-            0
-        } else {
-            (t - entry_idx) as u32
-        };
-        let state = BarState {
-            t: offset + t,
-            position,
-            entry_price_milli,
-            bars_held,
-        };
-        match decider.on_bar(state) {
-            Ok(signal) if !(-1..=1).contains(&signal) => {
-                return SimOutcome {
-                    status: RunStatus::ScriptError {
-                        open_time: bar.open_time,
-                        message: format!("on_bar returned {signal} (expected 1, -1, or 0)"),
-                    },
-                    trades,
-                    positions,
-                };
+        let state = build_bar_state(offset, t, position, entry_price_milli, entry_idx);
+        let message = match decider.on_bar(state) {
+            Ok(signal) if (-1..=1).contains(&signal) => {
+                pending_signal = (t + 1 < n).then_some(signal);
+                continue;
             }
-            Ok(signal) => {
-                if t + 1 < n {
-                    pending_signal = Some(signal);
-                }
-            }
-            Err(message) => {
-                return SimOutcome {
-                    status: RunStatus::ScriptError {
-                        open_time: bar.open_time,
-                        message,
-                    },
-                    trades,
-                    positions,
-                };
-            }
-        }
-    }
-
-    if position != 0 {
-        let last = &eval_bars[n - 1];
-        let exit_milli = if position == 1 {
-            last.bid_close
-        } else {
-            last.ask_close
+            Ok(signal) => format!("on_bar returned {signal} (expected 1, -1, or 0)"),
+            Err(DeciderError::Script(message)) => message,
+            Err(DeciderError::Fatal(err)) => return Err(err),
         };
-        trades.push(SimTrade {
-            direction: position,
-            entry_idx,
-            exit_idx: n - 1,
-            entry_milli: entry_price_milli,
-            exit_milli,
-            pnl_milli: pnl_milli(position, entry_price_milli, exit_milli),
-            reason: ExitReason::EndOfData,
+        return Ok(SimOutcome {
+            status: RunStatus::ScriptError {
+                open_time: bar.open_time,
+                message,
+            },
+            trades,
+            positions,
         });
     }
 
-    SimOutcome {
+    close_at_period_end(
+        position,
+        entry_price_milli,
+        entry_idx,
+        eval_bars,
+        &mut trades,
+    );
+
+    Ok(SimOutcome {
         status: RunStatus::Ok,
         trades,
         positions,
-    }
+    })
 }
 
 #[cfg(test)]

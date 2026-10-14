@@ -3,6 +3,7 @@ use std::time::Duration;
 pub const PIP_MILLI: i64 = 10;
 pub const PIP_MID2: i64 = 20;
 pub const M5_SECS: i64 = 300;
+pub(crate) const FLOAT_GRID_TOLERANCE: f64 = 1e-9;
 
 pub const GMO_KLINE_PATH: &str = "v1/klines";
 pub const GMO_SYMBOL: &str = "USD_JPY";

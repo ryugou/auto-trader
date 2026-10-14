@@ -160,16 +160,17 @@ pub async fn run_run_with_hooks(
     }
 }
 
-async fn execute_and_save_run(
+async fn resolve_run_result(
     pool: &PgPool,
     batch_id: Uuid,
-    save_run_fn: &SaveRunFn,
-    run_one: impl FnOnce() -> RunRecord + Send + 'static,
-) -> Result<(RunRecord, f64), i32> {
-    let start = Instant::now();
-    let run_result = tokio::task::spawn_blocking(run_one).await;
-    let record = match run_result {
-        Ok(record) => record,
+    run_result: Result<Result<RunRecord, SimError>, tokio::task::JoinError>,
+) -> Result<RunRecord, i32> {
+    match run_result {
+        Ok(Ok(record)) => Ok(record),
+        Ok(Err(e)) => {
+            tracing::error!(batch_id = %batch_id, error = %e, "failed to run simulation");
+            Err(fail_batch_and_exit(pool, batch_id).await)
+        }
         Err(join_err) => {
             tracing::error!(
                 batch_id = %batch_id,
@@ -177,9 +178,20 @@ async fn execute_and_save_run(
                 "failed to run simulation: run_one panicked; the process did not crash, \
                  but no sim_runs row was saved"
             );
-            return Err(fail_batch_and_exit(pool, batch_id).await);
+            Err(fail_batch_and_exit(pool, batch_id).await)
         }
-    };
+    }
+}
+
+async fn execute_and_save_run(
+    pool: &PgPool,
+    batch_id: Uuid,
+    save_run_fn: &SaveRunFn,
+    run_one: impl FnOnce() -> Result<RunRecord, SimError> + Send + 'static,
+) -> Result<(RunRecord, f64), i32> {
+    let start = Instant::now();
+    let run_result = tokio::task::spawn_blocking(run_one).await;
+    let record = resolve_run_result(pool, batch_id, run_result).await?;
     let save_result = save_run_fn(pool, batch_id, &record).await;
     let elapsed = start.elapsed().as_secs_f64();
 

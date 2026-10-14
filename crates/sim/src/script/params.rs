@@ -4,13 +4,13 @@ use rhai::Dynamic;
 
 use super::types::{ParamKind, ParamSet, ParamSpec, ParamValue};
 use crate::error::SimError;
+use crate::types::FLOAT_GRID_TOLERANCE;
 
 const MAX_PARAM_COUNT: usize = 12;
-const FLOAT_TOLERANCE: f64 = 1e-9;
 
 fn is_on_float_grid(value: f64, min: f64, step: f64) -> bool {
     let k = ((value - min) / step).round();
-    k >= 0.0 && (value - (min + k * step)).abs() <= FLOAT_TOLERANCE
+    k >= 0.0 && (value - (min + k * step)).abs() <= FLOAT_GRID_TOLERANCE
 }
 
 fn is_on_integer_grid(value: i64, min: i64, step: i64) -> bool {
@@ -116,7 +116,7 @@ fn resolve_one_param(
                     spec.name
                 ))
             })?;
-            if f < spec.min - FLOAT_TOLERANCE || f > spec.max + FLOAT_TOLERANCE {
+            if f < spec.min - FLOAT_GRID_TOLERANCE || f > spec.max + FLOAT_GRID_TOLERANCE {
                 return Err(SimError::Args(format!(
                     "invalid parameter \"{}\": out of range [{}, {}]",
                     spec.name, spec.min, spec.max
@@ -282,7 +282,7 @@ fn validate_float_param(
     }
     if !is_on_float_grid(default_f, min_f, step_f) {
         return Err(SimError::InvalidScript(format!(
-            "invalid parameter \"{name}\": default must equal min + k*step for a non-negative integer k (value difference within 1e-9)"
+            "invalid parameter \"{name}\": default must equal min + k*step for a non-negative integer k (value difference within {FLOAT_GRID_TOLERANCE:e})"
         )));
     }
     Ok((min_f, max_f, step_f, default_f))

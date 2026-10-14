@@ -98,6 +98,85 @@ fn completed_increases_exactly_when_the_bucket_last_bar_arrives() {
     assert_eq!(completed[2], 1, "at :10 the M15 bucket just completed");
 }
 
+fn assert_series_and_indicators_unaffected_by_future_bars(
+    dataset_a: &Dataset,
+    dataset_b: &Dataset,
+    tf: Tf,
+    t: usize,
+) {
+    let visible = dataset_a.completed(tf, t);
+    assert_eq!(
+        visible,
+        dataset_b.completed(tf, t),
+        "{tf:?} t={t}: completed(t) must not depend on future bars"
+    );
+    let (a, b) = (dataset_a.series(tf), dataset_b.series(tf));
+    assert_eq!(a.open[..visible], b.open[..visible], "{tf:?} t={t}: open");
+    assert_eq!(a.high[..visible], b.high[..visible], "{tf:?} t={t}: high");
+    assert_eq!(a.low[..visible], b.low[..visible], "{tf:?} t={t}: low");
+    assert_eq!(
+        a.close[..visible],
+        b.close[..visible],
+        "{tf:?} t={t}: close"
+    );
+    assert_eq!(
+        a.end_time[..visible],
+        b.end_time[..visible],
+        "{tf:?} t={t}: end_time"
+    );
+
+    let sma_key = IndicatorKey {
+        tf,
+        kind: IndicatorKind::Sma,
+        period: 3,
+        mult_x100: 0,
+    };
+    let bb_key = IndicatorKey {
+        tf,
+        kind: IndicatorKind::Bb,
+        period: 3,
+        mult_x100: 200,
+    };
+    let bits = |v: &[f64]| -> Vec<u64> { v.iter().map(|x| x.to_bits()).collect() };
+    match (
+        &*dataset_a.indicator(sma_key).unwrap(),
+        &*dataset_b.indicator(sma_key).unwrap(),
+    ) {
+        (IndicatorSeries::Single(x), IndicatorSeries::Single(y)) => assert_eq!(
+            bits(&x[..visible]),
+            bits(&y[..visible]),
+            "{tf:?} t={t}: sma must not depend on future bars"
+        ),
+        _ => panic!("sma must be Single"),
+    }
+    match (
+        &*dataset_a.indicator(bb_key).unwrap(),
+        &*dataset_b.indicator(bb_key).unwrap(),
+    ) {
+        (
+            IndicatorSeries::Band {
+                lower: l1,
+                middle: m1,
+                upper: u1,
+            },
+            IndicatorSeries::Band {
+                lower: l2,
+                middle: m2,
+                upper: u2,
+            },
+        ) => {
+            for (name, x, y) in [("lower", l1, l2), ("middle", m1, m2), ("upper", u1, u2)] {
+                assert_eq!(
+                    bits(&x[..visible]),
+                    bits(&y[..visible]),
+                    "{tf:?} t={t}: bb.{name} must not depend on future bars"
+                );
+            }
+        }
+        _ => panic!("bb must be Band"),
+    }
+}
+
 #[test]
 fn future_bars_do_not_affect_past_completed_or_series_values() {
     let n = 240usize;
@@ -127,76 +206,9 @@ fn future_bars_do_not_affect_past_completed_or_series_values() {
         let dataset_b = Dataset::new(mutated, 0, to, 0, 64).unwrap();
 
         for tf in ALL_TFS {
-            let visible = dataset_a.completed(tf, t);
-            assert_eq!(
-                visible,
-                dataset_b.completed(tf, t),
-                "{tf:?} t={t}: completed(t) must not depend on future bars"
-            );
-            if visible >= 1 {
+            assert_series_and_indicators_unaffected_by_future_bars(&dataset_a, &dataset_b, tf, t);
+            if dataset_a.completed(tf, t) >= 1 {
                 nonempty_seen[tf.idx()] = true;
-            }
-            let (a, b) = (dataset_a.series(tf), dataset_b.series(tf));
-            assert_eq!(a.open[..visible], b.open[..visible], "{tf:?} t={t}: open");
-            assert_eq!(a.high[..visible], b.high[..visible], "{tf:?} t={t}: high");
-            assert_eq!(a.low[..visible], b.low[..visible], "{tf:?} t={t}: low");
-            assert_eq!(
-                a.close[..visible],
-                b.close[..visible],
-                "{tf:?} t={t}: close"
-            );
-            assert_eq!(
-                a.end_time[..visible],
-                b.end_time[..visible],
-                "{tf:?} t={t}: end_time"
-            );
-
-            let sma_key = IndicatorKey {
-                tf,
-                kind: IndicatorKind::Sma,
-                period: 3,
-                mult_x100: 0,
-            };
-            let bb_key = IndicatorKey {
-                tf,
-                kind: IndicatorKind::Bb,
-                period: 3,
-                mult_x100: 200,
-            };
-            let bits = |v: &[f64]| -> Vec<u64> { v.iter().map(|x| x.to_bits()).collect() };
-            match (
-                &*dataset_a.indicator(sma_key),
-                &*dataset_b.indicator(sma_key),
-            ) {
-                (IndicatorSeries::Single(x), IndicatorSeries::Single(y)) => assert_eq!(
-                    bits(&x[..visible]),
-                    bits(&y[..visible]),
-                    "{tf:?} t={t}: sma must not depend on future bars"
-                ),
-                _ => panic!("sma must be Single"),
-            }
-            match (&*dataset_a.indicator(bb_key), &*dataset_b.indicator(bb_key)) {
-                (
-                    IndicatorSeries::Band {
-                        lower: l1,
-                        middle: m1,
-                        upper: u1,
-                    },
-                    IndicatorSeries::Band {
-                        lower: l2,
-                        middle: m2,
-                        upper: u2,
-                    },
-                ) => {
-                    for (name, x, y) in [("lower", l1, l2), ("middle", m1, m2), ("upper", u1, u2)] {
-                        assert_eq!(
-                            bits(&x[..visible]),
-                            bits(&y[..visible]),
-                            "{tf:?} t={t}: bb.{name} must not depend on future bars"
-                        );
-                    }
-                }
-                _ => panic!("bb must be Band"),
             }
         }
     }
@@ -393,7 +405,7 @@ fn indicator_delegates_to_the_series_for_the_requested_timeframe() {
         period: 3,
         mult_x100: 0,
     };
-    let result = dataset.indicator(key);
+    let result = dataset.indicator(key).unwrap();
     match &*result {
         IndicatorSeries::Single(values) => {
             assert_eq!(values.len(), dataset.series(Tf::M5).close.len());
@@ -418,4 +430,51 @@ fn tf_secs_match_spec() {
     assert_eq!(Tf::M15.secs(), 900);
     assert_eq!(Tf::H1.secs(), 3600);
     assert_eq!(Tf::H4.secs(), 14400);
+}
+
+#[test]
+fn new_fails_when_from_is_not_a_representable_utc_timestamp() {
+    let all_bars = make_bars(5, 0);
+    let to = all_bars.last().unwrap().open_time + M5_SECS;
+    let err = Dataset::new(all_bars, i64::MIN, to, 0, 64)
+        .expect_err("an out-of-range from must be rejected");
+    assert!(matches!(err, SimError::Other(_)));
+}
+
+#[test]
+fn new_fails_when_to_is_not_a_representable_utc_timestamp() {
+    let all_bars = make_bars(5, 0);
+    let from = all_bars[0].open_time;
+    let err = Dataset::new(all_bars, from, i64::MAX, 0, 64)
+        .expect_err("an out-of-range to must be rejected");
+    assert!(matches!(err, SimError::Other(_)));
+}
+
+#[test]
+fn new_fails_when_to_has_no_predecessor_in_i64() {
+    let all_bars = make_bars(5, 0);
+    let from = all_bars[0].open_time;
+    let err = Dataset::new(all_bars, from, i64::MIN, 0, 64)
+        .expect_err("to = i64::MIN must be rejected, not panic");
+    assert!(matches!(err, SimError::Args(_)));
+}
+
+#[test]
+fn missing_weekdays_in_range_stops_at_naivedate_max_without_overflow() {
+    use chrono::{Datelike, Weekday};
+
+    let max = NaiveDate::MAX;
+    let before_max = max.pred_opt().unwrap();
+    let cases = [
+        ("max only", max, vec![max]),
+        ("day before max to max", before_max, vec![before_max, max]),
+    ];
+    for (name, start, days) in cases {
+        let expected: Vec<NaiveDate> = days
+            .into_iter()
+            .filter(|d| !matches!(d.weekday(), Weekday::Sat | Weekday::Sun))
+            .collect();
+        let missing = missing_weekdays_in_range(start, max, &std::collections::BTreeSet::new());
+        assert_eq!(missing, expected, "{name}");
+    }
 }
