@@ -8,17 +8,21 @@ use auto_trader_sim::fetch::{GmoKlineClient, PriceType, backfill};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+#[cfg(test)]
 fn fast_client(server: &MockServer) -> GmoKlineClient {
-    GmoKlineClient::new(&server.uri()).with_timing(
-        Duration::from_millis(1),
-        vec![
+    GmoKlineClient::new(&server.uri())
+        .expect("test client must build")
+        .with_timing(
             Duration::from_millis(1),
-            Duration::from_millis(1),
-            Duration::from_millis(1),
-        ],
-    )
+            vec![
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+            ],
+        )
 }
 
+#[cfg(test)]
 fn test_date() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(2023, 10, 28).unwrap()
 }
@@ -76,6 +80,7 @@ async fn fetch_day_enforces_min_interval_between_consecutive_requests() {
 
     let min_interval = Duration::from_millis(200);
     let client = GmoKlineClient::new(&server.uri())
+        .expect("test client must build")
         .with_timing(min_interval, vec![Duration::from_millis(1); 3]);
 
     let started = std::time::Instant::now();

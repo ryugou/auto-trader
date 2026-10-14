@@ -68,17 +68,22 @@ pub struct GmoKlineClient {
 }
 
 impl GmoKlineClient {
-    pub fn new(base_url: &str) -> Self {
-        Self {
+    pub fn new(base_url: &str) -> Result<Self, SimError> {
+        let http = reqwest::Client::builder()
+            .timeout(GMO_HTTP_TIMEOUT)
+            .build()
+            .map_err(|e| {
+                SimError::Other(anyhow::anyhow!(
+                    "failed to build gmo kline http client: {e}"
+                ))
+            })?;
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::builder()
-                .timeout(GMO_HTTP_TIMEOUT)
-                .build()
-                .expect("reqwest client with a fixed timeout and no other options must build"),
+            http,
             min_interval: GMO_MIN_REQUEST_INTERVAL,
             retry_delays: GMO_RETRY_DELAYS.to_vec(),
             next_request_at: Mutex::new(None),
-        }
+        })
     }
 
     pub fn with_timing(mut self, min_interval: Duration, retry_delays: Vec<Duration>) -> Self {
@@ -87,12 +92,11 @@ impl GmoKlineClient {
         self
     }
 
-    async fn throttle(&self) {
+    async fn throttle(&self) -> Result<(), String> {
         let wait = {
-            let mut guard = self
-                .next_request_at
-                .lock()
-                .expect("next_request_at mutex poisoned by a panicked holder");
+            let mut guard = self.next_request_at.lock().map_err(|_| {
+                "failed to lock next_request_at: mutex poisoned by a panicked holder".to_string()
+            })?;
             let now = Instant::now();
             let earliest = guard.unwrap_or(now);
             let start_at = earliest.max(now);
@@ -102,6 +106,7 @@ impl GmoKlineClient {
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
+        Ok(())
     }
 
     async fn try_fetch(&self, url: &str) -> Result<KlineResponse, String> {
@@ -147,7 +152,7 @@ impl GmoKlineClient {
             if attempt > 0 {
                 tokio::time::sleep(self.retry_delays[attempt - 1]).await;
             }
-            self.throttle().await;
+            self.throttle().await?;
             match self.try_fetch(&url).await {
                 Ok(body) => return Ok(parse_klines(&body.data, &date_str, price_type)),
                 Err(e) => {
@@ -305,8 +310,96 @@ pub struct BackfillReport {
     pub failed: Vec<String>,
 }
 
+const GMO_KLINE_MIN_DATE: NaiveDate = match NaiveDate::from_ymd_opt(2023, 10, 28) {
+    Some(d) => d,
+    None => panic!("2023-10-28 is a valid calendar date"),
+};
+
 pub fn gmo_kline_min_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2023, 10, 28).expect("2023-10-28 is a valid calendar date")
+    GMO_KLINE_MIN_DATE
+}
+
+async fn fetch_and_join_day(
+    client: &GmoKlineClient,
+    date: NaiveDate,
+    date_str: &str,
+    failed: &mut Vec<String>,
+) -> Option<(JoinOutcome, usize, usize)> {
+    let bid_result = client.fetch_day(date, PriceType::Bid).await;
+    let ask_result = client.fetch_day(date, PriceType::Ask).await;
+
+    match (bid_result, ask_result) {
+        (Ok(bid), Ok(ask)) => {
+            let bid_count = bid.len();
+            let ask_count = ask.len();
+            let outcome = join_and_validate(&bid, &ask);
+            Some((outcome, bid_count, ask_count))
+        }
+        (bid_result, ask_result) => {
+            if let Err(e) = bid_result {
+                tracing::error!(
+                    date = %date_str,
+                    price_type = "BID",
+                    error = %e,
+                    "failed to fetch gmo kline for date: skipping this date"
+                );
+                failed.push(format!("{date_str} BID"));
+            }
+            if let Err(e) = ask_result {
+                tracing::error!(
+                    date = %date_str,
+                    price_type = "ASK",
+                    error = %e,
+                    "failed to fetch gmo kline for date: skipping this date"
+                );
+                failed.push(format!("{date_str} ASK"));
+            }
+            None
+        }
+    }
+}
+
+async fn save_day_outcome(
+    pool: &sqlx::PgPool,
+    date_str: &str,
+    outcome: JoinOutcome,
+    bid_count: usize,
+    ask_count: usize,
+    report: &mut BackfillReport,
+) -> Result<(), SimError> {
+    if outcome.one_sided > 0 || outcome.invalid > 0 {
+        tracing::warn!(
+            date = %date_str,
+            price_type = "BID+ASK",
+            bid_count,
+            ask_count,
+            kept = outcome.bars.len(),
+            one_sided = outcome.one_sided,
+            invalid = outcome.invalid,
+            "invalid bars for date: one-sided or invalid pricing data; dropped"
+        );
+    }
+    report.one_sided += outcome.one_sided;
+    report.invalid += outcome.invalid;
+    if outcome.bars.is_empty() {
+        return Ok(());
+    }
+    let bar_count = outcome.bars.len();
+    match data::upsert_bars(pool, &outcome.bars).await {
+        Ok(affected) => {
+            report.saved += affected;
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(
+                date = %date_str,
+                bar_count,
+                error = %e,
+                "failed to save bars to sim_candles"
+            );
+            Err(e)
+        }
+    }
 }
 
 pub async fn backfill(
@@ -328,62 +421,9 @@ pub async fn backfill(
         report.days += 1;
         let date_str = date.format("%Y%m%d").to_string();
 
-        let bid_result = client.fetch_day(date, PriceType::Bid).await;
-        let ask_result = client.fetch_day(date, PriceType::Ask).await;
-
-        match (bid_result, ask_result) {
-            (Ok(bid), Ok(ask)) => {
-                let outcome = join_and_validate(&bid, &ask);
-                if outcome.one_sided > 0 || outcome.invalid > 0 {
-                    tracing::warn!(
-                        date = %date_str,
-                        price_type = "BID+ASK",
-                        bid_count = bid.len(),
-                        ask_count = ask.len(),
-                        kept = outcome.bars.len(),
-                        one_sided = outcome.one_sided,
-                        invalid = outcome.invalid,
-                        "invalid bars for date: one-sided or invalid pricing data; dropped"
-                    );
-                }
-                report.one_sided += outcome.one_sided;
-                report.invalid += outcome.invalid;
-                if !outcome.bars.is_empty() {
-                    let bar_count = outcome.bars.len();
-                    match data::upsert_bars(pool, &outcome.bars).await {
-                        Ok(affected) => report.saved += affected,
-                        Err(e) => {
-                            tracing::error!(
-                                date = %date_str,
-                                bar_count,
-                                error = %e,
-                                "failed to save bars to sim_candles"
-                            );
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-            (bid_result, ask_result) => {
-                if let Err(e) = bid_result {
-                    tracing::error!(
-                        date = %date_str,
-                        price_type = "BID",
-                        error = %e,
-                        "failed to fetch gmo kline for date: skipping this date"
-                    );
-                    report.failed.push(format!("{date_str} BID"));
-                }
-                if let Err(e) = ask_result {
-                    tracing::error!(
-                        date = %date_str,
-                        price_type = "ASK",
-                        error = %e,
-                        "failed to fetch gmo kline for date: skipping this date"
-                    );
-                    report.failed.push(format!("{date_str} ASK"));
-                }
-            }
+        let join_result = fetch_and_join_day(client, date, &date_str, &mut report.failed).await;
+        if let Some((outcome, bid_count, ask_count)) = join_result {
+            save_day_outcome(pool, &date_str, outcome, bid_count, ask_count, &mut report).await?;
         }
 
         if date == to {
