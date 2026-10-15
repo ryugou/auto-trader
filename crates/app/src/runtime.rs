@@ -4,6 +4,8 @@ pub(crate) mod crypto_monitor;
 pub(crate) mod engine_loop;
 pub(crate) mod executor_loop;
 pub(crate) mod exit_executor;
+pub(crate) mod overnight;
+pub(crate) mod recorder;
 pub(crate) mod warmup;
 
 pub(crate) struct TradeAccount {
