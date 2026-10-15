@@ -1,5 +1,4 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use rand::SeedableRng;
@@ -15,6 +14,7 @@ use crate::script::{
     CompiledScript, ParamKind, ParamSet, ParamSpec, ParamValue, ScriptHost, ScriptRun,
 };
 use crate::series::Dataset;
+use crate::types::FLOAT_GRID_TOLERANCE;
 
 struct WorkQueue {
     next: usize,
@@ -33,7 +33,6 @@ impl WorkQueue {
 }
 
 const MAX_TOTAL_COMBINATIONS: u128 = 1u128 << 63;
-const FLOAT_GRID_TOLERANCE: f64 = 1e-9;
 const MAX_FLOAT_K_ADJUSTMENTS: usize = 4;
 
 fn widen_i64_span_to_i128(min: i64, value: i64) -> i128 {
@@ -163,9 +162,12 @@ pub fn select_indices(
 
     let pool_len = total - 1;
     let take = max_runs - 1;
-    let pool_len_usize: usize = pool_len
-        .try_into()
-        .expect("total_combinations is capped at 2^63, which fits in usize on our 64-bit targets");
+    let pool_len_usize: usize = pool_len.try_into().map_err(|e| {
+        SimError::Other(anyhow::anyhow!(
+            "invalid platform: total_combinations is capped at 2^63, which must fit in usize on \
+             our 64-bit targets, but converting {pool_len} to usize failed: {e}"
+        ))
+    })?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let sampled = rand_index::sample(&mut rng, pool_len_usize, take);
@@ -204,18 +206,18 @@ pub fn run_one(
     params: &ParamSet,
     benchmarks: &[Benchmark],
     cfg: &SimConfig,
-) -> RunRecord {
+) -> Result<RunRecord, SimError> {
     let mut run = ScriptRun::new(host, script, params, dataset.clone(), cfg);
-    let outcome = simulate(dataset, &mut run, cfg);
+    let outcome = simulate(dataset, &mut run, cfg)?;
     let metrics = match &outcome.status {
         RunStatus::Ok => Some(eval::evaluate(dataset.eval_bars(), &outcome, benchmarks)),
         RunStatus::ScriptError { .. } => None,
     };
-    RunRecord {
+    Ok(RunRecord {
         params: params.clone(),
         status: outcome.status,
         metrics,
-    }
+    })
 }
 
 fn channel_capacity(jobs: usize) -> usize {
@@ -246,6 +248,57 @@ pub fn run_sweep(
     )
 }
 
+fn run_one_combination_catching_panics(
+    dataset: &Arc<Dataset>,
+    host: &ScriptHost,
+    script: &CompiledScript,
+    benchmarks: &[Benchmark],
+    cfg: &SimConfig,
+    idx: u128,
+) -> Result<Result<RunRecord, SimError>, Box<dyn std::any::Any + Send>> {
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let params = combination_at(&script.params, idx);
+        run_one(dataset, host, script, &params, benchmarks, cfg)
+    }))
+}
+
+fn drain_sweep_results(
+    rx: &mpsc::Receiver<RunRecord>,
+    queue: &Mutex<WorkQueue>,
+    total: usize,
+    on_result: &mut (dyn FnMut(RunRecord) -> Result<(), SimError> + Send),
+) -> Option<SimError> {
+    let mut received = 0usize;
+    let mut final_err: Option<SimError> = None;
+    while received < total {
+        match rx.recv() {
+            Ok(record) => {
+                received += 1;
+                if final_err.is_some() {
+                    continue;
+                }
+                if let Err(e) = on_result(record) {
+                    final_err = Some(e);
+                    queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled = true;
+                }
+            }
+            Err(_) => {
+                break;
+            }
+        }
+    }
+    final_err
+}
+
+fn sweep_panic_result(first_panic: &Mutex<Option<(u128, String)>>) -> Result<(), SimError> {
+    let Some((idx, message)) = first_panic.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return Ok(());
+    };
+    Err(SimError::BatchFailed(format!(
+        "failed to run sweep worker at combination index {idx}: {message}"
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_sweep_with_hook(
     dataset: &Arc<Dataset>,
@@ -267,8 +320,8 @@ fn run_sweep_with_hook(
         next: 0,
         cancelled: false,
     });
-    let panicked = AtomicBool::new(false);
     let first_panic: Mutex<Option<(u128, String)>> = Mutex::new(None);
+    let first_fatal: Mutex<Option<SimError>> = Mutex::new(None);
     let (tx, rx) = mpsc::sync_channel::<RunRecord>(channel_capacity(jobs));
 
     std::thread::scope(|scope| {
@@ -276,8 +329,8 @@ fn run_sweep_with_hook(
         for _ in 0..jobs {
             let tx = tx.clone();
             let queue = &queue;
-            let panicked = &panicked;
             let first_panic = &first_panic;
+            let first_fatal = &first_fatal;
             scope.spawn(move || {
                 loop {
                     let i = {
@@ -288,16 +341,24 @@ fn run_sweep_with_hook(
                         }
                     };
                     let idx = indices[i];
-                    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        let params = combination_at(&script.params, idx);
-                        run_one(dataset, host, script, &params, benchmarks, cfg)
-                    }));
+                    let result = run_one_combination_catching_panics(
+                        dataset, host, script, benchmarks, cfg, idx,
+                    );
                     match result {
-                        Ok(record) => {
+                        Ok(Ok(record)) => {
                             on_worker_complete();
                             if tx.send(record).is_err() {
                                 break;
                             }
+                        }
+                        Ok(Err(sim_error)) => {
+                            let mut slot = first_fatal.lock().unwrap_or_else(|e| e.into_inner());
+                            if slot.is_none() {
+                                *slot = Some(sim_error);
+                            }
+                            drop(slot);
+                            queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled = true;
+                            break;
                         }
                         Err(payload) => {
                             let message = panic_message(payload.as_ref());
@@ -306,7 +367,6 @@ fn run_sweep_with_hook(
                                 *slot = Some((idx, message));
                             }
                             drop(slot);
-                            panicked.store(true, Ordering::SeqCst);
                             queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled = true;
                             break;
                         }
@@ -316,40 +376,13 @@ fn run_sweep_with_hook(
         }
         drop(tx);
 
-        let mut received = 0usize;
-        let mut final_err: Option<SimError> = None;
-        while received < indices.len() {
-            match rx.recv() {
-                Ok(record) => {
-                    received += 1;
-                    if final_err.is_some() {
-                        continue;
-                    }
-                    if let Err(e) = on_result(record) {
-                        final_err = Some(e);
-                        queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled = true;
-                    }
-                }
-                Err(_) => {
-                    break;
-                }
-            }
-        }
-
-        if let Some(e) = final_err {
+        if let Some(e) = drain_sweep_results(&rx, &queue, indices.len(), on_result) {
             return Err(e);
         }
-        if panicked.load(Ordering::SeqCst) {
-            let (idx, message) = first_panic
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .unwrap_or((0, "<panic details unavailable>".to_string()));
-            return Err(SimError::BatchFailed(format!(
-                "failed to run sweep worker at combination index {idx}: {message}"
-            )));
+        if let Some(e) = first_fatal.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Err(e);
         }
-        Ok(())
+        sweep_panic_result(&first_panic)
     })
 }
 

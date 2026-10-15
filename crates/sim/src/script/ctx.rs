@@ -121,6 +121,13 @@ impl RhaiCtx {
         Some(completed - 1 - shift)
     }
 
+    fn indicator(&self, key: IndicatorKey) -> Result<Arc<IndicatorSeries>, Box<EvalAltResult>> {
+        self.dataset.indicator(key).map_err(|err| {
+            let message = err.to_string();
+            Box::new(EvalAltResult::ErrorSystem(message, Box::new(err)))
+        })
+    }
+
     fn track_key(&self, key: IndicatorKey) -> Result<(), Box<EvalAltResult>> {
         let mut guard = self.requested_keys.lock().map_err(|_| {
             Box::<EvalAltResult>::from(
@@ -173,7 +180,7 @@ impl RhaiCtx {
         let Some(idx) = self.resolve_index(tf_v, shift_v) else {
             return Ok(Dynamic::UNIT);
         };
-        let series = self.dataset.indicator(key);
+        let series = self.indicator(key)?;
         let IndicatorSeries::Single(values) = &*series else {
             unreachable!("compute() always returns Single for this IndicatorKind")
         };
@@ -204,7 +211,7 @@ impl RhaiCtx {
         let Some(idx) = self.resolve_index(tf_v, shift_v) else {
             return Ok(Dynamic::UNIT);
         };
-        let series = self.dataset.indicator(key);
+        let series = self.indicator(key)?;
         let IndicatorSeries::Channel { lower, upper } = &*series else {
             unreachable!("compute() always returns Channel for IndicatorKind::Donchian")
         };
@@ -239,7 +246,7 @@ impl RhaiCtx {
         let Some(idx) = self.resolve_index(tf_v, shift_v) else {
             return Ok(Dynamic::UNIT);
         };
-        let series = self.dataset.indicator(key);
+        let series = self.indicator(key)?;
         let IndicatorSeries::Band {
             lower,
             middle,

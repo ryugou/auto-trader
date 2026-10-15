@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use rhai::{CallFnOptions, Dynamic, Scope};
+use rhai::{CallFnOptions, Dynamic, EvalAltResult, Scope};
 
 use super::ctx::RhaiCtx;
 use super::host::{ScriptHost, describe_rhai_error, reset_ops_relay, take_last_call_ops};
 use super::params::{CompiledScript, param_set_to_rhai_map};
-use super::types::{BarState, Decider, ParamSet};
+use super::types::{BarState, Decider, DeciderError, ParamSet};
 use crate::config::SimConfig;
+use crate::error::SimError;
 use crate::indicators::IndicatorKey;
 use crate::series::Dataset;
 
@@ -45,8 +46,20 @@ impl<'a> ScriptRun<'a> {
     }
 }
 
+fn classify_error(err: EvalAltResult) -> DeciderError {
+    match err {
+        EvalAltResult::ErrorSystem(message, source) => match source.downcast::<SimError>() {
+            Ok(sim_error) => DeciderError::Fatal(*sim_error),
+            Err(source) => DeciderError::Script(describe_rhai_error(&EvalAltResult::ErrorSystem(
+                message, source,
+            ))),
+        },
+        other => DeciderError::Script(describe_rhai_error(&other)),
+    }
+}
+
 impl Decider for ScriptRun<'_> {
-    fn on_bar(&mut self, state: BarState) -> Result<i8, String> {
+    fn on_bar(&mut self, state: BarState) -> Result<i8, DeciderError> {
         let ctx = RhaiCtx::new(
             self.dataset.clone(),
             state.t,
@@ -81,18 +94,18 @@ impl Decider for ScriptRun<'_> {
                 if let Ok(n) = value.as_int() {
                     match n {
                         -1..=1 => Ok(n as i8),
-                        other => Err(format!(
+                        other => Err(DeciderError::Script(format!(
                             "unsupported on_bar return value: {other} (expected 1, -1, or 0)"
-                        )),
+                        ))),
                     }
                 } else {
-                    Err(format!(
+                    Err(DeciderError::Script(format!(
                         "unsupported on_bar return type: \"{}\" (expected an integer 1, -1, or 0)",
                         value.type_name()
-                    ))
+                    )))
                 }
             }
-            Err(err) => Err(describe_rhai_error(&err)),
+            Err(err) => Err(classify_error(*err)),
         }
     }
 }

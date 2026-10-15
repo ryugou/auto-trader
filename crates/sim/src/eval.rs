@@ -211,23 +211,19 @@ fn theta_metrics(
 }
 
 fn mean_lag(eval_bars: &[Bar], leg_evals: &[LegEval]) -> (Option<f64>, Option<f64>) {
-    let lagged: Vec<&LegEval> = leg_evals
+    let lagged: Vec<(&LegEval, usize)> = leg_evals
         .iter()
-        .filter(|e| e.first_match_idx.is_some())
+        .filter_map(|e| e.first_match_idx.map(|idx| (e, idx)))
         .collect();
     if lagged.is_empty() {
         return (None, None);
     }
 
-    let bars_sum: usize = lagged
-        .iter()
-        .map(|e| e.first_match_idx.expect("filtered to Some above") - (e.leg.a + 1))
-        .sum();
+    let bars_sum: usize = lagged.iter().map(|(e, idx)| idx - (e.leg.a + 1)).sum();
     let pips_sum: f64 = lagged
         .iter()
-        .map(|e| {
-            let idx = e.first_match_idx.expect("filtered to Some above");
-            let diff = eval_bars[idx].mid2_close() - eval_bars[e.leg.a].mid2_close();
+        .map(|(e, idx)| {
+            let diff = eval_bars[*idx].mid2_close() - eval_bars[e.leg.a].mid2_close();
             mid2_to_pips(diff.abs())
         })
         .sum();
@@ -263,8 +259,14 @@ fn missed_legs(eval_bars: &[Bar], leg_evals: &[LegEval]) -> Vec<MissedLeg> {
 }
 
 fn rfc3339(open_time: i64) -> String {
-    crate::data::format_epoch_secs_rfc3339(open_time)
-        .expect("eval_bars[].open_time must be a valid UTC timestamp (Dataset invariant)")
+    match crate::data::format_epoch_secs_rfc3339(open_time) {
+        Some(s) => s,
+        None => unreachable!(
+            "eval_bars[].open_time={open_time} is not a representable UTC instant, but \
+             data::upsert_bars validates every open_time via epoch_secs_to_datetime before it \
+             is written to sim_candles, so a bar loaded through Dataset cannot carry one"
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -52,12 +52,12 @@ fn dataset_with_warmup(eval_bars: Vec<Bar>) -> Dataset {
 }
 
 struct ScriptedDecider {
-    responses: VecDeque<Result<i8, String>>,
+    responses: VecDeque<Result<i8, DeciderError>>,
     calls: Vec<BarState>,
 }
 
 impl ScriptedDecider {
-    fn new(responses: Vec<Result<i8, String>>) -> Self {
+    fn new(responses: Vec<Result<i8, DeciderError>>) -> Self {
         Self {
             responses: responses.into(),
             calls: Vec::new(),
@@ -66,7 +66,7 @@ impl ScriptedDecider {
 }
 
 impl Decider for ScriptedDecider {
-    fn on_bar(&mut self, state: BarState) -> Result<i8, String> {
+    fn on_bar(&mut self, state: BarState) -> Result<i8, DeciderError> {
         self.calls.push(state);
         self.responses.pop_front().unwrap_or_else(|| {
             panic!(
@@ -77,8 +77,12 @@ impl Decider for ScriptedDecider {
     }
 }
 
-fn signals(values: &[i8]) -> Vec<Result<i8, String>> {
+fn signals(values: &[i8]) -> Vec<Result<i8, DeciderError>> {
     values.iter().map(|&v| Ok(v)).collect()
+}
+
+fn simulate_ok(dataset: &Dataset, decider: &mut dyn Decider, cfg: &SimConfig) -> SimOutcome {
+    simulate(dataset, decider, cfg).expect("decider must not be Fatal in this test")
 }
 
 #[test]
@@ -92,7 +96,7 @@ fn out_of_range_on_bar_return_aborts_with_script_error_at_that_bar() {
         let dataset = dataset_with_warmup(eval);
         let mut decider = ScriptedDecider::new(signals(&[0, bad, 0]));
 
-        let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+        let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
         match &outcome.status {
             RunStatus::ScriptError { open_time, message } => {
@@ -116,7 +120,7 @@ fn out_of_range_return_on_the_last_bar_is_also_a_script_error() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[0, 2]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert!(matches!(
         outcome.status,
@@ -130,7 +134,7 @@ fn no_execution_on_first_bar_and_long_opens_at_second_bar_ask_open() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.status, RunStatus::Ok);
     assert_eq!(
@@ -155,7 +159,7 @@ fn long_round_trip_uses_ask_open_entry_and_bid_open_exit() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -175,7 +179,7 @@ fn short_round_trip_uses_bid_open_entry_and_ask_open_exit() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[-1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -195,7 +199,7 @@ fn doten_closes_and_reopens_at_the_same_bar_open_producing_two_trades() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, -1, -1]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 2);
     let close_long = outcome.trades[0];
@@ -235,7 +239,7 @@ fn bar_state_reflects_execution_and_stop_processing_with_bars_held_lifecycle() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 1, -1, -1, -1]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
     assert_eq!(outcome.status, RunStatus::Ok);
 
     let calls = &decider.calls;
@@ -306,7 +310,7 @@ fn protective_stop_closes_long_at_stop_price_when_crossed_intrabar() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -342,7 +346,7 @@ fn protective_stop_closes_long_at_bid_open_when_gapped_through() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -377,7 +381,7 @@ fn protective_stop_closes_short_at_stop_price_when_crossed_intrabar() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[-1, -1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -412,7 +416,7 @@ fn protective_stop_closes_short_at_ask_open_when_gapped_through() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[-1, -1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -446,7 +450,7 @@ fn protective_stop_can_trigger_on_the_same_bar_the_position_was_opened() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 0, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -486,7 +490,7 @@ fn decider_can_reenter_on_the_bar_after_the_bar_the_stop_happened_on() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 1, 0, 1, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 2);
     let stop_trade = outcome.trades[0];
@@ -518,7 +522,7 @@ fn execution_uses_the_next_existing_bar_open_across_a_weekend_gap() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     assert_eq!(
@@ -550,7 +554,7 @@ fn long_protective_stop_across_weekend_gap_exits_at_monday_bid_open() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 1, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -589,7 +593,7 @@ fn short_protective_stop_across_weekend_gap_exits_at_monday_ask_open() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[-1, -1, 0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -616,7 +620,7 @@ fn long_position_still_open_at_end_closes_at_last_bar_bid_close() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[1, 1, 1]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -639,7 +643,7 @@ fn short_position_still_open_at_end_closes_at_last_bar_ask_close() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[-1, -1, -1]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.trades.len(), 1);
     let trade = outcome.trades[0];
@@ -658,10 +662,12 @@ fn script_error_aborts_at_the_failing_bar_and_keeps_partial_trades_and_positions
         flat(2 * M5_SECS, 150_200, 150_220),
     ];
     let dataset = dataset_with_warmup(eval);
-    let mut decider =
-        ScriptedDecider::new(vec![Ok(1), Err("on_bar: division by zero".to_string())]);
+    let mut decider = ScriptedDecider::new(vec![
+        Ok(1),
+        Err(DeciderError::Script("on_bar: division by zero".to_string())),
+    ]);
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     match outcome.status {
         RunStatus::ScriptError { open_time, message } => {
@@ -696,10 +702,10 @@ fn simulate_is_deterministic_across_repeated_runs() {
     let cfg = SimConfig::default();
 
     let mut decider_a = ScriptedDecider::new(signals(&[1, 1, -1, -1]));
-    let outcome_a = simulate(&dataset, &mut decider_a, &cfg);
+    let outcome_a = simulate_ok(&dataset, &mut decider_a, &cfg);
 
     let mut decider_b = ScriptedDecider::new(signals(&[1, 1, -1, -1]));
-    let outcome_b = simulate(&dataset, &mut decider_b, &cfg);
+    let outcome_b = simulate_ok(&dataset, &mut decider_b, &cfg);
 
     assert_eq!(outcome_a, outcome_b);
 }
@@ -710,7 +716,7 @@ fn single_bar_evaluation_period_does_not_panic() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[0]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.status, RunStatus::Ok);
     assert!(outcome.trades.is_empty());
@@ -733,10 +739,10 @@ fn script_error_on_the_last_bar_is_reported_and_skips_end_of_data_liquidation() 
     let mut decider = ScriptedDecider::new(vec![
         Ok(1),
         Ok(1),
-        Err("on_bar: boom on last bar".to_string()),
+        Err(DeciderError::Script("on_bar: boom on last bar".to_string())),
     ]);
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     match outcome.status {
         RunStatus::ScriptError { open_time, message } => {
@@ -766,7 +772,7 @@ fn last_bar_signal_is_never_executed() {
     let dataset = dataset_with_warmup(eval);
     let mut decider = ScriptedDecider::new(signals(&[0, 0, 1]));
 
-    let outcome = simulate(&dataset, &mut decider, &SimConfig::default());
+    let outcome = simulate_ok(&dataset, &mut decider, &SimConfig::default());
 
     assert_eq!(outcome.status, RunStatus::Ok);
     assert!(
@@ -778,5 +784,28 @@ fn last_bar_signal_is_never_executed() {
         decider.calls.len(),
         3,
         "on_bar must be called on every evaluation bar including the last"
+    );
+}
+
+#[test]
+fn on_bar_returning_fatal_makes_simulate_return_err_and_produce_no_trades() {
+    let eval = vec![
+        flat(0, 150_000, 150_010),
+        flat(M5_SECS, 150_100, 150_120),
+        flat(2 * M5_SECS, 150_200, 150_220),
+    ];
+    let dataset = dataset_with_warmup(eval);
+    let mut decider = ScriptedDecider::new(vec![
+        Ok(1),
+        Err(DeciderError::Fatal(SimError::Other(anyhow::anyhow!(
+            "indicator cache mutex poisoned"
+        )))),
+    ]);
+
+    let result = simulate(&dataset, &mut decider, &SimConfig::default());
+
+    assert!(
+        result.is_err(),
+        "a Fatal decider error must make simulate return Err, got {result:?}"
     );
 }

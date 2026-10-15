@@ -150,8 +150,8 @@ pub fn earliest_from(all_bars: &[Bar], warmup_bars: usize) -> Option<i64> {
 pub struct Dataset {
     bars: Vec<Bar>,
     eval_start: usize,
-    from: i64,
-    to: i64,
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
     series: [TfSeries; TF_COUNT],
     completed: [Vec<usize>; TF_COUNT],
     cache: IndicatorCache,
@@ -165,6 +165,14 @@ impl Dataset {
         warmup_bars: usize,
         cache_mb: usize,
     ) -> Result<Dataset, SimError> {
+        let start_date = crate::data::epoch_secs_to_datetime(from, "from")?.date_naive();
+        let to_predecessor = to.checked_sub(1).ok_or_else(|| {
+            SimError::Args(format!(
+                "invalid to: {to} has no predecessor in i64 (epoch seconds)"
+            ))
+        })?;
+        let end_date = crate::data::epoch_secs_to_datetime(to_predecessor, "to")?.date_naive();
+
         let eval_start_in_all = all_bars.partition_point(|b| b.open_time < from);
         let eval_end_in_all = all_bars.partition_point(|b| b.open_time < to);
 
@@ -203,8 +211,8 @@ impl Dataset {
         Ok(Dataset {
             bars,
             eval_start,
-            from,
-            to,
+            start_date,
+            end_date,
             series,
             completed,
             cache: IndicatorCache::new(cache_mb),
@@ -231,14 +239,19 @@ impl Dataset {
         self.completed[tf.idx()][t]
     }
 
-    pub fn indicator(&self, key: IndicatorKey) -> Arc<IndicatorSeries> {
+    pub fn indicator(&self, key: IndicatorKey) -> Result<Arc<IndicatorSeries>, SimError> {
         let series = &self.series[key.tf.idx()];
         self.cache
             .get_or_compute(key, || indicators::compute(series, key))
     }
 
+    #[cfg(test)]
+    pub(crate) fn poison_indicator_cache_for_test(&self) {
+        self.cache.poison_for_test();
+    }
+
     pub fn missing_weekdays(&self) -> Vec<chrono::NaiveDate> {
-        use chrono::{DateTime, Datelike, Utc, Weekday};
+        use chrono::{DateTime, Utc};
 
         let present: std::collections::BTreeSet<chrono::NaiveDate> = self
             .eval_bars()
@@ -247,26 +260,36 @@ impl Dataset {
             .map(|dt| dt.date_naive())
             .collect();
 
-        let start_date = DateTime::<Utc>::from_timestamp(self.from, 0)
-            .expect("Dataset::from must be a valid UTC timestamp")
-            .date_naive();
-        let end_date = DateTime::<Utc>::from_timestamp(self.to - 1, 0)
-            .expect("Dataset::to must be a valid UTC timestamp")
-            .date_naive();
-
-        let mut missing = Vec::new();
-        let mut date = start_date;
-        while date <= end_date {
-            let is_weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
-            if !is_weekend && !present.contains(&date) {
-                missing.push(date);
-            }
-            date = date
-                .succ_opt()
-                .expect("date arithmetic should not overflow within an evaluation period");
-        }
-        missing
+        missing_weekdays_in_range(self.start_date, self.end_date, &present)
     }
+}
+
+fn missing_weekdays_in_range(
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
+    present: &std::collections::BTreeSet<chrono::NaiveDate>,
+) -> Vec<chrono::NaiveDate> {
+    use chrono::{Datelike, Weekday};
+
+    let mut missing = Vec::new();
+    if start_date > end_date {
+        return missing;
+    }
+    let mut date = start_date;
+    loop {
+        let is_weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
+        if !is_weekend && !present.contains(&date) {
+            missing.push(date);
+        }
+        if date == end_date {
+            break;
+        }
+        date = match date.succ_opt() {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    missing
 }
 
 #[cfg(test)]
