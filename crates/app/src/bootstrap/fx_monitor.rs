@@ -10,7 +10,7 @@ pub(crate) fn build(
     timeframe: &str,
     expected_feeds: &mut Vec<FeedKey>,
 ) -> anyhow::Result<Option<MarketMonitor>> {
-    let fx_pairs: Vec<Pair> = crate::resolve_configured_fx_pairs(config);
+    let fx_pairs: Vec<Pair> = super::feeds::resolve_configured_fx_pairs(config);
     if fx_pairs.is_empty() {
         tracing::info!("no fx pairs configured, fx monitor disabled");
         warn_if_fx_strategy_has_no_price_source(config);

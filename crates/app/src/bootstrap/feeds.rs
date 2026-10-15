@@ -17,6 +17,49 @@ pub(crate) struct FeedTimeframes<'a> {
     pub(crate) fx: &'a str,
 }
 
+pub(crate) struct FeedSetup {
+    pub(crate) exchange_pairs: Arc<HashMap<Exchange, HashSet<String>>>,
+    pub(crate) price_store: Arc<PriceStore>,
+    pub(crate) feed_handles: Vec<tokio::task::AbortHandle>,
+}
+
+pub(crate) fn start(
+    config: &AppConfig,
+    pool: &sqlx::PgPool,
+    fx_monitor: Option<MarketMonitor>,
+    mut bitflyer_seed: BitflyerCandleSeed,
+    mut expected_feeds: Vec<FeedKey>,
+    price_tx: &mpsc::Sender<PriceEvent>,
+    notifier: &Arc<Notifier>,
+) -> FeedSetup {
+    let feeds = build(
+        config,
+        pool,
+        fx_monitor,
+        &mut bitflyer_seed,
+        FeedTimeframes {
+            crypto: super::CRYPTO_TIMEFRAME,
+            fx: super::FX_TIMEFRAME,
+        },
+        &mut expected_feeds,
+    );
+    let exchange_pairs = group_pairs_by_exchange(&expected_feeds);
+    let price_store = PriceStore::new(expected_feeds);
+    let feed_handles = spawn_all(
+        feeds,
+        &price_store,
+        price_tx,
+        notifier,
+        &config.feed_watchdog,
+    );
+
+    FeedSetup {
+        exchange_pairs,
+        price_store,
+        feed_handles,
+    }
+}
+
 pub(crate) fn build(
     config: &AppConfig,
     pool: &sqlx::PgPool,
@@ -81,7 +124,7 @@ fn register_gmo_fx(
     expected_feeds: &mut Vec<FeedKey>,
     feeds: &mut HashMap<Exchange, Box<dyn MarketFeed>>,
 ) {
-    let gmo_fx_pairs: Vec<Pair> = crate::resolve_configured_fx_pairs(config);
+    let gmo_fx_pairs: Vec<Pair> = resolve_configured_fx_pairs(config);
     if gmo_fx_pairs.is_empty() {
         tracing::info!("no fx pairs configured, gmo fx feed disabled");
         return;
@@ -146,6 +189,14 @@ pub(crate) fn resolve_configured_crypto_pairs(config: &AppConfig) -> Vec<Pair> {
         .as_ref()
         .map(|v| v.iter().map(|s| Pair::new(s)).collect())
         .unwrap_or_default()
+}
+
+pub(crate) fn resolve_configured_fx_pairs(config: &AppConfig) -> Vec<Pair> {
+    if !config.pairs.active.is_empty() {
+        config.pairs.active.iter().map(|s| Pair::new(s)).collect()
+    } else {
+        config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
+    }
 }
 
 #[cfg(test)]

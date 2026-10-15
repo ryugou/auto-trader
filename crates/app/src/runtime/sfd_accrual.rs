@@ -54,7 +54,7 @@ async fn process_tick(
         return Some(current_hour);
     }
 
-    let open_target_count = match crate::count_open_bitflyer_paper_fx_btc_jpy_trades(pool).await {
+    let open_target_count = match count_open_bitflyer_paper_fx_btc_jpy_trades(pool).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(
@@ -73,6 +73,18 @@ async fn process_tick(
     };
 
     Some(apply_pending_hours(pool, &accounts, pending, lh, fx_mid, spot_mid).await)
+}
+
+async fn count_open_bitflyer_paper_fx_btc_jpy_trades(pool: &sqlx::PgPool) -> anyhow::Result<i64> {
+    sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM trades t
+           JOIN trading_accounts a ON a.id = t.account_id
+           WHERE t.pair = 'FX_BTC_JPY' AND t.status = 'open'
+             AND a.account_type = 'paper' AND a.exchange = 'bitflyer_cfd'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(anyhow::Error::from)
 }
 
 async fn fetch_fresh_mid_prices(
@@ -160,7 +172,7 @@ async fn apply_sfd_to_trade(
     fx_mid: Decimal,
     spot_mid: Decimal,
 ) {
-    if !crate::trade_is_subject_to_bitflyer_sfd(&trade.pair.0) {
+    if !trade_is_subject_to_bitflyer_sfd(&trade.pair.0) {
         return;
     }
     let notional = trade.entry_price * trade.quantity;
@@ -174,7 +186,7 @@ async fn apply_sfd_to_trade(
         return;
     }
     let event_at = lh + Duration::hours(1);
-    if crate::trade_was_not_yet_open_at_event_time(trade.entry_at, event_at) {
+    if trade_was_not_yet_open_at_event_time(trade.entry_at, event_at) {
         return;
     }
     match apply_fee(pool, account_id, trade.id, fee, event_at).await {
@@ -200,6 +212,14 @@ async fn apply_sfd_to_trade(
             );
         }
     }
+}
+
+fn trade_is_subject_to_bitflyer_sfd(pair: &str) -> bool {
+    pair == "FX_BTC_JPY"
+}
+
+fn trade_was_not_yet_open_at_event_time(entry_at: DateTime<Utc>, event_at: DateTime<Utc>) -> bool {
+    entry_at > event_at
 }
 
 async fn apply_fee(
@@ -238,7 +258,7 @@ fn clamp_catch_up(lh: DateTime<Utc>, current_hour: DateTime<Utc>) -> (DateTime<U
 fn has_paper_bitflyer_account(accounts: &[TradingAccount]) -> bool {
     accounts.iter().any(|pac| {
         pac.account_type == "paper"
-            && crate::exchange_from_str(&pac.exchange) == Some(Exchange::BitflyerCfd)
+            && super::exchange_from_str(&pac.exchange) == Some(Exchange::BitflyerCfd)
     })
 }
 

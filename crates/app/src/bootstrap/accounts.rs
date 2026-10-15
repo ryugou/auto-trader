@@ -23,13 +23,27 @@ pub(crate) async fn load_and_log(
         log_account(pac, registered_strategies);
     }
 
-    crate::log_swap_freshness_at_startup_leaving_slack_to_the_daily_job(
+    log_swap_freshness_at_startup_leaving_slack_to_the_daily_job(
         gmo_fx_swap,
         chrono::Utc::now().date_naive(),
         has_gmo_paper_account(&db_accounts),
     );
 
     Ok(db_accounts)
+}
+
+fn log_swap_freshness_at_startup_leaving_slack_to_the_daily_job(
+    gmo_fx_swap_config: &GmoFxSwapConfig,
+    today: chrono::NaiveDate,
+    has_gmo_paper_accounts: bool,
+) {
+    if let Some(body) = auto_trader::swap_freshness::swap_freshness_alert(
+        gmo_fx_swap_config,
+        today,
+        has_gmo_paper_accounts,
+    ) {
+        tracing::warn!(body = %body, "invalid swap config: stale");
+    }
 }
 
 fn log_account(pac: &TradingAccount, registered_strategies: &[String]) {

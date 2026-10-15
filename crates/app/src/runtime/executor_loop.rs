@@ -105,7 +105,7 @@ async fn dispatch_to_account(
         return false;
     };
 
-    match crate::reconfirm_account_active_before_marking_dispatched(&ctx.pool, pac).await {
+    match reconfirm_account_active_before_marking_dispatched(&ctx.pool, pac).await {
         Ok(true) => {}
         Ok(false) => {
             tracing::warn!(
@@ -130,6 +130,18 @@ async fn dispatch_to_account(
 
     execute_and_record(ctx, pac, signal_event, trader).await;
     true
+}
+
+async fn reconfirm_account_active_before_marking_dispatched(
+    pool: &sqlx::PgPool,
+    pac: &TradingAccount,
+) -> anyhow::Result<bool> {
+    let account_now = auto_trader_db::trading_accounts::get(pool, pac.id).await?;
+    Ok(account_still_tradable(account_now.as_ref()))
+}
+
+fn account_still_tradable(account: Option<&TradingAccount>) -> bool {
+    account.is_some_and(|a| a.active)
 }
 
 fn check_static_account_gates(
@@ -162,7 +174,7 @@ fn check_static_account_gates(
         );
         return None;
     }
-    if crate::live_order_blocked_when_live_disabled_leaving_close_paths_unaffected(
+    if live_order_blocked_when_live_disabled_leaving_close_paths_unaffected(
         &pac.account_type,
         ctx.live_enabled,
     ) {
@@ -175,6 +187,13 @@ fn check_static_account_gates(
         return None;
     }
     Some(exchange)
+}
+
+fn live_order_blocked_when_live_disabled_leaving_close_paths_unaffected(
+    account_type: &str,
+    live_enabled: bool,
+) -> bool {
+    account_type == "live" && !live_enabled
 }
 
 async fn check_kill_switch(
@@ -222,7 +241,7 @@ async fn check_kill_switch(
             }
         };
     let day_start_balance =
-        crate::compute_day_start_balance_net_of_todays_realized_pnl(pac.current_balance, day_net);
+        compute_day_start_balance_net_of_todays_realized_pnl(pac.current_balance, day_net);
     if let GateDecision::Reject(reason) = auto_trader_executor::risk_gate::eval_daily_loss(
         day_net,
         day_start_balance,
@@ -237,6 +256,13 @@ async fn check_kill_switch(
         return false;
     }
     true
+}
+
+fn compute_day_start_balance_net_of_todays_realized_pnl(
+    current_balance: Decimal,
+    day_net: Decimal,
+) -> Decimal {
+    current_balance - day_net
 }
 
 async fn apply_kill_switch_halt(
@@ -446,3 +472,6 @@ async fn record_trade_open_side_effects(
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
