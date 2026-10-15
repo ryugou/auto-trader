@@ -1,9 +1,13 @@
 use auto_trader_core::config::AppConfig;
 
+pub(crate) mod accounts;
 pub(crate) mod exchange_apis;
+pub(crate) mod feeds;
 pub(crate) mod fx_monitor;
+pub(crate) mod fx_new_assumptions;
 pub(crate) mod knowledge_store;
 pub(crate) mod macro_analyst;
+pub(crate) mod position_sizer;
 
 pub(crate) fn resolve_oanda_account_id(config: &AppConfig) -> Option<String> {
     env_trimmed("OANDA_ACCOUNT_ID").or_else(|| {
