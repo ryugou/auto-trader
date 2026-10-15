@@ -1,5 +1,13 @@
+use std::sync::{Arc, Mutex};
+
+use sha2::{Digest, Sha256};
+
 use super::*;
-use crate::types::Bar;
+use crate::config::SimConfig;
+use crate::error::SimError;
+use crate::indicators::{IndicatorKey, IndicatorKind, IndicatorSeries};
+use crate::series::{Dataset, Tf};
+use crate::types::{Bar, M5_SECS, milli_to_pips};
 
 fn wrap_on_bar(body: &str) -> String {
     format!("fn params() {{ #{{}} }}\nfn on_bar(ctx, p) {{\n{body}\n}}\n")
@@ -519,7 +527,7 @@ fn ctx_time_hour_weekday_and_spread_match_the_bar() {
     let cfg = SimConfig::default();
     let bar = dataset.bars()[T_MID];
     let end_time = bar.open_time + M5_SECS;
-    let expected = end_time_to_utc(end_time);
+    let expected = ctx::end_time_to_utc(end_time).expect("end_time must be a valid UTC timestamp");
     let expected_hour = {
         use chrono::Timelike;
         expected.hour() as i64
