@@ -2,253 +2,33 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::NaiveDate;
-use sqlx::PgPool;
-use uuid::Uuid;
 
-use crate::benchmark::{self, Benchmark};
-use crate::config::{self, SimConfig};
-use crate::data;
+use crate::config::SimConfig;
 use crate::engine::RunStatus;
 use crate::error::SimError;
-use crate::fetch::{self, GmoKlineClient};
-use crate::script::{CompiledScript, ParamSet, ScriptHost};
-use crate::series::{self, Dataset};
+use crate::script::ScriptHost;
 use crate::store::{self, BatchStatus, NewBatch};
 use crate::sweep::{self, RunRecord, run_sweep};
-use crate::types::Bar;
 
 mod args;
+mod backfill;
+mod benchmark;
 mod dispatch;
 mod migrate;
 mod output;
+mod prepare;
 
 pub use args::{Cli, Command};
 pub use dispatch::{run, run_args, run_with_config_path, run_with_config_path_and_output};
+pub use prepare::{RunOneFn, SaveRunFn, real_save_run, resolve_period};
 
-use output::{output_failed, print_backfill, print_benchmark, print_run, print_sweep};
+use output::{output_failed, print_run, print_sweep};
+use prepare::{
+    EvalInputs, fail_batch_and_exit, load_eval_inputs, prepare, read_and_compile,
+    run_batch_config_json, script_name_from_path,
+};
 
 const SWEEP_TOP_RUNS_LIMIT: i64 = 10;
-
-pub fn resolve_period(
-    all_bars: &[Bar],
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
-    warmup_bars: usize,
-) -> Result<(i64, i64), SimError> {
-    if all_bars.is_empty() {
-        return Err(SimError::Args(
-            "invalid sim_candles: no bars are loaded; run `backfill` first".to_string(),
-        ));
-    }
-
-    let from_secs = match from {
-        Some(d) => naive_date_to_utc_secs(d),
-        None => series::earliest_from(all_bars, warmup_bars).ok_or_else(|| {
-            SimError::Args(format!(
-                "invalid default --from: fewer than warmup_bars={warmup_bars} \
-                 bars are loaded before any candidate start (have {} bars total); pass --from \
-                 explicitly or run `backfill` to load more history",
-                all_bars.len()
-            ))
-        })?,
-    };
-    let to_secs = match to {
-        Some(d) => naive_date_to_utc_secs(d),
-        None => {
-            let last_bar = all_bars
-                .last()
-                .expect("checked all_bars is non-empty above");
-            let last_date = chrono::DateTime::<chrono::Utc>::from_timestamp(last_bar.open_time, 0)
-                .expect("Bar.open_time must be a valid UTC timestamp (data.rs invariant)")
-                .date_naive();
-            let next_date = last_date.succ_opt().expect(
-                "date arithmetic must not overflow for real market data (far from NaiveDate::MAX)",
-            );
-            naive_date_to_utc_secs(next_date)
-        }
-    };
-
-    if from_secs >= to_secs {
-        return Err(SimError::Args(format!(
-            "invalid evaluation period: [from, to) is empty or inverted (from={from_secs} to={to_secs} \
-             UTC epoch seconds); --from must be strictly before --to"
-        )));
-    }
-
-    Ok((from_secs, to_secs))
-}
-
-fn naive_date_to_utc_secs(date: NaiveDate) -> i64 {
-    date.and_time(chrono::NaiveTime::MIN).and_utc().timestamp()
-}
-
-struct Prepared {
-    pool: PgPool,
-    sim: SimConfig,
-}
-
-async fn prepare(config_path: &Path) -> Result<Prepared, i32> {
-    let settings = config::load(config_path).map_err(|e| {
-        tracing::error!(
-            config_path = %config_path.display(),
-            error = %e,
-            "failed to load or validate sim config"
-        );
-        1
-    })?;
-    let pool = data::connect(&settings.database_url).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to connect to database");
-        1
-    })?;
-    data::ensure_tables(&pool).await.map_err(|e| {
-        tracing::error!(error = %e, "invalid database: required sim_* tables are missing");
-        1
-    })?;
-    Ok(Prepared {
-        pool,
-        sim: settings.sim,
-    })
-}
-
-async fn fail_batch_and_exit(pool: &PgPool, batch_id: Uuid) -> i32 {
-    if let Err(e) = store::finish_batch(pool, batch_id, BatchStatus::Failed).await {
-        tracing::error!(
-            batch_id = %batch_id,
-            error = %e,
-            "failed to mark sim_batches row as failed: \
-             the row is stuck in 'running' state and needs manual investigation"
-        );
-    }
-    1
-}
-
-#[doc(hidden)]
-pub type RunOneFn = fn(
-    &std::sync::Arc<Dataset>,
-    &ScriptHost,
-    &CompiledScript,
-    &ParamSet,
-    &[Benchmark],
-    &SimConfig,
-) -> RunRecord;
-
-#[doc(hidden)]
-pub type SaveRunFn = std::sync::Arc<
-    dyn for<'a> Fn(
-            &'a PgPool,
-            Uuid,
-            &'a RunRecord,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Uuid, SimError>> + Send + 'a>,
-        > + Send
-        + Sync,
->;
-
-#[doc(hidden)]
-pub fn real_save_run() -> SaveRunFn {
-    std::sync::Arc::new(|pool, batch_id, record| Box::pin(store::save_run(pool, batch_id, record)))
-}
-
-fn warn_missing_weekdays(dataset: &Dataset) {
-    for date in dataset.missing_weekdays() {
-        tracing::warn!(
-            date = %date,
-            "invalid evaluation period: no bars for this utc weekday"
-        );
-    }
-}
-
-fn read_and_compile(host: &ScriptHost, script_path: &Path) -> Result<CompiledScript, i32> {
-    let source = std::fs::read_to_string(script_path).map_err(|e| {
-        tracing::error!(script = %script_path.display(), error = %e, "failed to read script file");
-        1
-    })?;
-    host.compile(&source).map_err(|e| {
-        tracing::error!(script = %script_path.display(), error = %e, "invalid script: failed registration validation");
-        1
-    })
-}
-
-async fn build_dataset(
-    prepared: &Prepared,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
-) -> Result<(Dataset, i64, i64), i32> {
-    let all_bars = data::load_bars(&prepared.pool, None).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to load bars from sim_candles");
-        1
-    })?;
-    let (from_secs, to_secs) = resolve_period(&all_bars, from, to, prepared.sim.warmup_bars)
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to resolve evaluation period");
-            1
-        })?;
-    let dataset = Dataset::new(
-        all_bars,
-        from_secs,
-        to_secs,
-        prepared.sim.warmup_bars,
-        prepared.sim.indicator_cache_mb,
-    )
-    .map_err(|e| {
-        tracing::error!(error = %e, "failed to build dataset for the evaluation period");
-        1
-    })?;
-    warn_missing_weekdays(&dataset);
-    Ok((dataset, from_secs, to_secs))
-}
-
-fn compute_benchmarks(dataset: &Dataset, sim: &SimConfig) -> Vec<Benchmark> {
-    sim.thetas_pips
-        .iter()
-        .map(|&theta| benchmark::compute(dataset.eval_bars(), theta))
-        .collect()
-}
-
-struct EvalInputs {
-    dataset: Dataset,
-    from_secs: i64,
-    to_secs: i64,
-    bar_count: i32,
-    benchmarks: Vec<Benchmark>,
-}
-
-async fn load_eval_inputs(
-    prepared: &Prepared,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
-) -> Result<EvalInputs, i32> {
-    let (dataset, from_secs, to_secs) = build_dataset(prepared, from, to).await?;
-    let bar_count = i32::try_from(dataset.eval_bars().len()).map_err(|e| {
-        tracing::error!(
-            error = %e,
-            eval_bars = dataset.eval_bars().len(),
-            "invalid evaluation period bar count: does not fit sim_batches.bar_count as i32"
-        );
-        1
-    })?;
-    let benchmarks = compute_benchmarks(&dataset, &prepared.sim);
-    Ok(EvalInputs {
-        dataset,
-        from_secs,
-        to_secs,
-        bar_count,
-        benchmarks,
-    })
-}
-
-fn script_name_from_path(path: &Path) -> Result<String, SimError> {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            SimError::Args(format!(
-                "invalid script path: cannot derive a script name from {} (expected a file name with a valid \
-                 UTF-8 stem)",
-                path.display()
-            ))
-        })
-}
 
 fn parse_given_params(
     raw: Option<&str>,
@@ -267,16 +47,6 @@ fn parse_given_params(
     }
 }
 
-fn run_batch_config_json(sim: &SimConfig) -> serde_json::Value {
-    serde_json::json!({
-        "warmup_bars": sim.warmup_bars,
-        "protective_stop_pips": sim.protective_stop_pips,
-        "thetas_pips": sim.thetas_pips,
-        "max_operations_per_bar": sim.max_operations_per_bar,
-        "max_operations_per_run": sim.max_operations_per_run,
-    })
-}
-
 fn sweep_batch_config_json(sim: &SimConfig, max_runs: usize, seed: u64) -> serde_json::Value {
     let mut value = run_batch_config_json(sim);
     value["max_runs"] = serde_json::json!(max_runs);
@@ -286,118 +56,6 @@ fn sweep_batch_config_json(sim: &SimConfig, max_runs: usize, seed: u64) -> serde
 
 fn effective_jobs(requested: usize, run_count: usize, available: usize) -> usize {
     requested.min(run_count).min(available).max(1)
-}
-
-async fn run_backfill(
-    config_path: &Path,
-    from: NaiveDate,
-    to: NaiveDate,
-    json: bool,
-    out: &mut dyn std::io::Write,
-) -> i32 {
-    if from > to {
-        tracing::error!(from = %from, to = %to, "invalid --from: must not be after --to");
-        return 1;
-    }
-    let min_date = fetch::gmo_kline_min_date();
-    if from < min_date {
-        tracing::error!(
-            from = %from,
-            min_date = %min_date,
-            "invalid --from: earlier than the oldest date the gmo kline api accepts; pass --from min_date or later"
-        );
-        return 1;
-    }
-    let prepared = match prepare(config_path).await {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-
-    let client = GmoKlineClient::new(&prepared.sim.gmo_public_base_url);
-
-    let mut total = fetch::BackfillReport {
-        days: 0,
-        saved: 0,
-        one_sided: 0,
-        invalid: 0,
-        failed: Vec::new(),
-    };
-    let mut date = from;
-    loop {
-        match fetch::backfill(&prepared.pool, &client, date, date).await {
-            Ok(r) => {
-                total.days += r.days;
-                total.saved += r.saved;
-                total.one_sided += r.one_sided;
-                total.invalid += r.invalid;
-                total.failed.extend(r.failed);
-            }
-            Err(SimError::FetchIncomplete(f)) => {
-                total.days += 1;
-                total.failed.extend(f);
-            }
-            Err(e) => {
-                tracing::error!(
-                    date = %date,
-                    from = %from,
-                    to = %to,
-                    days = total.days,
-                    saved = total.saved,
-                    one_sided = total.one_sided,
-                    invalid = total.invalid,
-                    failed = ?total.failed,
-                    error = %e,
-                    "backfill aborted by a non-fetch error; counts above cover only the dates \
-                     processed before this one"
-                );
-                return 1;
-            }
-        }
-        if date == to {
-            break;
-        }
-        match date.succ_opt() {
-            Some(next) => date = next,
-            None => break,
-        }
-    }
-
-    if let Err(e) = print_backfill(out, json, &total) {
-        return output_failed(e);
-    }
-    if !total.failed.is_empty() {
-        tracing::error!(
-            from = %from,
-            to = %to,
-            failed = ?total.failed,
-            "failed to fetch some dates after retries: rerun the same range to \
-             fill the gaps (already-saved dates are unaffected)"
-        );
-        return 1;
-    }
-    0
-}
-
-async fn run_benchmark(
-    config_path: &Path,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
-    json: bool,
-    out: &mut dyn std::io::Write,
-) -> i32 {
-    let prepared = match prepare(config_path).await {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-    let (dataset, _, _) = match build_dataset(&prepared, from, to).await {
-        Ok(d) => d,
-        Err(code) => return code,
-    };
-    let benchmarks = compute_benchmarks(&dataset, &prepared.sim);
-    match print_benchmark(out, &benchmarks, json) {
-        Ok(()) => 0,
-        Err(e) => output_failed(e),
-    }
 }
 
 async fn run_run(
