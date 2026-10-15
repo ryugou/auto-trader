@@ -115,14 +115,6 @@ fn compute_day_start_balance_net_of_todays_realized_pnl(
     current_balance - day_net
 }
 
-async fn update_price_store_from_candle_path_the_only_source_for_exchanges_without_raw_tick_feed(
-    price_store: &auto_trader::price_store::PriceStore,
-    key: price_store::FeedKey,
-    tick: price_store::LatestTick,
-) {
-    price_store.update(key, tick).await;
-}
-
 fn spawn_fx_price_drain_since_fx_position_monitor_is_disabled(
     mut rx: mpsc::Receiver<PriceEvent>,
 ) -> tokio::task::JoinHandle<()> {
@@ -270,7 +262,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut expected_feeds: Vec<price_store::FeedKey> = Vec::new();
 
-    let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
+    let (price_tx, price_rx) = mpsc::channel::<PriceEvent>(256);
     let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
     let (signal_tx, signal_rx) = mpsc::channel::<SignalEvent>(256);
     let (trade_tx, mut trade_rx) = mpsc::channel::<TradeEvent>(256);
@@ -396,215 +388,20 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(|s| Pair::new(s)).collect())
         .unwrap_or_default();
-
-    let mut bitflyer_highs_seed: std::collections::HashMap<String, Vec<Decimal>> =
-        std::collections::HashMap::new();
-    let mut bitflyer_lows_seed: std::collections::HashMap<String, Vec<Decimal>> =
-        std::collections::HashMap::new();
-    let mut bitflyer_closes_seed: std::collections::HashMap<String, Vec<Decimal>> =
-        std::collections::HashMap::new();
-
-    {
-        use auto_trader_core::event::PriceEvent;
-        use auto_trader_core::types::Exchange as ExchangeTy;
-        use std::collections::HashMap as StdHashMap;
-
-        async fn load_warmup_history(
-            pool: &sqlx::PgPool,
-            exchange: &str,
-            pair: &str,
-            timeframe: &str,
-            limit: i64,
-        ) -> Vec<auto_trader_core::types::Candle> {
-            match auto_trader_db::candles::get_candles(pool, exchange, pair, timeframe, limit).await
-            {
-                Ok(most_recent_first) => most_recent_first.into_iter().rev().collect(),
-                Err(e) => {
-                    tracing::warn!(
-                        exchange = %exchange,
-                        pair = %pair,
-                        timeframe = %timeframe,
-                        error = %e,
-                        "failed to load warmup history"
-                    );
-                    Vec::new()
-                }
-            }
-        }
-
-        for pair in &crypto_pairs_for_warmup {
-            let candles = load_warmup_history(
-                &pool,
-                ExchangeTy::BitflyerCfd.as_str(),
-                &pair.0,
-                CRYPTO_TIMEFRAME,
-                WARMUP_LIMIT,
-            )
-            .await;
-            if candles.is_empty() {
-                continue;
-            }
-            let highs: Vec<Decimal> = candles.iter().map(|c| c.high).collect();
-            let lows: Vec<Decimal> = candles.iter().map(|c| c.low).collect();
-            let closes: Vec<Decimal> = candles.iter().map(|c| c.close).collect();
-            bitflyer_highs_seed.insert(pair.0.clone(), highs);
-            bitflyer_lows_seed.insert(pair.0.clone(), lows);
-            bitflyer_closes_seed.insert(pair.0.clone(), closes);
-
-            let n = candles.len();
-            let events: Vec<PriceEvent> = candles
-                .into_iter()
-                .map(|c| PriceEvent {
-                    pair: c.pair.clone(),
-                    exchange: ExchangeTy::BitflyerCfd,
-                    timestamp: c.timestamp,
-                    candle: c,
-                    indicators: StdHashMap::new(),
-                })
-                .collect();
-            engine.warmup(&events).await;
-            tracing::info!(
-                exchange = %ExchangeTy::BitflyerCfd,
-                timeframe = CRYPTO_TIMEFRAME,
-                pair = %pair.0,
-                candle_count = n,
-                "fed warmup candles"
-            );
-        }
-
-        for pair in &crypto_pairs_for_warmup {
-            let h1_candles = load_warmup_history(
-                &pool,
-                ExchangeTy::BitflyerCfd.as_str(),
-                &pair.0,
-                H1_TIMEFRAME,
-                WARMUP_LIMIT,
-            )
-            .await;
-            if h1_candles.is_empty() {
-                continue;
-            }
-            let n = h1_candles.len();
-            let h1_events: Vec<PriceEvent> = h1_candles
-                .into_iter()
-                .map(|c| PriceEvent {
-                    pair: c.pair.clone(),
-                    exchange: ExchangeTy::BitflyerCfd,
-                    timestamp: c.timestamp,
-                    candle: c,
-                    indicators: StdHashMap::new(),
-                })
-                .collect();
-            engine.warmup(&h1_events).await;
-            tracing::info!(
-                exchange = %ExchangeTy::BitflyerCfd,
-                timeframe = H1_TIMEFRAME,
-                pair = %pair.0,
-                candle_count = n,
-                "fed warmup candles"
-            );
-        }
-
-        let fx_pairs_for_warmup: Vec<Pair> = resolve_configured_fx_pairs(&config);
-        for pair in &fx_pairs_for_warmup {
-            let candles = load_warmup_history(
-                &pool,
-                ExchangeTy::Oanda.as_str(),
-                &pair.0,
-                FX_TIMEFRAME,
-                WARMUP_LIMIT,
-            )
-            .await;
-            if candles.is_empty() {
-                continue;
-            }
-            let n = candles.len();
-            let events: Vec<PriceEvent> = candles
-                .into_iter()
-                .map(|c| PriceEvent {
-                    pair: c.pair.clone(),
-                    exchange: ExchangeTy::Oanda,
-                    timestamp: c.timestamp,
-                    candle: c,
-                    indicators: StdHashMap::new(),
-                })
-                .collect();
-            engine.warmup(&events).await;
-            tracing::info!(
-                exchange = %ExchangeTy::Oanda,
-                timeframe = FX_TIMEFRAME,
-                pair = %pair.0,
-                candle_count = n,
-                "fed warmup candles"
-            );
-        }
-
-        for pair in &fx_pairs_for_warmup {
-            let candles = load_warmup_history(
-                &pool,
-                ExchangeTy::GmoFx.as_str(),
-                &pair.0,
-                FX_TIMEFRAME,
-                WARMUP_LIMIT,
-            )
-            .await;
-            if candles.is_empty() {
-                continue;
-            }
-            let n = candles.len();
-            let events: Vec<PriceEvent> = candles
-                .into_iter()
-                .map(|c| PriceEvent {
-                    pair: c.pair.clone(),
-                    exchange: ExchangeTy::GmoFx,
-                    timestamp: c.timestamp,
-                    candle: c,
-                    indicators: StdHashMap::new(),
-                })
-                .collect();
-            engine.warmup(&events).await;
-            tracing::info!(
-                exchange = %ExchangeTy::GmoFx,
-                timeframe = FX_TIMEFRAME,
-                pair = %pair.0,
-                candle_count = n,
-                "fed warmup candles"
-            );
-        }
-
-        for pair in &fx_pairs_for_warmup {
-            let h1_candles = load_warmup_history(
-                &pool,
-                ExchangeTy::GmoFx.as_str(),
-                &pair.0,
-                H1_TIMEFRAME,
-                WARMUP_LIMIT,
-            )
-            .await;
-            if h1_candles.is_empty() {
-                continue;
-            }
-            let n = h1_candles.len();
-            let h1_events: Vec<PriceEvent> = h1_candles
-                .into_iter()
-                .map(|c| PriceEvent {
-                    pair: c.pair.clone(),
-                    exchange: ExchangeTy::GmoFx,
-                    timestamp: c.timestamp,
-                    candle: c,
-                    indicators: StdHashMap::new(),
-                })
-                .collect();
-            engine.warmup(&h1_events).await;
-            tracing::info!(
-                exchange = %ExchangeTy::GmoFx,
-                timeframe = H1_TIMEFRAME,
-                pair = %pair.0,
-                candle_count = n,
-                "fed warmup candles"
-            );
-        }
-    }
+    let fx_pairs_for_warmup: Vec<Pair> = resolve_configured_fx_pairs(&config);
+    let mut bitflyer_seed = runtime::warmup::feed_history(
+        &pool,
+        &mut engine,
+        &crypto_pairs_for_warmup,
+        &fx_pairs_for_warmup,
+        runtime::warmup::WarmupTimeframes {
+            crypto: CRYPTO_TIMEFRAME,
+            h1: H1_TIMEFRAME,
+            fx: FX_TIMEFRAME,
+            limit: WARMUP_LIMIT,
+        },
+    )
+    .await;
 
     let registered_strategies: Vec<String> = engine
         .registered_names()
@@ -780,9 +577,9 @@ async fn main() -> anyhow::Result<()> {
             )
             .with_db(pool.clone())
             .with_candle_seed(
-                std::mem::take(&mut bitflyer_highs_seed),
-                std::mem::take(&mut bitflyer_lows_seed),
-                std::mem::take(&mut bitflyer_closes_seed),
+                std::mem::take(&mut bitflyer_seed.highs),
+                std::mem::take(&mut bitflyer_seed.lows),
+                std::mem::take(&mut bitflyer_seed.closes),
             );
             feeds.insert(Exchange::BitflyerCfd, Box::new(bf_feed));
         }
@@ -924,90 +721,19 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let (exit_tx, exit_rx) = mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
-    let engine_pool = pool.clone();
-    let price_store_for_engine = price_store.clone();
 
-    let engine_handle = tokio::spawn(async move {
-        let mut macro_rx = macro_rx;
-        loop {
-            tokio::select! {
-                price = price_rx.recv() => {
-                    match price {
-                        Some(event) => {
-                            update_price_store_from_candle_path_the_only_source_for_exchanges_without_raw_tick_feed(
-                                &price_store_for_engine,
-                                price_store::FeedKey::new(event.exchange, event.pair.clone()),
-                                price_store::LatestTick {
-                                    price: event.candle.close,
-                                    best_bid: event.candle.best_bid,
-                                    best_ask: event.candle.best_ask,
-                                    ts: event.timestamp,
-                                },
-                            )
-                            .await;
-                            if event.exchange == auto_trader_core::types::Exchange::Oanda
-                                && price_monitor_tx.send(event.clone()).await.is_err()
-                            {
-                                tracing::warn!("fx position monitor channel closed");
-                            }
-                            if (event.exchange == auto_trader_core::types::Exchange::BitflyerCfd
-                                || event.exchange == auto_trader_core::types::Exchange::GmoFx)
-                                && crypto_price_tx.send(event.clone()).await.is_err()
-                            {
-                                tracing::warn!("position monitor channel closed");
-                            }
-
-                            let positions_by_strategy = match auto_trader_db::trades::list_open_with_account_name_for_pair(
-                                &engine_pool,
-                                event.exchange.as_str(),
-                                &event.pair.0,
-                            ).await {
-                                Ok(rows) => {
-                                    let mut by_strategy: std::collections::HashMap<String, Vec<auto_trader_core::types::Position>> =
-                                        std::collections::HashMap::new();
-                                    for r in rows {
-                                        by_strategy
-                                            .entry(r.trade.strategy_name.clone())
-                                            .or_default()
-                                            .push(auto_trader_core::types::Position { trade: r.trade });
-                                    }
-                                    by_strategy
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "failed to list open trades for on_open_positions"
-                                    );
-                                    std::collections::HashMap::new()
-                                }
-                            };
-
-                            let exits = engine
-                                .on_price_with_positions(&event, &positions_by_strategy)
-                                .await;
-                            for exit in exits {
-                                if exit_tx.send(exit).await.is_err() {
-                                    tracing::warn!("failed to send strategy exit: channel closed");
-                                }
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                macro_update = macro_rx.recv() => {
-                    match macro_update {
-                        Ok(update) => engine.on_macro_update(&update),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(skipped_updates = n, "failed to receive macro broadcast: lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            tracing::info!("macro broadcast channel closed");
-                        }
-                    }
-                }
-            }
-        }
-    });
+    let engine_handle = tokio::spawn(runtime::engine_loop::run(
+        runtime::engine_loop::EngineLoopContext {
+            engine,
+            pool: pool.clone(),
+            price_store: price_store.clone(),
+            price_monitor_tx,
+            crypto_price_tx,
+            exit_tx,
+        },
+        price_rx,
+        macro_rx,
+    ));
 
     let exit_executor_handle = tokio::spawn(runtime::exit_executor::run(
         new_close_ctx(),
