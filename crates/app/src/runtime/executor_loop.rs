@@ -137,18 +137,7 @@ fn check_static_account_gates(
     pac: &TradingAccount,
     signal: &Signal,
 ) -> Option<Exchange> {
-    let exchange = match crate::exchange_from_str(&pac.exchange) {
-        Some(e) => e,
-        None => {
-            tracing::warn!(
-                account_name = %pac.name,
-                account_id = %pac.id,
-                exchange = %pac.exchange,
-                "unsupported exchange"
-            );
-            return None;
-        }
-    };
+    let exchange = super::resolve_account_exchange(pac)?;
     if !auto_trader::startup::fx_new_dispatch_allowed(&signal.strategy_name, exchange) {
         tracing::warn!(
             account_name = %pac.name,

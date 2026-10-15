@@ -1,11 +1,15 @@
+use auto_trader_core::types::Exchange;
 use auto_trader_db::trades::OpenTradeWithAccount;
+use auto_trader_db::trading_accounts::TradingAccount;
 
 pub(crate) mod crypto_monitor;
+pub(crate) mod daily_batch;
 pub(crate) mod engine_loop;
 pub(crate) mod executor_loop;
 pub(crate) mod exit_executor;
 pub(crate) mod overnight;
 pub(crate) mod recorder;
+pub(crate) mod sfd_accrual;
 pub(crate) mod warmup;
 
 pub(crate) struct TradeAccount {
@@ -32,3 +36,19 @@ pub(crate) fn resolve_trade_account(owned: &OpenTradeWithAccount) -> Option<Trad
         account_name,
     })
 }
+
+pub(crate) fn resolve_account_exchange(pac: &TradingAccount) -> Option<Exchange> {
+    let Some(exchange) = crate::exchange_from_str(&pac.exchange) else {
+        tracing::warn!(
+            account_name = %pac.name,
+            account_id = %pac.id,
+            exchange = %pac.exchange,
+            "unsupported exchange"
+        );
+        return None;
+    };
+    Some(exchange)
+}
+
+#[cfg(test)]
+mod tests;
