@@ -1,23 +1,15 @@
-//! `sim_candles` の読み書きと、`auto-trader-sim` が必要とするテーブルの存在確認
-//! (spec 5.1 章、12 章)。
-//!
-//! ここで作る接続はマイグレーションを実行しない(`PgPoolOptions` を直接使う)。
-//! `migrate` サブコマンドだけが `sqlx::migrate!` を呼ぶ(spec 12 章: 本番 DB では
-//! 売買プロセスの起動時にだけマイグレーションを適用し、`auto-trader-sim migrate`
-//! を本番へ向けて実行してはならない)。
-
-use crate::error::SimError;
-use crate::types::{
-    Bar, DB_ACQUIRE_TIMEOUT, DB_MAX_CONNECTIONS, REQUIRED_TABLES, SIM_EXCHANGE, SIM_PAIR,
-    SIM_TIMEFRAME,
-};
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-/// マイグレーションを実行しない接続を作る(`migrate` 以外のサブコマンド用。spec 12 章)。
+use crate::error::SimError;
+use crate::types::{
+    Bar, DB_ACQUIRE_TIMEOUT, DB_MAX_CONNECTIONS, REQUIRED_TABLES, SIM_EXCHANGE, SIM_PAIR,
+    SIM_TIMEFRAME,
+};
+
 pub async fn connect(database_url: &str) -> Result<PgPool, SimError> {
     PgPoolOptions::new()
         .max_connections(DB_MAX_CONNECTIONS)
@@ -27,9 +19,6 @@ pub async fn connect(database_url: &str) -> Result<PgPool, SimError> {
         .map_err(SimError::Db)
 }
 
-/// 起動時のテーブル存在チェック(spec 12 章)。欠けているテーブル名を
-/// `SimError::MissingTables` で返す(運用者が次のアクションを判断できるよう、
-/// `SimError::MissingTables` 自体のメッセージに対処法を含めてある)。
 pub async fn ensure_tables(pool: &PgPool) -> Result<(), SimError> {
     let existing: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename = ANY($1)",
@@ -51,42 +40,52 @@ pub async fn ensure_tables(pool: &PgPool) -> Result<(), SimError> {
     }
 }
 
-/// ミリ円 (i64) を `NUMERIC(10,3)` と 1 対 1 に対応する `Decimal` へ変換する
-/// (spec 3 章)。`Decimal::new(v, 3)` は `v * 10^-3` を厳密に表す。
 fn milli_to_decimal(v: i64) -> Decimal {
     Decimal::new(v, 3)
 }
 
-/// `Decimal` (`NUMERIC(10,3)`) をミリ円 (i64) へ変換する。
-///
-/// `Decimal::to_i64()` は内部で `trunc()` してから整数化するため、端数が
-/// あっても黙って切り捨てられてしまう。ここでは端数の有無を明示的に確認し、
-/// 端数がある(= 保存時の規約が破れている)場合は値を握りつぶさず
-/// `SimError::Other` として報告する。
-fn decimal_to_milli(d: Decimal, field: &'static str, open_time: i64) -> Result<i64, SimError> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MilliScaleRejection {
+    Fractional { scaled: Decimal },
+    Overflow,
+}
+
+pub(crate) fn decimal_to_milli(d: Decimal) -> Result<i64, MilliScaleRejection> {
     let scaled = d * Decimal::from(1000);
     if !scaled.fract().is_zero() {
-        return Err(SimError::Other(anyhow::anyhow!(
-            "sim_candles row open_time={open_time}: {field}={d} does not convert to an integer milli-yen value (scaled={scaled})"
-        )));
+        return Err(MilliScaleRejection::Fractional { scaled });
     }
-    scaled.to_i64().ok_or_else(|| {
-        SimError::Other(anyhow::anyhow!(
-            "sim_candles row open_time={open_time}: {field}={d} overflows i64 after scaling to milli-yen"
-        ))
+    scaled.to_i64().ok_or(MilliScaleRejection::Overflow)
+}
+
+fn decimal_to_milli_rejecting_fraction(
+    d: Decimal,
+    field: &'static str,
+    open_time: i64,
+) -> Result<i64, SimError> {
+    decimal_to_milli(d).map_err(|rejection| match rejection {
+        MilliScaleRejection::Fractional { scaled } => SimError::Other(anyhow::anyhow!(
+            "invalid sim_candles field \"{field}\": value {d} at open_time {open_time} does not scale to an integer milli-yen amount (scaled={scaled})"
+        )),
+        MilliScaleRejection::Overflow => SimError::Other(anyhow::anyhow!(
+            "invalid sim_candles field \"{field}\": value {d} at open_time {open_time} overflows i64 at milli-yen scale"
+        )),
     })
 }
 
-fn epoch_secs_to_datetime(secs: i64, context: &str) -> Result<DateTime<Utc>, SimError> {
+pub(crate) fn format_epoch_secs_rfc3339(secs: i64) -> Option<String> {
+    DateTime::<Utc>::from_timestamp(secs, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+pub(crate) fn epoch_secs_to_datetime(secs: i64, context: &str) -> Result<DateTime<Utc>, SimError> {
     Utc.timestamp_opt(secs, 0).single().ok_or_else(|| {
         SimError::Other(anyhow::anyhow!(
-            "{context}: epoch seconds {secs} is not a representable UTC instant"
+            "invalid epoch seconds: {secs} is not a representable UTC instant (context={context})"
         ))
     })
 }
 
-/// `sim_candles` の 1 行をそのまま受け取る行表現。`Bar` への変換は
-/// `TryFrom<CandleRow>` で行う(`crates/db/src/candles.rs` の既存パターンに合わせる)。
 #[derive(sqlx::FromRow)]
 struct CandleRow {
     open_time: DateTime<Utc>,
@@ -107,22 +106,18 @@ impl TryFrom<CandleRow> for Bar {
         let open_time = r.open_time.timestamp();
         Ok(Bar {
             open_time,
-            bid_open: decimal_to_milli(r.bid_open, "bid_open", open_time)?,
-            bid_high: decimal_to_milli(r.bid_high, "bid_high", open_time)?,
-            bid_low: decimal_to_milli(r.bid_low, "bid_low", open_time)?,
-            bid_close: decimal_to_milli(r.bid_close, "bid_close", open_time)?,
-            ask_open: decimal_to_milli(r.ask_open, "ask_open", open_time)?,
-            ask_high: decimal_to_milli(r.ask_high, "ask_high", open_time)?,
-            ask_low: decimal_to_milli(r.ask_low, "ask_low", open_time)?,
-            ask_close: decimal_to_milli(r.ask_close, "ask_close", open_time)?,
+            bid_open: decimal_to_milli_rejecting_fraction(r.bid_open, "bid_open", open_time)?,
+            bid_high: decimal_to_milli_rejecting_fraction(r.bid_high, "bid_high", open_time)?,
+            bid_low: decimal_to_milli_rejecting_fraction(r.bid_low, "bid_low", open_time)?,
+            bid_close: decimal_to_milli_rejecting_fraction(r.bid_close, "bid_close", open_time)?,
+            ask_open: decimal_to_milli_rejecting_fraction(r.ask_open, "ask_open", open_time)?,
+            ask_high: decimal_to_milli_rejecting_fraction(r.ask_high, "ask_high", open_time)?,
+            ask_low: decimal_to_milli_rejecting_fraction(r.ask_low, "ask_low", open_time)?,
+            ask_close: decimal_to_milli_rejecting_fraction(r.ask_close, "ask_close", open_time)?,
         })
     }
 }
 
-/// `sim_candles` へ主キー upsert する。同じ `open_time` を再投入すると値が
-/// 更新される(spec 5.2 章: 同じ日付を再取得しても結果は変わらない)。
-/// バッチ全体を 1 トランザクションにまとめ、途中で失敗した場合に半端な
-/// 行だけが保存された状態を残さない。
 pub async fn upsert_bars(pool: &PgPool, bars: &[Bar]) -> Result<u64, SimError> {
     if bars.is_empty() {
         return Ok(0);
@@ -169,8 +164,6 @@ pub async fn upsert_bars(pool: &PgPool, bars: &[Bar]) -> Result<u64, SimError> {
     Ok(affected)
 }
 
-/// `open_time` 昇順で足を読み込む。`to_exclusive` を指定すると
-/// `open_time < to_exclusive` の範囲だけを返す。
 pub async fn load_bars(pool: &PgPool, to_exclusive: Option<i64>) -> Result<Vec<Bar>, SimError> {
     let rows: Vec<CandleRow> = match to_exclusive {
         Some(t) => {
@@ -211,3 +204,6 @@ pub async fn load_bars(pool: &PgPool, to_exclusive: Option<i64>) -> Result<Vec<B
 
     rows.into_iter().map(Bar::try_from).collect()
 }
+
+#[cfg(test)]
+mod tests;

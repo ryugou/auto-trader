@@ -1,28 +1,13 @@
-//! `GmoKlineClient::fetch_day` と `backfill` の結合テスト(wiremock でモック)。
-//!
-//! 計画 Task 2 Step 2 の確認項目(`fetch_day`):
-//! - 正常なレスポンスが `Kline` に変換される
-//! - HTTP 500 が 2 回続いた後に成功すると、結果が返る(リクエストは 3 回)
-//! - `status` が 5 のレスポンスが 4 回続くと `Err` になる(リクエストは 4 回)
-//! - `data` が空配列のレスポンスが、空の `Vec` として成功する
-//!
-//! 計画 Task 2 Step 4 の確認項目(`backfill`。wiremock と `#[sqlx::test]` の両方を使う):
-//! - 2 日分の BID・ASK が保存され、`BackfillReport` の件数が一致する
-//! - 1 日の ASK だけが失敗し続ける場合に、`failed == ["<その日付> ASK"]` となり、
-//!   他の日は保存され、戻り値が `Err(SimError::FetchIncomplete(..))` になる
-//!
-//! 実 API は一切叩かない。`with_timing` で間隔と再試行を 1 ミリ秒にし、テストを高速化する。
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use auto_trader_sim::data::load_bars;
 use auto_trader_sim::error::SimError;
 use auto_trader_sim::fetch::{GmoKlineClient, PriceType, backfill};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-/// テスト用クライアント。間隔・再試行間隔を 1ms にして実行時間を抑える。
 fn fast_client(server: &MockServer) -> GmoKlineClient {
     GmoKlineClient::new(&server.uri()).with_timing(
         Duration::from_millis(1),
@@ -230,10 +215,6 @@ async fn fetch_day_fails_after_exhausting_retries_on_malformed_json_body() {
     assert!(message.contains("ASK"), "priceType missing: {message}");
 }
 
-// ---- backfill (spec 5.2 章; 計画 Task 2 Step 4) --------------------------------
-
-/// `date`/`priceType` の組み合わせごとに固定のレスポンスを 1 件返す klines エンドポイントを
-/// マウントする。`open_time_ms` は `openTime` フィールド(ミリ秒の文字列)に使う。
 async fn mount_day(
     server: &MockServer,
     date: chrono::NaiveDate,
@@ -290,8 +271,6 @@ async fn backfill_saves_two_days_of_bid_and_ask_and_reports_counts(pool: sqlx::P
     assert_eq!(loaded.len(), 2);
 }
 
-/// 複数の足を返す klines エンドポイントをマウントする。各要素は
-/// `(openTime ミリ秒, open, high, low, close)`。
 async fn mount_day_with_klines(
     server: &MockServer,
     date: chrono::NaiveDate,
@@ -336,8 +315,6 @@ async fn backfill_with_from_after_to_processes_zero_days_without_any_request(poo
     assert_eq!(report.days, 0);
     assert_eq!(report.saved, 0);
     assert!(report.failed.is_empty());
-    // wiremock は MockServer の drop 時に .expect(0) を検証する。
-    drop(server);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -346,7 +323,6 @@ async fn backfill_counts_one_sided_and_invalid_bars_and_saves_only_the_valid_one
 ) {
     let server = MockServer::start().await;
     let day = test_date();
-    // t0: 正常 / t1: BID だけ / t2: 両側あるが ask_close < bid_close で不正。
     let t0 = 1_698_451_200_000;
     let t1 = t0 + 300_000;
     let t2 = t0 + 600_000;
@@ -368,8 +344,6 @@ async fn backfill_counts_one_sided_and_invalid_bars_and_saves_only_the_valid_one
         "ASK",
         &[
             (t0, "149.610", "149.610", "149.610", "149.610"),
-            // BID/ASK とも OHLC 整合・ask_open/high/low >= bid の各値を満たし、
-            // ask_close(149.595) < bid_close(149.600) だけが違反する。
             (t2, "149.610", "149.610", "149.590", "149.595"),
         ],
     )
@@ -395,10 +369,8 @@ async fn backfill_continues_past_a_failed_date_and_reports_fetch_incomplete(pool
     let day1 = chrono::NaiveDate::from_ymd_opt(2023, 10, 28).unwrap();
     let day2 = chrono::NaiveDate::from_ymd_opt(2023, 10, 29).unwrap();
 
-    // day1: BID と ASK がそろい、保存される。
     mount_day(&server, day1, "BID", 0, 1_698_451_200_000, "149.600").await;
     mount_day(&server, day1, "ASK", 0, 1_698_451_200_000, "149.610").await;
-    // day2: BID は成功するが、ASK は status=5 を返し続け、再試行をすべて使い切って失敗する。
     mount_day(&server, day2, "BID", 0, 1_698_537_600_000, "149.700").await;
     Mock::given(method("GET"))
         .and(path("/v1/klines"))
@@ -424,7 +396,6 @@ async fn backfill_continues_past_a_failed_date_and_reports_fetch_incomplete(pool
         other => panic!("expected SimError::FetchIncomplete, got {other:?}"),
     }
 
-    // day1 は再試行の対象ではないので、失敗した day2 とは独立に保存されている。
     let loaded = load_bars(&pool, None)
         .await
         .expect("day1 bars must still be saved despite day2 failing");
