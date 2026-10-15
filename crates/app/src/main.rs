@@ -1,3 +1,4 @@
+mod bootstrap;
 mod regime;
 mod runtime;
 mod startup_reconcile;
@@ -10,17 +11,12 @@ use std::sync::Arc;
 
 use auto_trader::api;
 use auto_trader::price_store;
-use auto_trader::spawn_system_alerts;
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent};
 use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::pool::create_pool;
-use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::market_feed::MarketFeed;
-use auto_trader_market::monitor::MarketMonitor;
-use auto_trader_market::oanda::OandaClient;
-use auto_trader_market::oanda_private::OandaPrivateApi;
 use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
@@ -182,80 +178,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = create_pool(&config.database.url).await?;
     tracing::info!("database connected");
 
-    let bitflyer_api: Arc<BitflyerPrivateApi> =
-        Arc::new(if let Some(bf) = config.bitflyer.as_ref() {
-            let api_key = bf.api_key.clone().unwrap_or_default();
-            let api_secret = bf.api_secret.clone().unwrap_or_default();
-            BitflyerPrivateApi::new(api_key, api_secret)?
-        } else {
-            BitflyerPrivateApi::new(String::new(), String::new())?
-        });
-
-    let mut exchange_apis: HashMap<Exchange, Arc<dyn ExchangeApi>> = HashMap::new();
-    exchange_apis.insert(Exchange::BitflyerCfd, bitflyer_api.clone());
-
-    fn resolve_oanda_account_id(config: &auto_trader_core::config::AppConfig) -> Option<String> {
-        std::env::var("OANDA_ACCOUNT_ID")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                config
-                    .oanda
-                    .as_ref()
-                    .map(|c| c.account_id.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            })
-    }
-
-    fn resolve_oanda_api_key() -> Option<String> {
-        std::env::var("OANDA_API_KEY")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    let oanda_account_id = resolve_oanda_account_id(&config);
-    let oanda_api_key = resolve_oanda_api_key();
-    if let (Some(account_id), Some(api_key), Some(oanda_config)) =
-        (oanda_account_id, oanda_api_key, config.oanda.as_ref())
-    {
-        let oanda_api: Arc<dyn ExchangeApi> = Arc::new(OandaPrivateApi::new(
-            oanda_config.api_url.clone(),
-            account_id,
-            api_key,
-        )?);
-        exchange_apis.insert(Exchange::Oanda, oanda_api);
-        tracing::info!(exchange = %Exchange::Oanda, "exchange api registered");
-    } else {
-        tracing::info!(
-            exchange = %Exchange::Oanda,
-            "no exchange api registered for exchange, requires OANDA_API_KEY env, an account id \
-             (OANDA_ACCOUNT_ID env or [oanda].account_id config), and [oanda].api_url in config"
-        );
-    }
-
-    fn env_trimmed(name: &str) -> Option<String> {
-        std::env::var(name)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-    match (env_trimmed("GMO_API_KEY"), env_trimmed("GMO_API_SECRET")) {
-        (Some(key), Some(secret)) => {
-            let gmo_api: Arc<dyn ExchangeApi> = Arc::new(
-                auto_trader_market::gmo_fx_private::GmoFxPrivateApi::new(key, secret)?,
-            );
-            exchange_apis.insert(Exchange::GmoFx, gmo_api);
-            tracing::info!(exchange = %Exchange::GmoFx, "exchange api registered");
-        }
-        _ => tracing::info!(
-            exchange = %Exchange::GmoFx,
-            "no exchange api registered for exchange, requires GMO_API_KEY and GMO_API_SECRET env"
-        ),
-    }
-
-    let exchange_apis = Arc::new(exchange_apis);
+    let exchange_apis = bootstrap::exchange_apis::build(&config)?;
 
     let slack_webhook_url = std::env::var("SLACK_WEBHOOK_URL").ok();
     let notifier: Arc<Notifier> = Arc::new(Notifier::new(slack_webhook_url)?);
@@ -272,86 +195,10 @@ async fn main() -> anyhow::Result<()> {
     const FX_TIMEFRAME: &str = "M5";
     const WARMUP_LIMIT: i64 = 200;
 
-    let fx_pairs: Vec<Pair> = resolve_configured_fx_pairs(&config);
-    let fx_pairs_configured = !fx_pairs.is_empty();
-    let fx_monitor: Option<MarketMonitor> = if !fx_pairs.is_empty() {
-        if let (Some(api_key), Some(oanda_config)) =
-            (resolve_oanda_api_key(), config.oanda.as_ref())
-        {
-            match resolve_oanda_account_id(&config) {
-                Some(account_id) => {
-                    for p in &fx_pairs {
-                        expected_feeds.push(price_store::FeedKey::new(
-                            auto_trader_core::types::Exchange::Oanda,
-                            p.clone(),
-                        ));
-                    }
-                    let oanda = OandaClient::new(&oanda_config.api_url, &account_id, &api_key)?;
-                    Some(
-                        MarketMonitor::new(
-                            oanda,
-                            fx_pairs,
-                            config.monitor.interval_secs,
-                            FX_TIMEFRAME,
-                        )
-                        .with_db(pool.clone()),
-                    )
-                }
-                None => {
-                    tracing::warn!(
-                        exchange = %Exchange::Oanda,
-                        "invalid oanda account id: not set"
-                    );
-                    None
-                }
-            }
-        } else {
-            tracing::info!(
-                exchange = %Exchange::Oanda,
-                "not configured or api key not set, fx monitor disabled"
-            );
-            None
-        }
-    } else {
-        tracing::info!("no fx pairs configured, fx monitor disabled");
-        None
-    };
+    let fx_monitor =
+        bootstrap::fx_monitor::build(&config, &pool, FX_TIMEFRAME, &mut expected_feeds)?;
 
-    if fx_monitor.is_none() && !fx_pairs_configured {
-        let has_fx_strategy = config
-            .strategies
-            .iter()
-            .any(|s| s.enabled && s.name.starts_with("swing_llm"));
-        if has_fx_strategy {
-            tracing::warn!(
-                remedy = "configure the oanda or gmo_fx feed, otherwise fx strategies receive no price data",
-                "invalid fx price source: not configured"
-            );
-        }
-    }
-
-    let vegapunk_auth_token = std::env::var("VEGAPUNK_AUTH_TOKEN").ok();
-    let knowledge_store: Option<Arc<dyn auto_trader_core::knowledge::KnowledgeStore>> =
-        match auto_trader_vegapunk::client::VegapunkClient::connect(
-            &config.vegapunk.endpoint,
-            &config.vegapunk.schema,
-            vegapunk_auth_token.as_deref(),
-        )
-        .await
-        {
-            Ok(client) => {
-                tracing::info!(endpoint = %config.vegapunk.endpoint, "vegapunk connected");
-                Some(
-                    Arc::new(auto_trader::knowledge::VegapunkKnowledgeStore::new(
-                        Arc::new(client),
-                    )) as Arc<dyn auto_trader_core::knowledge::KnowledgeStore>,
-                )
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to connect to vegapunk");
-                None
-            }
-        };
+    let knowledge_store = bootstrap::knowledge_store::connect(&config.vegapunk).await;
 
     let mut engine = StrategyEngine::new(signal_tx);
     auto_trader::startup::register_strategies(
@@ -637,49 +484,8 @@ async fn main() -> anyhow::Result<()> {
     let (macro_tx, _) =
         tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
     let macro_rx = macro_tx.subscribe();
-    let macro_analyst_handle = if config.macro_analyst.as_ref().is_some_and(|m| m.enabled) {
-        let mac = config.macro_analyst.as_ref().unwrap();
-        let gemini_api_key = match std::env::var("GEMINI_API_KEY") {
-            Ok(value) if !value.trim().is_empty() => Some(value),
-            _ => {
-                tracing::warn!("invalid env var \"GEMINI_API_KEY\": not set or empty");
-                None
-            }
-        };
-        let gemini_config = config.gemini.as_ref();
-        match (gemini_api_key, gemini_config) {
-            (Some(_), None) | (None, _) => {
-                tracing::info!(
-                    "missing env var \"GEMINI_API_KEY\" or gemini config, skipping macro analyst"
-                );
-                None
-            }
-            (Some(api_key), Some(gemini_config)) => {
-                let mut analyst = auto_trader_macro_analyst::analyst::MacroAnalyst::new(
-                    mac.news_sources.clone(),
-                    &gemini_config.api_url,
-                    &api_key,
-                    &gemini_config.model,
-                )?
-                .with_db(pool.clone());
-
-                if let Some(store) = &knowledge_store {
-                    analyst = analyst.with_knowledge(Arc::clone(store));
-                }
-
-                let news_interval = std::time::Duration::from_secs(mac.news_interval_secs);
-                let macro_tx_clone = macro_tx.clone();
-                Some(tokio::spawn(async move {
-                    if let Err(e) = analyst.run(macro_tx_clone, news_interval).await {
-                        tracing::error!(error = %e, "failed to run macro analyst");
-                    }
-                }))
-            }
-        }
-    } else {
-        tracing::info!("macro analyst disabled");
-        None
-    };
+    let macro_analyst_handle =
+        bootstrap::macro_analyst::spawn(&config, &pool, &knowledge_store, macro_tx.clone())?;
 
     reconcile_live_accounts_before_spawning_any_trading_task(
         &pool,
@@ -690,16 +496,13 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    {
-        let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
-            pool: pool.clone(),
-            price_store: price_store.clone(),
-            apis: exchange_apis.clone(),
-            live_forces_dry_run,
-        };
-        let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
-        spawn_system_alerts(&notifier, alerts);
-    }
+    let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
+        pool: pool.clone(),
+        price_store: price_store.clone(),
+        apis: exchange_apis.clone(),
+        live_forces_dry_run,
+    };
+    runtime::balance_drift_loop::check_and_alert(&drift_ctx, &notifier).await;
 
     let pos_monitor_handle =
         spawn_fx_price_drain_since_fx_position_monitor_is_disabled(price_monitor_rx);
@@ -784,66 +587,15 @@ async fn main() -> anyhow::Result<()> {
         },
     ));
 
-    let stop_fill_pool = pool.clone();
-    let stop_fill_apis = exchange_apis.clone();
-    let stop_fill_price_store = price_store.clone();
-    let stop_fill_notifier = notifier.clone();
-    let stop_fill_position_sizer = shared_position_sizer.clone();
-    let stop_fill_liquidation_levels = exchange_liquidation_levels.clone();
-    let stop_fill_trade_tx = trade_tx.clone();
-    let stop_fill_live_forces_dry_run = live_forces_dry_run;
-    let stop_fill_handle = tokio::spawn(async move {
-        let close_ctx = auto_trader::closer::CloseContext {
-            pool: stop_fill_pool.clone(),
-            apis: stop_fill_apis.clone(),
-            price_store: stop_fill_price_store.clone(),
-            notifier: stop_fill_notifier.clone(),
-            position_sizer: stop_fill_position_sizer.clone(),
-            liquidation_levels: stop_fill_liquidation_levels.clone(),
-            trade_tx: stop_fill_trade_tx.clone(),
-        };
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let open_trades =
-                match auto_trader_db::trades::list_open_with_account_name(&stop_fill_pool).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "failed to list open trades for stop-fill detection"
-                        );
-                        continue;
-                    }
-                };
-            auto_trader::stop_fill::detect_and_close_stop_fills(
-                &close_ctx,
-                &open_trades,
-                stop_fill_live_forces_dry_run,
-            )
-            .await;
-        }
-    });
+    let stop_fill_handle = tokio::spawn(runtime::stop_fill_loop::run(
+        new_close_ctx(),
+        live_forces_dry_run,
+    ));
 
-    let drift_pool = pool.clone();
-    let drift_price_store = price_store.clone();
-    let drift_apis = exchange_apis.clone();
-    let drift_notifier = notifier.clone();
-    let drift_live_forces_dry_run = live_forces_dry_run;
-    let balance_drift_handle = tokio::spawn(async move {
-        let drift_ctx = auto_trader::balance_drift::BalanceDriftContext {
-            pool: drift_pool.clone(),
-            price_store: drift_price_store.clone(),
-            apis: drift_apis.clone(),
-            live_forces_dry_run: drift_live_forces_dry_run,
-        };
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-        loop {
-            interval.tick().await;
-            let alerts = auto_trader::balance_drift::check_live_accounts(&drift_ctx).await;
-            spawn_system_alerts(&drift_notifier, alerts);
-        }
-    });
+    let balance_drift_handle = tokio::spawn(runtime::balance_drift_loop::run(
+        drift_ctx,
+        notifier.clone(),
+    ));
 
     let feed_watchdog_handle = if config.feed_watchdog.enabled {
         let feed_watchdog_ctx = auto_trader::feed_watchdog::FeedWatchdogContext {
