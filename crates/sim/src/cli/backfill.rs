@@ -30,7 +30,10 @@ async fn run_backfill_loop(
     to: NaiveDate,
 ) -> Result<fetch::BackfillReport, i32> {
     let prepared = prepare(config_path).await?;
-    let client = GmoKlineClient::new(&prepared.sim.gmo_public_base_url);
+    let client = GmoKlineClient::new(&prepared.sim.gmo_public_base_url).map_err(|e| {
+        tracing::error!(error = %e, "failed to build gmo kline http client");
+        1
+    })?;
 
     let mut total = fetch::BackfillReport {
         days: 0,

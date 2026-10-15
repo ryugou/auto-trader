@@ -9,6 +9,7 @@ use auto_trader_sim::types::Bar;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+#[cfg(test)]
 fn compile_minimal_script(source: &str) -> auto_trader_sim::script::CompiledScript {
     let host = ScriptHost::new(&SimConfig::default());
     host.compile(source).expect("test script must be valid")
@@ -60,6 +61,7 @@ fn ok_record(entry: i64, total_pips: f64) -> RunRecord {
     }
 }
 
+#[cfg(test)]
 async fn setup_script_and_batch(pool: &PgPool) -> (Uuid, Uuid) {
     let script = compile_minimal_script(MINIMAL_SCRIPT);
     let script_id = store::register_script(pool, "minimal", &script, "human", None)
@@ -240,6 +242,7 @@ struct SimRunRow {
     metrics: Option<serde_json::Value>,
 }
 
+#[cfg(test)]
 async fn fetch_run(pool: &PgPool, run_id: Uuid) -> SimRunRow {
     sqlx::query_as(
         "SELECT status, error, total_pips, trade_count, win_rate, max_drawdown_pips, \
@@ -313,6 +316,7 @@ async fn save_run_script_error_formats_error_with_rfc3339_prefix_and_nulls_metri
     assert!(row.metrics.is_none());
 }
 
+#[cfg(test)]
 async fn run_row_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM sim_runs")
         .fetch_one(pool)

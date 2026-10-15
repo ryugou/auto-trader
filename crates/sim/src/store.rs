@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::data::{epoch_secs_to_datetime, format_epoch_secs_rfc3339};
 use crate::engine::RunStatus;
 use crate::error::SimError;
+use crate::eval::Metrics;
 use crate::script::{CompiledScript, ParamSet, ParamValue};
 use crate::sweep::RunRecord;
 
@@ -152,6 +153,85 @@ pub async fn finish_batch(
     Ok(())
 }
 
+async fn insert_ok_run(
+    pool: &PgPool,
+    id: Uuid,
+    batch_id: Uuid,
+    params: &serde_json::Value,
+    metrics: &Metrics,
+) -> Result<(), SimError> {
+    let trade_count = i32::try_from(metrics.trade_count).map_err(|e| {
+        SimError::Other(anyhow::anyhow!(
+            "invalid run record: trade_count {} does not fit sim_runs.trade_count as \
+             i32: {e} (batch_id={batch_id}, params={params})",
+            metrics.trade_count
+        ))
+    })?;
+    let protective_stop_count = i32::try_from(metrics.protective_stop_count).map_err(|e| {
+        SimError::Other(anyhow::anyhow!(
+            "invalid run record: protective_stop_count {} does not fit \
+             sim_runs.protective_stop_count as i32: {e} \
+             (batch_id={batch_id}, params={params})",
+            metrics.protective_stop_count
+        ))
+    })?;
+    sqlx::query(
+        r#"
+        INSERT INTO sim_runs
+            (id, batch_id, params, status, error,
+             total_pips, trade_count, win_rate, max_drawdown_pips, time_in_market,
+             protective_stop_count, metrics)
+        VALUES ($1, $2, $3, 'ok', NULL, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(id)
+    .bind(batch_id)
+    .bind(params)
+    .bind(metrics.total_pips)
+    .bind(trade_count)
+    .bind(metrics.win_rate)
+    .bind(metrics.max_drawdown_pips)
+    .bind(metrics.time_in_market)
+    .bind(protective_stop_count)
+    .bind(metrics.metrics_json())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn insert_script_error_run(
+    pool: &PgPool,
+    id: Uuid,
+    batch_id: Uuid,
+    params: &serde_json::Value,
+    open_time: i64,
+    message: &str,
+) -> Result<(), SimError> {
+    let open_time = rfc3339(open_time).map_err(|e| {
+        SimError::Other(anyhow::anyhow!(
+            "failed to format script_error open_time for sim_runs.error: {e} \
+             (batch_id={batch_id}, params={params})"
+        ))
+    })?;
+    let error = format!("{open_time} {message}");
+    sqlx::query(
+        r#"
+        INSERT INTO sim_runs
+            (id, batch_id, params, status, error,
+             total_pips, trade_count, win_rate, max_drawdown_pips, time_in_market,
+             protective_stop_count, metrics)
+        VALUES ($1, $2, $3, 'script_error', $4, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        "#,
+    )
+    .bind(id)
+    .bind(batch_id)
+    .bind(params)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn save_run(pool: &PgPool, batch_id: Uuid, record: &RunRecord) -> Result<Uuid, SimError> {
     let id = Uuid::new_v4();
     let params = params_json(&record.params);
@@ -170,67 +250,10 @@ pub async fn save_run(pool: &PgPool, batch_id: Uuid, record: &RunRecord) -> Resu
             )));
         }
         (RunStatus::Ok, Some(metrics)) => {
-            let trade_count = i32::try_from(metrics.trade_count).map_err(|e| {
-                SimError::Other(anyhow::anyhow!(
-                    "invalid run record: trade_count {} does not fit sim_runs.trade_count as \
-                     i32: {e} (batch_id={batch_id}, params={params})",
-                    metrics.trade_count
-                ))
-            })?;
-            let protective_stop_count =
-                i32::try_from(metrics.protective_stop_count).map_err(|e| {
-                    SimError::Other(anyhow::anyhow!(
-                        "invalid run record: protective_stop_count {} does not fit \
-                         sim_runs.protective_stop_count as i32: {e} \
-                         (batch_id={batch_id}, params={params})",
-                        metrics.protective_stop_count
-                    ))
-                })?;
-            sqlx::query(
-                r#"
-                INSERT INTO sim_runs
-                    (id, batch_id, params, status, error,
-                     total_pips, trade_count, win_rate, max_drawdown_pips, time_in_market,
-                     protective_stop_count, metrics)
-                VALUES ($1, $2, $3, 'ok', NULL, $4, $5, $6, $7, $8, $9, $10)
-                "#,
-            )
-            .bind(id)
-            .bind(batch_id)
-            .bind(params)
-            .bind(metrics.total_pips)
-            .bind(trade_count)
-            .bind(metrics.win_rate)
-            .bind(metrics.max_drawdown_pips)
-            .bind(metrics.time_in_market)
-            .bind(protective_stop_count)
-            .bind(metrics.metrics_json())
-            .execute(pool)
-            .await?;
+            insert_ok_run(pool, id, batch_id, &params, metrics).await?;
         }
         (RunStatus::ScriptError { open_time, message }, None) => {
-            let open_time = rfc3339(*open_time).map_err(|e| {
-                SimError::Other(anyhow::anyhow!(
-                    "failed to format script_error open_time for sim_runs.error: {e} \
-                     (batch_id={batch_id}, params={params})"
-                ))
-            })?;
-            let error = format!("{open_time} {message}");
-            sqlx::query(
-                r#"
-                INSERT INTO sim_runs
-                    (id, batch_id, params, status, error,
-                     total_pips, trade_count, win_rate, max_drawdown_pips, time_in_market,
-                     protective_stop_count, metrics)
-                VALUES ($1, $2, $3, 'script_error', $4, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
-                "#,
-            )
-            .bind(id)
-            .bind(batch_id)
-            .bind(params)
-            .bind(error)
-            .execute(pool)
-            .await?;
+            insert_script_error_run(pool, id, batch_id, &params, *open_time, message).await?;
         }
     }
 

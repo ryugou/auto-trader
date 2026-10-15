@@ -305,7 +305,7 @@ fn gmo_kline_min_date_is_2023_10_28() {
 
 #[test]
 fn new_client_uses_one_second_interval_and_2_4_8_second_retries() {
-    let client = GmoKlineClient::new("http://x");
+    let client = GmoKlineClient::new("http://x").unwrap();
     assert_eq!(client.min_interval, Duration::from_secs(1));
     assert_eq!(
         client.retry_delays,
