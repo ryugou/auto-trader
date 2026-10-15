@@ -10,7 +10,7 @@ use crate::data;
 use crate::error::SimError;
 use crate::script::{CompiledScript, ParamSet, ScriptHost};
 use crate::series::{self, Dataset};
-use crate::store::{self, BatchStatus};
+use crate::store::{self, BatchStatus, NewBatch};
 use crate::sweep::RunRecord;
 use crate::types::Bar;
 
@@ -255,6 +255,59 @@ pub(super) fn run_batch_config_json(sim: &SimConfig) -> serde_json::Value {
         "max_operations_per_bar": sim.max_operations_per_bar,
         "max_operations_per_run": sim.max_operations_per_run,
     })
+}
+
+pub(super) async fn register_script_and_batch(
+    pool: &PgPool,
+    script_path: &Path,
+    compiled: &CompiledScript,
+    eval_inputs: &EvalInputs,
+    total_runs: i32,
+    config: serde_json::Value,
+) -> Result<(Uuid, Uuid), i32> {
+    let script_name = match script_name_from_path(script_path) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to derive script name");
+            return Err(1);
+        }
+    };
+    let script_id = match store::register_script(pool, &script_name, compiled, "human", None).await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to register script");
+            return Err(1);
+        }
+    };
+    let batch_id = match store::create_batch(
+        pool,
+        &NewBatch {
+            script_id,
+            period_from: eval_inputs.from_secs,
+            period_to: eval_inputs.to_secs,
+            bar_count: eval_inputs.bar_count,
+            total_runs,
+            config,
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create sim_batches row");
+            return Err(1);
+        }
+    };
+    Ok((script_id, batch_id))
+}
+
+pub(super) async fn complete_batch(pool: &PgPool, batch_id: Uuid) -> Result<(), i32> {
+    if let Err(e) = store::finish_batch(pool, batch_id, BatchStatus::Completed).await {
+        tracing::error!(batch_id = %batch_id, error = %e, "failed to mark sim_batches row as completed");
+        return Err(fail_batch_and_exit(pool, batch_id).await);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

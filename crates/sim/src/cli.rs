@@ -4,7 +4,6 @@ use std::time::Instant;
 use chrono::NaiveDate;
 
 use crate::config::SimConfig;
-use crate::engine::RunStatus;
 use crate::error::SimError;
 use crate::script::ScriptHost;
 use crate::store::{self, BatchStatus, NewBatch};
@@ -17,35 +16,20 @@ mod dispatch;
 mod migrate;
 mod output;
 mod prepare;
+mod run_cmd;
 
 pub use args::{Cli, Command};
 pub use dispatch::{run, run_args, run_with_config_path, run_with_config_path_and_output};
 pub use prepare::{RunOneFn, SaveRunFn, real_save_run, resolve_period};
+pub use run_cmd::run_run_with_hooks;
 
-use output::{output_failed, print_run, print_sweep};
+use output::{output_failed, print_sweep};
 use prepare::{
     EvalInputs, fail_batch_and_exit, load_eval_inputs, prepare, read_and_compile,
     run_batch_config_json, script_name_from_path,
 };
 
 const SWEEP_TOP_RUNS_LIMIT: i64 = 10;
-
-fn parse_given_params(
-    raw: Option<&str>,
-) -> Result<serde_json::Map<String, serde_json::Value>, SimError> {
-    let Some(raw) = raw else {
-        return Ok(serde_json::Map::new());
-    };
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(serde_json::Value::Object(map)) => Ok(map),
-        Ok(other) => Err(SimError::Args(format!(
-            "invalid --params: must be a JSON object (got {other})"
-        ))),
-        Err(e) => Err(SimError::Args(format!(
-            "invalid --params: not valid JSON: {e} (input={raw:?})"
-        ))),
-    }
-}
 
 fn sweep_batch_config_json(sim: &SimConfig, max_runs: usize, seed: u64) -> serde_json::Value {
     let mut value = run_batch_config_json(sim);
@@ -56,160 +40,6 @@ fn sweep_batch_config_json(sim: &SimConfig, max_runs: usize, seed: u64) -> serde
 
 fn effective_jobs(requested: usize, run_count: usize, available: usize) -> usize {
     requested.min(run_count).min(available).max(1)
-}
-
-async fn run_run(
-    config_path: &Path,
-    script_path: PathBuf,
-    params_raw: Option<String>,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
-    json: bool,
-    out: &mut dyn std::io::Write,
-) -> i32 {
-    run_run_with_hooks(
-        config_path,
-        script_path,
-        params_raw,
-        from,
-        to,
-        json,
-        out,
-        sweep::run_one,
-        real_save_run(),
-    )
-    .await
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub async fn run_run_with_hooks(
-    config_path: &Path,
-    script_path: PathBuf,
-    params_raw: Option<String>,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
-    json: bool,
-    out: &mut dyn std::io::Write,
-    run_one_fn: RunOneFn,
-    save_run_fn: SaveRunFn,
-) -> i32 {
-    let given = match parse_given_params(params_raw.as_deref()) {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::error!(error = %e, "invalid --params");
-            return 1;
-        }
-    };
-    let prepared = match prepare(config_path).await {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-
-    let host = ScriptHost::new(&prepared.sim);
-    let compiled = match read_and_compile(&host, &script_path) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let params = match compiled.resolve_params(&given) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "invalid --params");
-            return 1;
-        }
-    };
-
-    let EvalInputs {
-        dataset,
-        from_secs,
-        to_secs,
-        bar_count,
-        benchmarks,
-    } = match load_eval_inputs(&prepared, from, to).await {
-        Ok(i) => i,
-        Err(code) => return code,
-    };
-
-    let script_name = match script_name_from_path(&script_path) {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to derive script name");
-            return 1;
-        }
-    };
-    let script_id = match store::register_script(
-        &prepared.pool,
-        &script_name,
-        &compiled,
-        "human",
-        None,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to register script");
-            return 1;
-        }
-    };
-    let batch_id = match store::create_batch(
-        &prepared.pool,
-        &NewBatch {
-            script_id,
-            period_from: from_secs,
-            period_to: to_secs,
-            bar_count,
-            total_runs: 1,
-            config: run_batch_config_json(&prepared.sim),
-        },
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to create sim_batches row");
-            return 1;
-        }
-    };
-
-    let dataset = std::sync::Arc::new(dataset);
-    let sim_cfg = prepared.sim.clone();
-    let start = Instant::now();
-    let run_result = tokio::task::spawn_blocking(move || {
-        run_one_fn(&dataset, &host, &compiled, &params, &benchmarks, &sim_cfg)
-    })
-    .await;
-    let record = match run_result {
-        Ok(record) => record,
-        Err(join_err) => {
-            tracing::error!(
-                batch_id = %batch_id,
-                error = %join_err,
-                "failed to run simulation: run_one panicked; the process did not crash, \
-                 but no sim_runs row was saved"
-            );
-            return fail_batch_and_exit(&prepared.pool, batch_id).await;
-        }
-    };
-    let save_result = save_run_fn(&prepared.pool, batch_id, &record).await;
-    let elapsed = start.elapsed().as_secs_f64();
-
-    if let Err(e) = save_result {
-        tracing::error!(batch_id = %batch_id, error = %e, "failed to save sim_runs row");
-        return fail_batch_and_exit(&prepared.pool, batch_id).await;
-    }
-    if let Err(e) = store::finish_batch(&prepared.pool, batch_id, BatchStatus::Completed).await {
-        tracing::error!(batch_id = %batch_id, error = %e, "failed to mark sim_batches row as completed");
-        return fail_batch_and_exit(&prepared.pool, batch_id).await;
-    }
-
-    if let Err(e) = print_run(out, &record, elapsed, script_id, batch_id, json) {
-        return output_failed(e);
-    }
-    match record.status {
-        RunStatus::Ok => 0,
-        RunStatus::ScriptError { .. } => 1,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
