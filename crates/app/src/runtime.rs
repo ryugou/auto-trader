@@ -9,6 +9,7 @@ pub(crate) mod daily_batch;
 pub(crate) mod engine_loop;
 pub(crate) mod executor_loop;
 pub(crate) mod exit_executor;
+pub(crate) mod fx_price_drain;
 pub(crate) mod overnight;
 pub(crate) mod recorder;
 pub(crate) mod sfd_accrual;

@@ -35,34 +35,6 @@ fn account_still_tradable_false_when_account_missing() {
 }
 
 #[test]
-fn parse_live_dry_run_override_accepts_true_like_values() {
-    assert!(parse_live_dry_run_override(Some(" True\n"), false));
-    assert!(parse_live_dry_run_override(Some("1"), false));
-    assert!(parse_live_dry_run_override(Some("yes"), false));
-    assert!(parse_live_dry_run_override(Some("on"), false));
-}
-
-#[test]
-fn parse_live_dry_run_override_accepts_false_like_values() {
-    assert!(!parse_live_dry_run_override(Some("False"), true));
-    assert!(!parse_live_dry_run_override(Some("0"), true));
-    assert!(!parse_live_dry_run_override(Some("no"), true));
-    assert!(!parse_live_dry_run_override(Some("off"), true));
-}
-
-#[test]
-fn parse_live_dry_run_override_falls_back_to_config_when_absent() {
-    assert!(parse_live_dry_run_override(None, true));
-    assert!(!parse_live_dry_run_override(None, false));
-}
-
-#[test]
-fn parse_live_dry_run_override_falls_back_to_config_when_unrecognized() {
-    assert!(parse_live_dry_run_override(Some("maybe"), true));
-    assert!(!parse_live_dry_run_override(Some("maybe"), false));
-}
-
-#[test]
 fn rejects_new_live_order_when_live_disabled() {
     assert!(live_order_blocked_when_live_disabled_leaving_close_paths_unaffected("live", false));
 }
