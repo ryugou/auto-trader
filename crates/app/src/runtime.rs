@@ -3,14 +3,17 @@ use auto_trader_db::trades::OpenTradeWithAccount;
 use auto_trader_db::trading_accounts::TradingAccount;
 
 pub(crate) mod api_server;
+pub(crate) mod background;
 pub(crate) mod balance_drift_loop;
 pub(crate) mod crypto_monitor;
 pub(crate) mod daily_batch;
+pub(crate) mod dependencies;
 pub(crate) mod engine_loop;
 pub(crate) mod executor_loop;
 pub(crate) mod exit_executor;
 pub(crate) mod fx_price_drain;
 pub(crate) mod overnight;
+pub(crate) mod pipeline;
 pub(crate) mod recorder;
 pub(crate) mod sfd_accrual;
 pub(crate) mod shutdown;

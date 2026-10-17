@@ -8,7 +8,6 @@ mod wilson;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use auto_trader::api;
 use auto_trader::price_store;
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent};
@@ -228,125 +227,46 @@ async fn main() -> anyhow::Result<()> {
     };
     runtime::balance_drift_loop::check_and_alert(&drift_ctx, &notifier).await;
 
-    let pos_monitor_handle = runtime::fx_price_drain::spawn(price_monitor_rx);
-
-    let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
-    let new_close_ctx = || auto_trader::closer::CloseContext {
-        pool: pool.clone(),
-        apis: exchange_apis.clone(),
-        price_store: price_store.clone(),
-        notifier: notifier.clone(),
-        position_sizer: shared_position_sizer.clone(),
-        liquidation_levels: exchange_liquidation_levels.clone(),
-        trade_tx: trade_tx.clone(),
+    let dependencies = runtime::dependencies::SharedDependencies {
+        pool,
+        exchange_apis,
+        price_store,
+        notifier,
+        position_sizer: shared_position_sizer,
+        liquidation_levels: exchange_liquidation_levels,
+        knowledge_store,
     };
-    let crypto_monitor_handle = tokio::spawn(runtime::crypto_monitor::run(
-        new_close_ctx(),
-        live.forces_dry_run,
-        crypto_price_rx,
-    ));
 
-    let (exit_tx, exit_rx) = mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
-
-    let engine_handle = tokio::spawn(runtime::engine_loop::run(
-        runtime::engine_loop::EngineLoopContext {
+    let pipeline = runtime::pipeline::spawn_all(
+        &dependencies,
+        &trade_tx,
+        runtime::pipeline::PipelineInputs {
             engine,
-            pool: pool.clone(),
-            price_store: price_store.clone(),
-            price_monitor_tx,
-            crypto_price_tx,
-            exit_tx,
+            exchange_pairs,
+            live,
+            limits: runtime::pipeline::RiskLimits {
+                price_freshness_secs,
+                daily_loss_limit_pct,
+                halt_hours,
+            },
+            channels: runtime::pipeline::PipelineChannels {
+                price_rx,
+                price_monitor_tx,
+                price_monitor_rx,
+                signal_rx,
+                trade_rx,
+                macro_rx,
+            },
         },
-        price_rx,
-        macro_rx,
-    ));
+    );
 
-    let exit_executor_handle = tokio::spawn(runtime::exit_executor::run(
-        new_close_ctx(),
-        live.forces_dry_run,
-        exit_rx,
-    ));
-
-    let ctx = runtime::executor_loop::ExecutorLoopContext {
-        pool: pool.clone(),
-        trade_tx: trade_tx.clone(),
-        exchange_apis: exchange_apis.clone(),
-        price_store: price_store.clone(),
-        notifier: notifier.clone(),
-        exchange_pairs: Arc::clone(&exchange_pairs),
-        position_sizer: shared_position_sizer.clone(),
-        exchange_liquidation_levels: exchange_liquidation_levels.clone(),
-        live_forces_dry_run: live.forces_dry_run,
-        live_enabled: live.enabled,
-        price_freshness_secs,
-        daily_loss_limit_pct,
-        halt_hours,
-        knowledge_store: knowledge_store.clone(),
-    };
-    let executor_handle = tokio::spawn(runtime::executor_loop::run(ctx, signal_rx));
-
-    let recorder_handle = tokio::spawn(runtime::recorder::run(
-        pool.clone(),
-        knowledge_store.clone(),
-        trade_rx,
-    ));
-
-    let daily_handle = tokio::spawn(runtime::daily_batch::run(
-        runtime::daily_batch::DailyBatchContext {
-            pool: pool.clone(),
-            knowledge_store: knowledge_store.clone(),
-            gemini_api_url: config
-                .gemini
-                .as_ref()
-                .map(|g| g.api_url.clone())
-                .unwrap_or_default(),
-            gemini_api_key: std::env::var("GEMINI_API_KEY").unwrap_or_default(),
-            gemini_model: config
-                .gemini
-                .as_ref()
-                .map(|g| g.model.clone())
-                .unwrap_or_default(),
-            backfill_days: config.monitor.backfill_days,
-        },
-    ));
-
-    let stop_fill_handle = tokio::spawn(runtime::stop_fill_loop::run(
-        new_close_ctx(),
-        live.forces_dry_run,
-    ));
-
-    let balance_drift_handle = tokio::spawn(runtime::balance_drift_loop::run(
+    let background = runtime::background::spawn_all(
+        &dependencies,
+        &trade_tx,
+        &config,
         drift_ctx,
-        notifier.clone(),
-    ));
-
-    let feed_watchdog_handle = if config.feed_watchdog.enabled {
-        let feed_watchdog_ctx = auto_trader::feed_watchdog::FeedWatchdogContext {
-            price_store: price_store.clone(),
-            notifier: notifier.clone(),
-            config: config.feed_watchdog.clone(),
-        };
-        Some(tokio::spawn(auto_trader::feed_watchdog::run(
-            feed_watchdog_ctx,
-        )))
-    } else {
-        tracing::info!("feed watchdog disabled ([feed_watchdog].enabled=false)");
-        None
-    };
-
-    let overnight_handle = tokio::spawn(runtime::overnight::run(
-        pool.clone(),
-        config.gmo_fx.swap.clone(),
-        notifier.clone(),
-    ));
-
-    let sfd_handle = tokio::spawn(runtime::sfd_accrual::run(pool.clone(), price_store.clone()));
-
-    let api_handle = runtime::api_server::spawn(api::AppState {
-        pool: pool.clone(),
-        price_store: price_store.clone(),
-        exchange_liquidation_levels: exchange_liquidation_levels.clone(),
-    })
+        live.forces_dry_run,
+    )
     .await?;
 
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");
@@ -354,20 +274,9 @@ async fn main() -> anyhow::Result<()> {
     runtime::shutdown::run(
         runtime::shutdown::TaskHandles {
             feed_handles,
-            overnight: overnight_handle,
-            sfd: sfd_handle,
-            stop_fill: stop_fill_handle,
-            balance_drift: balance_drift_handle,
-            feed_watchdog: feed_watchdog_handle,
-            daily: daily_handle,
             macro_analyst: macro_analyst_handle,
-            api: api_handle,
-            engine: engine_handle,
-            pos_monitor: pos_monitor_handle,
-            crypto_monitor: crypto_monitor_handle,
-            exit_executor: exit_executor_handle,
-            executor: executor_handle,
-            recorder: recorder_handle,
+            pipeline,
+            background,
         },
         price_tx,
         trade_tx,

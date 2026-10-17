@@ -1,19 +1,8 @@
 pub(crate) struct TaskHandles {
     pub(crate) feed_handles: Vec<tokio::task::AbortHandle>,
-    pub(crate) overnight: tokio::task::JoinHandle<()>,
-    pub(crate) sfd: tokio::task::JoinHandle<()>,
-    pub(crate) stop_fill: tokio::task::JoinHandle<()>,
-    pub(crate) balance_drift: tokio::task::JoinHandle<()>,
-    pub(crate) feed_watchdog: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) daily: tokio::task::JoinHandle<()>,
     pub(crate) macro_analyst: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) api: tokio::task::JoinHandle<()>,
-    pub(crate) engine: tokio::task::JoinHandle<()>,
-    pub(crate) pos_monitor: tokio::task::JoinHandle<()>,
-    pub(crate) crypto_monitor: tokio::task::JoinHandle<()>,
-    pub(crate) exit_executor: tokio::task::JoinHandle<()>,
-    pub(crate) executor: tokio::task::JoinHandle<()>,
-    pub(crate) recorder: tokio::task::JoinHandle<()>,
+    pub(crate) pipeline: super::pipeline::PipelineHandles,
+    pub(crate) background: super::background::BackgroundHandles,
 }
 
 const DRAIN_TIMEOUT_SECS: u64 = 5;
@@ -22,29 +11,29 @@ fn abort_background_tasks(handles: &TaskHandles) {
     for h in &handles.feed_handles {
         h.abort();
     }
-    handles.overnight.abort();
-    handles.sfd.abort();
-    handles.stop_fill.abort();
-    handles.balance_drift.abort();
-    if let Some(h) = &handles.feed_watchdog {
+    handles.background.overnight.abort();
+    handles.background.sfd.abort();
+    handles.background.stop_fill.abort();
+    handles.background.balance_drift.abort();
+    if let Some(h) = &handles.background.feed_watchdog {
         h.abort();
     }
-    handles.daily.abort();
+    handles.background.daily.abort();
     if let Some(h) = &handles.macro_analyst {
         h.abort();
     }
-    handles.api.abort();
+    handles.background.api.abort();
 }
 
 async fn drain_pipeline(handles: TaskHandles) {
     let drain_timeout = tokio::time::Duration::from_secs(DRAIN_TIMEOUT_SECS);
     let _ = tokio::time::timeout(drain_timeout, async {
-        let _ = handles.engine.await;
-        let _ = handles.pos_monitor.await;
-        let _ = handles.crypto_monitor.await;
-        let _ = handles.exit_executor.await;
-        let _ = handles.executor.await;
-        let _ = handles.recorder.await;
+        let _ = handles.pipeline.engine.await;
+        let _ = handles.pipeline.pos_monitor.await;
+        let _ = handles.pipeline.crypto_monitor.await;
+        let _ = handles.pipeline.exit_executor.await;
+        let _ = handles.pipeline.executor.await;
+        let _ = handles.pipeline.recorder.await;
     })
     .await;
 }

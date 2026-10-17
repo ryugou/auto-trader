@@ -1,5 +1,6 @@
 use auto_trader_core::config::AppConfig;
 
+#[derive(Clone, Copy)]
 pub(crate) struct LiveFlags {
     pub(crate) forces_dry_run: bool,
     pub(crate) enabled: bool,
