@@ -10,6 +10,11 @@ use crate::types::{
     SIM_TIMEFRAME,
 };
 
+/// Opens a connection pool to the database at `database_url`.
+///
+/// # Errors
+///
+/// - Returns an error if the connection cannot be established within the acquire timeout.
 pub async fn connect(database_url: &str) -> Result<PgPool, SimError> {
     PgPoolOptions::new()
         .max_connections(DB_MAX_CONNECTIONS)
@@ -19,6 +24,12 @@ pub async fn connect(database_url: &str) -> Result<PgPool, SimError> {
         .map_err(SimError::Db)
 }
 
+/// Checks that every table in `REQUIRED_TABLES` exists in the current schema.
+///
+/// # Errors
+///
+/// - Returns an error if the query for the existing tables fails.
+/// - Returns an error that lists the missing tables if any is absent.
 pub async fn ensure_tables(pool: &PgPool) -> Result<(), SimError> {
     let existing: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename = ANY($1)",
@@ -118,6 +129,12 @@ impl TryFrom<CandleRow> for Bar {
     }
 }
 
+/// Inserts the bars into `sim_candles` in one transaction, updating the prices of a bar that already exists, and returns the number of affected rows.
+///
+/// # Errors
+///
+/// - Returns an error if the open time of a bar is not a representable UTC instant.
+/// - Returns an error if the transaction or a query fails.
 pub async fn upsert_bars(pool: &PgPool, bars: &[Bar]) -> Result<u64, SimError> {
     if bars.is_empty() {
         return Ok(0);
@@ -164,6 +181,13 @@ pub async fn upsert_bars(pool: &PgPool, bars: &[Bar]) -> Result<u64, SimError> {
     Ok(affected)
 }
 
+/// Loads the stored bars in ascending open time, only those opened before `to_exclusive` (Unix seconds) when it is given.
+///
+/// # Errors
+///
+/// - Returns an error if `to_exclusive` is not a representable UTC instant.
+/// - Returns an error if the query fails.
+/// - Returns an error if a stored price does not scale to an integer in milli units or overflows `i64`.
 pub async fn load_bars(pool: &PgPool, to_exclusive: Option<i64>) -> Result<Vec<Bar>, SimError> {
     let rows: Vec<CandleRow> = match to_exclusive {
         Some(t) => {

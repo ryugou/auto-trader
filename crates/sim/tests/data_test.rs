@@ -1,3 +1,5 @@
+#![doc = "Integration tests of the storage and loading of bars against a database."]
+
 use auto_trader_sim::data::{ensure_tables, load_bars, upsert_bars};
 use auto_trader_sim::error::SimError;
 use auto_trader_sim::types::Bar;

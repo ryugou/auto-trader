@@ -1,3 +1,5 @@
+#![doc = "Integration tests of the command line against a database."]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

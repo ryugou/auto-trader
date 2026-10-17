@@ -4,41 +4,67 @@ use crate::benchmark::{Benchmark, Leg};
 use crate::engine::{ExitReason, SimOutcome, SimTrade};
 use crate::types::{Bar, mid2_to_pips, milli_to_pips};
 
+/// Benchmark leg that a run held in its direction for less than half of the leg's bars.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MissedLeg {
+    /// Open time of the bar after the start of the leg, as an RFC 3339 string.
     pub start_time: String,
+    /// Open time of the bar at the end of the leg, as an RFC 3339 string.
     pub end_time: String,
+    /// 1 for an upward leg and -1 for a downward leg.
     pub direction: i8,
+    /// Realizable profit of the leg in pips.
     pub realizable_pips: f64,
+    /// Number of bars of the leg at which the run held no position.
     pub flat_bars: u32,
+    /// Number of bars of the leg at which the run held the opposite position.
     pub opposite_bars: u32,
 }
 
+/// Comparison of a run with the benchmark of one swing size.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ThetaMetrics {
+    /// Number of legs of the benchmark.
     pub leg_count: usize,
+    /// Ideal profit of the benchmark in pips.
     pub ideal_pips: f64,
+    /// Realizable profit of the benchmark in pips.
     pub realizable_pips: f64,
+    /// Total profit of the run divided by the realizable profit, or `None` when the realizable profit is not positive.
     pub capture_rate: Option<f64>,
+    /// Share of the bars covered by a leg at which the run held the direction of the leg, or `None` when no bar is covered.
     pub correct_side_ratio: Option<f64>,
+    /// Mean number of bars from the bar after the start of a leg to the first bar at which the run held its direction, over the legs where it did; `None` when there is none.
     pub mean_lag_bars: Option<f64>,
+    /// Mean price distance in pips between the start of a leg and the first bar at which the run held its direction, over the legs where it did; `None` when there is none.
     pub mean_lag_pips: Option<f64>,
+    /// Up to 20 missed legs, the largest realizable profit first.
     pub missed_legs: Vec<MissedLeg>,
 }
 
+/// Metrics of one simulation run.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Metrics {
+    /// Total profit of the closed trades in pips.
     pub total_pips: f64,
+    /// Number of closed trades.
     pub trade_count: usize,
+    /// Share of the trades with a positive profit, or 0 when there is no trade.
     pub win_rate: f64,
+    /// Largest fall of the cumulative profit from its peak, in pips.
     pub max_drawdown_pips: f64,
+    /// Share of the evaluation bars at which the run held a position.
     pub time_in_market: f64,
+    /// Number of trades closed by the protective stop.
     pub protective_stop_count: usize,
+    /// Profit in pips of the trades closed in each of six consecutive parts of the evaluation bars.
     pub segments: [f64; 6],
+    /// Comparison with the benchmark of each swing size, keyed by the swing size in pips.
     pub by_theta: BTreeMap<String, ThetaMetrics>,
 }
 
 impl Metrics {
+    /// Returns the `segments` and `by_theta` metrics as a JSON object.
     pub fn metrics_json(&self) -> serde_json::Value {
         serde_json::json!({
             "segments": self.segments,
@@ -47,6 +73,11 @@ impl Metrics {
     }
 }
 
+/// Computes the metrics of a run over the evaluation bars and compares it with each benchmark.
+///
+/// # Panics
+///
+/// Panics if `outcome.positions` is shorter than the labels of a benchmark, or if a leg of a benchmark refers to a bar beyond `eval_bars` or to a bar whose open time is not a representable UTC instant.
 pub fn evaluate(eval_bars: &[Bar], outcome: &SimOutcome, benchmarks: &[Benchmark]) -> Metrics {
     let trades = &outcome.trades;
     let positions = &outcome.positions;

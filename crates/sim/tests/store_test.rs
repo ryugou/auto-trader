@@ -1,3 +1,5 @@
+#![doc = "Integration tests of the storage of scripts, batches and runs against a database."]
+
 use auto_trader_sim::config::SimConfig;
 use auto_trader_sim::engine::{ExitReason, RunStatus, SimOutcome, SimTrade};
 use auto_trader_sim::error::SimError;

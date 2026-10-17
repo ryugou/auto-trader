@@ -1,3 +1,5 @@
+#![doc = "Command line of the simulator: creates the tables, backfills bars, computes benchmarks, and runs or sweeps a script."]
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()

@@ -89,6 +89,7 @@ pub(super) fn describe_rhai_error(err: &EvalAltResult) -> String {
     }
 }
 
+/// Sandboxed Rhai engine that compiles and runs scripts.
 pub struct ScriptHost {
     engine: Engine,
     max_operations_per_bar: u64,
@@ -99,6 +100,7 @@ impl ScriptHost {
         &self.engine
     }
 
+    /// Creates an engine with the operation limit per bar from `cfg`.
     pub fn new(cfg: &SimConfig) -> ScriptHost {
         let mut engine = Engine::new_raw();
 
@@ -128,6 +130,15 @@ impl ScriptHost {
         }
     }
 
+    /// Compiles `source` and reads the parameters that its `params()` function declares.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the source exceeds the size limit.
+    /// - Returns an error if the source does not parse.
+    /// - Returns an error if the script has no `params()` with no arguments or no `on_bar(ctx, p)` with two arguments.
+    /// - Returns an error if `params()` fails to run.
+    /// - Returns an error if the declared parameters are invalid.
     pub fn compile(&self, source: &str) -> Result<CompiledScript, SimError> {
         if source.len() > MAX_SCRIPT_BYTES {
             return Err(SimError::InvalidScript(format!(

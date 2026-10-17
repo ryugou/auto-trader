@@ -321,6 +321,10 @@ pub struct FeedWatchdogContext {
 }
 
 /// Spawns a task that waits for `inner_handle` and, if the feed task did not end by cancellation, logs an error and sends a system alert about it with retries; returns the handle that aborts the feed task.
+///
+/// # Panics
+///
+/// Panics if called outside a Tokio runtime.
 pub fn spawn_feed_supervisor(
     exchange: Exchange,
     notifier: Arc<Notifier>,

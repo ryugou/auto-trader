@@ -17,6 +17,7 @@ fn rfc3339(open_time: i64) -> Result<String, SimError> {
     })
 }
 
+/// Converts a parameter set to a JSON object that maps each parameter name to its value.
 pub fn params_json(params: &ParamSet) -> serde_json::Value {
     let map: serde_json::Map<String, serde_json::Value> = params
         .iter()
@@ -31,6 +32,12 @@ pub fn params_json(params: &ParamSet) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// Stores the script in `sim_scripts` and returns its id, or returns the id of the stored script with the same source hash without inserting.
+///
+/// # Errors
+///
+/// - Returns an error if `origin` is `human` and `parent_id` is given.
+/// - Returns an error if the insert or the lookup of the existing script fails.
 pub async fn register_script(
     pool: &PgPool,
     name: &str,
@@ -74,20 +81,31 @@ pub async fn register_script(
     }
 }
 
+/// Batch of runs to be inserted into `sim_batches`.
 #[derive(Debug, Clone)]
 pub struct NewBatch {
+    /// Id of the script that the runs execute.
     pub script_id: Uuid,
+    /// Start of the evaluation period in Unix seconds.
     pub period_from: i64,
+    /// End of the evaluation period in Unix seconds, exclusive.
     pub period_to: i64,
+    /// Number of evaluation bars.
     pub bar_count: i32,
+    /// Number of runs of the batch.
     pub total_runs: i32,
+    /// Settings of the simulation, as JSON.
     pub config: serde_json::Value,
 }
 
+/// Status of a batch in `sim_batches`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchStatus {
+    /// The runs are in progress.
     Running,
+    /// The batch finished.
     Completed,
+    /// The batch failed.
     Failed,
 }
 
@@ -101,6 +119,12 @@ impl BatchStatus {
     }
 }
 
+/// Inserts the batch into `sim_batches` with the status `running` and returns its id.
+///
+/// # Errors
+///
+/// - Returns an error if `period_from` or `period_to` is not a representable UTC instant.
+/// - Returns an error if the insert fails.
 pub async fn create_batch(pool: &PgPool, batch: &NewBatch) -> Result<Uuid, SimError> {
     let id = Uuid::new_v4();
     let period_from = epoch_secs_to_datetime(batch.period_from, "create_batch period_from")?;
@@ -124,6 +148,13 @@ pub async fn create_batch(pool: &PgPool, batch: &NewBatch) -> Result<Uuid, SimEr
     Ok(id)
 }
 
+/// Sets a running batch to `status` and records the finish time.
+///
+/// # Errors
+///
+/// - Returns an error if `status` is `Running`.
+/// - Returns an error if the update fails.
+/// - Returns an error if the batch does not exist or is not running.
 pub async fn finish_batch(
     pool: &PgPool,
     batch_id: Uuid,
@@ -232,6 +263,16 @@ async fn insert_script_error_run(
     Ok(())
 }
 
+/// Inserts the run record into `sim_runs` for the batch and returns the id of the new row.
+///
+/// A record whose status is `RunStatus::Ok` is stored with its metrics, and one whose status is `RunStatus::ScriptError` is stored with the failure time and message.
+///
+/// # Errors
+///
+/// - Returns an error if the status is `Ok` and the metrics are missing, or the status is `ScriptError` and the metrics are present.
+/// - Returns an error if the trade count or the protective stop count of the metrics does not fit `i32`.
+/// - Returns an error if the failure time of a script error is not a representable UTC instant.
+/// - Returns an error if the insert fails.
 pub async fn save_run(pool: &PgPool, batch_id: Uuid, record: &RunRecord) -> Result<Uuid, SimError> {
     let id = Uuid::new_v4();
     let params = params_json(&record.params);
@@ -260,14 +301,24 @@ pub async fn save_run(pool: &PgPool, batch_id: Uuid, record: &RunRecord) -> Resu
     Ok(id)
 }
 
+/// Stored run that finished without a script error.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct RunSummary {
+    /// Parameters of the run, as JSON.
     pub params: serde_json::Value,
+    /// Total profit in pips.
     pub total_pips: f64,
+    /// Number of closed trades.
     pub trade_count: i32,
+    /// Segment and benchmark metrics of the run, as JSON.
     pub metrics: serde_json::Value,
 }
 
+/// Returns up to `limit` runs of a completed batch that finished without a script error, the largest total profit first.
+///
+/// # Errors
+///
+/// - Returns an error if the query fails.
 pub async fn top_runs(
     pool: &PgPool,
     batch_id: Uuid,

@@ -10,6 +10,9 @@ use super::run_cmd::run_run;
 use super::sweep_cmd::run_sweep_cmd;
 use crate::config;
 
+/// Parses `args` as the command line, runs the subcommand and returns the process exit code.
+///
+/// Returns 0 for help and version output and 1 for a parse error.
 pub async fn run_args<I, T>(args: I) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -29,14 +32,17 @@ where
     }
 }
 
+/// Runs the subcommand with the configuration file at the default path and returns the process exit code.
 pub async fn run(cli: Cli) -> i32 {
     run_with_config_path(cli, &config::config_path()).await
 }
 
+/// Runs the subcommand with the configuration file at `config_path`, writing the result to standard output, and returns the process exit code.
 pub async fn run_with_config_path(cli: Cli, config_path: &Path) -> i32 {
     run_with_config_path_and_output(cli, config_path, &mut std::io::stdout()).await
 }
 
+/// Runs the subcommand with the configuration file at `config_path`, writing the result to `out`, and returns the process exit code.
 pub async fn run_with_config_path_and_output(
     cli: Cli,
     config_path: &Path,

@@ -4,34 +4,58 @@ use crate::script::{BarState, Decider, DeciderError};
 use crate::series::Dataset;
 use crate::types::{Bar, PIP_MILLI};
 
+/// Reason why a simulated trade was closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
+    /// The script returned a signal that differs from the position.
     Signal,
+    /// The bar reached the protective stop price.
     ProtectiveStop,
+    /// The evaluation period ended while the position was open.
     EndOfData,
 }
 
+/// Closed trade of a simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimTrade {
+    /// 1 for a long trade and -1 for a short trade.
     pub direction: i8,
+    /// Index of the evaluation bar at which the trade was opened.
     pub entry_idx: usize,
+    /// Index of the evaluation bar at which the trade was closed.
     pub exit_idx: usize,
+    /// Entry price in milli units.
     pub entry_milli: i64,
+    /// Exit price in milli units.
     pub exit_milli: i64,
+    /// Profit in milli units, negative for a loss.
     pub pnl_milli: i64,
+    /// Reason why the trade was closed.
     pub reason: ExitReason,
 }
 
+/// Status of a simulation run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunStatus {
+    /// The script ran through every evaluation bar.
     Ok,
-    ScriptError { open_time: i64, message: String },
+    /// The script failed at a bar, which stopped the run.
+    ScriptError {
+        /// Open time of the bar at which the script failed, in Unix seconds.
+        open_time: i64,
+        /// Description of the failure.
+        message: String,
+    },
 }
 
+/// Result of a simulation run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimOutcome {
+    /// Whether the run reached the end of the evaluation bars.
     pub status: RunStatus,
+    /// Trades closed during the run, in time order.
     pub trades: Vec<SimTrade>,
+    /// Position held at each evaluation bar that the run reached: 1, -1 or 0.
     pub positions: Vec<i8>,
 }
 
@@ -193,6 +217,11 @@ fn close_at_period_end(
     ));
 }
 
+/// Runs the decider over the evaluation bars of the dataset and returns the closed trades and the positions. A signal returned at a bar is executed at the open of the next bar, and a position is closed at the protective stop of `cfg.protective_stop_pips` or at the close of the last bar. A failure of the script, or a signal other than 1, -1 or 0, stops the run and is returned as `RunStatus::ScriptError`.
+///
+/// # Errors
+///
+/// - Returns an error if the decider reports a fatal failure.
 pub fn simulate(
     dataset: &Dataset,
     decider: &mut dyn Decider,
