@@ -34,19 +34,8 @@ pub async fn close_trade(
     exit_reason: ExitReason,
     current_price: Decimal,
 ) {
-    let api: Arc<dyn ExchangeApi> = match ctx.apis.get(&trade.exchange) {
-        Some(a) => a.clone(),
-        None => {
-            if !dry_run {
-                tracing::warn!(
-                    exchange = %trade.exchange,
-                    trade_id = %trade.id,
-                    "unsupported exchange"
-                );
-                return;
-            }
-            Arc::new(auto_trader_market::null_exchange_api::NullExchangeApi)
-        }
+    let Some(api) = resolve_close_api(ctx, trade, dry_run) else {
+        return;
     };
 
     let liquidation_margin_level =
@@ -75,31 +64,64 @@ pub async fn close_trade(
         .await
     {
         Ok(closed_trade) => {
-            let exit_price = closed_trade.exit_price.unwrap_or(current_price);
-            tracing::info!(
-                strategy_name = %closed_trade.strategy_name,
-                pair = %closed_trade.pair,
-                direction = ?closed_trade.direction,
-                exit_price = %exit_price,
-                exit_reason = ?exit_reason,
-                "position closed"
-            );
-            if let Err(e) = ctx
-                .trade_tx
-                .send(TradeEvent {
-                    trade: closed_trade,
-                    action: TradeAction::Closed {
-                        exit_price,
-                        exit_reason,
-                    },
-                    account_type: Some(account_type),
-                })
-                .await
-            {
-                tracing::error!(error = %e, "failed to send trade event for position close");
-            }
+            publish_closed_trade(ctx, closed_trade, current_price, exit_reason, account_type).await
         }
         Err(e) => log_close_failure_at_appropriate_level(exit_reason, trade.id, &e),
+    }
+}
+
+pub fn resolve_close_api(
+    ctx: &CloseContext,
+    trade: &Trade,
+    dry_run: bool,
+) -> Option<Arc<dyn ExchangeApi>> {
+    match ctx.apis.get(&trade.exchange) {
+        Some(a) => Some(a.clone()),
+        None => {
+            if !dry_run {
+                tracing::warn!(
+                    exchange = %trade.exchange,
+                    trade_id = %trade.id,
+                    "unsupported exchange"
+                );
+                return None;
+            }
+            Some(Arc::new(
+                auto_trader_market::null_exchange_api::NullExchangeApi,
+            ))
+        }
+    }
+}
+
+async fn publish_closed_trade(
+    ctx: &CloseContext,
+    closed_trade: Trade,
+    current_price: Decimal,
+    exit_reason: ExitReason,
+    account_type: String,
+) {
+    let exit_price = closed_trade.exit_price.unwrap_or(current_price);
+    tracing::info!(
+        strategy_name = %closed_trade.strategy_name,
+        pair = %closed_trade.pair,
+        direction = ?closed_trade.direction,
+        exit_price = %exit_price,
+        exit_reason = ?exit_reason,
+        "position closed"
+    );
+    if let Err(e) = ctx
+        .trade_tx
+        .send(TradeEvent {
+            trade: closed_trade,
+            action: TradeAction::Closed {
+                exit_price,
+                exit_reason,
+            },
+            account_type: Some(account_type),
+        })
+        .await
+    {
+        tracing::error!(error = %e, "failed to send trade event for position close");
     }
 }
 

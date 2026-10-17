@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use auto_trader::closer::CloseContext;
+use auto_trader::closer::{CloseContext, resolve_close_api};
 use auto_trader::startup::{effective_dry_run, liquidation_level_or_log};
 use auto_trader_core::event::{TradeAction, TradeEvent};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::strategy::ExitSignal;
-use auto_trader_core::types::Trade;
+use auto_trader_core::types::{ExitReason, Trade};
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::exchange_api::ExchangeApi;
-use auto_trader_market::null_exchange_api::NullExchangeApi;
 use tokio::sync::mpsc;
 
 use super::{TradeAccount, resolve_trade_account};
@@ -32,7 +31,7 @@ async fn process_exit(close_ctx: &CloseContext, live_forces_dry_run: bool, exit:
         account_name,
     } = account;
     let dry_run = effective_dry_run(&account_type, live_forces_dry_run);
-    let Some(api) = resolve_exit_api(close_ctx, &trade, dry_run) else {
+    let Some(api) = resolve_close_api(close_ctx, &trade, dry_run) else {
         return;
     };
     let Some(trader) = build_exit_trader(close_ctx, &trade, account_name, api, dry_run) else {
@@ -64,27 +63,6 @@ async fn load_exit_target(
         };
     let account = resolve_trade_account(&owned)?;
     Some((owned.trade, account))
-}
-
-fn resolve_exit_api(
-    close_ctx: &CloseContext,
-    trade: &Trade,
-    dry_run: bool,
-) -> Option<Arc<dyn ExchangeApi>> {
-    match close_ctx.apis.get(&trade.exchange) {
-        Some(a) => Some(a.clone()),
-        None => {
-            if !dry_run {
-                tracing::warn!(
-                    exchange = %trade.exchange,
-                    trade_id = %trade.id,
-                    "unsupported exchange"
-                );
-                return None;
-            }
-            Some(Arc::new(NullExchangeApi))
-        }
-    }
 }
 
 fn build_exit_trader(
@@ -122,31 +100,7 @@ async fn handle_close_position_result(
     let reason = exit.reason.to_exit_reason();
     match trader.close_position(&trade.id.to_string(), reason).await {
         Ok(closed) => {
-            tracing::info!(
-                strategy_name = %closed.strategy_name,
-                pair = %closed.pair,
-                direction = ?closed.direction,
-                strategy_exit_reason = exit.reason.as_tag(),
-                entry_price = %closed.entry_price,
-                exit_price = %closed.exit_price.unwrap_or_default(),
-                "strategy exit closed position"
-            );
-            let exit_price = closed.exit_price.unwrap_or(exit.close_price);
-            if close_ctx
-                .trade_tx
-                .send(TradeEvent {
-                    trade: closed,
-                    action: TradeAction::Closed {
-                        exit_price,
-                        exit_reason: reason,
-                    },
-                    account_type: Some(account_type.to_owned()),
-                })
-                .await
-                .is_err()
-            {
-                tracing::warn!("failed to send trade event: channel closed");
-            }
+            publish_strategy_exit_close(close_ctx, closed, account_type, exit, reason).await
         }
         Err(e) => {
             tracing::warn!(
@@ -155,5 +109,39 @@ async fn handle_close_position_result(
                 "failed to close trade for strategy exit"
             );
         }
+    }
+}
+
+async fn publish_strategy_exit_close(
+    close_ctx: &CloseContext,
+    closed: Trade,
+    account_type: &str,
+    exit: &ExitSignal,
+    reason: ExitReason,
+) {
+    tracing::info!(
+        strategy_name = %closed.strategy_name,
+        pair = %closed.pair,
+        direction = ?closed.direction,
+        strategy_exit_reason = exit.reason.as_tag(),
+        entry_price = %closed.entry_price,
+        exit_price = %closed.exit_price.unwrap_or_default(),
+        "strategy exit closed position"
+    );
+    let exit_price = closed.exit_price.unwrap_or(exit.close_price);
+    if close_ctx
+        .trade_tx
+        .send(TradeEvent {
+            trade: closed,
+            action: TradeAction::Closed {
+                exit_price,
+                exit_reason: reason,
+            },
+            account_type: Some(account_type.to_owned()),
+        })
+        .await
+        .is_err()
+    {
+        tracing::warn!("failed to send trade event: channel closed");
     }
 }
