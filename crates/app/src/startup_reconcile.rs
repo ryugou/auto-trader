@@ -3,15 +3,24 @@ use std::sync::Arc;
 
 use auto_trader_core::types::{Direction, ExitReason};
 use auto_trader_db::trades;
+use auto_trader_db::trading_accounts::TradingAccount;
 use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
 use auto_trader_market::price_store::{FeedKey, PriceStore};
 use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
+struct AccountScope<'a> {
+    pool: &'a PgPool,
+    account: &'a TradingAccount,
+    api: &'a dyn ExchangeApi,
+    price_store: &'a PriceStore,
+    notifier: &'a Notifier,
+}
+
 pub async fn reconcile_live_accounts_at_startup(
     pool: &PgPool,
-    accounts: &[auto_trader_db::trading_accounts::TradingAccount],
+    accounts: &[TradingAccount],
     apis: &HashMap<auto_trader_core::types::Exchange, Arc<dyn ExchangeApi>>,
     price_store: Arc<PriceStore>,
     notifier: Arc<Notifier>,
@@ -71,25 +80,65 @@ async fn get_positions_with_retry(
 
 async fn reconcile_one_account(
     pool: &PgPool,
-    account: &auto_trader_db::trading_accounts::TradingAccount,
+    account: &TradingAccount,
     api: &dyn ExchangeApi,
     price_store: &PriceStore,
     notifier: &Notifier,
 ) -> anyhow::Result<()> {
+    let scope = AccountScope {
+        pool,
+        account,
+        api,
+        price_store,
+        notifier,
+    };
+
     let db_trades = trades::list_open_or_closing_by_account(pool, account.id).await?;
     if db_trades.is_empty() {
         tracing::info!(account_name = %account.name, "no open or closing trades");
         return Ok(());
     }
 
+    let pairs = collect_distinct_pairs(&db_trades);
+    let exchange_positions = fetch_exchange_positions(api, &account.name, &pairs).await?;
+    let db_groups = group_trades_for_aggregate_comparison(&db_trades);
+
+    for ((pair, direction), (db_total_qty, trades)) in &db_groups {
+        let pair_positions = exchange_positions.get(pair).cloned().unwrap_or_default();
+        let (matching_exchange_size, exchange_has_conflicting) =
+            sum_matching_exchange_size(&pair_positions, direction);
+        reject_aggregate_mismatch(
+            &account.name,
+            pair,
+            direction,
+            *db_total_qty,
+            matching_exchange_size,
+            exchange_has_conflicting,
+        )?;
+
+        let exchange_has_matching = matching_exchange_size > Decimal::ZERO;
+        for trade in trades {
+            reconcile_trade(&scope, trade, exchange_has_matching).await?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_distinct_pairs(db_trades: &[auto_trader_core::types::Trade]) -> Vec<String> {
     let mut pairs_set = std::collections::HashSet::new();
-    for t in &db_trades {
+    for t in db_trades {
         pairs_set.insert(t.pair.0.clone());
     }
-    let pairs: Vec<String> = pairs_set.into_iter().collect();
+    pairs_set.into_iter().collect()
+}
 
+async fn fetch_exchange_positions(
+    api: &dyn ExchangeApi,
+    account_name: &str,
+    pairs: &[String],
+) -> anyhow::Result<HashMap<String, Vec<auto_trader_market::bitflyer_private::ExchangePosition>>> {
     let fetches = pairs.iter().map(|pair| {
-        let account_name = account.name.clone();
+        let account_name = account_name.to_string();
         async move {
             let ps = get_positions_with_retry(api, pair, &account_name)
                 .await
@@ -102,120 +151,164 @@ async fn reconcile_one_account(
         }
     });
     let results = futures_util::future::try_join_all(fetches).await?;
-    let exchange_positions: HashMap<
-        String,
-        Vec<auto_trader_market::bitflyer_private::ExchangePosition>,
-    > = results.into_iter().collect();
+    Ok(results.into_iter().collect())
+}
 
-    let db_groups = group_trades_for_aggregate_comparison(&db_trades);
-
-    for ((pair, direction), (db_total_qty, trades)) in &db_groups {
-        let pair_positions = exchange_positions.get(pair).cloned().unwrap_or_default();
-
-        let mut exchange_has_conflicting = false;
-        let mut matching_exchange_size = Decimal::ZERO;
-        for p in &pair_positions {
-            if p.size <= Decimal::ZERO {
-                continue;
-            }
-            match matches_direction(&p.side, direction) {
-                Some(true) => matching_exchange_size += p.size,
-                Some(false) => exchange_has_conflicting = true,
-                None => {
-                    tracing::warn!(
-                        side = %p.side,
-                        product_code = %p.product_code,
-                        "unknown side, treating as conflict"
-                    );
-                    exchange_has_conflicting = true;
-                }
-            }
+fn sum_matching_exchange_size(
+    pair_positions: &[auto_trader_market::bitflyer_private::ExchangePosition],
+    direction: &Direction,
+) -> (Decimal, bool) {
+    let mut exchange_has_conflicting = false;
+    let mut matching_exchange_size = Decimal::ZERO;
+    for p in pair_positions {
+        if p.size <= Decimal::ZERO {
+            continue;
         }
-
-        if exchange_has_conflicting {
-            anyhow::bail!(
-                "failed to reconcile: conflicting exchange position for pair \"{pair}\" direction {direction:?} on account \"{}\"; manual intervention required",
-                account.name
-            );
-        }
-
-        if matching_exchange_size > Decimal::ZERO && matching_exchange_size != *db_total_qty {
-            anyhow::bail!(
-                "failed to reconcile: size mismatch for pair \"{pair}\" direction {direction:?} (db_total={db_total_qty}, exchange={matching_exchange_size}) on account \"{}\"; manual intervention required",
-                account.name
-            );
-        }
-
-        let exchange_has_matching = matching_exchange_size > Decimal::ZERO;
-        for trade in trades {
-            match (trade.status.as_str(), exchange_has_matching) {
-                ("open", true) => {
-                    if let Some(stop_id) = &trade.stop_order_id {
-                        alert_if_protective_stop_is_gone(api, account, trade, stop_id, notifier)
-                            .await;
-                    } else {
-                        tracing::info!(trade_id = %trade.id, "consistent, db open and exchange open");
-                    }
-                }
-                ("open", false) => {
-                    if let Some((price, commission)) = stop_executed_fill(api, trade).await {
-                        tracing::info!(
-                            trade_id = %trade.id,
-                            price = %price,
-                            "closed by exchange stop, recording as sl_hit"
-                        );
-                        close_reconciled_with(pool, trade, price, ExitReason::SlHit, commission)
-                            .await?;
-                    } else {
-                        tracing::warn!(
-                            trade_id = %trade.id,
-                            "db open but exchange has no matching position, closing with best-effort exit price"
-                        );
-                        tracing::warn!(trade_id = %trade.id, reason = "orphan", "force-closed");
-                        let exit_price = best_effort_exit_price(price_store, trade).await;
-                        close_reconciled_with(
-                            pool,
-                            trade,
-                            exit_price,
-                            ExitReason::Reconciled,
-                            Decimal::ZERO,
-                        )
-                        .await?;
-                    }
-                }
-                ("closing", true) => {
-                    tracing::warn!(
-                        trade_id = %trade.id,
-                        "db closing but exchange position still open, resetting to open for retry by normal close monitor"
-                    );
-                    trades::release_close_lock(pool, trade.id).await?;
-                }
-                ("closing", false) => {
-                    tracing::warn!(
-                        trade_id = %trade.id,
-                        "db closing and exchange shows no position, completing phase3 with best-effort exit price"
-                    );
-                    tracing::warn!(trade_id = %trade.id, reason = "phase3", "force-closed");
-                    let exit_price = best_effort_exit_price(price_store, trade).await;
-                    close_reconciled_with(
-                        pool,
-                        trade,
-                        exit_price,
-                        ExitReason::Reconciled,
-                        Decimal::ZERO,
-                    )
-                    .await?;
-                }
-                (other, _) => {
-                    anyhow::bail!(
-                        "unsupported trade_status for trade \"{}\": {other}",
-                        trade.id
-                    );
-                }
+        match matches_direction(&p.side, direction) {
+            Some(true) => matching_exchange_size += p.size,
+            Some(false) => exchange_has_conflicting = true,
+            None => {
+                tracing::warn!(
+                    side = %p.side,
+                    product_code = %p.product_code,
+                    "unknown side, treating as conflict"
+                );
+                exchange_has_conflicting = true;
             }
         }
     }
+    (matching_exchange_size, exchange_has_conflicting)
+}
+
+fn reject_aggregate_mismatch(
+    account_name: &str,
+    pair: &str,
+    direction: &Direction,
+    db_total_qty: Decimal,
+    matching_exchange_size: Decimal,
+    exchange_has_conflicting: bool,
+) -> anyhow::Result<()> {
+    if exchange_has_conflicting {
+        anyhow::bail!(
+            "failed to reconcile: conflicting exchange position for pair \"{pair}\" direction {direction:?} on account \"{}\"; manual intervention required",
+            account_name
+        );
+    }
+
+    if matching_exchange_size > Decimal::ZERO && matching_exchange_size != db_total_qty {
+        anyhow::bail!(
+            "failed to reconcile: size mismatch for pair \"{pair}\" direction {direction:?} (db_total={db_total_qty}, exchange={matching_exchange_size}) on account \"{}\"; manual intervention required",
+            account_name
+        );
+    }
+
     Ok(())
+}
+
+async fn reconcile_trade(
+    scope: &AccountScope<'_>,
+    trade: &auto_trader_core::types::Trade,
+    exchange_has_matching: bool,
+) -> anyhow::Result<()> {
+    match (trade.status.as_str(), exchange_has_matching) {
+        ("open", true) => reconcile_open_matching(scope, trade).await,
+        ("open", false) => reconcile_open_orphan(scope, trade).await,
+        ("closing", true) => reconcile_closing_matching(scope, trade).await,
+        ("closing", false) => reconcile_closing_orphan(scope, trade).await,
+        (other, _) => anyhow::bail!(
+            "unsupported trade_status for trade \"{}\": {other}",
+            trade.id
+        ),
+    }
+}
+
+async fn reconcile_open_matching(
+    scope: &AccountScope<'_>,
+    trade: &auto_trader_core::types::Trade,
+) -> anyhow::Result<()> {
+    if let Some(stop_id) = &trade.stop_order_id {
+        alert_if_protective_stop_is_gone(scope.api, scope.account, trade, stop_id, scope.notifier)
+            .await;
+    } else {
+        tracing::info!(trade_id = %trade.id, "consistent, db open and exchange open");
+    }
+    Ok(())
+}
+
+async fn reconcile_open_orphan(
+    scope: &AccountScope<'_>,
+    trade: &auto_trader_core::types::Trade,
+) -> anyhow::Result<()> {
+    if let Some((price, commission)) = stop_executed_fill(scope.api, trade).await {
+        close_as_sl_hit(scope.pool, trade, price, commission).await
+    } else {
+        close_as_open_orphan(scope, trade).await
+    }
+}
+
+async fn close_as_sl_hit(
+    pool: &PgPool,
+    trade: &auto_trader_core::types::Trade,
+    price: Decimal,
+    commission: Decimal,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        trade_id = %trade.id,
+        price = %price,
+        "closed by exchange stop, recording as sl_hit"
+    );
+    close_reconciled_with(pool, trade, price, ExitReason::SlHit, commission).await
+}
+
+async fn close_as_open_orphan(
+    scope: &AccountScope<'_>,
+    trade: &auto_trader_core::types::Trade,
+) -> anyhow::Result<()> {
+    tracing::warn!(
+        trade_id = %trade.id,
+        "db open but exchange has no matching position, closing with best-effort exit price"
+    );
+    tracing::warn!(trade_id = %trade.id, reason = "orphan", "force-closed");
+    force_close_at_best_effort_price(scope.pool, scope.price_store, trade).await
+}
+
+async fn reconcile_closing_matching(
+    scope: &AccountScope<'_>,
+    trade: &auto_trader_core::types::Trade,
+) -> anyhow::Result<()> {
+    tracing::warn!(
+        trade_id = %trade.id,
+        "db closing but exchange position still open, resetting to open for retry by normal close monitor"
+    );
+    trades::release_close_lock(scope.pool, trade.id).await
+}
+
+async fn reconcile_closing_orphan(
+    scope: &AccountScope<'_>,
+    trade: &auto_trader_core::types::Trade,
+) -> anyhow::Result<()> {
+    tracing::warn!(
+        trade_id = %trade.id,
+        "db closing and exchange shows no position, completing phase3 with best-effort exit price"
+    );
+    tracing::warn!(trade_id = %trade.id, reason = "phase3", "force-closed");
+    force_close_at_best_effort_price(scope.pool, scope.price_store, trade).await
+}
+
+async fn force_close_at_best_effort_price(
+    pool: &PgPool,
+    price_store: &PriceStore,
+    trade: &auto_trader_core::types::Trade,
+) -> anyhow::Result<()> {
+    let exit_price = best_effort_exit_price(price_store, trade).await;
+    close_reconciled_with(
+        pool,
+        trade,
+        exit_price,
+        ExitReason::Reconciled,
+        Decimal::ZERO,
+    )
+    .await
 }
 
 fn group_trades_for_aggregate_comparison(
@@ -236,32 +329,14 @@ fn group_trades_for_aggregate_comparison(
 
 async fn alert_if_protective_stop_is_gone(
     api: &dyn ExchangeApi,
-    account: &auto_trader_db::trading_accounts::TradingAccount,
+    account: &TradingAccount,
     trade: &auto_trader_core::types::Trade,
     stop_id: &str,
     notifier: &Notifier,
 ) {
     match api.stop_order_status(&trade.pair.0, stop_id).await {
         Ok(StopOrderStatus::Gone) => {
-            tracing::error!(
-                trade_id = %trade.id,
-                stop_id = %stop_id,
-                "protective stop order is gone, position is unprotected"
-            );
-            let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
-                title: "stop order lost".to_string(),
-                account_name: account.name.clone(),
-                exchange: trade.exchange,
-                body: format!(
-                    "trade {} on {} has an open exchange position but its SL \
-                     stop order ({stop_id}) is gone (canceled/expired). The \
-                     position is unprotected — replace the stop or close manually.",
-                    trade.id, trade.pair
-                ),
-            });
-            if let Err(e) = notifier.send(ev).await {
-                tracing::warn!(error = %e, "failed to send stop-order-lost alert");
-            }
+            notify_stop_order_lost(notifier, account, trade, stop_id).await;
         }
         Ok(_) => {
             tracing::info!(trade_id = %trade.id, "consistent, db open and exchange open with stop present");
@@ -269,6 +344,33 @@ async fn alert_if_protective_stop_is_gone(
         Err(e) => {
             tracing::warn!(trade_id = %trade.id, error = %e, "failed to check stop_order_status");
         }
+    }
+}
+
+async fn notify_stop_order_lost(
+    notifier: &Notifier,
+    account: &TradingAccount,
+    trade: &auto_trader_core::types::Trade,
+    stop_id: &str,
+) {
+    tracing::error!(
+        trade_id = %trade.id,
+        stop_id = %stop_id,
+        "protective stop order is gone, position is unprotected"
+    );
+    let ev = NotifyEvent::SystemAlert(SystemAlertEvent {
+        title: "stop order lost".to_string(),
+        account_name: account.name.clone(),
+        exchange: trade.exchange,
+        body: format!(
+            "trade {} on {} has an open exchange position but its SL \
+             stop order ({stop_id}) is gone (canceled/expired). The \
+             position is unprotected — replace the stop or close manually.",
+            trade.id, trade.pair
+        ),
+    });
+    if let Err(e) = notifier.send(ev).await {
+        tracing::warn!(error = %e, "failed to send stop-order-lost alert");
     }
 }
 

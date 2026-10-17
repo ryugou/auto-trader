@@ -309,6 +309,55 @@ mod reconcile_tests {
         PriceStore::new(vec![])
     }
 
+    #[test]
+    fn sum_matching_exchange_size_returns_expected_per_case() {
+        struct Case {
+            name: &'static str,
+            positions: Vec<ExchangePosition>,
+            expected_size: Decimal,
+            expected_conflict: bool,
+        }
+
+        let cases = vec![
+            Case {
+                name: "adds_same_side_and_skips_zero_size",
+                positions: vec![
+                    make_exchange_position("BUY", dec!(0.1)),
+                    make_exchange_position("BUY", dec!(0.2)),
+                    make_exchange_position("BUY", dec!(0)),
+                ],
+                expected_size: dec!(0.3),
+                expected_conflict: false,
+            },
+            Case {
+                name: "flags_opposite_side_as_conflict",
+                positions: vec![
+                    make_exchange_position("BUY", dec!(0.1)),
+                    make_exchange_position("SELL", dec!(0.1)),
+                ],
+                expected_size: dec!(0.1),
+                expected_conflict: true,
+            },
+            Case {
+                name: "flags_unknown_side_as_conflict",
+                positions: vec![make_exchange_position("HOLD", dec!(0.1))],
+                expected_size: dec!(0),
+                expected_conflict: true,
+            },
+        ];
+
+        for case in cases {
+            let (size, has_conflicting) =
+                sum_matching_exchange_size(&case.positions, &Direction::Long);
+            assert_eq!(size, case.expected_size, "{}: size", case.name);
+            assert_eq!(
+                has_conflicting, case.expected_conflict,
+                "{}: conflict",
+                case.name
+            );
+        }
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn db_open_exchange_has_position_is_noop(pool: PgPool) {
         let account_id = seed_live_account(&pool).await;

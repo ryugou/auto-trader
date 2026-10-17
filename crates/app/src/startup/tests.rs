@@ -182,6 +182,7 @@ mod fx_new_account_assumption_tests {
 
 mod resolve_exchange_liquidation_levels_tests {
     use auto_trader_core::config::AppConfig;
+    use auto_trader_core::types::Exchange;
     use auto_trader_db::trading_accounts::TradingAccount;
     use chrono::Utc;
     use rust_decimal_macros::dec;
@@ -199,6 +200,24 @@ mod resolve_exchange_liquidation_levels_tests {
             }"#,
         )
         .expect("minimal_config must parse")
+    }
+
+    fn config_with_margin(entries: &[(&str, &str)]) -> AppConfig {
+        let margin_entries: String = entries
+            .iter()
+            .map(|(name, value)| format!(r#""{name}": {{"liquidation_margin_level": {value}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        serde_json::from_str(&format!(
+            r#"{{
+                "vegapunk": {{"endpoint": "http://x", "schema": "y"}},
+                "database": {{"url": "postgresql://x"}},
+                "monitor": {{"interval_secs": 60}},
+                "pairs": {{}},
+                "exchange_margin": {{{margin_entries}}}
+            }}"#
+        ))
+        .expect("config_with_margin must parse")
     }
 
     fn account_with_exchange(exchange: &str) -> TradingAccount {
@@ -226,5 +245,50 @@ mod resolve_exchange_liquidation_levels_tests {
             format!("{err}").contains("not_a_real_exchange"),
             "error must name the offending exchange value: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_non_positive_margin_for_exchange_in_use() {
+        let accounts = vec![account_with_exchange("bitflyer_cfd")];
+        let config = config_with_margin(&[("bitflyer_cfd", "0")]);
+        let err = resolve_exchange_liquidation_levels(&accounts, &config).unwrap_err();
+        let message = format!("{err}");
+        assert!(
+            message.contains("exchange_margin.bitflyer_cfd.liquidation_margin_level"),
+            "error must name the offending config key: {message}"
+        );
+        assert!(
+            message.contains("must be positive"),
+            "error must state the reason: {message}"
+        );
+    }
+
+    #[test]
+    fn reports_all_missing_exchanges_sorted() {
+        let accounts = vec![
+            account_with_exchange("oanda"),
+            account_with_exchange("bitflyer_cfd"),
+        ];
+        let config = config_with_margin(&[]);
+        let err = resolve_exchange_liquidation_levels(&accounts, &config).unwrap_err();
+        let message = format!("{err}");
+        let bitflyer_pos = message.find("\"exchange_margin.bitflyer_cfd\"");
+        let oanda_pos = message.find("\"exchange_margin.oanda\"");
+        assert!(
+            bitflyer_pos.is_some() && oanda_pos.is_some(),
+            "error must name both missing exchanges: {message}"
+        );
+        assert!(
+            bitflyer_pos < oanda_pos,
+            "missing exchanges must be sorted: {message}"
+        );
+    }
+
+    #[test]
+    fn returns_levels_for_exchanges_in_use() {
+        let accounts = vec![account_with_exchange("bitflyer_cfd")];
+        let config = config_with_margin(&[("bitflyer_cfd", "50")]);
+        let map = resolve_exchange_liquidation_levels(&accounts, &config).unwrap();
+        assert_eq!(map[&Exchange::BitflyerCfd], dec!(50));
     }
 }
