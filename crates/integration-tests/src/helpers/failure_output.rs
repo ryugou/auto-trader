@@ -4,10 +4,6 @@ use std::sync::{Arc, Mutex};
 use tracing::Subscriber;
 use tracing_subscriber::Layer;
 
-// ---------------------------------------------------------------------------
-// TracingCapture — in-memory log capture layer
-// ---------------------------------------------------------------------------
-
 /// A [`tracing_subscriber::Layer`] that appends formatted log lines
 /// (`"{LEVEL} {message}"`) to a shared buffer.
 ///
@@ -45,7 +41,6 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        // Extract message field from the event.
         let mut visitor = MessageVisitor(String::new());
         event.record(&mut visitor);
 
@@ -58,7 +53,6 @@ where
     }
 }
 
-/// Simple field visitor that collects the `message` field.
 struct MessageVisitor(String);
 
 impl tracing::field::Visit for MessageVisitor {
@@ -74,10 +68,6 @@ impl tracing::field::Visit for MessageVisitor {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// format_failure — structured failure report
-// ---------------------------------------------------------------------------
 
 /// Build a human-readable (and future-LLM-parseable) failure report.
 ///
@@ -99,21 +89,18 @@ pub fn format_failure(
     let _ = writeln!(out, "  actual: {actual}");
     let _ = writeln!(out);
 
-    // --- application log ---
     let _ = writeln!(out, "  === application log ===");
     for line in logs {
         let _ = writeln!(out, "  {line}");
     }
     let _ = writeln!(out);
 
-    // --- db state ---
     let _ = writeln!(out, "  === db state ===");
     for line in db_snapshot.lines() {
         let _ = writeln!(out, "  {line}");
     }
     let _ = writeln!(out);
 
-    // --- git diff ---
     let _ = writeln!(out, "  === git diff (last 1 commit) ===");
     match std::process::Command::new("git")
         .args(["diff", "HEAD~1", "HEAD"])
@@ -129,13 +116,13 @@ pub fn format_failure(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let _ = writeln!(
                 out,
-                "  (git diff unavailable: exit code {}, stderr: {})",
+                "  (failed to run git diff: exit code {}, stderr: {})",
                 output.status,
                 stderr.trim()
             );
         }
         Err(e) => {
-            let _ = writeln!(out, "  (git diff unavailable: {e})");
+            let _ = writeln!(out, "  (failed to run git diff: {e})");
         }
     }
 
@@ -143,30 +130,4 @@ pub fn format_failure(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_failure_contains_all_sections() {
-        let logs = vec!["INFO starting".to_string(), "ERROR boom".to_string()];
-        let report = format_failure(
-            "my_test",
-            "smoke.csv",
-            "balance=100",
-            "balance=90",
-            &logs,
-            "trading_accounts: 1 row",
-        );
-
-        assert!(report.contains("[FAIL] my_test"));
-        assert!(report.contains("fixture: smoke.csv"));
-        assert!(report.contains("expected: balance=100"));
-        assert!(report.contains("actual: balance=90"));
-        assert!(report.contains("=== application log ==="));
-        assert!(report.contains("INFO starting"));
-        assert!(report.contains("ERROR boom"));
-        assert!(report.contains("=== db state ==="));
-        assert!(report.contains("trading_accounts: 1 row"));
-        assert!(report.contains("=== git diff (last 1 commit) ==="));
-    }
-}
+mod tests;

@@ -1,6 +1,5 @@
-//! Wiremock-based mock for the OANDA REST API (candles endpoint mock).
-
 use std::time::Duration;
+
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -38,23 +38,19 @@ impl TickData {
     }
 }
 
-/// Scenario that the mock server will execute for each connected client.
 #[derive(Clone)]
 enum Scenario {
-    /// Send all ticks then keep the connection open.
     NormalTicks {
         pair: String,
         ticks: Vec<TickData>,
         interval: std::time::Duration,
     },
-    /// Send `n` ticks then close the connection.
     DisconnectAfter {
         pair: String,
         ticks: Vec<TickData>,
         n: usize,
         interval: std::time::Duration,
     },
-    /// Send a single invalid (non-JSON) message.
     InvalidMessage,
 }
 
@@ -113,64 +109,9 @@ impl MockBitflyerWs {
         let port = listener.local_addr().unwrap().port();
         let url = format!("ws://127.0.0.1:{port}");
 
-        let handle = tokio::spawn(async move {
-            // Accept connections in a loop so we can handle reconnects in tests.
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let scenario = scenario.clone();
-                tokio::spawn(async move {
-                    let Ok(mut ws) = accept_async(stream).await else {
-                        return;
-                    };
-
-                    match scenario {
-                        Scenario::NormalTicks {
-                            pair,
-                            ticks,
-                            interval,
-                        } => {
-                            for tick in &ticks {
-                                let msg = make_ticker_message(&pair, tick);
-                                if ws.send(Message::Text(msg)).await.is_err() {
-                                    return;
-                                }
-                                tokio::time::sleep(interval).await;
-                            }
-                            // Wait for client disconnect instead of pending forever
-                            while let Some(Ok(_)) = ws.next().await {}
-                        }
-                        Scenario::DisconnectAfter {
-                            pair,
-                            ticks,
-                            n,
-                            interval,
-                        } => {
-                            for (i, tick) in ticks.iter().enumerate() {
-                                if i >= n {
-                                    break;
-                                }
-                                let msg = make_ticker_message(&pair, tick);
-                                if ws.send(Message::Text(msg)).await.is_err() {
-                                    return;
-                                }
-                                tokio::time::sleep(interval).await;
-                            }
-                            // Close the connection
-                            let _ = ws.close(None).await;
-                        }
-                        Scenario::InvalidMessage => {
-                            let _ = ws
-                                .send(Message::Text("this is not valid json {{{{".to_string()))
-                                .await;
-                            // Wait for client disconnect instead of pending forever
-                            while let Some(Ok(_)) = ws.next().await {}
-                        }
-                    }
-                });
-            }
-        });
+        let handle = tokio::spawn(serve_scenario_to_every_reconnecting_client(
+            listener, scenario,
+        ));
 
         Self {
             url,
@@ -185,7 +126,6 @@ impl Drop for MockBitflyerWs {
     }
 }
 
-/// Build a JSON-RPC channelMessage matching the BitFlyer lightning WS format.
 fn make_ticker_message(pair: &str, tick: &TickData) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -203,4 +143,65 @@ fn make_ticker_message(pair: &str, tick: &TickData) -> String {
         }
     })
     .to_string()
+}
+
+async fn serve_scenario_to_every_reconnecting_client(listener: TcpListener, scenario: Scenario) {
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            break;
+        };
+        let scenario = scenario.clone();
+        tokio::spawn(async move {
+            let Ok(mut ws) = accept_async(stream).await else {
+                return;
+            };
+
+            match scenario {
+                Scenario::NormalTicks {
+                    pair,
+                    ticks,
+                    interval,
+                } => {
+                    for tick in &ticks {
+                        let msg = make_ticker_message(&pair, tick);
+                        if ws.send(Message::Text(msg)).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(interval).await;
+                    }
+                    drain_until_client_disconnects(&mut ws).await;
+                }
+                Scenario::DisconnectAfter {
+                    pair,
+                    ticks,
+                    n,
+                    interval,
+                } => {
+                    for (i, tick) in ticks.iter().enumerate() {
+                        if i >= n {
+                            break;
+                        }
+                        let msg = make_ticker_message(&pair, tick);
+                        if ws.send(Message::Text(msg)).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(interval).await;
+                    }
+                    let _ = ws.close(None).await;
+                }
+                Scenario::InvalidMessage => {
+                    let _ = ws
+                        .send(Message::Text("this is not valid json {{{{".to_string()))
+                        .await;
+                    drain_until_client_disconnects(&mut ws).await;
+                }
+            }
+        });
+    }
+}
+
+async fn drain_until_client_disconnects(
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) {
+    while let Some(Ok(_)) = ws.next().await {}
 }

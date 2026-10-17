@@ -1,7 +1,3 @@
-//! Seed helpers for trades, notifications, daily_summary.
-//!
-//! These complement the existing `db.rs` helpers (which seed accounts).
-
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -55,7 +51,7 @@ pub async fn seed_closed_trade(
     .bind(exit_at)
     .execute(pool)
     .await
-    .expect("seed_closed_trade: insert failed");
+    .expect("failed to insert closed trade");
     id
 }
 
@@ -95,7 +91,7 @@ pub async fn seed_open_trade(
     .bind(entry_at)
     .execute(pool)
     .await
-    .expect("seed_open_trade: insert failed");
+    .expect("failed to insert open trade");
     id
 }
 
@@ -134,7 +130,7 @@ pub async fn seed_notification(
     .bind(read_at)
     .execute(pool)
     .await
-    .expect("seed_notification: insert failed");
+    .expect("failed to insert notification");
     id
 }
 
@@ -171,5 +167,5 @@ pub async fn seed_daily_summary(
     .bind(max_drawdown)
     .execute(pool)
     .await
-    .expect("seed_daily_summary: insert failed");
+    .expect("failed to insert daily summary");
 }

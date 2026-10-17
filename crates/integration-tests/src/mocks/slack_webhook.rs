@@ -1,8 +1,5 @@
-//! Wiremock-based mock for a Slack incoming-webhook endpoint.
-//!
-//! Captures all POST request bodies so tests can assert on them.
-
 use std::sync::{Arc, Mutex};
+
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -16,7 +13,6 @@ pub struct CapturedRequest {
     pub status: u16,
 }
 
-/// A responder that captures request bodies and returns 200.
 #[derive(Clone)]
 struct CapturingResponder {
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
@@ -91,10 +87,6 @@ impl MockSlackWebhook {
         self.mount_responder(None).await;
     }
 
-    /// Reset existing mocks and mount a responder with the given behavior.
-    /// `error_code: None` means respond 200; `Some(code)` means respond with
-    /// that status. Shared by `start`/`with_error_response`/
-    /// `with_success_response` so the mount logic lives in one place.
     async fn mount_responder(&self, error_code: Option<u16>) {
         self.server.reset().await;
 

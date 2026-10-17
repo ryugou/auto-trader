@@ -1,5 +1,3 @@
-//! Wiremock-based mock for the GMO Coin FX Public API ticker endpoint.
-
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

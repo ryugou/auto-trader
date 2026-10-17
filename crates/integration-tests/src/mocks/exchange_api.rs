@@ -1,26 +1,17 @@
-//! Configurable [`ExchangeApi`] mock with builder pattern and failure injection.
-//!
-//! Each trait method can be pre-loaded with a success response via the builder.
-//! Failure injection (`with_failures`) makes the first N calls return an error
-//! before falling through to the configured response.
-
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-
 use auto_trader_market::bitflyer_private::{
     ChildOrder, Collateral, ExchangePosition, Execution, SendChildOrderRequest,
     SendChildOrderResponse, Side,
 };
 use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
-// ---------------------------------------------------------------------------
-// CallCounter — tracks per-method invocation counts
-// ---------------------------------------------------------------------------
+const STOP_ORDER_STATUS_DRIVING_CLOSE_THROUGH_CANCEL: StopOrderStatus = StopOrderStatus::Active;
 
 /// Per-method call counters exposed via `Arc<AtomicU32>`.
 #[derive(Debug, Default)]
@@ -47,10 +38,6 @@ pub struct StopOrderCall {
     pub position_id: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// MethodConfig — per-method response + failure policy
-// ---------------------------------------------------------------------------
-
 #[derive(Clone)]
 struct MethodConfig<T: Clone> {
     response: T,
@@ -70,7 +57,6 @@ impl<T: Clone> MethodConfig<T> {
         self
     }
 
-    /// Returns `Ok(response)` or `Err` depending on remaining failure count.
     fn try_respond(&self) -> anyhow::Result<T> {
         let prev = self
             .fail_remaining
@@ -78,15 +64,11 @@ impl<T: Clone> MethodConfig<T> {
                 if n > 0 { Some(n - 1) } else { None }
             });
         match prev {
-            Ok(_) => anyhow::bail!("MockExchangeApi: injected failure"),
+            Ok(_) => anyhow::bail!("failed to call exchange api: injected failure"),
             Err(_) => Ok(self.response.clone()),
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// MockExchangeApi
-// ---------------------------------------------------------------------------
 
 pub struct MockExchangeApi {
     send_child_order_cfg: MethodConfig<SendChildOrderResponse>,
@@ -98,10 +80,6 @@ pub struct MockExchangeApi {
     place_stop_order_cfg: MethodConfig<String>,
     cancel_stop_order_cfg: MethodConfig<()>,
     stop_order_status_cfg: MethodConfig<StopOrderStatus>,
-    /// Per-call `stop_order_status` overrides. When non-empty, each call pops
-    /// the front element; once drained, falls back to `stop_order_status_cfg`.
-    /// Lets tests drive multi-step recovery (e.g. Active → Gone across a
-    /// failed cancel).
     stop_order_status_seq: Arc<Mutex<VecDeque<StopOrderStatus>>>,
     /// Recorded `place_stop_order` args (in call order).
     pub place_stop_calls: Arc<Mutex<Vec<StopOrderCall>>>,
@@ -184,7 +162,7 @@ impl ExchangeApi for MockExchangeApi {
             .fetch_add(1, Ordering::SeqCst);
         self.place_stop_calls
             .lock()
-            .expect("place_stop_calls mutex poisoned")
+            .expect("failed to lock place_stop_calls: mutex poisoned")
             .push(StopOrderCall {
                 product_code: product_code.to_string(),
                 close_side,
@@ -217,7 +195,7 @@ impl ExchangeApi for MockExchangeApi {
         if let Some(next) = self
             .stop_order_status_seq
             .lock()
-            .expect("stop_order_status_seq mutex poisoned")
+            .expect("failed to lock stop_order_status_seq: mutex poisoned")
             .pop_front()
         {
             return Ok(next);
@@ -225,10 +203,6 @@ impl ExchangeApi for MockExchangeApi {
         self.stop_order_status_cfg.try_respond()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
 
 /// Builder for [`MockExchangeApi`].
 ///
@@ -262,8 +236,7 @@ impl MockExchangeApiBuilder {
                 keep_rate: dec!(0),
             },
             place_stop_order_resp: "mock-stop-001".to_string(),
-            // 既定は Active: close 経路が cancel → 成行 close に進む。
-            stop_order_status_resp: StopOrderStatus::Active,
+            stop_order_status_resp: STOP_ORDER_STATUS_DRIVING_CLOSE_THROUGH_CANCEL,
             stop_order_status_seq: vec![],
             failures: vec![],
         }
@@ -363,7 +336,7 @@ impl MockExchangeApiBuilder {
                 "stop_order_status" => {
                     stop_order_status_cfg = stop_order_status_cfg.with_failures(*count);
                 }
-                other => panic!("MockExchangeApiBuilder: unknown method '{other}'"),
+                other => panic!("unsupported method: \"{other}\""),
             }
         }
 
