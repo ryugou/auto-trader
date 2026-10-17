@@ -9,6 +9,7 @@ use crate::calendar::EconomicCalendar;
 use crate::news::NewsFetcher;
 use crate::summarizer::GeminiSummarizer;
 
+/// Analyst that periodically fetches news, summarizes each new item and publishes the summary as a macro update.
 pub struct MacroAnalyst {
     _calendar: EconomicCalendar,
     news: NewsFetcher,
@@ -19,6 +20,11 @@ pub struct MacroAnalyst {
 }
 
 impl MacroAnalyst {
+    /// Creates an analyst for the given news feed URLs and Gemini endpoint, with no knowledge store and no database.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client of the calendar, the news fetcher or the summarizer cannot be built.
     pub fn new(
         news_sources: Vec<String>,
         gemini_api_url: &str,
@@ -35,16 +41,29 @@ impl MacroAnalyst {
         })
     }
 
+    /// Sets the knowledge store that receives a market event for each summary.
     pub fn with_knowledge(mut self, store: Arc<dyn KnowledgeStore>) -> Self {
         self.knowledge = Some(store);
         self
     }
 
+    /// Sets the database pool that receives a macro event for each summary.
     pub fn with_db(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
         self
     }
 
+    /// Fetches news every `news_interval` and sends a macro update on `macro_tx` for each new item, skipping titles already seen.
+    ///
+    /// The loop runs until the future is dropped. A failed summary is logged and the item is skipped; a failed store write or database write is logged and the macro update is still sent.
+    ///
+    /// # Errors
+    ///
+    /// - Never returns an error: the loop has no exit.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `news_interval` is zero.
     pub async fn run(
         &mut self,
         macro_tx: tokio::sync::broadcast::Sender<MacroUpdate>,

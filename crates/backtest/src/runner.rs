@@ -269,11 +269,13 @@ async fn close_strategy_driven_exits(
     Ok(())
 }
 
+/// Runner that replays the stored candles of one exchange, pair and timeframe through a strategy.
 pub struct BacktestRunner {
     pool: sqlx::PgPool,
 }
 
 impl BacktestRunner {
+    /// Creates a runner that reads candles from the given database pool.
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
     }
@@ -306,6 +308,14 @@ impl BacktestRunner {
         Ok(candles)
     }
 
+    /// Replays up to the latest 10000 stored candles in chronological order through the strategy and returns the report.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the candles cannot be read from the database.
+    /// - Returns an error if a stored candle has an unsupported exchange.
+    /// - Returns an error if no candles are stored for the exchange, pair and timeframe.
+    /// - Returns an error if the simulated trader is asked to close a position that is not open.
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,

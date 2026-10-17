@@ -33,6 +33,7 @@ fn strip_markdown_code_fence(text: &str) -> &str {
         .trim()
 }
 
+/// Swing strategy that queries Gemini for a trade decision using similar patterns from the knowledge store.
 pub struct SwingLLMv1 {
     name: String,
     pairs: Vec<Pair>,
@@ -50,6 +51,11 @@ pub struct SwingLLMv1 {
 }
 
 impl SwingLLMv1 {
+    /// Creates the strategy with a Gemini HTTP client that times out after 30 seconds.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(
         name: String,
         pairs: Vec<Pair>,

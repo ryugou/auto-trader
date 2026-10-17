@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+/// Summarizer of news text for FX trading that uses the Gemini API.
 pub struct GeminiSummarizer {
     client: Client,
     api_url: String,
@@ -44,6 +45,11 @@ struct GeminiPartResponse {
 }
 
 impl GeminiSummarizer {
+    /// Creates a summarizer for the Gemini endpoint, model and API key.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(api_url: &str, api_key: &str, model: &str) -> anyhow::Result<Self> {
         let client = crate::http_client::build_http_client()?;
         Ok(Self {
@@ -54,6 +60,15 @@ impl GeminiSummarizer {
         })
     }
 
+    /// Asks Gemini for a short Japanese summary of the text from the viewpoint of FX trading.
+    ///
+    /// Returns an empty string when the response has no candidate text.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent.
+    /// - Returns an error if Gemini answers with a non-success status.
+    /// - Returns an error if the response body cannot be decoded.
     pub async fn summarize_for_fx(&self, text: &str) -> anyhow::Result<String> {
         let prompt = format!(
             "以下のニュース/経済指標をFXトレードの観点で要約してください。\

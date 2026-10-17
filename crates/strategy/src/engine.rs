@@ -10,12 +10,14 @@ struct StrategySlot {
     mode: String,
 }
 
+/// Engine that runs registered strategies and sends the signals they produce to a channel.
 pub struct StrategyEngine {
     slots: Vec<StrategySlot>,
     signal_tx: mpsc::Sender<SignalEvent>,
 }
 
 impl StrategyEngine {
+    /// Creates an engine without strategies that sends signals to `signal_tx`.
     pub fn new(signal_tx: mpsc::Sender<SignalEvent>) -> Self {
         Self {
             slots: Vec::new(),
@@ -23,14 +25,17 @@ impl StrategyEngine {
         }
     }
 
+    /// Registers a strategy; a strategy registered with the mode `disabled` receives no price events.
     pub fn add_strategy(&mut self, strategy: Box<dyn Strategy>, mode: String) {
         self.slots.push(StrategySlot { strategy, mode });
     }
 
+    /// Returns the names of the registered strategies in registration order.
     pub fn registered_names(&self) -> Vec<&str> {
         self.slots.iter().map(|s| s.strategy.name()).collect()
     }
 
+    /// Passes the events to every strategy so it can build its history, without producing signals.
     pub async fn warmup(&mut self, events: &[PriceEvent]) {
         for slot in &mut self.slots {
             slot.strategy.warmup(events).await;
@@ -54,6 +59,7 @@ impl StrategyEngine {
         }
     }
 
+    /// Passes the event to every strategy that is not disabled and sends the signals they produce.
     pub async fn on_price(&mut self, event: &PriceEvent) {
         for slot in &mut self.slots {
             if slot.mode == "disabled" {
@@ -63,6 +69,7 @@ impl StrategyEngine {
         }
     }
 
+    /// Like `on_price`, and also returns the exit signals that each strategy produces for its open positions in `open_positions_by_strategy`.
     pub async fn on_price_with_positions(
         &mut self,
         event: &PriceEvent,
@@ -84,6 +91,7 @@ impl StrategyEngine {
         all_exits
     }
 
+    /// Passes the macro update to every strategy.
     pub fn on_macro_update(&mut self, update: &MacroUpdate) {
         for slot in &mut self.slots {
             slot.strategy.on_macro_update(update);

@@ -1,3 +1,5 @@
+#![doc = "Integration tests for the risk gate checks."]
+
 use auto_trader_executor::risk_gate::{GateDecision, RejectReason, eval_price_freshness};
 
 #[test]

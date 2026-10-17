@@ -93,9 +93,22 @@ fn char_literal_end(text: &str, quote: usize) -> usize {
     }
 }
 
+fn is_at_line_start(text: &str, pos: usize) -> bool {
+    let line_start = text[..pos].rfind('\n').map_or(0, |p| p + 1);
+    text[line_start..pos].trim().is_empty()
+}
+
 fn is_safety_comment_at(text: &str, slashes: usize) -> bool {
-    let line_start = text[..slashes].rfind('\n').map_or(0, |p| p + 1);
-    text[line_start..slashes].trim().is_empty() && text[slashes..].starts_with("// SAFETY:")
+    is_at_line_start(text, slashes) && text[slashes..].starts_with("// SAFETY:")
+}
+
+fn is_rustdoc_line_at(text: &str, slashes: usize) -> bool {
+    is_at_line_start(text, slashes)
+        && text[slashes..].starts_with("///")
+        && matches!(
+            text.as_bytes().get(slashes + 3),
+            None | Some(b' ' | b'\n' | b'\r')
+        )
 }
 
 fn comment_line_numbers(text: &str) -> Vec<usize> {
@@ -125,7 +138,7 @@ fn comment_line_numbers(text: &str) -> Vec<usize> {
                 },
                 b'\'' => i = char_literal_end(text, i),
                 b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                    if !is_safety_comment_at(text, i) {
+                    if !is_safety_comment_at(text, i) && !is_rustdoc_line_at(text, i) {
                         found.push(line);
                     }
                     while i < bytes.len() && bytes[i] != b'\n' {
@@ -279,9 +292,24 @@ fn line_comment_is_forbidden() {
 }
 
 #[test]
-fn doc_comment_is_forbidden() {
-    assert!(has_comment("/// doc"));
+fn rustdoc_line_is_allowed() {
+    assert!(!has_comment("/// Returns the price."));
+    assert!(!has_comment("    ///"));
+    assert!(!has_comment("    /// # Errors"));
+}
+
+#[test]
+fn inner_doc_comment_is_forbidden() {
     assert!(has_comment("//! module doc"));
+    assert!(has_comment("/*! module doc */"));
+}
+
+#[test]
+fn malformed_rustdoc_is_forbidden() {
+    assert!(has_comment("///no space"));
+    assert!(has_comment("//// four slashes"));
+    assert!(has_comment("/** block doc */"));
+    assert!(has_comment("let x = 1; /// trailing"));
 }
 
 #[test]
