@@ -15,28 +15,41 @@ use super::lock_mock_state;
 
 const STOP_ORDER_STATUS_DRIVING_CLOSE_THROUGH_CANCEL: StopOrderStatus = StopOrderStatus::Active;
 
-/// Per-method call counters exposed via `Arc<AtomicU32>`.
+/// Counters of the calls to each method of the mock, including the calls that fail.
 #[derive(Debug, Default)]
 pub struct CallCounters {
+    /// Number of calls to `send_child_order`.
     pub send_child_order: AtomicU32,
+    /// Number of calls to `get_child_orders`.
     pub get_child_orders: AtomicU32,
+    /// Number of calls to `get_executions`.
     pub get_executions: AtomicU32,
+    /// Number of calls to `get_positions`.
     pub get_positions: AtomicU32,
+    /// Number of calls to `get_collateral`.
     pub get_collateral: AtomicU32,
+    /// Number of calls to `cancel_child_order`.
     pub cancel_child_order: AtomicU32,
+    /// Number of calls to `place_stop_order`.
     pub place_stop_order: AtomicU32,
+    /// Number of calls to `cancel_stop_order`.
     pub cancel_stop_order: AtomicU32,
+    /// Number of calls to `stop_order_status`.
     pub stop_order_status: AtomicU32,
 }
 
-/// Recorded arguments for a single `place_stop_order` invocation. Tests assert
-/// the trader placed the stop with the rounded trigger price / close side.
+/// Arguments of a `place_stop_order` call.
 #[derive(Debug, Clone)]
 pub struct StopOrderCall {
+    /// Product code of the stop order.
     pub product_code: String,
+    /// Side of the order that closes the position.
     pub close_side: Side,
+    /// Size of the stop order.
     pub size: Decimal,
+    /// Price at which the stop order triggers.
     pub trigger_price: Decimal,
+    /// Id of the position to close, if the call named one.
     pub position_id: Option<String>,
 }
 
@@ -72,6 +85,7 @@ impl<T: Clone> MethodConfig<T> {
     }
 }
 
+/// Mock of `ExchangeApi` that returns configured responses, injects failures and counts the calls it receives.
 pub struct MockExchangeApi {
     send_child_order_cfg: MethodConfig<SendChildOrderResponse>,
     get_child_orders_cfg: MethodConfig<Vec<ChildOrder>>,
@@ -83,8 +97,9 @@ pub struct MockExchangeApi {
     cancel_stop_order_cfg: MethodConfig<()>,
     stop_order_status_cfg: MethodConfig<StopOrderStatus>,
     stop_order_status_seq: Arc<Mutex<VecDeque<StopOrderStatus>>>,
-    /// Recorded `place_stop_order` args (in call order).
+    /// Arguments of every `place_stop_order` call, in call order.
     pub place_stop_calls: Arc<Mutex<Vec<StopOrderCall>>>,
+    /// Counters of the calls to each method.
     pub counters: Arc<CallCounters>,
 }
 
@@ -200,10 +215,7 @@ impl ExchangeApi for MockExchangeApi {
     }
 }
 
-/// Builder for [`MockExchangeApi`].
-///
-/// All responses have sensible zero-value defaults so callers only need to
-/// configure the methods they actually exercise.
+/// Builder of `MockExchangeApi`.
 pub struct MockExchangeApiBuilder {
     send_child_order_resp: SendChildOrderResponse,
     get_child_orders_resp: Vec<ChildOrder>,
@@ -217,6 +229,7 @@ pub struct MockExchangeApiBuilder {
 }
 
 impl MockExchangeApiBuilder {
+    /// Returns a builder whose mock returns empty lists, a zero collateral, the order id `mock-order-001`, the stop order id `mock-stop-001` and the stop order status `Active`, and injects no failures.
     pub fn new() -> Self {
         Self {
             send_child_order_resp: SendChildOrderResponse {
@@ -238,60 +251,69 @@ impl MockExchangeApiBuilder {
         }
     }
 
-    /// Drive `stop_order_status` through an explicit per-call sequence. Once the
-    /// sequence is drained, later calls fall back to the single response set by
-    /// [`with_stop_order_status_response`](Self::with_stop_order_status_response).
+    /// Sets the statuses that successive `stop_order_status` calls return, one per call.
+    ///
+    /// Once the statuses are used up, the calls return the status set by `with_stop_order_status_response`, and injected failures apply to them.
     pub fn with_stop_order_status_sequence(mut self, seq: Vec<StopOrderStatus>) -> Self {
         self.stop_order_status_seq = seq;
         self
     }
 
+    /// Sets the stop order id that `place_stop_order` returns.
     pub fn with_place_stop_order_response(mut self, id: impl Into<String>) -> Self {
         self.place_stop_order_resp = id.into();
         self
     }
 
+    /// Sets the status that `stop_order_status` returns.
     pub fn with_stop_order_status_response(mut self, status: StopOrderStatus) -> Self {
         self.stop_order_status_resp = status;
         self
     }
 
+    /// Sets the response that `send_child_order` returns.
     pub fn with_send_child_order_response(mut self, resp: SendChildOrderResponse) -> Self {
         self.send_child_order_resp = resp;
         self
     }
 
+    /// Sets the positions that `get_positions` returns.
     pub fn with_get_positions_response(mut self, positions: Vec<ExchangePosition>) -> Self {
         self.get_positions_resp = positions;
         self
     }
 
+    /// Sets the executions that `get_executions` returns.
     pub fn with_get_executions_response(mut self, executions: Vec<Execution>) -> Self {
         self.get_executions_resp = executions;
         self
     }
 
+    /// Sets the collateral that `get_collateral` returns.
     pub fn with_get_collateral_response(mut self, collateral: Collateral) -> Self {
         self.get_collateral_resp = collateral;
         self
     }
 
+    /// Sets the orders that `get_child_orders` returns.
     pub fn with_get_child_orders_response(mut self, orders: Vec<ChildOrder>) -> Self {
         self.get_child_orders_resp = orders;
         self
     }
 
-    /// Register failure injection for a method.
+    /// Makes the first `count` calls to `method` return an error.
     ///
-    /// `method` must be one of: `"send_child_order"`, `"get_child_orders"`,
-    /// `"get_executions"`, `"get_positions"`, `"get_collateral"`,
-    /// `"cancel_child_order"`, `"place_stop_order"`, `"cancel_stop_order"`,
-    /// `"stop_order_status"`.
+    /// `method` must be one of `"send_child_order"`, `"get_child_orders"`, `"get_executions"`, `"get_positions"`, `"get_collateral"`, `"cancel_child_order"`, `"place_stop_order"`, `"cancel_stop_order"` and `"stop_order_status"`.
     pub fn with_failures(mut self, method: &str, count: u32) -> Self {
         self.failures.push((method.to_string(), count));
         self
     }
 
+    /// Builds the mock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the method name given to `with_failures` is not one of the nine methods.
     pub fn build(self) -> Arc<MockExchangeApi> {
         let mut send_child_order_cfg = MethodConfig::new(self.send_child_order_resp);
         let mut get_child_orders_cfg = MethodConfig::new(self.get_child_orders_resp);

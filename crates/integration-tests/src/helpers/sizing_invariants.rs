@@ -22,8 +22,7 @@ fn validate_inputs_like_position_sizer(
     Some(())
 }
 
-/// `max_alloc = 1 / (Y + L × s)`. Returns `None` for non-positive inputs
-/// (matching `PositionSizer::calculate_quantity`'s validation).
+/// Returns the largest allocation, `1 / (Y + L × s)` for the liquidation margin level `Y`, the leverage `L` and the stop-loss percentage `s`, or `None` if any input is not positive.
 pub fn compute_max_alloc(
     leverage: Decimal,
     stop_loss_pct: Decimal,
@@ -38,9 +37,7 @@ pub fn compute_max_alloc(
     Some(Decimal::ONE / (liquidation_margin_level + leverage * stop_loss_pct))
 }
 
-/// Mirror of `PositionSizer::calculate_quantity` (without min_lot truncation).
-/// Returns `None` when any input is non-positive or `allocation_pct > 1`,
-/// matching production validation. Otherwise returns the raw quantity.
+/// Returns the quantity that `PositionSizer::calculate_quantity` sizes before it truncates to the minimum lot, or `None` if any input is not positive or `allocation_pct` is above 1.
 pub fn compute_raw_quantity(
     balance: Decimal,
     leverage: Decimal,
@@ -62,7 +59,7 @@ pub fn compute_raw_quantity(
     Some(balance * leverage * risk_alloc / entry_price)
 }
 
-/// Apply min_lot truncation (floor to multiple of `min_lot`).
+/// Returns `raw_qty` rounded down to a multiple of `min_lot`, or `raw_qty` itself if `min_lot` is not positive.
 pub fn truncate_to_min_lot(raw_qty: Decimal, min_lot: Decimal) -> Decimal {
     if min_lot <= Decimal::ZERO {
         return raw_qty;
@@ -70,13 +67,9 @@ pub fn truncate_to_min_lot(raw_qty: Decimal, min_lot: Decimal) -> Decimal {
     (raw_qty / min_lot).floor() * min_lot
 }
 
-/// Full quantity computation matching `PositionSizer::calculate_quantity`.
+/// Returns the quantity that `PositionSizer::calculate_quantity` returns, or `None` if the position cannot be sized.
 ///
-/// Returns `None` when the truncated quantity would be below `min_lot` —
-/// matching production behavior where the sizer refuses to produce a
-/// sub-lot order. Tests that previously got a 0-or-below value silently
-/// will now see `None`, forcing them to handle the unsizeable case
-/// explicitly (or unwrap if they expect a successful sizing).
+/// The position cannot be sized when an input is invalid (see `compute_raw_quantity`), when the quantity truncated to `min_lot` is below `min_lot`, or when `min_lot` is not positive and the raw quantity is not positive.
 #[allow(clippy::too_many_arguments)]
 pub fn expected_quantity(
     balance: Decimal,
@@ -108,7 +101,7 @@ pub fn expected_quantity(
     }
 }
 
-/// `SL = entry × (1 - sl_pct)` for Long, `entry × (1 + sl_pct)` for Short.
+/// Returns the stop-loss price: `entry × (1 - sl_pct)` for a long position and `entry × (1 + sl_pct)` for a short position.
 pub fn expected_stop_loss_price(
     entry_price: Decimal,
     direction: Direction,
@@ -120,7 +113,7 @@ pub fn expected_stop_loss_price(
     }
 }
 
-/// `TP = entry × (1 + tp_pct)` for Long, `entry × (1 - tp_pct)` for Short.
+/// Returns the take-profit price: `entry × (1 + tp_pct)` for a long position and `entry × (1 - tp_pct)` for a short position.
 pub fn expected_take_profit_price(
     entry_price: Decimal,
     direction: Direction,
@@ -132,8 +125,9 @@ pub fn expected_take_profit_price(
     }
 }
 
-/// `PnL = (exit - entry) × qty` for Long, `(entry - exit) × qty` for Short.
-/// Note: leverage is already baked into `qty` by the sizer.
+/// Returns the profit and loss: `(exit - entry) × qty` for a long position and `(entry - exit) × qty` for a short position.
+///
+/// The leverage is not applied, because the quantity already includes it.
 pub fn expected_pnl(
     entry_price: Decimal,
     exit_price: Decimal,
@@ -147,20 +141,19 @@ pub fn expected_pnl(
     price_diff * quantity
 }
 
-/// `margin = qty × entry / leverage`, truncated toward zero to whole yen
-/// (matching `Trader::execute`'s `truncate_yen` helper).
+/// Returns the margin to lock, `qty × entry / leverage` truncated toward zero to whole yen.
 pub fn expected_margin_lock(quantity: Decimal, entry_price: Decimal, leverage: Decimal) -> Decimal {
     (quantity * entry_price / leverage).round_dp_with_strategy(0, RoundingStrategy::ToZero)
 }
 
-/// Assert that the post-SL margin level is at or above broker threshold `Y`.
+/// Asserts that the margin level of the trade after its stop loss is hit is at least `liquidation_margin_level` minus 0.001.
 ///
-/// Computes:
-///   `equity_at_sl     = balance + (sl_price - entry) × qty × direction_sign`
-///   `margin_used      = qty × entry / leverage`
-///   `margin_level     = equity_at_sl / margin_used`
+/// The margin level is the balance at open plus the profit and loss at the stop-loss price, divided by the margin used, which is `qty × entry / leverage`.
 ///
-/// Asserts `margin_level >= Y - epsilon` (epsilon for Decimal rounding).
+/// # Panics
+///
+/// - Panics if the margin used is not positive.
+/// - Panics if the margin level is below `liquidation_margin_level` minus 0.001.
 pub fn assert_post_sl_margin_level_at_least_y(
     trade: &Trade,
     balance_at_open: Decimal,

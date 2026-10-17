@@ -3,28 +3,25 @@ use std::time::Duration;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// Mock of the Gemini `generateContent` API.
 pub struct MockGemini {
     server: MockServer,
 }
 
 impl MockGemini {
-    /// Start a new mock server (no routes mounted yet).
+    /// Starts a mock server that has no routes.
     pub async fn start() -> Self {
         Self {
             server: MockServer::start().await,
         }
     }
 
-    /// Base URL of the mock server.
+    /// Returns the base URL of the server.
     pub fn url(&self) -> String {
         self.server.uri()
     }
 
-    /// Mount a response that returns a parameter proposal (weekly batch).
-    ///
-    /// `json` is the raw JSON text that Gemini would return inside the
-    /// `candidates[0].content.parts[0].text` field (i.e. a serialized
-    /// `GeminiProposal`).
+    /// Replaces the routes with a response whose first candidate carries `json` as its text, for the parameter proposal of the weekly batch.
     pub async fn parameter_proposal(&self, json: &str) {
         self.server.reset().await;
         let body = gemini_response_wrapper(json);
@@ -36,10 +33,7 @@ impl MockGemini {
             .await;
     }
 
-    /// Mount a response that returns a swing-trade signal decision.
-    ///
-    /// `json` is the raw JSON text for the trade decision, e.g.
-    /// `{"action":"long","confidence":0.8,"sl_pips":50,"tp_pips":100,"reason":"..."}`
+    /// Replaces the routes with a response whose first candidate carries `json` as its text, for the swing-trade decision.
     pub async fn swing_signal(&self, json: &str) {
         self.server.reset().await;
         let body = gemini_response_wrapper(json);
@@ -51,7 +45,7 @@ impl MockGemini {
             .await;
     }
 
-    /// Mount a response that returns malformed JSON (not valid Gemini structure).
+    /// Replaces the routes with a response whose body is not valid JSON.
     pub async fn invalid_response(&self) {
         self.server.reset().await;
         Mock::given(method("POST"))
@@ -61,7 +55,7 @@ impl MockGemini {
             .await;
     }
 
-    /// Mount a response that delays long enough to trigger a client timeout.
+    /// Replaces the routes with a response that is delayed by 60 seconds.
     pub async fn timeout(&self) {
         self.server.reset().await;
         Mock::given(method("POST"))

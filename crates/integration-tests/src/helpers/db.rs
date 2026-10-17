@@ -3,14 +3,24 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// `seed_standard_accounts` が返す構造体。
+/// Ids of the accounts that `seed_standard_accounts` inserts.
 pub struct StandardAccounts {
+    /// Id of the paper account on bitFlyer CFD.
     pub bitflyer_cfd_account_id: Uuid,
+    /// Id of the paper account on GMO FX.
     pub gmo_fx_account_id: Uuid,
 }
 
-/// 指定テーブルの全行を JSON 文字列としてダンプする。
-/// テスト失敗時の診断ログに使う想定。
+/// Dumps every row of each given table as pretty-printed JSON, under a header line per table; a table without rows is dumped as `(empty)`.
+///
+/// # Errors
+///
+/// - Returns an error if the query of a table fails.
+/// - Returns an error if serializing the rows of a table fails.
+///
+/// # Panics
+///
+/// Panics if a table is not one of `trading_accounts`, `trades`, `price_candles`, `daily_summary`, `strategies`, `strategy_params`, `notifications`, `account_events` and `macro_events`.
 pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> anyhow::Result<String> {
     const ALLOWED_TABLES: &[&str] = &[
         "trading_accounts",
@@ -63,7 +73,14 @@ async fn ensure_strategy_for_foreign_key(pool: &PgPool, name: &str) -> anyhow::R
     Ok(())
 }
 
-/// テスト用 trading_account を 1 行挿入し、生成された UUID を返す。
+/// Inserts a trading account with a JPY currency and a leverage of 2, whose current balance equals `initial_balance`, and returns its id.
+///
+/// A strategy named `strategy` is inserted first when none exists.
+///
+/// # Errors
+///
+/// - Returns an error if inserting the strategy fails.
+/// - Returns an error if inserting the account fails.
 pub async fn seed_trading_account(
     pool: &PgPool,
     name: &str,
@@ -94,10 +111,11 @@ pub async fn seed_trading_account(
     Ok(id)
 }
 
-/// 指定 account の `current_balance` を直接読む。
+/// Returns the current balance of the given account.
 ///
-/// 残高更新を assert する flow テスト用の小さな共有ヘルパー。
-/// `Trader::execute` / `close_position` 前後で値を比較するときに使う。
+/// # Errors
+///
+/// - Returns an error if the query fails or the account does not exist.
 pub async fn read_current_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
     sqlx::query_scalar("SELECT current_balance FROM trading_accounts WHERE id = $1")
         .bind(account_id)
@@ -106,7 +124,12 @@ pub async fn read_current_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Re
         .context("failed to read current balance")
 }
 
-/// BitflyerCfd + GmoFx の paper アカウントを seed する。
+/// Inserts a paper account on bitFlyer CFD and one on GMO FX, each with an initial balance of 30000, and returns their ids.
+///
+/// # Errors
+///
+/// - Returns an error if inserting the strategy of either account fails.
+/// - Returns an error if inserting either account fails.
 pub async fn seed_standard_accounts(pool: &PgPool) -> anyhow::Result<StandardAccounts> {
     let bitflyer_cfd_account_id = seed_trading_account(
         pool,

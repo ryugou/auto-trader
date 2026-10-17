@@ -21,34 +21,54 @@ const PAPER_TRADING_DRY_RUN: bool = true;
 
 const LEVERAGE_HARDCODED_BY_SEED_TRADING_ACCOUNT: Decimal = Decimal::TWO;
 
-/// Test harness for full-pipeline integration tests. Wires up the DB pool,
-/// price store, sizer, trader, and a strategy instance for one account.
+/// Harness of the full-pipeline tests, which holds a seeded paper account, a price store with one feed and a dry-run trader for that account.
 pub struct PipelineHarness {
+    /// Database pool that the account and the trader use.
     pub pool: PgPool,
+    /// Id of the seeded account.
     pub account_id: Uuid,
+    /// Name of the seeded account.
     pub account_name: String,
+    /// Exchange of the account and of the price feed.
     pub exchange: Exchange,
+    /// Pair of the price feed.
     pub pair: Pair,
+    /// Leverage of the seeded account.
     pub leverage: Decimal,
+    /// Initial balance of the seeded account.
     pub balance: Decimal,
+    /// Liquidation margin level that the trader passes to the position sizer.
     pub liquidation_margin_level: Decimal,
+    /// Price store whose only feed is the pair on the exchange.
     pub price_store: Arc<PriceStore>,
+    /// Trader of the account, which runs in dry-run mode.
     pub trader: Trader,
 }
 
+/// Settings of the account, the price feed and the trader that `PipelineHarness::new` builds.
 pub struct PipelineHarnessConfig {
+    /// Name of the account to seed.
     pub account_name: String,
+    /// Exchange of the account and of the price feed.
     pub exchange: Exchange,
+    /// Name of the pair of the price feed.
     pub pair_str: String,
+    /// Name of the strategy that the account is bound to.
     pub strategy: String,
+    /// Initial balance of the account.
     pub balance: i64,
+    /// Liquidation margin level that the trader passes to the position sizer.
     pub liquidation_margin_level: Decimal,
+    /// Minimum order size of the pair.
     pub min_order_size: Decimal,
 }
 
 impl PipelineHarness {
-    /// Seed an account, build a price store with the given pair and a
-    /// trader configured for `dry_run` paper trading.
+    /// Seeds a paper account, builds a price store with one feed for the pair on the exchange, and builds a dry-run trader for the account.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if seeding the account fails.
     pub async fn new(pool: PgPool, cfg: PipelineHarnessConfig) -> anyhow::Result<Self> {
         use crate::helpers::db::seed_trading_account;
 
@@ -100,8 +120,7 @@ impl PipelineHarness {
         })
     }
 
-    /// Push a tick (bid/ask) into the price store so `trader.execute` can
-    /// see a fill price.
+    /// Sets the latest tick of the feed to `bid` and `ask`, with their mean as its price and the current time as its timestamp.
     pub async fn set_market(&self, bid: Decimal, ask: Decimal) {
         let feed_key = FeedKey::new(self.exchange, self.pair.clone());
         self.price_store
@@ -117,8 +136,7 @@ impl PipelineHarness {
             .await;
     }
 
-    /// Drive a strategy through warmup candles + 1 trigger candle. Returns
-    /// the signal emitted (if any).
+    /// Warms up the strategy with the `warmup` candles and returns the signal that it emits for the `trigger` candle, if any.
     pub async fn drive_strategy(
         &self,
         strategy: &mut dyn Strategy,
@@ -135,7 +153,11 @@ impl PipelineHarness {
         strategy.on_price(&trigger_event).await
     }
 
-    /// Execute a signal through the full trader path. Asserts success.
+    /// Executes the signal through the trader and returns the opened trade.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the trader fails to execute the signal.
     pub async fn execute(&self, signal: &Signal) -> anyhow::Result<Trade> {
         self.trader
             .execute(signal)
@@ -143,7 +165,11 @@ impl PipelineHarness {
             .context("failed to execute signal")
     }
 
-    /// Close a trade through `trader.close_position`. Asserts success.
+    /// Closes the trade through the trader with the given exit reason and returns the closed trade.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the trader fails to close the trade.
     pub async fn close(
         &self,
         trade_id: Uuid,
@@ -155,7 +181,11 @@ impl PipelineHarness {
             .context("failed to close position")
     }
 
-    /// Read `account.current_balance` from DB.
+    /// Returns the current balance of the account.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the query fails.
     pub async fn current_balance(&self) -> anyhow::Result<Decimal> {
         let row: (Decimal,) =
             sqlx::query_as("SELECT current_balance FROM trading_accounts WHERE id = $1")
@@ -166,7 +196,11 @@ impl PipelineHarness {
         Ok(row.0)
     }
 
-    /// Read `account_events` for this account, ordered by `occurred_at`.
+    /// Returns the events of the account, ordered by the time they occurred.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the query fails.
     pub async fn events(&self) -> anyhow::Result<Vec<AccountEvent>> {
         sqlx::query_as::<_, AccountEvent>(
             r#"SELECT event_type, amount, balance_after
@@ -181,10 +215,14 @@ impl PipelineHarness {
     }
 }
 
+/// Row of `account_events`, which records a change of the balance of an account.
 #[derive(sqlx::FromRow, Debug, PartialEq)]
 pub struct AccountEvent {
+    /// Type of the event.
     pub event_type: String,
+    /// Amount by which the event changed the balance.
     pub amount: Decimal,
+    /// Balance of the account after the event.
     pub balance_after: Decimal,
 }
 

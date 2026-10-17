@@ -4,23 +4,13 @@ use std::sync::{Arc, Mutex};
 use tracing::Subscriber;
 use tracing_subscriber::Layer;
 
-/// A [`tracing_subscriber::Layer`] that appends formatted log lines
-/// (`"{LEVEL} {message}"`) to a shared buffer.
-///
-/// Usage:
-/// ```ignore
-/// let (layer, buffer) = TracingCapture::new();
-/// let _guard = tracing_subscriber::registry().with(layer).set_default();
-/// tracing::info!("hello");
-/// let logs = buffer.lock().unwrap();
-/// assert!(logs[0].contains("hello"));
-/// ```
+/// Tracing layer that appends a line of the form `{LEVEL} {message}` for each event to a shared buffer.
 pub struct TracingCapture {
     buffer: Arc<Mutex<Vec<String>>>,
 }
 
 impl TracingCapture {
-    /// Create a new capture layer together with a handle to the shared buffer.
+    /// Returns a new capture layer together with a handle to its buffer.
     pub fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         (
@@ -69,10 +59,9 @@ impl tracing::field::Visit for MessageVisitor {
     }
 }
 
-/// Build a human-readable (and future-LLM-parseable) failure report.
+/// Returns a failure report made of the test name, the fixture, the expected and actual values, the application logs, the database snapshot and the output of `git diff HEAD~1 HEAD`.
 ///
-/// Includes application logs, DB state snapshot, and the git diff of the
-/// last commit so that vibepod / auto-fix agents have full context.
+/// If running `git diff` fails, the report holds a line that states the failure in place of the diff.
 pub fn format_failure(
     test_name: &str,
     fixture: &str,

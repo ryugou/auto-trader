@@ -4,7 +4,13 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Insert a closed trade. Returns the trade ID.
+/// Inserts a closed trade with a leverage of 2 and the exit reason `sl_hit`, and returns its id.
+///
+/// The stop loss is set 100 below the entry price for a `long` direction and 100 above it for any other direction.
+///
+/// # Errors
+///
+/// - Returns an error if the insert fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_closed_trade(
     pool: &PgPool,
@@ -56,7 +62,11 @@ pub async fn seed_closed_trade(
     Ok(id)
 }
 
-/// Insert an open trade. Returns the trade ID.
+/// Inserts an open trade with a leverage of 2 and no fees, and returns its id.
+///
+/// # Errors
+///
+/// - Returns an error if the insert fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_open_trade(
     pool: &PgPool,
@@ -96,7 +106,11 @@ pub async fn seed_open_trade(
     Ok(id)
 }
 
-/// Insert a notification row. Returns the notification ID.
+/// Inserts a notification and returns its id.
+///
+/// # Errors
+///
+/// - Returns an error if the insert fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_notification(
     pool: &PgPool,
@@ -135,7 +149,11 @@ pub async fn seed_notification(
     Ok(id)
 }
 
-/// Insert a daily_summary row.
+/// Inserts a row of `daily_summary`.
+///
+/// # Errors
+///
+/// - Returns an error if the insert fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_daily_summary(
     pool: &PgPool,

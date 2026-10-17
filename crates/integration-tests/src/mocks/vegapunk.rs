@@ -6,47 +6,59 @@ use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, Vega
 
 use super::lock_mock_state;
 
-/// Per-method call counters.
+/// Counters of the calls to each method of the mock, including the calls that fail.
 #[derive(Debug, Default)]
 pub struct CallCounters {
+    /// Number of calls to `ingest_raw`.
     pub ingest_raw: AtomicU32,
+    /// Number of calls to `search`.
     pub search: AtomicU32,
+    /// Number of calls to `feedback`.
     pub feedback: AtomicU32,
+    /// Number of calls to `merge`.
     pub merge: AtomicU32,
 }
 
-/// Arguments captured from an `ingest_raw` call.
+/// Arguments of an `ingest_raw` call.
 #[derive(Debug, Clone)]
 pub struct IngestRawCall {
+    /// Text to ingest.
     pub text: String,
+    /// Source type of the text.
     pub source_type: String,
+    /// Channel that the text came from.
     pub channel: String,
+    /// Timestamp of the text.
     pub timestamp: String,
 }
 
-/// Arguments captured from a `search` call.
+/// Arguments of a `search` call.
 #[derive(Debug, Clone)]
 pub struct SearchCall {
+    /// Query text.
     pub query: String,
+    /// Search mode that the call passed.
     pub mode: String,
+    /// Maximum number of results requested.
     pub top_k: i32,
 }
 
-/// Arguments captured from a `feedback` call.
+/// Arguments of a `feedback` call.
 #[derive(Debug, Clone)]
 pub struct FeedbackCall {
+    /// Id of the search that the feedback is about.
     pub search_id: String,
+    /// Rating given to the search.
     pub rating: i32,
+    /// Comment on the search.
     pub comment: String,
 }
 
-/// A call-tracking mock that replaces [`VegapunkClient`] in integration tests.
-///
-/// Does **not** start a gRPC server. Instead it provides async methods with
-/// the same signatures as the real client, records every invocation, and
-/// returns canned responses (or errors when failure injection is active).
+/// Mock of the Vegapunk client that starts no gRPC server, records the calls it receives and returns canned results or injected failures.
 pub struct MockVegapunkApi {
+    /// Counters of the calls to each method.
     pub counters: CallCounters,
+    /// Whether every call fails while the flag is set.
     pub should_fail: AtomicBool,
 
     ingest_raw_calls: Mutex<Vec<IngestRawCall>>,
@@ -62,20 +74,23 @@ pub struct MockVegapunkApi {
     search_results: Mutex<Vec<SearchResult>>,
 }
 
-/// A simplified search result item returned by the mock.
+/// Search result that the mock returns.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    /// Text of the result.
     pub text: String,
+    /// Score of the result.
     pub score: f32,
 }
 
-/// Builder for [`MockVegapunkApi`] with fluent configuration.
+/// Builder of `MockVegapunkApi`.
 pub struct MockVegapunkApiBuilder {
     search_results: Vec<SearchResult>,
     failures: Vec<(&'static str, u32)>,
 }
 
 impl MockVegapunkApiBuilder {
+    /// Returns a builder whose mock has no search results and no injected failures.
     pub fn new() -> Self {
         Self {
             search_results: Vec::new(),
@@ -83,20 +98,23 @@ impl MockVegapunkApiBuilder {
         }
     }
 
-    /// Pre-load search results returned by `search()`.
+    /// Sets the results that `search` returns.
     pub fn with_search_results(mut self, results: Vec<SearchResult>) -> Self {
         self.search_results = results;
         self
     }
 
-    /// Make the first `n` calls to `method` return an error.
-    ///
-    /// Supported method names: `"ingest_raw"`, `"search"`, `"feedback"`, `"merge"`.
+    /// Makes the first `n` calls to `method` return an error; `method` must be `"ingest_raw"`, `"search"`, `"feedback"` or `"merge"`.
     pub fn with_failures(mut self, method: &'static str, n: u32) -> Self {
         self.failures.push((method, n));
         self
     }
 
+    /// Builds the mock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the method name given to `with_failures` is not one of the four methods.
     pub fn build(self) -> MockVegapunkApi {
         let mock = MockVegapunkApi {
             counters: CallCounters::default(),
@@ -133,7 +151,7 @@ impl Default for MockVegapunkApiBuilder {
 }
 
 impl MockVegapunkApi {
-    /// Shorthand: build a default mock with no failure injection.
+    /// Returns a mock that has no search results and no injected failures.
     pub fn new() -> Self {
         MockVegapunkApiBuilder::new().build()
     }
@@ -166,6 +184,13 @@ impl MockVegapunkApi {
         }
     }
 
+    /// Records the call and returns a result of one chunk.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `should_fail` is set.
+    /// - Returns an error if a failure injected for `ingest_raw` remains.
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub async fn ingest_raw(
         &self,
         text: &str,
@@ -186,9 +211,13 @@ impl MockVegapunkApi {
         Ok(IngestRawResult { chunk_count: 1 })
     }
 
-    /// Inherent search returns canned results truncated to `top_k`. Also
-    /// returns the ordinal from the call counter so the trait impl can
-    /// build a unique search_id atomically.
+    /// Records the call and returns the canned results, cut to the first `top_k` (none if `top_k` is negative), together with the number of this call to `search`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `should_fail` is set.
+    /// - Returns an error if a failure injected for `search` remains.
+    /// - Returns an error if the lock on the recorded calls or on the canned results is poisoned.
     pub async fn search(
         &self,
         query: &str,
@@ -212,6 +241,13 @@ impl MockVegapunkApi {
         Ok((results, ordinal))
     }
 
+    /// Records the call.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `should_fail` is set.
+    /// - Returns an error if a failure injected for `feedback` remains.
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub async fn feedback(
         &self,
         search_id: &str,
@@ -230,6 +266,13 @@ impl MockVegapunkApi {
         Ok(())
     }
 
+    /// Records the call.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `should_fail` is set.
+    /// - Returns an error if a failure injected for `merge` remains.
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub async fn merge(&self) -> anyhow::Result<()> {
         self.counters.merge.fetch_add(1, Ordering::SeqCst);
         Self::check_fail(&self.should_fail, &self.merge_failures)?;
@@ -239,18 +282,38 @@ impl MockVegapunkApi {
         Ok(())
     }
 
+    /// Returns the `ingest_raw` calls that succeeded, in call order.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub fn ingest_raw_calls(&self) -> anyhow::Result<Vec<IngestRawCall>> {
         Ok(lock_mock_state(&self.ingest_raw_calls, "ingest_raw_calls")?.clone())
     }
 
+    /// Returns the `search` calls that succeeded, in call order.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub fn search_calls(&self) -> anyhow::Result<Vec<SearchCall>> {
         Ok(lock_mock_state(&self.search_calls, "search_calls")?.clone())
     }
 
+    /// Returns the `feedback` calls that succeeded, in call order.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub fn feedback_calls(&self) -> anyhow::Result<Vec<FeedbackCall>> {
         Ok(lock_mock_state(&self.feedback_calls, "feedback_calls")?.clone())
     }
 
+    /// Returns the number of `merge` calls that succeeded.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the lock on the recorded calls is poisoned.
     pub fn merge_call_count(&self) -> anyhow::Result<u32> {
         Ok(lock_mock_state(&self.merge_calls, "merge_calls")?.len() as u32)
     }
@@ -262,9 +325,10 @@ impl Default for MockVegapunkApi {
     }
 }
 
-/// Canned response from `ingest_raw`.
+/// Result that the mock returns from `ingest_raw`.
 #[derive(Debug, Clone)]
 pub struct IngestRawResult {
+    /// Number of chunks that the mock reports for the text, which is always 1.
     pub chunk_count: i32,
 }
 
