@@ -8,13 +8,15 @@ use auto_trader_core::knowledge::KnowledgeStore;
 use auto_trader_core::types::{Exchange, Signal, Trade};
 use auto_trader_db::trading_accounts::TradingAccount;
 use auto_trader_executor::position_sizer::PositionSizer;
-use auto_trader_executor::risk_gate::{GateDecision, RejectReason, eval_price_freshness};
+use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_notify::Notifier;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
+
+mod kill_switch;
 
 pub(crate) struct ExecutorLoopContext {
     pub(crate) pool: sqlx::PgPool,
@@ -54,9 +56,20 @@ async fn process_signal(ctx: &ExecutorLoopContext, signal_event: &SignalEvent) {
             }
         };
 
+    let (matched_strategy, dispatched) =
+        dispatch_to_matching_accounts(ctx, &active_accounts_for_new_dispatch, signal_event).await;
+    log_dispatch_outcome(signal, matched_strategy, dispatched);
+}
+
+async fn dispatch_to_matching_accounts(
+    ctx: &ExecutorLoopContext,
+    accounts: &[TradingAccount],
+    signal_event: &SignalEvent,
+) -> (bool, bool) {
+    let signal = &signal_event.signal;
     let mut matched_strategy = false;
     let mut dispatched = false;
-    for pac in &active_accounts_for_new_dispatch {
+    for pac in accounts {
         if pac.strategy != signal.strategy_name {
             continue;
         }
@@ -65,6 +78,10 @@ async fn process_signal(ctx: &ExecutorLoopContext, signal_event: &SignalEvent) {
             dispatched = true;
         }
     }
+    (matched_strategy, dispatched)
+}
+
+fn log_dispatch_outcome(signal: &Signal, matched_strategy: bool, dispatched: bool) {
     if !matched_strategy {
         tracing::warn!(
             strategy_name = %signal.strategy_name,
@@ -89,7 +106,7 @@ async fn dispatch_to_account(
     };
 
     let now = Utc::now();
-    if !check_kill_switch(ctx, pac, signal, exchange, now).await {
+    if !kill_switch::check_kill_switch(ctx, pac, signal, exchange, now).await {
         return false;
     }
 
@@ -196,121 +213,6 @@ fn live_order_blocked_when_live_disabled_leaving_close_paths_unaffected(
     account_type == "live" && !live_enabled
 }
 
-async fn check_kill_switch(
-    ctx: &ExecutorLoopContext,
-    pac: &TradingAccount,
-    signal: &Signal,
-    exchange: Exchange,
-    now: DateTime<Utc>,
-) -> bool {
-    match auto_trader_db::trading_accounts::get_halt(&ctx.pool, pac.id).await {
-        Ok(Some((until, reason))) if until > now => {
-            tracing::warn!(
-                account_name = %pac.name,
-                account_id = %pac.id,
-                halted_until = %until,
-                halt_reason = %reason.as_deref().unwrap_or("no reason"),
-                "account halted by kill switch, skipping entry"
-            );
-            return false;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::error!(
-                account_name = %pac.name,
-                account_id = %pac.id,
-                error = %e,
-                "failed to check kill switch halt status, skipping account (fail-closed)"
-            );
-            return false;
-        }
-    }
-
-    let day_start = auto_trader_executor::risk_gate::jst_day_start(now);
-    let day_net =
-        match auto_trader_db::trades::realized_net_since(&ctx.pool, pac.id, day_start).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    account_name = %pac.name,
-                    account_id = %pac.id,
-                    error = %e,
-                    "failed to compute realized pnl for kill switch, skipping account (fail-closed)"
-                );
-                return false;
-            }
-        };
-    let day_start_balance =
-        compute_day_start_balance_net_of_todays_realized_pnl(pac.current_balance, day_net);
-    if let GateDecision::Reject(reason) = auto_trader_executor::risk_gate::eval_daily_loss(
-        day_net,
-        day_start_balance,
-        ctx.daily_loss_limit_pct,
-    ) {
-        let until = now + chrono::Duration::hours(ctx.halt_hours as i64);
-        let halt_reason = format!(
-            "daily loss limit: day_net={day_net} start_balance={day_start_balance} limit_pct={}",
-            ctx.daily_loss_limit_pct
-        );
-        apply_kill_switch_halt(ctx, pac, signal, exchange, until, halt_reason, reason).await;
-        return false;
-    }
-    true
-}
-
-fn compute_day_start_balance_net_of_todays_realized_pnl(
-    current_balance: Decimal,
-    day_net: Decimal,
-) -> Decimal {
-    current_balance - day_net
-}
-
-async fn apply_kill_switch_halt(
-    ctx: &ExecutorLoopContext,
-    pac: &TradingAccount,
-    signal: &Signal,
-    exchange: Exchange,
-    until: DateTime<Utc>,
-    halt_reason: String,
-    gate_reason: RejectReason,
-) {
-    tracing::warn!(
-        account_name = %pac.name,
-        account_id = %pac.id,
-        halted_until = %until,
-        halt_reason = %halt_reason,
-        gate_reason = ?gate_reason,
-        "kill switch halting account due to daily loss limit"
-    );
-    if let Err(e) =
-        auto_trader_db::trading_accounts::set_halt(&ctx.pool, pac.id, until, &halt_reason).await
-    {
-        tracing::error!(
-            account_name = %pac.name,
-            account_id = %pac.id,
-            error = %e,
-            "failed to persist kill switch halt"
-        );
-    }
-    let notifier = ctx.notifier.clone();
-    let account_name = pac.name.clone();
-    let strategy_name = signal.strategy_name.clone();
-    let pair = signal.pair.clone();
-    tokio::spawn(async move {
-        let ev =
-            auto_trader_notify::NotifyEvent::OrderFailed(auto_trader_notify::OrderFailedEvent {
-                account_name,
-                exchange,
-                strategy_name,
-                pair,
-                reason: format!("Kill Switch 発火 (新規エントリー停止): {halt_reason}"),
-            });
-        if let Err(e) = notifier.send(ev).await {
-            tracing::warn!(error = %e, "failed to send kill switch halt notification");
-        }
-    });
-}
-
 fn resolve_exchange_api(
     ctx: &ExecutorLoopContext,
     pac: &TradingAccount,
@@ -395,6 +297,23 @@ async fn execute_and_record(
 ) {
     let signal = &signal_event.signal;
 
+    if account_has_open_position(&trader, pac, signal).await {
+        return;
+    }
+
+    match trader.execute(signal).await {
+        Ok(trade) => publish_opened_trade(ctx, pac, signal_event, trade).await,
+        Err(e) => {
+            tracing::error!(account_name = %pac.name, error = %e, "failed to execute signal");
+        }
+    }
+}
+
+async fn account_has_open_position(
+    trader: &UnifiedTrader,
+    pac: &TradingAccount,
+    signal: &Signal,
+) -> bool {
     let positions = trader.open_positions().await.unwrap_or_default();
     let has_position = positions
         .iter()
@@ -406,33 +325,33 @@ async fn execute_and_record(
             account_name = %pac.name,
             "signal skipped, account already has open position"
         );
-        return;
     }
+    has_position
+}
 
-    match trader.execute(signal).await {
-        Ok(trade) => {
-            tokio::spawn(record_trade_open_side_effects(
-                ctx.pool.clone(),
-                ctx.knowledge_store.clone(),
-                trade.clone(),
-                signal_event.indicators.clone(),
-                signal.allocation_pct,
-            ));
-            if let Err(e) = ctx
-                .trade_tx
-                .send(TradeEvent {
-                    trade,
-                    action: TradeAction::Opened,
-                    account_type: Some(pac.account_type.clone()),
-                })
-                .await
-            {
-                tracing::error!(error = %e, "failed to send trade event to trade channel");
-            }
-        }
-        Err(e) => {
-            tracing::error!(account_name = %pac.name, error = %e, "failed to execute signal");
-        }
+async fn publish_opened_trade(
+    ctx: &ExecutorLoopContext,
+    pac: &TradingAccount,
+    signal_event: &SignalEvent,
+    trade: Trade,
+) {
+    tokio::spawn(record_trade_open_side_effects(
+        ctx.pool.clone(),
+        ctx.knowledge_store.clone(),
+        trade.clone(),
+        signal_event.indicators.clone(),
+        signal_event.signal.allocation_pct,
+    ));
+    if let Err(e) = ctx
+        .trade_tx
+        .send(TradeEvent {
+            trade,
+            action: TradeAction::Opened,
+            account_type: Some(pac.account_type.clone()),
+        })
+        .await
+    {
+        tracing::error!(error = %e, "failed to send trade event to trade channel");
     }
 }
 

@@ -189,29 +189,8 @@ async fn apply_sfd_to_trade(
     if trade_was_not_yet_open_at_event_time(trade.entry_at, event_at) {
         return;
     }
-    match apply_fee(pool, account_id, trade.id, fee, event_at).await {
-        Ok(Some(_)) => {
-            tracing::info!(
-                trade_id = %trade.id,
-                fee = %fee,
-                notional = %notional,
-                "sfd applied"
-            );
-        }
-        Ok(None) => {
-            tracing::debug!(
-                trade_id = %trade.id,
-                "sfd skipped, trade closed mid-tick"
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                trade_id = %trade.id,
-                error = %e,
-                "failed to apply sfd fee"
-            );
-        }
-    }
+    let result = apply_fee(pool, account_id, trade.id, fee, event_at).await;
+    log_apply_fee_result(trade.id, fee, notional, result);
 }
 
 fn trade_is_subject_to_bitflyer_sfd(pair: &str) -> bool {
@@ -234,6 +213,37 @@ async fn apply_fee(
         auto_trader_db::trades::apply_sfd_fee(&mut tx, account_id, trade_id, fee, event_at).await?;
     tx.commit().await?;
     Ok(applied)
+}
+
+fn log_apply_fee_result(
+    trade_id: Uuid,
+    fee: Decimal,
+    notional: Decimal,
+    result: anyhow::Result<Option<Decimal>>,
+) {
+    match result {
+        Ok(Some(_)) => {
+            tracing::info!(
+                trade_id = %trade_id,
+                fee = %fee,
+                notional = %notional,
+                "sfd applied"
+            );
+        }
+        Ok(None) => {
+            tracing::debug!(
+                trade_id = %trade_id,
+                "sfd skipped, trade closed mid-tick"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                trade_id = %trade_id,
+                error = %e,
+                "failed to apply sfd fee"
+            );
+        }
+    }
 }
 
 fn clamp_catch_up(lh: DateTime<Utc>, current_hour: DateTime<Utc>) -> (DateTime<Utc>, i64) {
