@@ -18,15 +18,20 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
+/// State shared by the handlers of the dashboard API.
 #[derive(Clone)]
 pub struct AppState {
+    /// Connection pool of the database.
     pub pool: sqlx::PgPool,
+    /// Store of the latest ticks of the feeds.
     pub price_store: std::sync::Arc<crate::price_store::PriceStore>,
+    /// Liquidation margin level of each exchange.
     pub exchange_liquidation_levels: std::sync::Arc<
         std::collections::HashMap<auto_trader_core::types::Exchange, rust_decimal::Decimal>,
     >,
 }
 
+/// Builds the router that serves the dashboard API under `/api` and the dashboard files, with permissive CORS. When the environment variable `API_TOKEN` is set at the call, every API route requires the header `Authorization: Bearer <token>` and answers 401 otherwise.
 pub fn router(state: AppState) -> Router {
     let api_token = std::env::var("API_TOKEN").ok();
 

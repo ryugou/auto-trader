@@ -11,12 +11,14 @@ use super::types::{BitflyerApiError, BitflyerErrorBody};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Rate limiter that delays requests to keep them within a quota.
 pub type RateLimiter = governor::RateLimiter<
     governor::state::NotKeyed,
     governor::state::InMemoryState,
     governor::clock::DefaultClock,
 >;
 
+/// Client of the bitFlyer private HTTP API that signs each request with the API key and secret.
 #[derive(Clone)]
 pub struct BitflyerPrivateApi {
     base_url: String,
@@ -45,6 +47,11 @@ impl std::fmt::Debug for BitflyerPrivateApi {
 }
 
 impl BitflyerPrivateApi {
+    /// Creates a client of the API at `https://api.bitflyer.com` that spaces its requests to 30 per minute with a burst of 10.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(api_key: String, api_secret: String) -> anyhow::Result<Self> {
         const CONSERVATIVE_RATE_LIMIT_REQUESTS_PER_MINUTE: NonZeroU32 = match NonZeroU32::new(30) {
             Some(n) => n,

@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::provider::MarketDataProvider;
 
+/// Client of the OANDA REST API for candles and prices.
 pub struct OandaClient {
     client: reqwest::Client,
     base_url: String,
@@ -35,6 +36,12 @@ struct OandaCandleMid {
 }
 
 impl OandaClient {
+    /// Creates a client of the API at `base_url` for the account `account_id` that authorizes its requests with `api_key`, with a request timeout of 30 seconds and a connect timeout of 10 seconds.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `api_key` cannot be used in an authorization header.
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(base_url: &str, account_id: &str, api_key: &str) -> anyhow::Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -75,6 +82,15 @@ impl OandaClient {
         }
     }
 
+    /// Returns the complete candles of `pair` for `granularity` among the latest `count`, with their mid prices. A failed request is tried up to three times, with a delay of one second and then two seconds between the attempts.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent on the third attempt.
+    /// - Returns an error if the response status is not a success on the third attempt.
+    /// - Returns an error if the response body cannot be decoded on the third attempt.
+    /// - Returns an error if the time of a complete candle is not in RFC 3339 format.
+    /// - Returns an error if the open, high, low or close price of a complete candle is not a decimal.
     pub async fn get_candles(
         &self,
         pair: &Pair,
@@ -136,6 +152,19 @@ impl OandaClient {
         Ok(candles)
     }
 
+    /// Returns the mid of the first bid and the first ask price of `pair`. A failed request is tried up to three times, with a delay of one second and then two seconds between the attempts.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent on the third attempt.
+    /// - Returns an error if the response status is not a success on the third attempt.
+    /// - Returns an error if the response body cannot be decoded on the third attempt.
+    /// - Returns an error if the response has no `prices` array.
+    /// - Returns an error if the `prices` array is empty.
+    /// - Returns an error if the first price has no bid.
+    /// - Returns an error if the first price has no ask.
+    /// - Returns an error if the bid is not a decimal.
+    /// - Returns an error if the ask is not a decimal.
     pub async fn get_latest_price(&self, pair: &Pair) -> anyhow::Result<Decimal> {
         let url = format!("{}/v3/accounts/{}/pricing", self.base_url, self.account_id);
         let instrument = pair.0.clone();

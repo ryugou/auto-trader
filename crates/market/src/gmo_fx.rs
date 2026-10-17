@@ -244,6 +244,7 @@ async fn handle_open_market_item(
     true
 }
 
+/// Feed that polls the GMO FX ticker, builds candles and publishes price events.
 pub struct GmoFxFeed {
     pairs: Vec<Pair>,
     pool: Option<PgPool>,
@@ -251,6 +252,7 @@ pub struct GmoFxFeed {
 }
 
 impl GmoFxFeed {
+    /// Creates a feed of `pairs` with candles of `primary_timeframe`.
     pub fn new(pairs: Vec<Pair>, primary_timeframe: &str) -> Self {
         Self {
             pairs,
@@ -259,6 +261,7 @@ impl GmoFxFeed {
         }
     }
 
+    /// Sets the pool that the feed saves its completed candles to.
     pub fn with_db(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
         self

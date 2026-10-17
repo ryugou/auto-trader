@@ -9,6 +9,7 @@ use crate::bitflyer_private::truncate_body;
 
 use super::types::GmoApiResponse;
 
+/// Rate limiter that delays requests to keep them within a quota.
 pub type RateLimiter = governor::RateLimiter<
     governor::state::NotKeyed,
     governor::state::InMemoryState,
@@ -31,6 +32,7 @@ pub(crate) fn sign(
     crate::bitflyer_private::sign(api_secret, &timestamp_ms.to_string(), method, path, body)
 }
 
+/// Client of the GMO FX private HTTP API that signs each request with the API key and secret.
 pub struct GmoFxPrivateApi {
     api_url: String,
     api_key: String,
@@ -50,6 +52,11 @@ const GET_RATE_LIMIT_PER_SECOND: NonZeroU32 = match NonZeroU32::new(6) {
 };
 
 impl GmoFxPrivateApi {
+    /// Creates a client of the API at `https://forex-api.coin.z.com` that limits POST requests to 1 per second and GET requests to 6 per second.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(api_key: String, api_secret: String) -> anyhow::Result<Self> {
         let post_quota = governor::Quota::per_second(POST_RATE_LIMIT_PER_SECOND)
             .allow_burst(POST_RATE_LIMIT_PER_SECOND);
@@ -68,6 +75,7 @@ impl GmoFxPrivateApi {
         })
     }
 
+    /// Replaces the base URL of the API with `url`.
     pub fn with_api_url(mut self, url: String) -> Self {
         self.api_url = url;
         self

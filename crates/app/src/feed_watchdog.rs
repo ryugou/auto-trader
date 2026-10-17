@@ -16,13 +16,18 @@ fn to_jst_string(ts: DateTime<Utc>) -> String {
     format!("{} JST", jst.format("%Y-%m-%d %H:%M:%S"))
 }
 
+/// Period in which the process appears to have been suspended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuspendGap {
+    /// Wall-clock time of the check before the gap.
     pub started_at: DateTime<Utc>,
+    /// Wall-clock time of the check that found the gap.
     pub resumed_at: DateTime<Utc>,
+    /// Length of the gap in seconds.
     pub gap_secs: i64,
 }
 
+/// Returns how many seconds `now` is before `previous`, or `None` if it is not before.
 pub fn wall_clock_backward_secs(previous: DateTime<Utc>, now: DateTime<Utc>) -> Option<i64> {
     if now < previous {
         Some((previous - now).num_seconds())
@@ -31,6 +36,7 @@ pub fn wall_clock_backward_secs(previous: DateTime<Utc>, now: DateTime<Utc>) -> 
     }
 }
 
+/// Returns the gap between `previous_wall_clock` and `now_wall_clock` if it is at least `suspend_gap_secs` seconds, or `None` if it is shorter.
 pub fn detect_suspend_gap(
     previous_wall_clock: DateTime<Utc>,
     now_wall_clock: DateTime<Utc>,
@@ -47,6 +53,7 @@ pub fn detect_suspend_gap(
     })
 }
 
+/// Returns the alert text for `gap`, with its length in minutes, its times in JST and a note that it can exceed the outage by up to `check_interval_secs` seconds.
 pub fn format_suspend_alert(gap: &SuspendGap, check_interval_secs: u64) -> String {
     let minutes = gap.gap_secs / 60;
     format!(
@@ -60,31 +67,40 @@ pub fn format_suspend_alert(gap: &SuspendGap, check_interval_secs: u64) -> Strin
     )
 }
 
+/// Tracker of the grace period after a suspend, in which stale feeds are not reported.
 #[derive(Debug, Default)]
 pub struct SuspendGraceTracker {
     grace_until: Option<DateTime<Utc>>,
 }
 
 impl SuspendGraceTracker {
+    /// Creates a tracker that has no grace period.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Starts a grace period at `resumed_at` that lasts `stale_after_secs` seconds.
     pub fn note_suspend_resumed(&mut self, resumed_at: DateTime<Utc>, stale_after_secs: u64) {
         self.grace_until = Some(resumed_at + chrono::Duration::seconds(stale_after_secs as i64));
     }
 
+    /// Returns whether `now` is before the end of the grace period.
     pub fn in_grace_period(&self, now: DateTime<Utc>) -> bool {
         self.grace_until.is_some_and(|until| now < until)
     }
 }
 
+/// Exchange name and pair name that identify a feed.
 pub type FeedId = (String, String);
 
+/// State of one feed at a check.
 #[derive(Debug, Clone)]
 pub struct FeedObservation {
+    /// Identifier of the feed.
     pub key: FeedId,
+    /// Whether the market of the feed counts as closed.
     pub market_closed: bool,
+    /// Time of the latest tick of the feed, or `None` if it has none.
     pub last_tick_at: Option<DateTime<Utc>>,
 }
 
@@ -104,30 +120,41 @@ struct StaleState {
     last_alert_at: DateTime<Utc>,
 }
 
+/// Change in the staleness of a feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreshnessEvent {
+    /// The feed became stale.
     NewlyStale {
+        /// Time at which the feed was found stale.
         since: DateTime<Utc>,
     },
+    /// The feed is still stale and the re-alert interval has passed.
     StillStale {
+        /// Time at which the feed was found stale.
         since: DateTime<Utc>,
     },
+    /// The feed recovered.
     Recovered {
+        /// Time at which the feed was found stale.
         since: DateTime<Utc>,
+        /// Time at which the recovery was found.
         recovered_at: DateTime<Utc>,
     },
 }
 
+/// Tracker of the feeds that are stale.
 #[derive(Debug, Default)]
 pub struct FeedFreshnessTracker {
     states: HashMap<FeedId, StaleState>,
 }
 
 impl FeedFreshnessTracker {
+    /// Creates a tracker with no stale feed.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns `None` without changing any state if `suppress` is true; otherwise updates the state of `obs` and returns the change, or `None` if there is none. A feed whose market is closed is cleared. A feed is stale if its latest tick, or the start of the watchdog if it has none, is `stale_after_secs` seconds old or older. A feed that becomes stale gives `NewlyStale`, a stale feed gives `StillStale` once `realert_interval_secs` seconds have passed since its last alert, and a stale feed that is no longer stale gives `Recovered`.
     pub fn evaluate(
         &mut self,
         obs: &FeedObservation,
@@ -264,6 +291,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Returns the alert title and body for the result of a feed task, or `None` if the task was canceled. A task that returned `Ok`, returned an error or panicked each gives its own body.
 pub fn classify_feed_task_result(
     exchange: Exchange,
     result: Result<anyhow::Result<()>, tokio::task::JoinError>,
@@ -282,12 +310,17 @@ pub fn classify_feed_task_result(
     }
 }
 
+/// Dependencies of the feed watchdog.
 pub struct FeedWatchdogContext {
+    /// Store of the latest ticks of the feeds.
     pub price_store: Arc<PriceStore>,
+    /// Notifier that the alerts are sent through.
     pub notifier: Arc<Notifier>,
+    /// Settings of the watchdog.
     pub config: FeedWatchdogConfig,
 }
 
+/// Spawns a task that waits for `inner_handle` and, if the feed task did not end by cancellation, logs an error and sends a system alert about it with retries; returns the handle that aborts the feed task.
 pub fn spawn_feed_supervisor(
     exchange: Exchange,
     notifier: Arc<Notifier>,
@@ -316,6 +349,7 @@ pub fn spawn_feed_supervisor(
     abort_handle
 }
 
+/// Runs the watchdog until the task is aborted: at each interval it skips the round if the wall clock went backwards, alerts and starts a grace period if it finds a suspend gap, and then sends an alert for each feed of a non-excluded exchange whose staleness changed.
 pub async fn run(ctx: FeedWatchdogContext) {
     log_watchdog_started(&ctx.config);
 

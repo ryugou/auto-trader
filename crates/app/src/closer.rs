@@ -15,16 +15,25 @@ use tokio::sync::mpsc;
 
 use crate::startup;
 
+/// Dependencies of closing a trade.
 pub struct CloseContext {
+    /// Connection pool of the database.
     pub pool: PgPool,
+    /// Exchange API of each exchange.
     pub apis: Arc<HashMap<Exchange, Arc<dyn ExchangeApi>>>,
+    /// Store of the latest ticks of the feeds.
     pub price_store: Arc<PriceStore>,
+    /// Notifier that the closing trader sends notifications through.
     pub notifier: Arc<Notifier>,
+    /// Position sizer that the closing trader uses.
     pub position_sizer: Arc<PositionSizer>,
+    /// Liquidation margin level of each exchange.
     pub liquidation_levels: Arc<HashMap<Exchange, Decimal>>,
+    /// Channel the closed trade event is sent on.
     pub trade_tx: mpsc::Sender<TradeEvent>,
 }
 
+/// Closes `trade` with a trader of its exchange and account, then sends a closed trade event on `ctx.trade_tx` with the exit price of the closed trade, or `current_price` if it has none. Nothing is closed, with a warning logged, if the exchange has no API and `dry_run` is false, and nothing is closed, with an error logged, if the exchange has no liquidation margin level or a non-positive one. A failure to close is logged and not returned: as a warning for the liquidation exit reason and as a debug message for any other, and a failure to send the event is logged as an error.
 pub async fn close_trade(
     ctx: &CloseContext,
     trade: &Trade,
@@ -70,6 +79,7 @@ pub async fn close_trade(
     }
 }
 
+/// Returns the exchange API of the exchange of `trade`, or a null API that supports no exchange operation if the exchange has none and `dry_run` is true, or `None`, with a warning logged, if the exchange has none and `dry_run` is false.
 pub fn resolve_close_api(
     ctx: &CloseContext,
     trade: &Trade,
