@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use auto_trader_core::config::FeedWatchdogConfig;
 use auto_trader_core::types::{Exchange, Pair};
-use auto_trader_market::price_store::{FeedStatus, PriceStore};
+use auto_trader_market::price_store::{FeedHealth, FeedStatus, PriceStore};
 use auto_trader_notify::{Notifier, NotifyEvent, ProcessAlertEvent, SystemAlertEvent};
 use chrono::{DateTime, Utc};
 
@@ -317,17 +317,7 @@ pub fn spawn_feed_supervisor(
 }
 
 pub async fn run(ctx: FeedWatchdogContext) {
-    tracing::info!(
-        check_interval_secs = ctx.config.check_interval_secs,
-        suspend_gap_secs = ctx.config.suspend_gap_secs,
-        stale_after_secs = ctx.config.stale_after_secs,
-        realert_interval_secs = ctx.config.realert_interval_secs,
-        "feed watchdog started"
-    );
-    tracing::info!(
-        exclude_exchanges = ?ctx.config.exclude_exchanges,
-        "excluding exchanges from freshness monitoring"
-    );
+    log_watchdog_started(&ctx.config);
 
     let watchdog_started_at = Utc::now();
     let mut previous_wall_clock = watchdog_started_at;
@@ -354,102 +344,157 @@ pub async fn run(ctx: FeedWatchdogContext) {
         let suspend_gap = detect_suspend_gap(previous_wall_clock, now, ctx.config.suspend_gap_secs);
         previous_wall_clock = now;
         if let Some(gap) = &suspend_gap {
-            suspend_grace.note_suspend_resumed(now, ctx.config.stale_after_secs);
-            let body = format_suspend_alert(gap, ctx.config.check_interval_secs);
-            tracing::error!(body = %body, "suspend detected");
-            crate::spawn_notify_with_retry(
-                &ctx.notifier,
-                NotifyEvent::ProcessAlert(ProcessAlertEvent {
-                    title: "process suspend detected".to_string(),
-                    body,
-                }),
-                ctx.config.notify_retry_attempts,
-                ctx.config.notify_retry_initial_secs,
-            );
+            alert_suspend_resumed(&ctx, &mut suspend_grace, gap, now);
         }
 
-        let health = ctx.price_store.health_at(now).await;
-        for h in &health {
-            if ctx
-                .config
-                .exclude_exchanges
-                .iter()
-                .any(|e| e == &h.exchange)
-            {
-                continue;
-            }
-            let obs = FeedObservation {
-                key: (h.exchange.clone(), h.pair.clone()),
-                market_closed: is_effectively_market_closed(
-                    h.status == FeedStatus::MarketClosed,
-                    h.market_closed_at,
-                    now,
-                    ctx.config.stale_after_secs,
-                ),
-                last_tick_at: h
-                    .last_tick_age_secs
-                    .map(|age| now - chrono::Duration::seconds(age)),
-            };
-            let Some(event) = freshness.evaluate(
-                &obs,
-                now,
-                watchdog_started_at,
-                ctx.config.stale_after_secs,
-                ctx.config.realert_interval_secs,
-                suspend_grace.in_grace_period(now),
-            ) else {
-                continue;
-            };
-            let exchange = match h.exchange.parse::<Exchange>() {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(
-                        exchange = %h.exchange,
-                        error = %e,
-                        "failed to parse exchange, skipping notify"
-                    );
-                    continue;
-                }
-            };
-            let pair = Pair::new(&h.pair);
-            let (title, body, log_level_is_error) = match event {
-                FreshnessEvent::NewlyStale { since } | FreshnessEvent::StillStale { since } => (
-                    "feed stale".to_string(),
-                    format_stale_alert(
-                        exchange,
-                        &pair,
-                        since,
-                        obs.last_tick_at,
-                        watchdog_started_at,
-                    ),
-                    true,
-                ),
-                FreshnessEvent::Recovered {
-                    since,
-                    recovered_at,
-                } => (
-                    "feed recovered".to_string(),
-                    format_recovered_alert(exchange, &pair, since, recovered_at),
-                    false,
-                ),
-            };
-            if log_level_is_error {
-                tracing::error!(title = %title, body = %body, "feed freshness alert");
-            } else {
-                tracing::info!(title = %title, body = %body, "feed freshness alert");
-            }
-            crate::spawn_notify_with_retry(
-                &ctx.notifier,
-                NotifyEvent::SystemAlert(SystemAlertEvent {
-                    title,
-                    account_name: "(system)".to_string(),
-                    exchange,
-                    body,
-                }),
-                ctx.config.notify_retry_attempts,
-                ctx.config.notify_retry_initial_secs,
-            );
+        check_feed_freshness(
+            &ctx,
+            &mut freshness,
+            &suspend_grace,
+            now,
+            watchdog_started_at,
+        )
+        .await;
+    }
+}
+
+fn log_watchdog_started(config: &FeedWatchdogConfig) {
+    tracing::info!(
+        check_interval_secs = config.check_interval_secs,
+        suspend_gap_secs = config.suspend_gap_secs,
+        stale_after_secs = config.stale_after_secs,
+        realert_interval_secs = config.realert_interval_secs,
+        "feed watchdog started"
+    );
+    tracing::info!(
+        exclude_exchanges = ?config.exclude_exchanges,
+        "excluding exchanges from freshness monitoring"
+    );
+}
+
+fn alert_suspend_resumed(
+    ctx: &FeedWatchdogContext,
+    suspend_grace: &mut SuspendGraceTracker,
+    gap: &SuspendGap,
+    now: DateTime<Utc>,
+) {
+    suspend_grace.note_suspend_resumed(now, ctx.config.stale_after_secs);
+    let body = format_suspend_alert(gap, ctx.config.check_interval_secs);
+    tracing::error!(body = %body, "suspend detected");
+    crate::spawn_notify_with_retry(
+        &ctx.notifier,
+        NotifyEvent::ProcessAlert(ProcessAlertEvent {
+            title: "process suspend detected".to_string(),
+            body,
+        }),
+        ctx.config.notify_retry_attempts,
+        ctx.config.notify_retry_initial_secs,
+    );
+}
+
+async fn check_feed_freshness(
+    ctx: &FeedWatchdogContext,
+    freshness: &mut FeedFreshnessTracker,
+    suspend_grace: &SuspendGraceTracker,
+    now: DateTime<Utc>,
+    watchdog_started_at: DateTime<Utc>,
+) {
+    let health = ctx.price_store.health_at(now).await;
+    for h in health
+        .iter()
+        .filter(|h| !ctx.config.exclude_exchanges.contains(&h.exchange))
+    {
+        let obs = observe_feed(h, now, ctx.config.stale_after_secs);
+        let Some(event) = freshness.evaluate(
+            &obs,
+            now,
+            watchdog_started_at,
+            ctx.config.stale_after_secs,
+            ctx.config.realert_interval_secs,
+            suspend_grace.in_grace_period(now),
+        ) else {
+            continue;
+        };
+        let Some(exchange) = parse_feed_exchange(h) else {
+            continue;
+        };
+        let pair = Pair::new(&h.pair);
+        let (title, body, log_level_is_error) = build_freshness_alert(
+            exchange,
+            &pair,
+            event,
+            obs.last_tick_at,
+            watchdog_started_at,
+        );
+        if log_level_is_error {
+            tracing::error!(title = %title, body = %body, "feed freshness alert");
+        } else {
+            tracing::info!(title = %title, body = %body, "feed freshness alert");
         }
+        crate::spawn_notify_with_retry(
+            &ctx.notifier,
+            NotifyEvent::SystemAlert(SystemAlertEvent {
+                title,
+                account_name: "(system)".to_string(),
+                exchange,
+                body,
+            }),
+            ctx.config.notify_retry_attempts,
+            ctx.config.notify_retry_initial_secs,
+        );
+    }
+}
+
+fn parse_feed_exchange(h: &FeedHealth) -> Option<Exchange> {
+    match h.exchange.parse::<Exchange>() {
+        Ok(e) => Some(e),
+        Err(e) => {
+            tracing::warn!(
+                exchange = %h.exchange,
+                error = %e,
+                "failed to parse exchange, skipping notify"
+            );
+            None
+        }
+    }
+}
+
+fn observe_feed(h: &FeedHealth, now: DateTime<Utc>, stale_after_secs: u64) -> FeedObservation {
+    FeedObservation {
+        key: (h.exchange.clone(), h.pair.clone()),
+        market_closed: is_effectively_market_closed(
+            h.status == FeedStatus::MarketClosed,
+            h.market_closed_at,
+            now,
+            stale_after_secs,
+        ),
+        last_tick_at: h
+            .last_tick_age_secs
+            .map(|age| now - chrono::Duration::seconds(age)),
+    }
+}
+
+fn build_freshness_alert(
+    exchange: Exchange,
+    pair: &Pair,
+    event: FreshnessEvent,
+    last_tick_at: Option<DateTime<Utc>>,
+    watchdog_started_at: DateTime<Utc>,
+) -> (String, String, bool) {
+    match event {
+        FreshnessEvent::NewlyStale { since } | FreshnessEvent::StillStale { since } => (
+            "feed stale".to_string(),
+            format_stale_alert(exchange, pair, since, last_tick_at, watchdog_started_at),
+            true,
+        ),
+        FreshnessEvent::Recovered {
+            since,
+            recovered_at,
+        } => (
+            "feed recovered".to_string(),
+            format_recovered_alert(exchange, pair, since, recovered_at),
+            false,
+        ),
     }
 }
 

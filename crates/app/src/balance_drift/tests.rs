@@ -83,3 +83,22 @@ fn split_for_equity_empty_returns_open_empty() {
         }
     }
 }
+
+#[test]
+fn build_drift_alert_returns_none_within_threshold() {
+    assert!(build_drift_alert("acct", Exchange::BitflyerCfd, dec!(30000), dec!(30400)).is_none());
+}
+
+#[test]
+fn build_drift_alert_returns_alert_with_title_and_body_over_threshold() {
+    let alert = build_drift_alert("acct", Exchange::BitflyerCfd, dec!(30000), dec!(30501))
+        .expect("drift over threshold must alert");
+    assert_eq!(alert.title, "balance drift");
+    assert_eq!(alert.account_name, "acct");
+    assert_eq!(alert.exchange, Exchange::BitflyerCfd);
+    assert_eq!(
+        alert.body,
+        "exchange equity=30000 bot equity=30501 diff=-501 \
+         (alert only — no auto-correction; operator must reconcile deposits/swaps)"
+    );
+}

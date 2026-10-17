@@ -456,3 +456,61 @@ fn panic_message_falls_back_for_non_string_payload() {
     let payload: Box<dyn std::any::Any + Send> = Box::new(42_i32);
     assert_eq!(panic_message(payload), "panic payload was not a string");
 }
+
+#[test]
+fn build_freshness_alert_reports_stale_as_error() {
+    let pair = Pair::new("FX_BTC_JPY");
+    let since = t(0);
+    let last_tick_at = Some(t(10));
+    let started = t(-100);
+    let (title, body, is_error) = build_freshness_alert(
+        Exchange::BitflyerCfd,
+        &pair,
+        FreshnessEvent::NewlyStale { since },
+        last_tick_at,
+        started,
+    );
+    assert_eq!(title, "feed stale");
+    assert!(is_error);
+    assert_eq!(
+        body,
+        format_stale_alert(Exchange::BitflyerCfd, &pair, since, last_tick_at, started)
+    );
+}
+
+#[test]
+fn build_freshness_alert_reports_recovered_as_info() {
+    let pair = Pair::new("FX_BTC_JPY");
+    let (title, body, is_error) = build_freshness_alert(
+        Exchange::BitflyerCfd,
+        &pair,
+        FreshnessEvent::Recovered {
+            since: t(0),
+            recovered_at: t(120),
+        },
+        None,
+        t(-100),
+    );
+    assert_eq!(title, "feed recovered");
+    assert!(!is_error);
+    assert_eq!(
+        body,
+        format_recovered_alert(Exchange::BitflyerCfd, &pair, t(0), t(120))
+    );
+}
+
+#[test]
+fn observe_feed_marks_market_closed_and_derives_last_tick_at() {
+    let now = t(1000);
+    let h = FeedHealth {
+        exchange: "bitflyer_cfd".to_string(),
+        pair: "FX_BTC_JPY".to_string(),
+        status: FeedStatus::MarketClosed,
+        last_tick_age_secs: Some(30),
+        market_closed_at: Some(t(990)),
+    };
+    let obs = observe_feed(&h, now, 60);
+    assert_eq!(obs.key, feed("bitflyer_cfd", "FX_BTC_JPY"));
+    assert!(obs.market_closed);
+    assert_eq!(obs.last_tick_at, Some(t(970)));
+}

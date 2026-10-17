@@ -33,65 +33,21 @@ pub async fn detect_liquidation_targets(
         None => return vec![],
     };
 
-    let mut buckets: HashMap<Uuid, Vec<&OpenTradeWithAccount>> = HashMap::new();
-    for owned in open_trades
-        .iter()
-        .filter(|t| t.trade.exchange == event.exchange)
-    {
-        buckets
-            .entry(owned.trade.account_id)
-            .or_default()
-            .push(owned);
-    }
+    let buckets = group_open_trades_by_account(open_trades, event.exchange);
 
     let mut price_cache: HashMap<FeedKey, Option<(Decimal, Decimal)>> = HashMap::new();
     let mut results = Vec::new();
 
     for (account_id, trades_in_account) in buckets {
-        let account_type = trades_in_account
-            .first()
-            .and_then(|t| t.account_type.as_deref())
-            .unwrap_or("paper");
-        let dry_run = crate::startup::effective_dry_run(account_type, ctx.live_forces_dry_run);
-        if !dry_run {
+        if !is_dry_run_bucket(&trades_in_account, ctx.live_forces_dry_run) {
             continue;
         }
 
-        let account =
-            match auto_trader_db::trading_accounts::get_account(&ctx.pool, account_id).await {
-                Ok(Some(a)) => a,
-                Ok(None) => {
-                    tracing::warn!(
-                        account_id = %account_id,
-                        "invalid account: not found"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(account_id = %account_id, error = %e, "failed to read account");
-                    continue;
-                }
-            };
-
-        let ctx_label = format!("liquidation: account {account_id}");
-        let positions_with_all_prices_known = match build_close_side_positions(
-            trades_in_account.iter().map(|owned| &owned.trade),
-            &ctx.price_store,
-            &mut price_cache,
-            &ctx_label,
-        )
-        .await
-        {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let ratio = match compute_maintenance_ratio(
-            account.current_balance,
-            &positions_with_all_prices_known,
-        ) {
-            Some(r) => r,
-            None => continue,
+        let Some(ratio) =
+            liquidation_ratio_for_account(ctx, account_id, &trades_in_account, &mut price_cache)
+                .await
+        else {
+            continue;
         };
 
         if is_below_liquidation_threshold(ratio, threshold) {
@@ -109,3 +65,64 @@ pub async fn detect_liquidation_targets(
 
     results
 }
+
+pub(crate) fn group_open_trades_by_account(
+    open_trades: &[OpenTradeWithAccount],
+    exchange: Exchange,
+) -> HashMap<Uuid, Vec<&OpenTradeWithAccount>> {
+    let mut buckets: HashMap<Uuid, Vec<&OpenTradeWithAccount>> = HashMap::new();
+    for owned in open_trades.iter().filter(|t| t.trade.exchange == exchange) {
+        buckets
+            .entry(owned.trade.account_id)
+            .or_default()
+            .push(owned);
+    }
+    buckets
+}
+
+pub(crate) fn is_dry_run_bucket(
+    trades_in_account: &[&OpenTradeWithAccount],
+    live_forces_dry_run: bool,
+) -> bool {
+    let account_type = trades_in_account
+        .first()
+        .and_then(|t| t.account_type.as_deref())
+        .unwrap_or("paper");
+    crate::startup::effective_dry_run(account_type, live_forces_dry_run)
+}
+
+async fn liquidation_ratio_for_account(
+    ctx: &LiquidationContext,
+    account_id: Uuid,
+    trades_in_account: &[&OpenTradeWithAccount],
+    price_cache: &mut HashMap<FeedKey, Option<(Decimal, Decimal)>>,
+) -> Option<Decimal> {
+    let account = match auto_trader_db::trading_accounts::get_account(&ctx.pool, account_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            tracing::warn!(
+                account_id = %account_id,
+                "invalid account: not found"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(account_id = %account_id, error = %e, "failed to read account");
+            return None;
+        }
+    };
+
+    let ctx_label = format!("liquidation: account {account_id}");
+    let positions_with_all_prices_known = build_close_side_positions(
+        trades_in_account.iter().map(|owned| &owned.trade),
+        &ctx.price_store,
+        price_cache,
+        &ctx_label,
+    )
+    .await?;
+
+    compute_maintenance_ratio(account.current_balance, &positions_with_all_prices_known)
+}
+
+#[cfg(test)]
+pub(crate) mod tests;
