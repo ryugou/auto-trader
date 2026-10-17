@@ -12,7 +12,7 @@ use auto_trader::api;
 use auto_trader::price_store;
 use auto_trader::spawn_system_alerts;
 use auto_trader_core::config::AppConfig;
-use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
+use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent};
 use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::pool::create_pool;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
@@ -265,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
     let (price_tx, price_rx) = mpsc::channel::<PriceEvent>(256);
     let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
     let (signal_tx, signal_rx) = mpsc::channel::<SignalEvent>(256);
-    let (trade_tx, mut trade_rx) = mpsc::channel::<TradeEvent>(256);
+    let (trade_tx, trade_rx) = mpsc::channel::<TradeEvent>(256);
 
     const CRYPTO_TIMEFRAME: &str = "M5";
     const H1_TIMEFRAME: &str = "H1";
@@ -759,118 +759,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let executor_handle = tokio::spawn(runtime::executor_loop::run(ctx, signal_rx));
 
-    let recorder_pool = pool.clone();
-    let knowledge_store_recorder = knowledge_store.clone();
-    let recorder_handle = tokio::spawn(async move {
-        while let Some(trade_event) = trade_rx.recv().await {
-            match trade_event.action {
-                TradeAction::Opened => {}
-                TradeAction::Closed { .. } => {
-                    let t = &trade_event.trade;
-                    if let (
-                        Some(_exit_price),
-                        Some(exit_at),
-                        Some(pnl_amount),
-                        Some(_exit_reason),
-                    ) = (t.exit_price, t.exit_at, t.pnl_amount, t.exit_reason)
-                    {
-                        let date = exit_at.date_naive();
-                        let win = if pnl_amount > Decimal::ZERO { 1 } else { 0 };
-                        let account_id = t.account_id;
-                        let account_type = trade_event.account_type.as_deref().unwrap_or("paper");
-                        if let Err(e) = auto_trader_db::summary::upsert_daily_summary(
-                            &recorder_pool,
-                            date,
-                            &t.strategy_name,
-                            &t.pair.0,
-                            account_type,
-                            t.exchange.as_str(),
-                            Some(account_id),
-                            1,
-                            win,
-                            pnl_amount,
-                        )
-                        .await
-                        {
-                            tracing::error!(error = %e, "failed to upsert daily summary");
-                        }
-                        if let Some(store) = knowledge_store_recorder.clone() {
-                            let t = t.clone();
-                            let close_pool = recorder_pool.clone();
-                            tokio::spawn(async move {
-                                let entry_ind: Option<serde_json::Value> = sqlx::query_scalar(
-                                    "SELECT entry_indicators FROM trades WHERE id = $1",
-                                )
-                                .bind(t.id)
-                                .fetch_optional(&close_pool)
-                                .await
-                                .unwrap_or(None)
-                                .flatten();
-
-                                let (bal, init): (
-                                    Option<rust_decimal::Decimal>,
-                                    Option<rust_decimal::Decimal>,
-                                ) = {
-                                    let aid = t.account_id;
-                                    sqlx::query_as::<_, (rust_decimal::Decimal, rust_decimal::Decimal)>(
-                                        "SELECT current_balance, initial_balance FROM trading_accounts WHERE id = $1",
-                                    )
-                                    .bind(aid)
-                                    .fetch_optional(&close_pool)
-                                    .await
-                                    .unwrap_or(None)
-                                    .map(|(b, i)| (Some(b), Some(i)))
-                                    .unwrap_or((None, None))
-                                };
-
-                                let ctx = auto_trader_core::knowledge::TradeCloseContext {
-                                    entry_indicators: entry_ind.as_ref(),
-                                    account_balance: bal,
-                                    account_initial: init,
-                                };
-                                if let Err(e) = store.record_trade_close(&t, &ctx).await {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "failed to record trade close in knowledge store"
-                                    );
-                                }
-
-                                let search_id: Option<uuid::Uuid> = sqlx::query_scalar(
-                                    "SELECT vegapunk_search_id FROM trades WHERE id = $1",
-                                )
-                                .bind(t.id)
-                                .fetch_optional(&close_pool)
-                                .await
-                                .unwrap_or(None)
-                                .flatten();
-
-                                if let Some(sid) = search_id {
-                                    let rating =
-                                        auto_trader::enriched_ingest::compute_feedback_rating(&t);
-                                    let net_pnl = t.pnl_amount.unwrap_or_default() - t.fees;
-                                    let regime = entry_ind
-                                        .as_ref()
-                                        .and_then(|i| i.get("regime"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    let comment = format!("PnL: {net_pnl}, regime: {regime}");
-                                    let sid_str = sid.to_string();
-                                    if let Err(e) =
-                                        store.submit_feedback(&sid_str, rating, &comment).await
-                                    {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "failed to submit feedback to knowledge store"
-                                        );
-                                    }
-                                }
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    });
+    let recorder_handle = tokio::spawn(runtime::recorder::run(
+        pool.clone(),
+        knowledge_store.clone(),
+        trade_rx,
+    ));
 
     let knowledge_store_daily = knowledge_store.clone();
     let knowledge_store_weekly = knowledge_store.clone();
@@ -1030,176 +923,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let overnight_pool = pool.clone();
-    let swap_config = config.gmo_fx.swap.clone();
-    let overnight_notifier = notifier.clone();
-    let overnight_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let bitflyer_fee_rate = rust_decimal_macros::dec!(0.0004);
-        let mut last_date = chrono::Utc::now().date_naive();
-        loop {
-            interval.tick().await;
-            let today = chrono::Utc::now().date_naive();
-            if today != last_date {
-                let accounts =
-                    match auto_trader_db::trading_accounts::list_active_or_with_open_trades(
-                        &overnight_pool,
-                    )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "failed to list trading accounts for overnight fee, retrying next tick"
-                            );
-                            continue;
-                        }
-                    };
-                let has_gmo_paper = accounts
-                    .iter()
-                    .any(|a| a.exchange == "gmo_fx" && a.account_type == "paper");
-                if let Some(body) = auto_trader::swap_freshness::swap_freshness_alert(
-                    &swap_config,
-                    today,
-                    has_gmo_paper,
-                ) {
-                    let ev = auto_trader_notify::NotifyEvent::SystemAlert(
-                        auto_trader_notify::SystemAlertEvent {
-                            title: "swap rates freshness".to_string(),
-                            account_name: "(config)".to_string(),
-                            exchange: auto_trader_core::types::Exchange::GmoFx,
-                            body,
-                        },
-                    );
-                    let notifier = overnight_notifier.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = notifier.send(ev).await {
-                            tracing::warn!(error = %e, "failed to send swap freshness alert");
-                        }
-                    });
-                }
-
-                let event_at = today
-                    .and_hms_opt(0, 0, 0)
-                    .expect("midnight is always valid")
-                    .and_utc();
-                for pac in accounts {
-                    if pac.account_type != "paper" {
-                        continue;
-                    }
-                    let exchange = match exchange_from_str(&pac.exchange) {
-                        Some(e) => e,
-                        None => {
-                            tracing::warn!(
-                                account_name = %pac.name,
-                                account_id = %pac.id,
-                                exchange = %pac.exchange,
-                                "unsupported exchange"
-                            );
-                            continue;
-                        }
-                    };
-                    if !overnight_fee_applies_to_exchange(exchange) {
-                        continue;
-                    }
-                    let open_trades = match auto_trader_db::trades::get_open_trades_by_account(
-                        &overnight_pool,
-                        pac.id,
-                    )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!(
-                                account_name = %pac.name,
-                                error = %e,
-                                "failed to list open trades for overnight fee/swap"
-                            );
-                            continue;
-                        }
-                    };
-                    let mut applied_count: usize = 0;
-                    for trade in &open_trades {
-                        let fee = match exchange {
-                            Exchange::BitflyerCfd => (trade.entry_price
-                                * trade.quantity
-                                * bitflyer_fee_rate)
-                                .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero),
-                            Exchange::GmoFx => {
-                                let Some(rate) = swap_config.rates.get(trade.pair.0.as_str())
-                                else {
-                                    tracing::debug!(
-                                        pair = %trade.pair,
-                                        trade_id = %trade.id,
-                                        "no swap rate configured for pair, skipping"
-                                    );
-                                    continue;
-                                };
-                                auto_trader_core::swap::compute_daily_swap(
-                                    *rate,
-                                    trade.direction,
-                                    trade.quantity,
-                                )
-                            }
-                            Exchange::Oanda => unreachable!("filtered above"),
-                        };
-                        if fee.is_zero() {
-                            continue;
-                        }
-                        let result = async {
-                            let mut tx = overnight_pool.begin().await?;
-                            let applied = match exchange {
-                                Exchange::BitflyerCfd => {
-                                    auto_trader_db::trades::apply_overnight_fee(
-                                        &mut tx, pac.id, trade.id, fee,
-                                    )
-                                    .await?
-                                }
-                                Exchange::GmoFx => {
-                                    auto_trader_db::trades::apply_swap_fee(
-                                        &mut tx, pac.id, trade.id, fee, event_at,
-                                    )
-                                    .await?
-                                }
-                                Exchange::Oanda => unreachable!("filtered above"),
-                            };
-                            tx.commit().await?;
-                            anyhow::Ok(applied)
-                        }
-                        .await;
-                        match result {
-                            Ok(Some(_new_balance)) => {
-                                applied_count += 1;
-                            }
-                            Ok(None) => {
-                                tracing::debug!(
-                                    trade_id = %trade.id,
-                                    "overnight fee/swap apply skipped, trade closed mid-tick"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    trade_id = %trade.id,
-                                    error = %e,
-                                    "failed to apply overnight fee or swap"
-                                );
-                            }
-                        }
-                    }
-                    if applied_count > 0 {
-                        tracing::info!(
-                            account_name = %pac.name,
-                            exchange = %exchange,
-                            applied_count,
-                            "applied overnight fee/swap to trades"
-                        );
-                    }
-                }
-                last_date = today;
-            }
-        }
-    });
+    let overnight_handle = tokio::spawn(runtime::overnight::run(
+        pool.clone(),
+        config.gmo_fx.swap.clone(),
+        notifier.clone(),
+    ));
 
     let sfd_pool = pool.clone();
     let sfd_price_store = price_store.clone();
