@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use auto_trader_core::types::{Direction, Pair};
 use rust_decimal::Decimal;
 
+/// Sizer that calculates order quantities and rounds trigger prices per currency pair.
 pub struct PositionSizer {
     min_order_sizes: HashMap<Pair, Decimal>,
     margin_buffer: Decimal,
@@ -10,6 +11,7 @@ pub struct PositionSizer {
 }
 
 impl PositionSizer {
+    /// Creates a sizer from the minimum order size of each pair and the margin buffer added to the liquidation margin level.
     pub fn new(min_order_sizes: HashMap<Pair, Decimal>, margin_buffer: Decimal) -> Self {
         Self {
             min_order_sizes,
@@ -18,11 +20,15 @@ impl PositionSizer {
         }
     }
 
+    /// Sets the price unit of each pair that trigger prices are rounded to.
     pub fn with_price_units(mut self, price_units: HashMap<Pair, Decimal>) -> Self {
         self.price_units = price_units;
         self
     }
 
+    /// Rounds a trigger price to a multiple of the pair's price unit: up for a long, down for a short.
+    ///
+    /// Returns the price unchanged when the pair has no positive price unit.
     pub fn round_trigger_price(
         &self,
         pair: &Pair,
@@ -41,6 +47,9 @@ impl PositionSizer {
         rounded * unit
     }
 
+    /// Calculates the order quantity, truncated to a multiple of the pair's minimum order size when the pair has a positive one.
+    ///
+    /// Returns `None` when `balance`, `entry_price`, `leverage`, `stop_loss_pct` or `liquidation_margin_level` is not positive, when `allocation_pct` is not in `(0, 1]`, or when the quantity is below the minimum order size.
     #[allow(clippy::too_many_arguments)]
     pub fn calculate_quantity(
         &self,

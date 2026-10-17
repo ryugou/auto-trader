@@ -24,12 +24,20 @@ impl tonic::service::Interceptor for AuthInterceptor {
     }
 }
 
+/// Vegapunk gRPC client bound to one schema, with optional bearer-token authentication.
 pub struct VegapunkClient {
     client: AuthClient,
     schema: String,
 }
 
 impl VegapunkClient {
+    /// Connects to the gRPC endpoint and returns a client bound to the given schema.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the endpoint is not a valid URI.
+    /// - Returns an error if the connection cannot be established.
+    /// - Returns an error if the auth token is not a valid header value.
     pub async fn connect(
         endpoint: &str,
         schema: &str,

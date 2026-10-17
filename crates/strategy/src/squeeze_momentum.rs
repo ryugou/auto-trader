@@ -30,6 +30,7 @@ const TIME_LIMIT_HOURS: i64 = 48;
 const HISTORY_LEN: usize = 200;
 const TIMEFRAME: &str = "H1";
 
+/// Strategy on H1 candles that enters after Bollinger Bands stay inside the Keltner Channels for several bars.
 pub struct SqueezeMomentumV1 {
     name: String,
     pairs: Vec<Pair>,
@@ -38,6 +39,7 @@ pub struct SqueezeMomentumV1 {
 }
 
 impl SqueezeMomentumV1 {
+    /// Creates the strategy under the given name for the given pairs.
     pub fn new(name: String, pairs: Vec<Pair>) -> Self {
         Self {
             name,

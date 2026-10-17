@@ -23,6 +23,7 @@ const ALLOCATION_CAP: Decimal = dec!(1.00);
 const HISTORY_LEN: usize = 200;
 const TIMEFRAME: &str = "H1";
 
+/// Donchian channel trend strategy on H1 candles with fixed channel lengths.
 pub struct DonchianTrendV1 {
     name: String,
     pairs: Vec<Pair>,
@@ -30,6 +31,7 @@ pub struct DonchianTrendV1 {
 }
 
 impl DonchianTrendV1 {
+    /// Creates the strategy under the given name for the given pairs.
     pub fn new(name: String, pairs: Vec<Pair>) -> Self {
         Self {
             name,

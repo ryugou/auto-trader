@@ -20,6 +20,7 @@ const SL_CAP: Decimal = dec!(0.05);
 const ALLOCATION_CAP: Decimal = dec!(1.00);
 const TIMEFRAME: &str = "H1";
 
+/// Donchian channel trend strategy on H1 candles whose channel lengths are taken from parameters.
 pub struct DonchianTrendEvolveV1 {
     name: String,
     pairs: Vec<Pair>,
@@ -30,6 +31,9 @@ pub struct DonchianTrendEvolveV1 {
 }
 
 impl DonchianTrendEvolveV1 {
+    /// Creates the strategy for the given pairs, reading `entry_channel`, `exit_channel` and `atr_baseline_bars` from `params`.
+    ///
+    /// A value that is missing or not a non-negative integer uses its default, and every value is then clamped to its allowed range.
     pub fn new(name: String, pairs: Vec<Pair>, params: serde_json::Value) -> Self {
         let entry_channel = (params["entry_channel"].as_u64().unwrap_or(20) as usize).clamp(10, 30);
         let exit_channel = (params["exit_channel"].as_u64().unwrap_or(10) as usize).clamp(5, 15);

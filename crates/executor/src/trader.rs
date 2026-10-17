@@ -20,6 +20,7 @@ use crate::position_sizer::PositionSizer;
 
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Trader that places and closes orders for one account on one exchange.
 pub struct Trader {
     pool: PgPool,
     exchange: Exchange,
@@ -35,6 +36,7 @@ pub struct Trader {
 }
 
 impl Trader {
+    /// Creates a trader for the account, with the default poll timeout.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
@@ -63,6 +65,7 @@ impl Trader {
         }
     }
 
+    /// Sets how long to wait for an order's executions to be reported.
     pub fn with_poll_timeout(mut self, timeout: Duration) -> Self {
         self.poll_timeout = timeout;
         self

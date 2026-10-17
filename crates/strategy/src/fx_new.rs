@@ -19,12 +19,15 @@ const ATR_MULT: Decimal = dec!(2);
 const SL_CAP: Decimal = dec!(0.02);
 const TARGET_RISK_PCT: Decimal = dec!(0.01);
 const SIGNAL_CONFIDENCE: f64 = 0.65;
+/// Leverage that the strategy assumes for GMO FX.
 pub const GMO_FX_LEVERAGE: Decimal = dec!(10);
+/// Exchange whose price events the strategy accepts.
 pub const FX_NEW_EXCHANGE: Exchange = Exchange::GmoFx;
 const M15_BARS_PER_TRADING_DAY: usize = 96;
 const HISTORY_TRADING_DAYS: usize = 5;
 const HISTORY_LEN: usize = M15_BARS_PER_TRADING_DAY * HISTORY_TRADING_DAYS;
 
+/// Breakout strategy that builds M15 candles from M5 candles and trades in the direction of the H1 moving average trend.
 pub struct FxNewV1 {
     name: String,
     pairs: Vec<Pair>,
@@ -34,6 +37,7 @@ pub struct FxNewV1 {
 }
 
 impl FxNewV1 {
+    /// Creates the strategy under the given name for the given pairs.
     pub fn new(name: String, pairs: Vec<Pair>) -> Self {
         Self {
             name,

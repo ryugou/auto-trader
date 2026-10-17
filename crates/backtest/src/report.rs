@@ -1,21 +1,34 @@
 use auto_trader_core::types::{Trade, TradeStatus};
 use rust_decimal::Decimal;
 
+/// Result of a backtest run: the closed trades and the statistics derived from them.
 pub struct BacktestReport {
+    /// Number of closed trades.
     pub total_trades: usize,
+    /// Number of closed trades with a positive profit.
     pub wins: usize,
+    /// Number of closed trades that are not wins.
     pub losses: usize,
+    /// Number of entries that the simulated trader could not open.
     pub execution_failures: usize,
+    /// Fraction of closed trades that are wins, `0.0` when there are none.
     pub win_rate: f64,
+    /// Sum of the profit and loss of the closed trades.
     pub total_pnl: Decimal,
+    /// Largest fall of the balance from a previous peak while closing the trades in order.
     pub max_drawdown: Decimal,
+    /// Balance at the start of the run.
     pub initial_balance: Decimal,
+    /// Balance at the end of the run.
     pub final_balance: Decimal,
+    /// Gross profit divided by gross loss: infinite when there is profit and no loss, `0.0` when there is neither.
     pub profit_factor: f64,
+    /// Trades that the report was built from.
     pub trades: Vec<Trade>,
 }
 
 impl BacktestReport {
+    /// Builds a report from the trades of a run, counting only closed trades in the statistics.
     pub fn from_trades_with_failures(
         trades: Vec<Trade>,
         initial_balance: Decimal,
@@ -92,6 +105,7 @@ impl BacktestReport {
         }
     }
 
+    /// Prints the statistics of the report to standard output.
     pub fn print_summary(&self) {
         println!("=== Backtest Report ===");
         println!(

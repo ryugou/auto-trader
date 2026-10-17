@@ -27,6 +27,7 @@ const TIME_LIMIT_HOURS: i64 = 24;
 const TIMEFRAME: &str = "M5";
 const BB_STD_DEV_MULT: Decimal = dec!(2.5);
 
+/// Mean reversion strategy that trades M5 candles closing outside the Bollinger Bands when RSI is extreme.
 pub struct BbMeanRevertV1 {
     name: String,
     pairs: Vec<Pair>,
@@ -34,6 +35,7 @@ pub struct BbMeanRevertV1 {
 }
 
 impl BbMeanRevertV1 {
+    /// Creates the strategy under the given name for the given pairs.
     pub fn new(name: String, pairs: Vec<Pair>) -> Self {
         Self {
             name,

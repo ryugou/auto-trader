@@ -29,7 +29,7 @@
 ## Decisions
 
 - D-R1 Order: the comment test changes first (Task 1), the doc lints are added to `[workspace.lints]` last (Task 5). Until Task 5 the lints are not active, so each run proves its crate with `DOCLINT` below.
-- D-R2 `DOCLINT` = `cargo clippy -p <package> --all-targets --locked -- -D warnings -W missing_docs -W clippy::missing_errors_doc -W clippy::missing_panics_doc`. A crate is done when `DOCLINT` exits 0.
+- D-R2 `DOCLINT` = `cargo clippy -p <package> --all-targets --locked --no-deps -- -D warnings -W missing_docs -W clippy::missing_errors_doc -W clippy::missing_panics_doc`. A crate is done when `DOCLINT` exits 0. `--no-deps` keeps the lint flags off path dependencies such as core, which would otherwise fail first while they still lack rustdoc.
 - D-R3 Test targets: `missing_docs` reports the crate root of a file under `tests/` that has no crate doc. Give each such file one `#![doc = "..."]` line in the run of its crate. Other comments under `tests/` stay out of scope, as in the #114 plan.
 - D-R4 Generated code: the tonic code that `tonic::include_proto!("graphrag")` pulls into `pub mod proto` is not documented. Task 5 adds `#[expect(missing_docs, clippy::missing_errors_doc, reason = "tonic-generated code for proto/graphrag.proto")]` to `pub mod proto` in `crates/vegapunk-client/src/lib.rs`. The existing `#[allow]` attributes on that module stay.
 - D-R5 `# Errors` states, per error path a caller can tell apart, the condition in one bullet (example: `/// - Returns an error if the database query fails.`). `# Panics` states the condition that panics.

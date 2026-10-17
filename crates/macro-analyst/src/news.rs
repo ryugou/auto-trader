@@ -1,23 +1,35 @@
 use chrono::{DateTime, Utc};
 
+/// Fetcher of news items from RSS and Atom feeds.
 pub struct NewsFetcher {
     client: reqwest::Client,
     sources: Vec<String>,
 }
 
+/// News item taken from a feed entry.
 pub struct NewsItem {
+    /// Title of the entry, empty when the entry has none.
     pub title: String,
+    /// Summary of the entry, empty when the entry has none.
     pub description: String,
+    /// Publication time of the entry, if the feed gives one.
     pub published: Option<DateTime<Utc>>,
+    /// URL of the feed that the entry came from.
     pub source: String,
 }
 
 impl NewsFetcher {
+    /// Creates a fetcher for the given feed URLs.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(sources: Vec<String>) -> anyhow::Result<Self> {
         let client = crate::http_client::build_http_client()?;
         Ok(Self { client, sources })
     }
 
+    /// Fetches the first 10 entries of every feed; a feed that fails to download or parse is logged and skipped.
     pub async fn fetch_latest(&self) -> Vec<NewsItem> {
         let mut items = Vec::new();
         for source in &self.sources {
