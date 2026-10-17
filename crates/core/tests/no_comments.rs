@@ -1,3 +1,5 @@
+#![doc = "Workspace test that fails when a source file of a checked crate contains a comment."]
+
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
