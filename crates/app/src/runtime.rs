@@ -1,8 +1,10 @@
 use auto_trader_db::trades::OpenTradeWithAccount;
 
 pub(crate) mod crypto_monitor;
+pub(crate) mod engine_loop;
 pub(crate) mod executor_loop;
 pub(crate) mod exit_executor;
+pub(crate) mod warmup;
 
 pub(crate) struct TradeAccount {
     pub(crate) account_type: String,
