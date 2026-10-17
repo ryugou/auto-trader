@@ -5,6 +5,11 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
+/// Inserts a candle, or overwrites the prices and volume of the stored candle with the same exchange, pair, timeframe and timestamp.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn upsert_candle(pool: &PgPool, candle: &Candle) -> anyhow::Result<()> {
     sqlx::query(
         r#"INSERT INTO price_candles (exchange, pair, timeframe, open, high, low, close, volume, timestamp)
@@ -26,6 +31,12 @@ pub async fn upsert_candle(pool: &PgPool, candle: &Candle) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Returns up to `limit` candles of the exchange, pair and timeframe, newest first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange that is not supported.
 pub async fn get_candles(
     pool: &PgPool,
     exchange: &str,

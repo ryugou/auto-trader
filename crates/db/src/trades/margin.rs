@@ -1,6 +1,11 @@
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
+/// Subtracts `margin_amount` from the balance of the account and records a `margin_lock` account event for the trade.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails, including when the account does not exist.
 pub async fn lock_margin(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -31,6 +36,11 @@ pub async fn lock_margin(
     Ok(())
 }
 
+/// Adds `margin_return` and `pnl_amount` to the balance of the account and records a `margin_release` and a `trade_close` account event for the trade.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails, including when the account does not exist.
 pub async fn release_margin(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,

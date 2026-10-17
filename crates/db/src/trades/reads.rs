@@ -7,6 +7,12 @@ use uuid::Uuid;
 use super::row::TradeRow;
 use crate::jst_day_start::{jst_day_start_utc, jst_next_day_start_utc};
 
+/// Returns the open and closing trades of the account, newest entry first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn list_open_or_closing_by_account(
     pool: &PgPool,
     account_id: Uuid,
@@ -27,6 +33,12 @@ pub async fn list_open_or_closing_by_account(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
+/// Returns the open trades of the account, newest entry first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn get_open_trades_by_account(
     pool: &PgPool,
     account_id: Uuid,
@@ -47,6 +59,12 @@ pub async fn get_open_trades_by_account(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
+/// Returns the open trades of the strategy for the pair.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn get_open_trades(
     pool: &PgPool,
     strategy_name: &str,
@@ -68,6 +86,12 @@ pub async fn get_open_trades(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
+/// Returns the trade with the given identifier whatever its status, or `None` if there is none.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Trade>> {
     let row = sqlx::query_as::<_, TradeRow>(
         r#"SELECT id, strategy_name, pair, exchange, direction, entry_price, exit_price,
@@ -84,10 +108,14 @@ pub async fn get_trade_by_id(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<T
     row.map(|r| r.try_into()).transpose()
 }
 
+/// Open trade together with the name and type of the account that holds it.
 #[derive(Debug)]
 pub struct OpenTradeWithAccount {
+    /// The open trade.
     pub trade: Trade,
+    /// Name of the account; `None` if no account row matches.
     pub account_name: Option<String>,
+    /// Type of the account; `None` if no account row matches.
     pub account_type: Option<String>,
 }
 
@@ -111,6 +139,12 @@ impl TryFrom<OpenTradeWithAccountRow> for OpenTradeWithAccount {
     }
 }
 
+/// Returns the open trade with the given identifier together with its account, or `None` if there is no open trade with that identifier.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn get_open_trade_with_account(
     pool: &PgPool,
     trade_id: Uuid,
@@ -132,6 +166,11 @@ pub async fn get_open_trade_with_account(
     row.map(OpenTradeWithAccount::try_from).transpose()
 }
 
+/// Returns the sum of the profit or loss minus the fees of the closed trades of the account whose exit time is at or after `since`, or zero if there are none.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn realized_net_since(
     pool: &PgPool,
     account_id: Uuid,
@@ -148,27 +187,47 @@ pub async fn realized_net_since(
     Ok(row.0.unwrap_or(Decimal::ZERO))
 }
 
+/// Kind of an event in the history of a trade.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeEventKind {
+    /// The trade was opened.
     Open,
+    /// An overnight fee was charged.
     OvernightFee,
+    /// An SFD fee was charged.
     SfdFee,
+    /// A swap fee was charged.
     SwapFee,
+    /// The trade was closed.
     Close,
 }
 
+/// Event in the history of a trade, with the price, quantity and amounts that apply to it.
 #[derive(Debug, serde::Serialize)]
 pub struct TradeEvent {
+    /// Kind of the event.
     pub kind: TradeEventKind,
+    /// Time of the event.
     pub occurred_at: DateTime<Utc>,
+    /// Entry price for `Open` and exit price for `Close`; `None` for a fee event.
     pub price: Option<Decimal>,
+    /// Quantity of the trade for `Open` and `Close`; `None` for a fee event.
     pub quantity: Option<Decimal>,
+    /// Direction of the trade for `Open` and `Close`; `None` for a fee event.
     pub direction: Option<String>,
+    /// Change of the account cash caused by the event, taken from the recorded account events and, for `Close`, the profit or loss of the trade; `None` when neither is recorded.
     pub cash_delta: Option<Decimal>,
+    /// Realized profit or loss for `Close`; `None` for the other kinds.
     pub pnl_amount: Option<Decimal>,
 }
 
+/// Returns the events of the trade in order: `Open`, then the fee events in the order they occurred, then `Close` if the trade has an exit time and an exit price. Returns `None` if there is no such trade.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the stored trade has an exchange, direction, status or exit reason that is not supported.
 pub async fn get_trade_events(
     pool: &PgPool,
     trade_id: Uuid,
@@ -260,6 +319,12 @@ pub async fn get_trade_events(
     Ok(Some(events))
 }
 
+/// Returns the open trades on the exchange for the pair, each with its account, newest entry first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn list_open_with_account_name_for_pair(
     pool: &PgPool,
     exchange: &str,
@@ -286,6 +351,12 @@ pub async fn list_open_with_account_name_for_pair(
         .collect()
 }
 
+/// Returns all open trades, each with its account, newest entry first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn list_open_with_account_name(
     pool: &PgPool,
 ) -> anyhow::Result<Vec<OpenTradeWithAccount>> {
@@ -308,6 +379,13 @@ pub async fn list_open_with_account_name(
         .collect()
 }
 
+/// Returns a page of trades, newest entry first, together with the number of trades that match the filters. `from` and `to` keep the trades entered from the start of the JST day of `from` up to the end of the JST day of `to`.
+///
+/// # Errors
+///
+/// - Returns an error if the JST day of `from` or `to` is out of range.
+/// - Returns an error if the database query fails.
+/// - Returns an error if a stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn list_trades(
     pool: &PgPool,
     limit: i64,

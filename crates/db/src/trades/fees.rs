@@ -60,6 +60,11 @@ async fn apply_fee_inner(
     Ok(Some(new_balance))
 }
 
+/// Charges `fee_amount` as an overnight fee to the open trade of the account and returns the new balance of the account, or `None` if the account has no such open trade. The fee is added to the fees of the trade, subtracted from the balance of the account and recorded as an `overnight_fee` account event.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn apply_overnight_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -69,6 +74,11 @@ pub async fn apply_overnight_fee(
     apply_fee_inner(tx, account_id, trade_id, fee_amount, "overnight_fee", None).await
 }
 
+/// Charges `fee_amount` as an SFD fee to the open trade of the account and returns the new balance of the account, or `None` if the account has no such open trade. The fee is added to the fees of the trade, subtracted from the balance of the account and recorded as an `sfd_fee` account event that occurred at `occurred_at`.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn apply_sfd_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -87,6 +97,11 @@ pub async fn apply_sfd_fee(
     .await
 }
 
+/// Charges `fee_amount` as a swap fee to the open trade of the account and returns the new balance of the account, or `None` if the account has no such open trade. The fee is added to the fees of the trade, subtracted from the balance of the account and recorded as a `swap_fee` account event that occurred at `occurred_at`.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn apply_swap_fee(
     tx: &mut sqlx::PgConnection,
     account_id: Uuid,
@@ -105,6 +120,12 @@ pub async fn apply_swap_fee(
     .await
 }
 
+/// Adds `fee_delta` to the fees of the trade.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the trade does not exist.
 pub async fn add_fees(pool: &PgPool, id: Uuid, fee_delta: Decimal) -> anyhow::Result<()> {
     let result = sqlx::query("UPDATE trades SET fees = fees + $2 WHERE id = $1")
         .bind(id)

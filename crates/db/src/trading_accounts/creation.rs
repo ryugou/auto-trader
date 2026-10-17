@@ -7,14 +7,21 @@ use uuid::Uuid;
 
 use super::model::{ACCOUNT_COLUMNS, AccountRow, TradingAccount};
 
+/// Smallest initial balance accepted for an account in JPY.
 pub const MIN_INITIAL_BALANCE_JPY: Decimal = dec!(10000);
 
+/// Returns `currency` without the surrounding spaces, tabs and line breaks, in ASCII upper case.
 pub fn normalize_currency(currency: &str) -> String {
     currency
         .trim_matches([' ', '\t', '\n', '\r'])
         .to_ascii_uppercase()
 }
 
+/// Checks that the initial balance of an account in JPY is at least `MIN_INITIAL_BALANCE_JPY`. The balance of an account in another currency is accepted as it is.
+///
+/// # Errors
+///
+/// - Returns an error if the normalized `currency` is `JPY` and `initial_balance` is less than `MIN_INITIAL_BALANCE_JPY`.
 pub fn validate_initial_balance(currency: &str, initial_balance: Decimal) -> Result<(), String> {
     if normalize_currency(currency) == "JPY" && initial_balance < MIN_INITIAL_BALANCE_JPY {
         return Err(format!(
@@ -24,6 +31,11 @@ pub fn validate_initial_balance(currency: &str, initial_balance: Decimal) -> Res
     Ok(())
 }
 
+/// Checks `leverage` against the cap of the exchange: 2 for bitFlyer CFD and 25 for GMO FX. OANDA has no cap.
+///
+/// # Errors
+///
+/// - Returns an error if `leverage` exceeds the cap of the exchange.
 pub fn validate_leverage_for_exchange(exchange: Exchange, leverage: Decimal) -> Result<(), String> {
     let cap = match exchange {
         Exchange::BitflyerCfd => dec!(2),
@@ -41,21 +53,32 @@ fn default_currency() -> String {
     "JPY".to_string()
 }
 
+/// Request to create a trading account.
 #[derive(Debug, Deserialize)]
 pub struct CreateTradingAccount {
+    /// Name of the account.
     pub name: String,
+    /// Exchange name. It is trimmed and lower-cased on creation and must be a supported exchange.
     pub exchange: String,
+    /// Initial balance, which is also the first current balance. It is rounded toward zero to a whole number for JPY.
     pub initial_balance: Decimal,
+    /// Leverage of the account, checked against the cap of the exchange.
     pub leverage: Decimal,
+    /// Name of the strategy of the account.
     pub strategy: String,
+    /// Account type: `paper` or `live`.
     pub account_type: String,
+    /// Currency code. It is trimmed and upper-cased on creation and defaults to `JPY` when it is omitted from the request.
     #[serde(default = "default_currency")]
     pub currency: String,
 }
 
+/// Operation name that the conflict message uses for creating an account.
 pub const CREATE_ACCOUNT_OPERATION: &str = "create account";
+/// Operation name that the conflict message uses for reactivating an account.
 pub const REACTIVATE_ACCOUNT_OPERATION: &str = "reactivate account";
 
+/// Returns the error message that says a live account already exists for `exchange` while performing `operation`.
 pub fn build_one_live_per_exchange_conflict_message(operation: &str, exchange: &str) -> String {
     format!(
         "failed to {operation}: live account already exists for exchange \"{exchange}\"; \
@@ -87,6 +110,17 @@ pub(super) fn translate_unique_violation(
     }
 }
 
+/// Validates the request, inserts a new trading account whose current balance equals its initial balance, and returns it.
+///
+/// # Errors
+///
+/// - Returns an error if `account_type` is neither `paper` nor `live`.
+/// - Returns an error if `exchange` is empty after trimming, or contains a character other than `a` to `z`, `0` to `9` and `_` after lower-casing.
+/// - Returns an error if `exchange` is not a supported exchange.
+/// - Returns an error if `account_type` is `live` and an active live account already exists for the exchange.
+/// - Returns an error if the currency is `JPY` and `initial_balance` is less than `MIN_INITIAL_BALANCE_JPY`.
+/// - Returns an error if `leverage` exceeds the cap of the exchange.
+/// - Returns an error if the database query fails, including when the insert violates the limit of one live account per exchange.
 pub async fn create_account(
     pool: &PgPool,
     req: &CreateTradingAccount,

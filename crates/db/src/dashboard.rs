@@ -4,89 +4,150 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Trade statistics summed over the daily summary rows that match the filters.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct SummaryStats {
+    /// Number of trades.
     pub total_trades: i64,
+    /// Number of winning trades.
     pub win_count: i64,
+    /// Total profit or loss.
     pub total_pnl: Decimal,
+    /// Total fees of the closed trades that match the filters.
     pub total_fees: Decimal,
+    /// Largest maximum drawdown among the summarized rows.
     pub max_drawdown: Decimal,
 }
 
+/// Profit or loss of one day and its running total.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct PnlHistoryRow {
+    /// Day of the summary.
     pub date: NaiveDate,
+    /// Profit or loss of the day.
     pub daily_pnl: Decimal,
+    /// Sum of the profit or loss from the first day up to this day.
     pub cumulative_pnl: Decimal,
 }
 
+/// Trade statistics of one strategy.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct StrategyStats {
+    /// Name of the strategy.
     pub strategy_name: String,
+    /// Number of trades.
     pub trade_count: i64,
+    /// Number of winning trades.
     pub win_count: i64,
+    /// Total profit or loss.
     pub total_pnl: Decimal,
 }
 
+/// Trade statistics of one currency pair.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct PairStats {
+    /// Currency pair.
     pub pair: String,
+    /// Number of trades.
     pub trade_count: i64,
+    /// Number of winning trades.
     pub win_count: i64,
+    /// Total profit or loss.
     pub total_pnl: Decimal,
 }
 
+/// Trade statistics of one hour of the day.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct HourlyWinrate {
+    /// Hour of the entry time, from 0 to 23.
     pub hour: i32,
+    /// Number of closed trades entered in this hour.
     pub trade_count: i64,
+    /// Number of winning trades among them.
     pub win_count: i64,
 }
 
+/// Trade as shown on the dashboard, with the type of its account.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct TradeRow {
+    /// Identifier of the trade.
     pub id: Uuid,
+    /// Name of the strategy.
     pub strategy_name: String,
+    /// Currency pair.
     pub pair: String,
+    /// Exchange name as text.
     pub exchange: String,
+    /// Direction of the trade as text.
     pub direction: String,
+    /// Entry price.
     pub entry_price: Decimal,
+    /// Exit price, if the trade has one.
     pub exit_price: Option<Decimal>,
+    /// Stop-loss price.
     pub stop_loss: Decimal,
+    /// Take-profit price, if the trade has one.
     pub take_profit: Option<Decimal>,
+    /// Quantity of the trade.
     pub quantity: Decimal,
+    /// Leverage of the trade.
     pub leverage: Decimal,
+    /// Fees charged to the trade.
     pub fees: Decimal,
+    /// Identifier of the account that holds the trade.
     pub account_id: Uuid,
+    /// Type of the account that holds the trade.
     pub account_type: Option<String>,
+    /// Time of the entry.
     pub entry_at: DateTime<Utc>,
+    /// Time of the exit, if the trade has one.
     pub exit_at: Option<DateTime<Utc>>,
+    /// Profit or loss, if recorded.
     pub pnl_amount: Option<Decimal>,
+    /// Reason the trade was closed, if any.
     pub exit_reason: Option<String>,
+    /// Status of the trade as text.
     pub status: String,
+    /// Time the trade row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// Balance of an account valued with its open trades.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct EvaluatedBalance {
+    /// Current balance of the account.
     pub current_balance: Decimal,
+    /// Sum of the unrealized profit or loss of the open trades, each truncated to a whole number and valued at the latest candle close of its pair and exchange, or at its entry price when there is none.
     pub unrealized_pnl: Decimal,
+    /// Current balance plus the margin locked by the open trades plus `unrealized_pnl`.
     pub evaluated_balance: Decimal,
 }
 
+/// Balance of an account at the end of one day.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct BalanceHistoryPoint {
+    /// Day of the balance.
     pub date: NaiveDate,
+    /// Balance at the end of the day.
     pub balance: Decimal,
 }
 
+/// Daily balance history of one account.
 #[derive(Debug, Serialize)]
 pub struct BalanceHistoryAccount {
+    /// Identifier of the account.
     pub account_id: Uuid,
+    /// Name of the account.
     pub account_name: String,
+    /// Balance of each day from the day of the first account event up to today, in date order.
     pub data: Vec<BalanceHistoryPoint>,
 }
 
+/// Returns the trade counts, win counts, profit or loss and maximum drawdown of the daily summary rows that match the filters, together with the fees of the closed trades that match them. A filter left as `None` is not applied, and `from` and `to` bound the day inclusively.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_summary(
     pool: &PgPool,
@@ -138,6 +199,11 @@ pub async fn get_summary(
     Ok(row)
 }
 
+/// Returns the profit or loss of each day with its running total, in date order, over the daily summary rows that match the filters. A filter left as `None` is not applied, and `from` and `to` bound the day inclusively.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_pnl_history(
     pool: &PgPool,
@@ -171,6 +237,11 @@ pub async fn get_pnl_history(
     Ok(rows)
 }
 
+/// Returns the trade count, win count and profit or loss of each strategy, largest profit or loss first, over the daily summary rows that match the filters. A filter left as `None` is not applied.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_strategy_stats(
     pool: &PgPool,
     exchange: Option<&str>,
@@ -195,6 +266,11 @@ pub async fn get_strategy_stats(
     Ok(rows)
 }
 
+/// Returns the trade count, win count and profit or loss of each currency pair, largest profit or loss first, over the daily summary rows that match the filters. A filter left as `None` is not applied.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_pair_stats(
     pool: &PgPool,
     exchange: Option<&str>,
@@ -219,6 +295,11 @@ pub async fn get_pair_stats(
     Ok(rows)
 }
 
+/// Returns the number of closed trades and the number of winning trades for each hour of the entry time, in hour order. A filter left as `None` is not applied.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_hourly_winrate(
     pool: &PgPool,
     exchange: Option<&str>,
@@ -243,6 +324,11 @@ pub async fn get_hourly_winrate(
     Ok(rows)
 }
 
+/// Returns a page of the trades that match the filters, newest created first, together with the number of matching trades. A filter left as `None` is not applied. `page` counts from 1 and defaults to 1, and `per_page` defaults to 50 and is capped at 200.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_trades(
     pool: &PgPool,
@@ -304,6 +390,11 @@ pub async fn get_trades(
     Ok((rows, total.0))
 }
 
+/// Returns the evaluated balance of the account.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails, including when the account does not exist.
 pub async fn get_evaluated_balance(
     pool: &PgPool,
     account_id: Uuid,
@@ -360,6 +451,11 @@ pub async fn get_evaluated_balance(
     Ok(row)
 }
 
+/// Returns the evaluated balance of every account, keyed by the identifier of the account.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_all_evaluated_balances(
     pool: &PgPool,
 ) -> anyhow::Result<std::collections::HashMap<uuid::Uuid, EvaluatedBalance>> {
@@ -426,6 +522,11 @@ pub async fn get_all_evaluated_balances(
     Ok(map)
 }
 
+/// Returns the daily balance history of each active account, oldest account first. When `account_type` is given, only accounts of that type are returned. The balance of a day is the initial balance plus the sum of the trade close, overnight fee, SFD fee and swap fee events up to that day.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_balance_history(
     pool: &PgPool,
     account_type: Option<&str>,

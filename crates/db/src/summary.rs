@@ -113,6 +113,11 @@ async fn persist_max_drawdown(
     Ok(())
 }
 
+/// Recomputes the maximum drawdown of each strategy, pair, exchange and account group of the trades closed on the UTC day `date`, and stores it in `daily_summary`. A group that has no row there gets one inserted.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
     let rows = fetch_closed_trades_for_day(pool, date).await?;
     let groups = group_pnls_by_strategy_pair_exchange_account(rows);
@@ -125,6 +130,11 @@ pub async fn update_daily_max_drawdown(pool: &PgPool, date: NaiveDate) -> anyhow
     Ok(())
 }
 
+/// Adds the deltas to the trade count, win count and profit or loss of the daily summary row identified by the date, strategy, pair, account type, exchange and account, and inserts the row if it does not exist. An `account_id` of `None` selects the row that has no account.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_daily_summary(
     pool: &PgPool,
@@ -181,6 +191,11 @@ pub async fn upsert_daily_summary(
     Ok(())
 }
 
+/// Deletes the daily summary rows of the UTC day `date`, rebuilds them from the trades closed on that day and then recomputes their maximum drawdown.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn rebuild_daily_summary(pool: &PgPool, date: NaiveDate) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -222,6 +237,11 @@ pub async fn rebuild_daily_summary(pool: &PgPool, date: NaiveDate) -> anyhow::Re
     Ok(())
 }
 
+/// Rebuilds the daily summary of every UTC day on which a trade was closed.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn rebuild_all_daily_summaries(pool: &PgPool) -> anyhow::Result<()> {
     let dates: Vec<(NaiveDate,)> = sqlx::query_as(
         "SELECT DISTINCT (exit_at AT TIME ZONE 'UTC')::date AS d
