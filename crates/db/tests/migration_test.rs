@@ -1,3 +1,4 @@
+#![doc = "Tests that the migrations add the unique index of one live account per exchange and drop the `risk_halts` table and the one-active-trade-per-strategy-pair index."]
 // Verify: (1) revert migration dropped risk_halts + trades_one_active_per_strategy_pair,
 // (2) one_live_per_exchange migration added the partial unique index.
 

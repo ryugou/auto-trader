@@ -13,6 +13,7 @@ use crate::market_feed::MarketFeed;
 use crate::oanda::OandaClient;
 use crate::price_store::PriceStore;
 
+/// Feed that polls the OANDA candles of its pairs at an interval and publishes a price event for the latest candle of each.
 pub struct MarketMonitor {
     client: OandaClient,
     pairs: Vec<Pair>,
@@ -22,6 +23,7 @@ pub struct MarketMonitor {
 }
 
 impl MarketMonitor {
+    /// Creates a feed that polls the candles of `pairs` through `client` every `interval_secs` seconds, with candles of `timeframe`.
     pub fn new(client: OandaClient, pairs: Vec<Pair>, interval_secs: u64, timeframe: &str) -> Self {
         Self {
             client,
@@ -32,6 +34,7 @@ impl MarketMonitor {
         }
     }
 
+    /// Sets the pool that the feed saves the polled candles to.
     pub fn with_db(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
         self

@@ -55,6 +55,11 @@ pub(crate) fn indicator_map(
     map
 }
 
+/// Returns the simple moving average of the last `period` prices, or `None` when there are fewer than `period` prices.
+///
+/// # Panics
+///
+/// Panics if `period` is zero.
 pub fn sma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     if prices.len() < period {
         return None;
@@ -63,6 +68,11 @@ pub fn sma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     Some(sum / Decimal::from(period as u64))
 }
 
+/// Returns the exponential moving average of `prices` over `period`, seeded with the simple moving average of the first `period` prices, or `None` when there are fewer than `period` prices.
+///
+/// # Panics
+///
+/// Panics if `period` is zero.
 pub fn ema(prices: &[Decimal], period: usize) -> Option<Decimal> {
     if prices.len() < period {
         return None;
@@ -75,6 +85,11 @@ pub fn ema(prices: &[Decimal], period: usize) -> Option<Decimal> {
     Some(ema_val)
 }
 
+/// Returns the relative strength index over the last `period` price changes, which is `100` when none of them is a loss, or `None` when there are fewer than `period + 1` prices.
+///
+/// # Panics
+///
+/// Panics if `period` is zero and `prices` is not empty.
 pub fn rsi(prices: &[Decimal], period: usize) -> Option<Decimal> {
     if prices.len() < period + 1 {
         return None;
@@ -99,6 +114,11 @@ pub fn rsi(prices: &[Decimal], period: usize) -> Option<Decimal> {
     Some(Decimal::from(100) - Decimal::from(100) / (Decimal::ONE + rs))
 }
 
+/// Returns the lower band, the middle and the upper band, which are the simple moving average of the last `period` prices minus, at and plus `std_dev_mult` times their population standard deviation, or `None` when there are fewer than `period` prices or the deviation cannot be converted to a `Decimal`.
+///
+/// # Panics
+///
+/// Panics if `period` is zero.
 pub fn bollinger_bands(
     prices: &[Decimal],
     period: usize,
@@ -121,6 +141,11 @@ pub fn bollinger_bands(
     Some((middle - band, middle, middle + band))
 }
 
+/// Returns the average true range over `period` with Wilder smoothing, or `None` when the slices differ in length or hold fewer than `period + 1` elements.
+///
+/// # Panics
+///
+/// Panics if `period` is zero and the slices have the same non-zero length.
 pub fn atr(
     highs: &[Decimal],
     lows: &[Decimal],
@@ -149,6 +174,7 @@ pub fn atr(
     Some(atr_val)
 }
 
+/// Returns the lowest low and the highest high of the last `period` candles as a pair, leaving out the last candle unless `include_current` is `true`, or `None` when the slices differ in length, are empty or hold fewer than `period` candles to look at.
 pub fn donchian_channel(
     highs: &[Decimal],
     lows: &[Decimal],
@@ -174,6 +200,11 @@ pub fn donchian_channel(
     Some((lower, upper))
 }
 
+/// Returns the average directional index over `period` with Wilder smoothing, or `None` when a slice has fewer than `2 * period + 1` elements or fewer than `period` directional index values can be computed.
+///
+/// # Panics
+///
+/// Panics if `lows` has fewer elements than `highs`, if `closes` has fewer than `highs` has minus one, or if `period` is zero and no slice is empty.
 pub fn adx(
     highs: &[Decimal],
     lows: &[Decimal],
@@ -246,6 +277,11 @@ pub fn adx(
     Some(adx_val)
 }
 
+/// Returns the lower band, the middle and the upper band, which are the exponential moving average of `closes` over `period` minus, at and plus `atr_mult` times the average true range over `period`, or `None` when either of them cannot be computed.
+///
+/// # Panics
+///
+/// Panics if `period` is zero.
 pub fn keltner_channels(
     highs: &[Decimal],
     lows: &[Decimal],

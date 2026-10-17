@@ -9,6 +9,7 @@ pub(super) fn encode_path(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
 
+/// Client of the OANDA private REST API for one account.
 pub struct OandaPrivateApi {
     client: Client,
     base_url: String,
@@ -17,6 +18,11 @@ pub struct OandaPrivateApi {
 }
 
 impl OandaPrivateApi {
+    /// Creates a client of the API at `base_url` for the account `account_id` that authorizes its requests with `api_key`, with a request timeout of 30 seconds.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(base_url: String, account_id: String, api_key: String) -> anyhow::Result<Self> {
         Ok(Self {
             client: Client::builder()

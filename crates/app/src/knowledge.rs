@@ -11,11 +11,13 @@ use rust_decimal::Decimal;
 
 use crate::enriched_ingest;
 
+/// Knowledge store that keeps trade and market events in Vegapunk.
 pub struct VegapunkKnowledgeStore {
     api: Arc<dyn VegapunkApi>,
 }
 
 impl VegapunkKnowledgeStore {
+    /// Creates a store that calls `api`.
     pub fn new(api: Arc<dyn VegapunkApi>) -> Self {
         Self { api }
     }

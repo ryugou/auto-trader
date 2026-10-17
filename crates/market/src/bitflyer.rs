@@ -19,6 +19,7 @@ use crate::candle_builder::build_primary_and_h1_builders;
 use crate::market_feed::MarketFeed;
 use crate::price_store::PriceStore;
 
+/// Feed of the bitFlyer WebSocket ticks that builds candles and publishes price events.
 pub struct BitflyerMonitor {
     ws_url: String,
     pairs: Vec<Pair>,
@@ -36,6 +37,7 @@ fn is_spot_only(pair: &Pair) -> bool {
 }
 
 impl BitflyerMonitor {
+    /// Creates a feed of `pairs` on the WebSocket at `ws_url` with candles of `timeframe`, adding `BTC_JPY` to the pairs when `FX_BTC_JPY` is present and `BTC_JPY` is not.
     pub fn new(ws_url: &str, pairs: Vec<Pair>, timeframe: &str) -> Self {
         let mut pairs = pairs;
         let has_fx_btc = pairs.iter().any(|p| p.0 == "FX_BTC_JPY");
@@ -54,16 +56,19 @@ impl BitflyerMonitor {
         }
     }
 
+    /// Sets the pool that the feed saves its completed candles to.
     pub fn with_db(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
         self
     }
 
+    /// Sets the close prices per pair that seed the indicators of the primary timeframe.
     pub fn with_closes_seed(mut self, seed: HashMap<String, Vec<Decimal>>) -> Self {
         self.closes_seed = seed;
         self
     }
 
+    /// Sets the high, low and close prices per pair that seed the indicators of the primary timeframe.
     pub fn with_candle_seed(
         mut self,
         highs: HashMap<String, Vec<Decimal>>,

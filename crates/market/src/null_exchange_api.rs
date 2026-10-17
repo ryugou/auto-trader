@@ -6,6 +6,7 @@ use crate::bitflyer_private::{
 };
 use crate::exchange_api::ExchangeApi;
 
+/// Exchange API that supports no exchange operation: every order, position and collateral call fails as unsupported, resolving a position finds none, and the defaults of the trait apply otherwise.
 pub struct NullExchangeApi;
 
 #[async_trait]

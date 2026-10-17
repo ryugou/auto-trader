@@ -4,6 +4,7 @@ use auto_trader_core::types::{Candle, Exchange, Pair};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+/// Builder of the candles of one pair and one timeframe from ticks.
 pub struct CandleBuilder {
     pair: Pair,
     exchange: Exchange,
@@ -20,6 +21,11 @@ pub struct CandleBuilder {
 }
 
 impl CandleBuilder {
+    /// Creates a builder for `pair` on `exchange` with candles of `timeframe`, which is `M1`, `M5` or `H1`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `timeframe` is not `M1`, `M5` or `H1`.
     pub fn new(pair: Pair, exchange: Exchange, timeframe: String) -> Self {
         let period_secs = match timeframe.as_str() {
             "M1" => 60,
@@ -54,6 +60,9 @@ impl CandleBuilder {
         start
     }
 
+    /// Records a tick in the candle of its period and returns the finished candle of the previous period when the tick falls in a different period.
+    ///
+    /// The returned candle carries the best bid and ask kept before this tick; when given, `best_bid` and `best_ask` replace the kept values.
     pub fn on_tick(
         &mut self,
         price: Decimal,
@@ -121,6 +130,9 @@ impl CandleBuilder {
         Some(candle)
     }
 
+    /// Finishes the open candle and returns it when its period has ended at `now`, and returns `None` when no candle is open or the period has not ended.
+    ///
+    /// When the period has ended, `best_bid` and `best_ask` replace the kept values, when given, before the candle is built.
     pub fn try_complete(
         &mut self,
         now: DateTime<Utc>,

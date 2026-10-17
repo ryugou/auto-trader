@@ -47,6 +47,20 @@ struct GetParentOrderResponse {
 }
 
 impl BitflyerPrivateApi {
+    /// Posts `req` as a new child order and returns the response of the exchange with its acceptance ID.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the order is not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the request body cannot be serialized.
+    /// - Returns an error if the response body cannot be parsed.
     pub async fn send_child_order(
         &self,
         req: SendChildOrderRequest,
@@ -63,6 +77,19 @@ impl BitflyerPrivateApi {
         })
     }
 
+    /// Returns the child orders of `product_code` that have `child_order_acceptance_id`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the order is not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the response body cannot be parsed.
     pub async fn get_child_orders(
         &self,
         product_code: &str,
@@ -82,6 +109,19 @@ impl BitflyerPrivateApi {
         })
     }
 
+    /// Returns the executions of `product_code` that belong to the child order `child_order_acceptance_id`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the order is not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the response body cannot be parsed.
     pub async fn get_executions(
         &self,
         product_code: &str,
@@ -101,6 +141,19 @@ impl BitflyerPrivateApi {
         })
     }
 
+    /// Cancels the child order `child_order_acceptance_id` of `product_code`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the order is not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the request body cannot be serialized.
     pub async fn cancel_child_order(
         &self,
         product_code: &str,
@@ -124,6 +177,20 @@ impl BitflyerPrivateApi {
         Ok(())
     }
 
+    /// Places a simple parent order that closes `size` on `close_side` of `product_code` once `trigger_price` is reached, and returns its acceptance ID.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the order is not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the request body cannot be serialized.
+    /// - Returns an error if the response body cannot be parsed.
     pub async fn send_parent_order_stop(
         &self,
         product_code: &str,
@@ -156,6 +223,19 @@ impl BitflyerPrivateApi {
         Ok(resp.parent_order_acceptance_id)
     }
 
+    /// Cancels the parent order `parent_order_acceptance_id` of `product_code`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the order is not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the request body cannot be serialized.
     pub async fn cancel_parent_order(
         &self,
         product_code: &str,
@@ -215,6 +295,22 @@ impl BitflyerPrivateApi {
         })
     }
 
+    /// Returns the status of the stop parent order `parent_order_acceptance_id`.
+    ///
+    /// A missing, canceled, expired or rejected parent order is `Gone`. A completed parent order, or one without a state, is `Executed` when a child order has an executed size, with the volume-weighted price and the total commission of its executions, or with the average price of the child order and no commission when it has no executions. Without an executed child order, a completed parent order is `Gone` and one without a state is `Active`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the request cannot be sent or the response body cannot be read.
+    /// - Returns an error if the exchange answers with status 429, with the delay it asks for when it gives one.
+    /// - Returns an error if the exchange reports insufficient funds (status -200 or -205).
+    /// - Returns an error if the exchange reports an invalid API key (status -201).
+    /// - Returns an error if the exchange reports an invalid signature (status -207).
+    /// - Returns an error if the exchange reports that the child orders or the executions are not found (status -208).
+    /// - Returns an error if the exchange reports any other error status.
+    /// - Returns an error if an error response cannot be parsed.
+    /// - Returns an error if the response body cannot be parsed.
+    /// - Returns an error if a child order has an executed size but neither executions nor an average price.
     pub async fn stop_order_status(
         &self,
         product_code: &str,

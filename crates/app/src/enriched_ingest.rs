@@ -3,6 +3,7 @@ use auto_trader_core::types::{Direction, ExitReason, Trade};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
+/// Returns the Japanese text that announces the opening of `trade`: its exchange, pair, direction, strategy with `allocation_pct` as a percentage (N/A if none), prices, quantity, the regime classified from `indicators`, every indicator rounded to two places in key order, and the deviation of the entry price from `sma_20` in percent if that indicator is positive.
 pub fn format_trade_open(
     trade: &Trade,
     indicators: &HashMap<String, Decimal>,
@@ -57,6 +58,7 @@ pub fn format_trade_open(
     text
 }
 
+/// Returns the Japanese text that announces the close of `trade`: its result, PnL, fees, net PnL, holding time, entry and exit prices with the change rate, the account balance against `account_initial` when both are given and the initial one is positive, the regime and the RSI, ATR and ADX of `entry_indicators` that it holds, and a post-mortem note.
 pub fn format_trade_close(
     trade: &Trade,
     entry_indicators: Option<&serde_json::Value>,
@@ -152,6 +154,7 @@ pub fn format_trade_close(
     text
 }
 
+/// Returns the feedback rating of `trade` from 2 to 5: 5 for a profitable exit at the take profit or by a trailing channel, mean reach or trailing MA, 4 for a profitable exit by time limit, 2 for a stop loss with no profit, and 3 otherwise.
 pub fn compute_feedback_rating(trade: &Trade) -> i32 {
     let is_profit = trade.pnl_amount.map(|p| p > Decimal::ZERO).unwrap_or(false);
     match trade.exit_reason {
