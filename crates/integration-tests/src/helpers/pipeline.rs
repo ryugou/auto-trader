@@ -1,11 +1,5 @@
-//! `PipelineHarness` — drives a single account through the full trading
-//! pipeline (warmup → signal → execute → close → balance) for end-to-end
-//! integration tests.
-//!
-//! Goal: a test that calls only `PipelineHarness` should be able to assert
-//! that the system would actually have traded correctly under realistic
-//! inputs. No path is mocked beyond what production uses (price store,
-//! exchange API stub).
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::executor::OrderExecutor;
@@ -20,9 +14,11 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sqlx::PgPool;
-use std::collections::HashMap;
-use std::sync::Arc;
 use uuid::Uuid;
+
+const PAPER_TRADING_DRY_RUN: bool = true;
+
+const LEVERAGE_HARDCODED_BY_SEED_TRADING_ACCOUNT: Decimal = Decimal::TWO;
 
 /// Test harness for full-pipeline integration tests. Wires up the DB pool,
 /// price store, sizer, trader, and a strategy instance for one account.
@@ -86,7 +82,7 @@ impl PipelineHarness {
             notifier,
             sizer,
             cfg.liquidation_margin_level,
-            true, // dry_run = paper trading
+            PAPER_TRADING_DRY_RUN,
         );
 
         Self {
@@ -95,9 +91,7 @@ impl PipelineHarness {
             account_name: cfg.account_name,
             exchange: cfg.exchange,
             pair,
-            // `seed_trading_account` hardcodes leverage=2; flow tests that need
-            // a different value should update the row directly after `new`.
-            leverage: dec!(2),
+            leverage: LEVERAGE_HARDCODED_BY_SEED_TRADING_ACCOUNT,
             balance: Decimal::from(cfg.balance),
             liquidation_margin_level: cfg.liquidation_margin_level,
             price_store,
@@ -145,7 +139,7 @@ impl PipelineHarness {
         self.trader
             .execute(signal)
             .await
-            .expect("trader.execute should succeed")
+            .expect("failed to execute signal")
     }
 
     /// Close a trade through `trader.close_position`. Asserts success.
@@ -157,7 +151,7 @@ impl PipelineHarness {
         self.trader
             .close_position(&trade_id.to_string(), reason)
             .await
-            .expect("close_position should succeed")
+            .expect("failed to close position")
     }
 
     /// Read `account.current_balance` from DB.
@@ -167,7 +161,7 @@ impl PipelineHarness {
                 .bind(self.account_id)
                 .fetch_one(&self.pool)
                 .await
-                .expect("read current_balance");
+                .expect("failed to read current balance");
         row.0
     }
 
@@ -182,7 +176,7 @@ impl PipelineHarness {
         .bind(self.account_id)
         .fetch_all(&self.pool)
         .await
-        .expect("read account_events")
+        .expect("failed to read account events")
     }
 }
 
@@ -204,32 +198,4 @@ fn make_event(candle: Candle, exchange: Exchange) -> PriceEvent {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn harness_initializes_with_seeded_account(pool: PgPool) {
-        let harness = PipelineHarness::new(
-            pool.clone(),
-            PipelineHarnessConfig {
-                account_name: "harness_init_test".to_string(),
-                exchange: Exchange::GmoFx,
-                pair_str: "USD_JPY".to_string(),
-                strategy: "test_strategy".to_string(),
-                balance: 30_000,
-                liquidation_margin_level: dec!(1.00),
-                min_order_size: dec!(1),
-            },
-        )
-        .await;
-
-        // Confirm the account row exists in DB with the seeded balance.
-        let row: (Decimal,) =
-            sqlx::query_as("SELECT current_balance FROM trading_accounts WHERE id = $1")
-                .bind(harness.account_id)
-                .fetch_one(&pool)
-                .await
-                .expect("seeded account must exist");
-        assert_eq!(row.0, Decimal::from(30_000));
-    }
-}
+mod tests;

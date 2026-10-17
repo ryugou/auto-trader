@@ -5,7 +5,6 @@ use chrono::DateTime;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
-/// CSV の各行に対応する中間構造体。
 #[derive(Debug, serde::Deserialize)]
 struct CandleRow {
     timestamp: String,
@@ -14,11 +13,9 @@ struct CandleRow {
     low: Decimal,
     close: Decimal,
     volume: i64,
-    /// CSV に含まれるが DB カラムには存在しないためスキップ。
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "csv column absent from price_candles")]
     bid: Option<Decimal>,
-    /// CSV に含まれるが DB カラムには存在しないためスキップ。
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "csv column absent from price_candles")]
     ask: Option<Decimal>,
 }
 
@@ -36,16 +33,16 @@ pub async fn load_price_candles(
     csv_path: &Path,
 ) -> Result<usize> {
     let mut reader = csv::Reader::from_path(csv_path)
-        .with_context(|| format!("CSV ファイルを開けません: {}", csv_path.display()))?;
+        .with_context(|| format!("failed to open csv file \"{}\"", csv_path.display()))?;
 
     let mut count = 0usize;
 
     for result in reader.deserialize() {
-        let row: CandleRow =
-            result.with_context(|| format!("CSV 行のパースに失敗: {}", csv_path.display()))?;
+        let row: CandleRow = result
+            .with_context(|| format!("failed to parse csv row \"{}\"", csv_path.display()))?;
 
         let ts = DateTime::parse_from_rfc3339(&row.timestamp)
-            .with_context(|| format!("タイムスタンプのパースに失敗: {}", row.timestamp))?
+            .with_context(|| format!("failed to parse timestamp \"{}\"", row.timestamp))?
             .with_timezone(&chrono::Utc);
 
         sqlx::query(
@@ -71,7 +68,7 @@ pub async fn load_price_candles(
         .bind(ts)
         .execute(pool)
         .await
-        .with_context(|| format!("price_candles への INSERT に失敗: ts={ts}"))?;
+        .with_context(|| format!("failed to insert price candle: ts={ts}"))?;
 
         count += 1;
     }

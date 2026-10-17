@@ -1,16 +1,11 @@
-//! Phase 3 trade flow test helpers.
-//!
-//! CSV フィクスチャからキャンドルを読み取り、PriceEvent に変換して
-//! 戦略に直接流すためのユーティリティ群。
+use std::collections::HashMap;
+use std::path::Path;
 
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::types::{Candle, Exchange, Pair};
 use chrono::DateTime;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
-use std::path::Path;
 
-/// CSV 行の中間構造体。
 #[derive(Debug, serde::Deserialize)]
 struct CsvRow {
     timestamp: String,
@@ -34,15 +29,15 @@ pub fn load_events_from_csv(
     timeframe: &str,
 ) -> Vec<PriceEvent> {
     let mut reader = csv::Reader::from_path(csv_path)
-        .unwrap_or_else(|e| panic!("CSV を開けません: {}: {e}", csv_path.display()));
+        .unwrap_or_else(|e| panic!("failed to open csv file \"{}\": {e}", csv_path.display()));
 
     let mut events = Vec::new();
     for result in reader.deserialize() {
-        let row: CsvRow =
-            result.unwrap_or_else(|e| panic!("CSV パース失敗: {}: {e}", csv_path.display()));
+        let row: CsvRow = result
+            .unwrap_or_else(|e| panic!("failed to parse csv row \"{}\": {e}", csv_path.display()));
 
         let ts = DateTime::parse_from_rfc3339(&row.timestamp)
-            .unwrap_or_else(|e| panic!("タイムスタンプパース失敗: {}: {e}", row.timestamp))
+            .unwrap_or_else(|e| panic!("failed to parse timestamp \"{}\": {e}", row.timestamp))
             .with_timezone(&chrono::Utc);
 
         let candle = Candle {
@@ -53,7 +48,7 @@ pub fn load_events_from_csv(
             high: row.high,
             low: row.low,
             close: row.close,
-            volume: Some(u64::try_from(row.volume).expect("fixture volume must be non-negative")),
+            volume: Some(u64::try_from(row.volume).expect("invalid fixture volume: negative")),
             best_bid: row.bid,
             best_ask: row.ask,
             timestamp: ts,

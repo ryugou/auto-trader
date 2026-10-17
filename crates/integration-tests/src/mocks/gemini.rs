@@ -1,6 +1,5 @@
-//! Wiremock-based mock for the Google Gemini generateContent API.
-
 use std::time::Duration;
+
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -77,7 +76,6 @@ impl MockGemini {
     }
 }
 
-/// Wrap raw text in the standard Gemini generateContent response envelope.
 fn gemini_response_wrapper(text: &str) -> serde_json::Value {
     serde_json::json!({
         "candidates": [{

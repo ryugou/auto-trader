@@ -1,22 +1,8 @@
-//! Call-tracking mock for the Vegapunk GraphRAG client.
-//!
-//! The real [`VegapunkClient`] uses tonic gRPC stubs generated with
-//! `build_server(false)`, so no server trait exists in the crate.
-//! Spinning up a full tonic server from the proto adds significant
-//! complexity with minimal test value for Phase 3 integration tests.
-//!
-//! Instead, this module provides [`MockVegapunkApi`] — a lightweight struct
-//! that mirrors the four methods used by auto-trader (`ingest_raw`,
-//! `search`, `feedback`, `merge`) and tracks every call with atomic
-//! counters plus captured arguments. Failure injection is supported
-//! via [`MockVegapunkApiBuilder::with_failures`].
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-// ---------------------------------------------------------------------------
-// CallCounters
-// ---------------------------------------------------------------------------
+use async_trait::async_trait;
+use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
 
 /// Per-method call counters.
 #[derive(Debug, Default)]
@@ -26,10 +12,6 @@ pub struct CallCounters {
     pub feedback: AtomicU32,
     pub merge: AtomicU32,
 }
-
-// ---------------------------------------------------------------------------
-// Captured arguments
-// ---------------------------------------------------------------------------
 
 /// Arguments captured from an `ingest_raw` call.
 #[derive(Debug, Clone)]
@@ -56,10 +38,6 @@ pub struct FeedbackCall {
     pub comment: String,
 }
 
-// ---------------------------------------------------------------------------
-// MockVegapunkApi
-// ---------------------------------------------------------------------------
-
 /// A call-tracking mock that replaces [`VegapunkClient`] in integration tests.
 ///
 /// Does **not** start a gRPC server. Instead it provides async methods with
@@ -69,19 +47,16 @@ pub struct MockVegapunkApi {
     pub counters: CallCounters,
     pub should_fail: AtomicBool,
 
-    // Captured calls for assertion
     ingest_raw_calls: Mutex<Vec<IngestRawCall>>,
     search_calls: Mutex<Vec<SearchCall>>,
     feedback_calls: Mutex<Vec<FeedbackCall>>,
     merge_calls: Mutex<Vec<()>>,
 
-    // Per-method remaining failure counts
     ingest_raw_failures: AtomicU32,
     search_failures: AtomicU32,
     feedback_failures: AtomicU32,
     merge_failures: AtomicU32,
 
-    // Canned search results
     search_results: Mutex<Vec<SearchResult>>,
 }
 
@@ -91,10 +66,6 @@ pub struct SearchResult {
     pub text: String,
     pub score: f32,
 }
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
 
 /// Builder for [`MockVegapunkApi`] with fluent configuration.
 pub struct MockVegapunkApiBuilder {
@@ -145,7 +116,7 @@ impl MockVegapunkApiBuilder {
                 "search" => mock.search_failures.store(*n, Ordering::SeqCst),
                 "feedback" => mock.feedback_failures.store(*n, Ordering::SeqCst),
                 "merge" => mock.merge_failures.store(*n, Ordering::SeqCst),
-                other => panic!("MockVegapunkApi: unknown method '{other}'"),
+                other => panic!("unsupported method: \"{other}\""),
             }
         }
 
@@ -159,21 +130,17 @@ impl Default for MockVegapunkApiBuilder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mock method implementations
-// ---------------------------------------------------------------------------
-
 impl MockVegapunkApi {
     /// Shorthand: build a default mock with no failure injection.
     pub fn new() -> Self {
         MockVegapunkApiBuilder::new().build()
     }
 
-    // -- helpers --
-
     fn check_fail(global: &AtomicBool, per_method: &AtomicU32) -> Result<(), anyhow::Error> {
         if global.load(Ordering::SeqCst) {
-            return Err(anyhow::anyhow!("MockVegapunkApi: global failure enabled"));
+            return Err(anyhow::anyhow!(
+                "failed to call vegapunk: global failure enabled"
+            ));
         }
         loop {
             let current = per_method.load(Ordering::SeqCst);
@@ -188,16 +155,14 @@ impl MockVegapunkApi {
             ) {
                 Ok(_) => {
                     return Err(anyhow::anyhow!(
-                        "MockVegapunkApi: injected failure ({} remaining)",
+                        "failed to call vegapunk: injected failure ({} remaining)",
                         current - 1
                     ));
                 }
-                Err(_) => continue, // retry
+                Err(_) => continue,
             }
         }
     }
-
-    // -- public API (mirrors VegapunkClient) --
 
     pub async fn ingest_raw(
         &self,
@@ -238,10 +203,7 @@ impl MockVegapunkApi {
         });
 
         let mut results = self.search_results.lock().unwrap().clone();
-        // Mirror the proto's literal semantics: top_k is a hard cap on result
-        // count. Negative is treated as 0 (no results) since the proto is i32
-        // but logically unsigned.
-        let limit = top_k.max(0) as usize;
+        let limit = top_k_as_hard_cap_with_negative_as_zero(top_k);
         if limit < results.len() {
             results.truncate(limit);
         }
@@ -275,8 +237,6 @@ impl MockVegapunkApi {
         Ok(())
     }
 
-    // -- accessors for captured calls --
-
     pub fn ingest_raw_calls(&self) -> Vec<IngestRawCall> {
         self.ingest_raw_calls.lock().unwrap().clone()
     }
@@ -306,13 +266,6 @@ pub struct IngestRawResult {
     pub chunk_count: i32,
 }
 
-// ---------------------------------------------------------------------------
-// VegapunkApi trait implementation
-// ---------------------------------------------------------------------------
-
-use async_trait::async_trait;
-use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
-
 #[async_trait]
 impl VegapunkApi for MockVegapunkApi {
     async fn ingest_raw(
@@ -322,7 +275,6 @@ impl VegapunkApi for MockVegapunkApi {
         channel: &str,
         timestamp: &str,
     ) -> anyhow::Result<()> {
-        // Delegate to inherent method for call tracking / failure injection.
         MockVegapunkApi::ingest_raw(self, text, source_type, channel, timestamp).await?;
         Ok(())
     }
@@ -356,34 +308,9 @@ impl VegapunkApi for MockVegapunkApi {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use auto_trader_core::vegapunk_port::{SearchMode, VegapunkApi};
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn mock_implements_vegapunk_api() {
-        let mock: Arc<dyn VegapunkApi> = Arc::new(
-            MockVegapunkApiBuilder::new()
-                .with_search_results(vec![SearchResult {
-                    text: "hi".into(),
-                    score: 0.9,
-                }])
-                .build(),
-        );
-        mock.ingest_raw(
-            "t",
-            "trade_signal",
-            "usd_jpy-trades",
-            "2026-01-01T00:00:00Z",
-        )
-        .await
-        .unwrap();
-        let r = mock.search("q", SearchMode::Local, 5).await.unwrap();
-        assert_eq!(r.hits.len(), 1);
-        assert_eq!(r.hits[0].text, "hi");
-        mock.feedback("sid", 5, "ok").await.unwrap();
-        mock.merge().await.unwrap();
-    }
+fn top_k_as_hard_cap_with_negative_as_zero(top_k: i32) -> usize {
+    top_k.max(0) as usize
 }
+
+#[cfg(test)]
+mod tests;

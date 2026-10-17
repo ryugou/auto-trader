@@ -16,6 +16,7 @@ const CHECKED_CRATES: &[&str] = &[
     "strategy",
     "app",
     "sim",
+    "integration-tests",
 ];
 
 fn workspace_root() -> PathBuf {

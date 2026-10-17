@@ -1,5 +1,3 @@
-//! DB テスト用ヘルパー — snapshot / seed 関数群。
-
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -29,14 +27,14 @@ pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
     for table in tables {
         assert!(
             ALLOWED_TABLES.contains(table),
-            "snapshot_tables: table name '{table}' is not in the allowlist"
+            "unsupported table: \"{table}\""
         );
         // SAFETY: table name is validated against ALLOWED_TABLES above; no user input.
         let query = format!("SELECT json_agg(t) FROM (SELECT * FROM {table}) t",);
         let row: (Option<serde_json::Value>,) = sqlx::query_as(&query)
             .fetch_one(pool)
             .await
-            .unwrap_or_else(|e| panic!("snapshot_tables: failed to query {table}: {e}"));
+            .unwrap_or_else(|e| panic!("failed to query table \"{table}\": {e}"));
 
         out.push_str(&format!("=== {table} ===\n"));
         match row.0 {
@@ -48,9 +46,7 @@ pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
     out
 }
 
-/// テスト用の strategy 行を seed する（FK 制約を満たすため）。
-/// 既に存在する場合は何もしない。
-async fn ensure_strategy(pool: &PgPool, name: &str) {
+async fn ensure_strategy_for_foreign_key(pool: &PgPool, name: &str) {
     sqlx::query(
         r#"INSERT INTO strategies (name, display_name, category, risk_level, description, default_params)
            VALUES ($1, $1, 'test', 'low', 'test strategy', '{}'::jsonb)
@@ -59,7 +55,7 @@ async fn ensure_strategy(pool: &PgPool, name: &str) {
     .bind(name)
     .execute(pool)
     .await
-    .expect("ensure_strategy: insert failed");
+    .expect("failed to insert strategy");
 }
 
 /// テスト用 trading_account を 1 行挿入し、生成された UUID を返す。
@@ -71,7 +67,7 @@ pub async fn seed_trading_account(
     strategy: &str,
     initial_balance: i64,
 ) -> Uuid {
-    ensure_strategy(pool, strategy).await;
+    ensure_strategy_for_foreign_key(pool, strategy).await;
 
     let id = Uuid::new_v4();
     sqlx::query(
@@ -88,7 +84,7 @@ pub async fn seed_trading_account(
     .bind(initial_balance)
     .execute(pool)
     .await
-    .expect("seed_trading_account: insert failed");
+    .expect("failed to insert trading account");
 
     id
 }
@@ -102,7 +98,7 @@ pub async fn read_current_balance(pool: &PgPool, account_id: Uuid) -> Decimal {
         .bind(account_id)
         .fetch_one(pool)
         .await
-        .expect("read_current_balance: query failed")
+        .expect("failed to read current balance")
 }
 
 /// BitflyerCfd + GmoFx の paper アカウントを seed する。
