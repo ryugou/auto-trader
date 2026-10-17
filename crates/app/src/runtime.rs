@@ -2,6 +2,7 @@ use auto_trader_core::types::Exchange;
 use auto_trader_db::trades::OpenTradeWithAccount;
 use auto_trader_db::trading_accounts::TradingAccount;
 
+pub(crate) mod api_server;
 pub(crate) mod balance_drift_loop;
 pub(crate) mod crypto_monitor;
 pub(crate) mod daily_batch;
@@ -11,6 +12,7 @@ pub(crate) mod exit_executor;
 pub(crate) mod overnight;
 pub(crate) mod recorder;
 pub(crate) mod sfd_accrual;
+pub(crate) mod shutdown;
 pub(crate) mod stop_fill_loop;
 pub(crate) mod warmup;
 

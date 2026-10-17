@@ -5,7 +5,7 @@ mod startup_reconcile;
 mod weekly_batch;
 mod wilson;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,8 +16,7 @@ use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent};
 use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::pool::create_pool;
 use auto_trader_market::exchange_api::ExchangeApi;
-use auto_trader_market::market_feed::MarketFeed;
-use auto_trader_notify::{Notifier, NotifyEvent, SystemAlertEvent};
+use auto_trader_notify::Notifier;
 use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
@@ -229,12 +228,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let crypto_pairs_for_warmup: Vec<Pair> = config
-        .pairs
-        .crypto
-        .as_ref()
-        .map(|v| v.iter().map(|s| Pair::new(s)).collect())
-        .unwrap_or_default();
+    let crypto_pairs_for_warmup: Vec<Pair> =
+        bootstrap::feeds::resolve_configured_crypto_pairs(&config);
     let fx_pairs_for_warmup: Vec<Pair> = resolve_configured_fx_pairs(&config);
     let mut bitflyer_seed = runtime::warmup::feed_history(
         &pool,
@@ -256,51 +251,9 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.to_string())
         .collect();
 
-    let db_accounts = match auto_trader_db::trading_accounts::list_active_or_with_open_trades(&pool)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            anyhow::bail!(
-                "failed to list trading accounts at startup: {e}; cannot validate live-trading preconditions, refusing to start"
-            );
-        }
-    };
-    if db_accounts.is_empty() {
-        tracing::info!("no trading accounts found in DB at startup");
-    }
-    for pac in &db_accounts {
-        tracing::info!(
-            account_id = %pac.id,
-            account_name = %pac.name,
-            account_type = %pac.account_type,
-            exchange = %pac.exchange,
-            strategy_name = %pac.strategy,
-            current_balance = %pac.current_balance,
-            initial_balance = %pac.initial_balance,
-            leverage = %pac.leverage,
-            active = pac.active,
-            "found trading account at startup"
-        );
-        if !registered_strategies.iter().any(|s| s == &pac.strategy) {
-            tracing::warn!(
-                account_name = %pac.name,
-                strategy_name = %pac.strategy,
-                "invalid strategy: not registered"
-            );
-        }
-    }
-
-    {
-        let has_gmo_paper_accounts = db_accounts
-            .iter()
-            .any(|a| a.exchange == "gmo_fx" && a.account_type == "paper");
-        log_swap_freshness_at_startup_leaving_slack_to_the_daily_job(
-            &config.gmo_fx.swap,
-            chrono::Utc::now().date_naive(),
-            has_gmo_paper_accounts,
-        );
-    }
+    let db_accounts =
+        bootstrap::accounts::load_and_log(&pool, &registered_strategies, &config.gmo_fx.swap)
+            .await?;
 
     let live_cfg_dry_run = config.live.as_ref().is_some_and(|l| l.dry_run);
     let live_forces_dry_run: bool = parse_live_dry_run_override(
@@ -326,160 +279,38 @@ async fn main() -> anyhow::Result<()> {
             &config,
         )?);
 
-    for mismatch in auto_trader::startup::check_fx_new_account_assumptions(&db_accounts) {
-        let notify_exchange = mismatch
-            .account_exchange
-            .parse::<Exchange>()
-            .unwrap_or(auto_trader_strategy::fx_new::FX_NEW_EXCHANGE);
-        match &mismatch.kind {
-            auto_trader::startup::FxNewMismatchKind::Leverage {
-                account_leverage,
-                expected_leverage,
-            } => {
-                let body = format!(
-                    "account '{}' has leverage {} but fx_new strategy assumes {} — risk sizing (1% of equity at stop) is wrong for this account until leverage is corrected",
-                    mismatch.account_name, account_leverage, expected_leverage
-                );
-                tracing::error!(body = %body, "invalid leverage: mismatch with fx_new");
-                auto_trader::spawn_notify(
-                    &notifier,
-                    NotifyEvent::SystemAlert(SystemAlertEvent {
-                        title: "fx_new leverage mismatch".to_string(),
-                        account_name: mismatch.account_name.clone(),
-                        exchange: notify_exchange,
-                        body,
-                    }),
-                );
-            }
-            auto_trader::startup::FxNewMismatchKind::Exchange { expected_exchange } => {
-                let body = format!(
-                    "account '{}' has exchange '{}' but fx_new only processes {} events — the executor will not dispatch fx_new signals to this account until the exchange is corrected, so no order will be placed for it",
-                    mismatch.account_name,
-                    mismatch.account_exchange,
-                    expected_exchange.as_str()
-                );
-                tracing::error!(body = %body, "invalid exchange: mismatch with fx_new");
-                auto_trader::spawn_notify(
-                    &notifier,
-                    NotifyEvent::SystemAlert(SystemAlertEvent {
-                        title: "fx_new exchange mismatch".to_string(),
-                        account_name: mismatch.account_name.clone(),
-                        exchange: notify_exchange,
-                        body,
-                    }),
-                );
-            }
-        }
-    }
+    bootstrap::fx_new_assumptions::alert_mismatches(&db_accounts, &notifier);
 
     let risk = config.risk.clone().unwrap_or_default();
     let sizing_margin_buffer: Decimal = risk.sizing_margin_buffer;
-    let shared_position_sizer: Arc<auto_trader_executor::position_sizer::PositionSizer> = {
-        let min_order_sizes: HashMap<Pair, Decimal> = pair_configs
-            .iter()
-            .map(|(k, v)| (Pair::new(k), v.min_order_size))
-            .collect();
-        let price_units: HashMap<Pair, Decimal> = pair_configs
-            .iter()
-            .map(|(k, v)| (Pair::new(k), v.price_unit))
-            .collect();
-        Arc::new(
-            auto_trader_executor::position_sizer::PositionSizer::new(
-                min_order_sizes,
-                sizing_margin_buffer,
-            )
-            .with_price_units(price_units),
-        )
-    };
+    let shared_position_sizer =
+        bootstrap::position_sizer::build(&pair_configs, sizing_margin_buffer);
 
     let price_freshness_secs: u64 = risk.price_freshness_secs;
 
     let daily_loss_limit_pct: Decimal = risk.daily_loss_limit_pct;
     let halt_hours: u64 = risk.halt_hours;
 
-    let mut feeds: HashMap<Exchange, Box<dyn MarketFeed>> = HashMap::new();
-
-    if let Some(fx_monitor) = fx_monitor {
-        feeds.insert(Exchange::Oanda, Box::new(fx_monitor));
-    }
-
-    if let Some(bf_config) = &config.bitflyer {
-        let crypto_pairs: Vec<Pair> = config
-            .pairs
-            .crypto
-            .as_ref()
-            .map(|v| v.iter().map(|s| Pair::new(s)).collect())
-            .unwrap_or_default();
-        if !crypto_pairs.is_empty() {
-            for p in &crypto_pairs {
-                expected_feeds.push(price_store::FeedKey::new(
-                    auto_trader_core::types::Exchange::BitflyerCfd,
-                    p.clone(),
-                ));
-            }
-            let bf_feed = auto_trader_market::bitflyer::BitflyerMonitor::new(
-                &bf_config.ws_url,
-                crypto_pairs,
-                CRYPTO_TIMEFRAME,
-            )
-            .with_db(pool.clone())
-            .with_candle_seed(
-                std::mem::take(&mut bitflyer_seed.highs),
-                std::mem::take(&mut bitflyer_seed.lows),
-                std::mem::take(&mut bitflyer_seed.closes),
-            );
-            feeds.insert(Exchange::BitflyerCfd, Box::new(bf_feed));
-        }
-    }
-
-    {
-        let gmo_fx_pairs: Vec<Pair> = resolve_configured_fx_pairs(&config);
-        if !gmo_fx_pairs.is_empty() {
-            for p in &gmo_fx_pairs {
-                expected_feeds.push(price_store::FeedKey::new(
-                    auto_trader_core::types::Exchange::GmoFx,
-                    p.clone(),
-                ));
-            }
-            let gmo_feed =
-                auto_trader_market::gmo_fx::GmoFxFeed::new(gmo_fx_pairs.clone(), FX_TIMEFRAME)
-                    .with_db(pool.clone());
-            feeds.insert(Exchange::GmoFx, Box::new(gmo_feed));
-            tracing::info!(pair_count = gmo_fx_pairs.len(), "gmo fx feed registered");
-        } else {
-            tracing::info!("no fx pairs configured, gmo fx feed disabled");
-        }
-    }
-    let exchange_pairs: Arc<HashMap<Exchange, HashSet<String>>> = {
-        let mut map: HashMap<Exchange, HashSet<String>> = HashMap::new();
-        for fk in &expected_feeds {
-            map.entry(fk.exchange)
-                .or_default()
-                .insert(fk.pair.0.clone());
-        }
-        Arc::new(map)
-    };
-
+    let feeds = bootstrap::feeds::build(
+        &config,
+        &pool,
+        fx_monitor,
+        &mut bitflyer_seed,
+        bootstrap::feeds::FeedTimeframes {
+            crypto: CRYPTO_TIMEFRAME,
+            fx: FX_TIMEFRAME,
+        },
+        &mut expected_feeds,
+    );
+    let exchange_pairs = bootstrap::feeds::group_pairs_by_exchange(&expected_feeds);
     let price_store = price_store::PriceStore::new(expected_feeds);
-
-    let mut feed_handles: Vec<tokio::task::AbortHandle> = Vec::new();
-    for (exchange, feed) in feeds {
-        let feed_price_store = price_store.clone();
-        let feed_price_tx = price_tx.clone();
-        let exchange_label = exchange;
-        let inner_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            tracing::info!(exchange = %exchange_label, "starting market feed");
-            feed.run(feed_price_store, feed_price_tx).await
-        });
-        let abort_handle = auto_trader::feed_watchdog::spawn_feed_supervisor(
-            exchange_label,
-            notifier.clone(),
-            inner_handle,
-            config.feed_watchdog.notify_retry_attempts,
-            config.feed_watchdog.notify_retry_initial_secs,
-        );
-        feed_handles.push(abort_handle);
-    }
+    let feed_handles = bootstrap::feeds::spawn_all(
+        feeds,
+        &price_store,
+        &price_tx,
+        &notifier,
+        &config.feed_watchdog,
+    );
 
     let (macro_tx, _) =
         tokio::sync::broadcast::channel::<auto_trader_core::strategy::MacroUpdate>(16);
@@ -619,58 +450,37 @@ async fn main() -> anyhow::Result<()> {
 
     let sfd_handle = tokio::spawn(runtime::sfd_accrual::run(pool.clone(), price_store.clone()));
 
-    let api_state = api::AppState {
+    let api_handle = runtime::api_server::spawn(api::AppState {
         pool: pool.clone(),
         price_store: price_store.clone(),
         exchange_liquidation_levels: exchange_liquidation_levels.clone(),
-    };
-    let api_handle = tokio::spawn(async move {
-        let app = api::router(api_state);
-        let bind_addr = "0.0.0.0:3001";
-        let listener = tokio::net::TcpListener::bind(bind_addr)
-            .await
-            .expect("failed to bind API server");
-        tracing::info!(bind_addr = %bind_addr, "api server listening");
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!(error = %e, "failed to serve api");
-        }
-    });
+    })
+    .await?;
 
     tracing::info!("auto-trader running. Press Ctrl+C to stop.");
-
     tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down... draining channels");
-
-    drop(price_tx);
-    drop(trade_tx);
-    for h in feed_handles {
-        h.abort();
-    }
-    overnight_handle.abort();
-    sfd_handle.abort();
-    stop_fill_handle.abort();
-    balance_drift_handle.abort();
-    if let Some(h) = feed_watchdog_handle {
-        h.abort();
-    }
-    daily_handle.abort();
-    if let Some(h) = macro_analyst_handle {
-        h.abort();
-    }
-    api_handle.abort();
-
-    let drain_timeout = tokio::time::Duration::from_secs(5);
-    let _ = tokio::time::timeout(drain_timeout, async {
-        let _ = engine_handle.await;
-        let _ = pos_monitor_handle.await;
-        let _ = crypto_monitor_handle.await;
-        let _ = exit_executor_handle.await;
-        let _ = executor_handle.await;
-        let _ = recorder_handle.await;
-    })
+    runtime::shutdown::run(
+        runtime::shutdown::TaskHandles {
+            feed_handles,
+            overnight: overnight_handle,
+            sfd: sfd_handle,
+            stop_fill: stop_fill_handle,
+            balance_drift: balance_drift_handle,
+            feed_watchdog: feed_watchdog_handle,
+            daily: daily_handle,
+            macro_analyst: macro_analyst_handle,
+            api: api_handle,
+            engine: engine_handle,
+            pos_monitor: pos_monitor_handle,
+            crypto_monitor: crypto_monitor_handle,
+            exit_executor: exit_executor_handle,
+            executor: executor_handle,
+            recorder: recorder_handle,
+        },
+        price_tx,
+        trade_tx,
+    )
     .await;
-
-    tracing::info!("shutdown complete");
     Ok(())
 }
 
