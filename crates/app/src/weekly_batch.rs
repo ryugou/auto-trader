@@ -28,6 +28,16 @@ struct EvolutionEvidence {
 
 const MIN_TRADES_FOR_EVOLUTION: i64 = 5;
 
+/// Evolves the parameters of each strategy that has a row in `strategy_params`, then triggers a merge of `knowledge` if it is given, and returns once all strategies are processed. Does nothing if there is no row. For each strategy, the closed trades of the past 7 days are counted:
+/// - with fewer than 5 trades, the parameters are kept and a system notification says so;
+/// - otherwise Gemini at `gemini_api_url` is asked for a proposal using the statistics of those trades, the current parameters, the win rate lower bound of each regime and, if available, the strategy outcomes from `knowledge`; the validated proposal is saved to `strategy_params` and announced in a system notification;
+/// - if the Gemini call fails or the proposal does not validate, the parameters are kept and a system notification gives the reason.
+///
+/// A failure for one strategy is logged as an error and does not stop the others, and a failure of the knowledge merge is logged as a warning.
+///
+/// # Errors
+///
+/// - Returns an error if the strategy names cannot be read from `strategy_params`.
 pub async fn run(
     pool: &PgPool,
     knowledge: Option<&Arc<dyn KnowledgeStore>>,

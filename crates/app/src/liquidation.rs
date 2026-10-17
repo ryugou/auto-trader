@@ -12,10 +12,15 @@ use uuid::Uuid;
 
 use crate::positions::build_close_side_positions;
 
+/// Dependencies of the detection of liquidation targets and margin alerts.
 pub struct LiquidationContext {
+    /// Database pool from which the accounts are read.
     pub pool: PgPool,
+    /// Store of the latest ticks of the feeds.
     pub price_store: Arc<PriceStore>,
+    /// Liquidation margin level of each exchange.
     pub exchange_liquidation_levels: Arc<HashMap<Exchange, Decimal>>,
+    /// Whether live accounts are treated as dry run.
     pub live_forces_dry_run: bool,
 }
 
@@ -23,6 +28,11 @@ fn is_below_liquidation_threshold(ratio: Decimal, threshold: Decimal) -> bool {
     ratio < threshold
 }
 
+/// Returns, for each dry run account that has open trades on the exchange of `event` and whose maintenance ratio is below the liquidation margin level of that exchange, the account identifier with the identifiers of its open trades on that exchange; an account whose first trade carries no account type counts as paper. Returns nothing if the exchange has no liquidation margin level. An account is skipped, with a warning logged, if it cannot be read, is not found, or has a trade with no latest bid and ask; it is also skipped if its maintenance ratio cannot be computed because the total required margin is zero.
+///
+/// # Panics
+///
+/// Panics if the leverage of a trade of an account whose maintenance ratio is computed is zero.
 pub async fn detect_liquidation_targets(
     ctx: &LiquidationContext,
     open_trades: &[OpenTradeWithAccount],

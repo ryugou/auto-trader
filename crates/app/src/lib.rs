@@ -1,24 +1,47 @@
+#![doc = "Runtime services of the trading application: the dashboard API, the monitors of balances, margins, stops and feeds, the closing of trades, the startup reconciliation and the weekly strategy evolution."]
+
+/// Router and state of the dashboard API.
 pub mod api;
+/// Check of the drift between the exchange equity and the bot equity of live accounts.
 pub mod balance_drift;
+/// Closing of a trade and sending of the closed trade event.
 pub mod closer;
+/// Texts and feedback rating that describe opened and closed trades.
 pub mod enriched_ingest;
+/// Detection of process suspends and stale feeds, and supervision of the feed tasks.
 pub mod feed_watchdog;
+/// Knowledge store backed by Vegapunk.
 pub mod knowledge;
+/// Detection of dry run accounts whose maintenance ratio is below the liquidation margin level.
 pub mod liquidation;
+/// Detection of live accounts whose maintenance ratio nears the liquidation margin level.
 pub mod margin_alert;
+/// Construction of the open positions of trades from the latest prices.
 pub mod positions;
+/// Store of the latest tick of each feed.
 pub mod price_store;
+/// Classification of the market regime.
 pub mod regime;
 #[doc(hidden)]
 pub mod startup;
+/// Reconciliation of the open trades of live accounts with the exchange positions at startup.
 pub mod startup_reconcile;
+/// Detection and closing of trades whose stop order has been executed.
 pub mod stop_fill;
+/// Alert about empty or stale GMO FX swap rates.
 pub mod swap_freshness;
+/// Weekly evolution of the strategy parameters.
 pub mod weekly_batch;
+/// Lower bound of the Wilson score interval.
 pub mod wilson;
 
 use std::sync::Arc;
 
+/// Spawns a task that sends `event` with `notifier` and returns at once; a failure to send is logged as a warning and not returned.
+///
+/// # Panics
+///
+/// Panics if called outside a Tokio runtime.
 pub fn spawn_notify(
     notifier: &Arc<auto_trader_notify::Notifier>,
     event: auto_trader_notify::NotifyEvent,
@@ -31,6 +54,7 @@ pub fn spawn_notify(
     });
 }
 
+/// Returns the seconds to wait before retry number `attempt`, counting from 1: `initial_secs` doubled once for each earlier retry, at most 63 times, saturating at `u64::MAX`. An `attempt` of 0 is treated as 1.
 pub fn notify_retry_delay_secs(attempt: u64, initial_secs: u64) -> u64 {
     let exponent = attempt.saturating_sub(1).min(63) as u32;
     initial_secs.saturating_mul(1u64 << exponent)
@@ -112,6 +136,11 @@ where
     Err(last_err)
 }
 
+/// Spawns a task that sends `event` with `notifier` and returns at once. When a send fails, the task retries up to `attempts` times, waiting `notify_retry_delay_secs(n, initial_secs)` seconds before retry `n`, and logs a warning before each retry. When every retry fails, it logs an error and gives up; the failure is not returned.
+///
+/// # Panics
+///
+/// Panics if called outside a Tokio runtime.
 pub fn spawn_notify_with_retry(
     notifier: &Arc<auto_trader_notify::Notifier>,
     event: auto_trader_notify::NotifyEvent,
@@ -144,6 +173,11 @@ pub fn spawn_notify_with_retry(
     });
 }
 
+/// Spawns one task per alert of `alerts` with `spawn_notify`, which sends it as a system alert event, and returns at once; the sends are not ordered.
+///
+/// # Panics
+///
+/// Panics if called outside a Tokio runtime and `alerts` is not empty.
 pub fn spawn_system_alerts(
     notifier: &Arc<auto_trader_notify::Notifier>,
     alerts: Vec<auto_trader_notify::SystemAlertEvent>,

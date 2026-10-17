@@ -2,6 +2,7 @@ use auto_trader_core::config::GmoFxSwapConfig;
 use auto_trader_core::swap::is_swap_rates_stale;
 use chrono::NaiveDate;
 
+/// Returns the alert text if `cfg.rates` is empty and `has_gmo_paper_accounts` is true, or if `cfg.rates` is not empty and `updated_on` is more than `cfg.max_age_days` days before `today`; returns `None` otherwise, including when `cfg.rates` is not empty and `updated_on` is unset or is not a valid date.
 pub fn swap_freshness_alert(
     cfg: &GmoFxSwapConfig,
     today: NaiveDate,

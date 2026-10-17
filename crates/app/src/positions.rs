@@ -9,6 +9,7 @@ use rust_decimal::Decimal;
 
 type BoxedFutureAvoidingHrtbSendBug<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Returns a future that resolves to the open position of each of `trades`, valued at the bid for a long trade and at the ask for a short trade, or to `None`, with a warning logged that names `ctx_label`, if a trade has no latest bid and ask. Looks each feed up in `price_store` once and keeps the result, including a missing price, in `cache`.
 pub fn build_close_side_positions<'a, I>(
     trades: I,
     price_store: &'a PriceStore,

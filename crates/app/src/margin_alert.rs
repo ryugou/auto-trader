@@ -14,13 +14,17 @@ use crate::positions::build_close_side_positions;
 const CRITICAL_MAINTENANCE_RATIO_MULTIPLIER: Decimal = dec!(1.1);
 const WARN_MAINTENANCE_RATIO_MULTIPLIER: Decimal = dec!(1.3);
 
+/// Severity of a margin alert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertLevel {
+    /// The maintenance ratio is below 1.3 times the liquidation margin level but not below 1.1 times.
     Warn,
+    /// The maintenance ratio is below 1.1 times the liquidation margin level.
     Critical,
 }
 
 impl AlertLevel {
+    /// Returns `"warn"` for `Warn` and `"critical"` for `Critical`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Warn => "warn",
@@ -29,15 +33,22 @@ impl AlertLevel {
     }
 }
 
+/// Alert about a live account whose maintenance ratio nears the liquidation margin level.
 #[derive(Debug, Clone)]
 pub struct MarginAlert {
+    /// Identifier of the account.
     pub account_id: Uuid,
+    /// Name of the account, or its identifier as text if its first trade carries no name.
     pub account_name: String,
+    /// Maintenance ratio of the account.
     pub ratio: Decimal,
+    /// Liquidation margin level of the exchange.
     pub threshold: Decimal,
+    /// Severity of the alert.
     pub level: AlertLevel,
 }
 
+/// Returns `Critical` if `ratio` is below 1.1 times `liquidation_level`, `Warn` if it is below 1.3 times but not below 1.1 times, and `None` otherwise.
 pub fn classify_alert_level(ratio: Decimal, liquidation_level: Decimal) -> Option<AlertLevel> {
     let critical = liquidation_level * CRITICAL_MAINTENANCE_RATIO_MULTIPLIER;
     let warn = liquidation_level * WARN_MAINTENANCE_RATIO_MULTIPLIER;
@@ -50,6 +61,11 @@ pub fn classify_alert_level(ratio: Decimal, liquidation_level: Decimal) -> Optio
     }
 }
 
+/// Returns an alert for each account that has open trades on the exchange of `event`, is not dry run, and whose maintenance ratio is below 1.3 times the liquidation margin level of that exchange, and logs a warning for each. Returns nothing if the exchange has no liquidation margin level. An account is skipped, with a warning logged, if it cannot be read, is not found, or has a trade with no latest bid and ask; it is also skipped if its maintenance ratio cannot be computed because the total required margin is zero. It closes nothing.
+///
+/// # Panics
+///
+/// Panics if the leverage of a trade of an account whose maintenance ratio is computed is zero.
 pub async fn detect_margin_alerts(
     ctx: &LiquidationContext,
     open_trades: &[OpenTradeWithAccount],

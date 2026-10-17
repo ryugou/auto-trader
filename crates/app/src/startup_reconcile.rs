@@ -18,6 +18,29 @@ struct AccountScope<'a> {
     notifier: &'a Notifier,
 }
 
+/// Reconciles, for each live account of `accounts`, its open and closing trades with the positions on its exchange, and stops at the first account or trade that fails. An account with no such trades is left as is. For each pair and direction, the quantities of the trades are compared with the matching exchange positions in total. Then, per trade:
+/// - an open trade with a matching exchange position is left open, and a system alert is sent through `notifier` if its stop order is gone;
+/// - an open trade with no matching exchange position is closed as a stop loss hit at the executed price of its stop order, with the stop commission added to its fees, or else closed as reconciled at the mean of the latest bid and ask in `price_store`, or at its entry price if there is none;
+/// - a closing trade with a matching exchange position is reset to open;
+/// - a closing trade with no matching exchange position is closed as reconciled at the same price as above.
+///
+/// Each close also adds the trade to the daily summary; a failure of that update is logged as a warning and not returned.
+///
+/// # Errors
+///
+/// - Returns an error if the exchange of a live account cannot be parsed.
+/// - Returns an error if `apis` has no API for the exchange of a live account.
+/// - Returns an error if the open and closing trades of an account cannot be read.
+/// - Returns an error if the positions of a pair cannot be read from the exchange in 3 attempts, waiting 2 and then 4 seconds between them.
+/// - Returns an error if an exchange position of a pair with a positive size has the opposite or an unknown side, or if matching exchange positions exist and their total size differs from the total quantity of the trades; manual intervention is required in both cases.
+/// - Returns an error if a trade has a status other than open or closing.
+/// - Returns an error if the database query that resets or closes a trade, adds its fees, or reads the account type for the daily summary fails.
+/// - Returns an error if a trade to be closed no longer exists or is already closed, or if a trade whose fees are added no longer exists.
+/// - Returns an error if the stored row of a trade to be closed has an exchange, direction, status or exit reason that is not supported.
+///
+/// # Panics
+///
+/// Panics if the leverage of a trade that is closed is zero.
 pub async fn reconcile_live_accounts_at_startup(
     pool: &PgPool,
     accounts: &[TradingAccount],
