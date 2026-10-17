@@ -12,6 +12,7 @@ use crate::error::SimError;
 use crate::indicators::IndicatorKey;
 use crate::series::Dataset;
 
+/// One run of a compiled script over a dataset, which decides the position of each bar.
 pub struct ScriptRun<'a> {
     host: &'a ScriptHost,
     script: &'a CompiledScript,
@@ -25,6 +26,7 @@ pub struct ScriptRun<'a> {
 }
 
 impl<'a> ScriptRun<'a> {
+    /// Creates a run of `script` with `params` over `dataset`, with the operation limits from `cfg`.
     pub fn new(
         host: &'a ScriptHost,
         script: &'a CompiledScript,

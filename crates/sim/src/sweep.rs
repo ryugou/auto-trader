@@ -39,6 +39,11 @@ fn widen_i64_span_to_i128(min: i64, value: i64) -> i128 {
     value as i128 - min as i128
 }
 
+/// Returns the number of values on the grid that runs from `min` to `max` in steps of `step`, ends included.
+///
+/// # Panics
+///
+/// Panics if the kind is `Int` and `step` truncated to an integer is zero (division by zero).
 pub fn candidate_count(spec: &ParamSpec) -> u64 {
     match spec.kind {
         ParamKind::Int => {
@@ -76,6 +81,15 @@ fn too_many_combinations_error() -> SimError {
     ))
 }
 
+/// Returns the number of parameter combinations, which is the product of the candidate counts of `specs`.
+///
+/// # Errors
+///
+/// - Returns an error if the product exceeds 2^63.
+///
+/// # Panics
+///
+/// Panics if a spec of kind `Int` has a `step` that truncated to an integer is zero (division by zero).
 pub fn total_combinations(specs: &[ParamSpec]) -> Result<u128, SimError> {
     let mut total: u128 = 1;
     for spec in specs {
@@ -112,6 +126,15 @@ fn param_value_at(spec: &ParamSpec, k: u64) -> ParamValue {
     }
 }
 
+/// Returns the index of the combination that holds the default value of every parameter.
+///
+/// # Errors
+///
+/// - Returns an error if the number of combinations exceeds 2^63.
+///
+/// # Panics
+///
+/// Panics if a spec of kind `Int` has a `step` that truncated to an integer is zero (division by zero).
 pub fn default_index(specs: &[ParamSpec]) -> Result<u128, SimError> {
     total_combinations(specs)?;
     let mut result: u128 = 0;
@@ -122,6 +145,11 @@ pub fn default_index(specs: &[ParamSpec]) -> Result<u128, SimError> {
     Ok(result)
 }
 
+/// Returns the parameter set at `index` in the grid of `specs`, where the last spec varies fastest.
+///
+/// # Panics
+///
+/// Panics if a spec of kind `Int` has a `step` that truncated to an integer is zero (division by zero).
 pub fn combination_at(specs: &[ParamSpec], index: u128) -> ParamSet {
     let mut remaining = index;
     let mut ks = vec![0u64; specs.len()];
@@ -137,6 +165,16 @@ pub fn combination_at(specs: &[ParamSpec], index: u128) -> ParamSet {
         .collect()
 }
 
+/// Returns at most `max_runs` combination indices, with the default combination first. All combinations are returned when they fit in `max_runs`. Otherwise the rest is a random sample drawn from `seed`.
+///
+/// # Errors
+///
+/// - Returns an error if the number of combinations exceeds 2^63.
+/// - Returns an error if the number of combinations does not fit `usize`.
+///
+/// # Panics
+///
+/// Panics if a spec of kind `Int` has a `step` that truncated to an integer is zero (division by zero).
 pub fn select_indices(
     specs: &[ParamSpec],
     max_runs: usize,
@@ -192,13 +230,26 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Result of one run of a script.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRecord {
+    /// Parameters of the run.
     pub params: ParamSet,
+    /// Whether the run finished or stopped on a script error.
     pub status: RunStatus,
+    /// Metrics of the run, or `None` when the run stopped on a script error.
     pub metrics: Option<Metrics>,
 }
 
+/// Runs the script once with `params` and evaluates the result against `benchmarks`.
+///
+/// # Errors
+///
+/// - Returns an error if the simulation fails fatally.
+///
+/// # Panics
+///
+/// Panics if a benchmark of `benchmarks` has more labels than the evaluation bars, or a leg of it lies beyond them (see `eval::evaluate`).
 pub fn run_one(
     dataset: &Arc<Dataset>,
     host: &ScriptHost,
@@ -224,6 +275,13 @@ fn channel_capacity(jobs: usize) -> usize {
     jobs
 }
 
+/// Runs the combinations at `indices` on `jobs` threads and passes each result to `on_result`.
+///
+/// # Errors
+///
+/// - Returns the first error that `on_result` returns, and the remaining combinations are not started.
+/// - Returns the first fatal error of a run.
+/// - Returns an error if a worker panicked, naming the combination index.
 #[allow(clippy::too_many_arguments)]
 pub fn run_sweep(
     dataset: &Arc<Dataset>,

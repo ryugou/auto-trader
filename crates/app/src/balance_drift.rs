@@ -53,6 +53,10 @@ pub struct BalanceDriftContext {
 }
 
 /// Returns an alert for each account that is active or has open trades and is not dry run, and whose exchange equity drifts from the bot equity, or none if live accounts are forced to dry run. The exchange equity is the collateral plus the open position PnL; the bot equity is the account balance plus the required margin and the unrealized PnL of its open trades. Returns none, with a warning logged, if the accounts cannot be listed. An account is skipped, with a warning logged, when its exchange is unknown, it has no exchange API, or its collateral, trades or prices cannot be obtained; it is skipped, with an info log, while one of its trades is closing. A warning is logged for each drift.
+///
+/// # Panics
+///
+/// Panics if the leverage of an open trade of an account whose bot equity is computed is zero.
 pub async fn check_live_accounts(ctx: &BalanceDriftContext) -> Vec<SystemAlertEvent> {
     if ctx.live_forces_dry_run {
         return vec![];

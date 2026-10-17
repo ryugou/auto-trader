@@ -1,20 +1,32 @@
 use crate::types::{Bar, PIP_MID2};
 
+/// Price move between two successive turning points of the evaluation bars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Leg {
+    /// Index of the evaluation bar at the start of the leg.
     pub a: usize,
+    /// Index of the evaluation bar at the end of the leg.
     pub b: usize,
+    /// 1 for an upward leg and -1 for a downward leg.
     pub direction: i8,
+    /// Profit in milli units of trading from the close of bar `a` to the close of bar `b`.
     pub ideal_milli: i64,
+    /// Profit in milli units of trading from the open of bar `a + 1` to the open of bar `b + 1`.
     pub realizable_milli: i64,
 }
 
+/// Profit of trading every leg of the evaluation bars for one swing size.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Benchmark {
+    /// Swing size in pips that a move must reach to count as a leg.
     pub theta_pips: i64,
+    /// Legs in time order.
     pub legs: Vec<Leg>,
+    /// Sum of `ideal_milli` over the legs.
     pub ideal_milli: i64,
+    /// Sum of `realizable_milli` over the legs.
     pub realizable_milli: i64,
+    /// Direction of the leg for each evaluation bar from `a + 1` to `b`, or 0 for a bar in no such range.
     pub labels: Vec<i8>,
 }
 
@@ -177,6 +189,7 @@ fn convert_theta_pips_to_mid2_saturating_so_an_overflowing_theta_yields_no_legs(
     theta_pips.saturating_mul(PIP_MID2)
 }
 
+/// Computes the benchmark of the evaluation bars for a swing size of `theta_pips`.
 pub fn compute(eval_bars: &[Bar], theta_pips: i64) -> Benchmark {
     let theta =
         convert_theta_pips_to_mid2_saturating_so_an_overflowing_theta_yields_no_legs(theta_pips);

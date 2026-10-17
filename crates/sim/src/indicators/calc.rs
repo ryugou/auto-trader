@@ -1,6 +1,11 @@
 use super::types::{IndicatorKey, IndicatorKind, IndicatorSeries};
 use crate::series::TfSeries;
 
+/// Computes the indicator that `key` names over the bars of `series`.
+///
+/// # Panics
+///
+/// Panics if `key.period` is non-zero and either `key.kind` is `Atr`, `Adx` or `Keltner` with enough bars to warm up and `series.high` or `series.low` is shorter than `series.close`, or `key.kind` is `Donchian` and `series.low` is shorter than `series.high`.
 pub fn compute(series: &TfSeries, key: IndicatorKey) -> IndicatorSeries {
     let period = key.period as usize;
     let mult = key.mult_x100 as f64 / 100.0;

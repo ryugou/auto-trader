@@ -4,11 +4,16 @@ use crate::error::SimError;
 use crate::indicators::{self, IndicatorCache, IndicatorKey, IndicatorSeries};
 use crate::types::{Bar, M5_SECS, mid2_to_yen};
 
+/// Timeframe of aggregated bars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tf {
+    /// Five minutes.
     M5,
+    /// Fifteen minutes.
     M15,
+    /// One hour.
     H1,
+    /// Four hours.
     H4,
 }
 
@@ -16,6 +21,7 @@ const TF_COUNT: usize = 4;
 const ALL_TFS: [Tf; TF_COUNT] = [Tf::M5, Tf::M15, Tf::H1, Tf::H4];
 
 impl Tf {
+    /// Returns the length of the timeframe in seconds.
     pub fn secs(self) -> i64 {
         match self {
             Tf::M5 => M5_SECS,
@@ -25,6 +31,7 @@ impl Tf {
         }
     }
 
+    /// Returns the timeframe named `M5`, `M15`, `H1` or `H4`, or `None` for any other name.
     pub fn parse(s: &str) -> Option<Tf> {
         match s {
             "M5" => Some(Tf::M5),
@@ -45,12 +52,18 @@ impl Tf {
     }
 }
 
+/// Bars of one timeframe aggregated from M5 bars, with mid prices in yen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TfSeries {
+    /// Open price of each bar.
     pub open: Vec<f64>,
+    /// Highest price of each bar.
     pub high: Vec<f64>,
+    /// Lowest price of each bar.
     pub low: Vec<f64>,
+    /// Close price of each bar.
     pub close: Vec<f64>,
+    /// End time of each bar in Unix seconds.
     pub end_time: Vec<i64>,
 }
 
@@ -133,6 +146,7 @@ fn advance_to_midnight_of_the_next_day_so_bars_through_index_warmup_bars_minus_1
     (open_time.div_euclid(SECS_PER_DAY) + 1) * SECS_PER_DAY
 }
 
+/// Returns the earliest midnight (UTC, Unix seconds) at which an evaluation period can start with `warmup_bars` bars before it, or `None` when `all_bars` has too few bars.
 pub fn earliest_from(all_bars: &[Bar], warmup_bars: usize) -> Option<i64> {
     if warmup_bars == 0 {
         let first = all_bars.first()?;
@@ -146,6 +160,7 @@ pub fn earliest_from(all_bars: &[Bar], warmup_bars: usize) -> Option<i64> {
     )
 }
 
+/// Warmup and evaluation bars with their aggregated series and a cache of indicators.
 #[derive(Debug)]
 pub struct Dataset {
     bars: Vec<Bar>,
@@ -158,6 +173,13 @@ pub struct Dataset {
 }
 
 impl Dataset {
+    /// Builds a dataset from the bars of `all_bars` that open before `to`, with the `warmup_bars` bars before `from` as warmup, and an indicator cache of `cache_mb` megabytes. `all_bars` must be in ascending open time, and `from` and `to` are Unix seconds with `to` exclusive.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `from` or `to - 1` is not a representable UTC instant, or if `to` has no predecessor in `i64`.
+    /// - Returns an error if no bar opens in `[from, to)`.
+    /// - Returns an error if fewer than `warmup_bars` bars open before `from`.
     pub fn new(
         all_bars: Vec<Bar>,
         from: i64,
@@ -219,26 +241,40 @@ impl Dataset {
         })
     }
 
+    /// Returns the warmup bars followed by the evaluation bars.
     pub fn bars(&self) -> &[Bar] {
         &self.bars
     }
 
+    /// Returns the index in `bars` of the first evaluation bar.
     pub fn eval_start(&self) -> usize {
         self.eval_start
     }
 
+    /// Returns the evaluation bars.
     pub fn eval_bars(&self) -> &[Bar] {
         &self.bars[self.eval_start..]
     }
 
+    /// Returns the bars aggregated to the timeframe `tf`.
     pub fn series(&self, tf: Tf) -> &TfSeries {
         &self.series[tf.idx()]
     }
 
+    /// Returns the number of bars of `tf` that have ended by the end of the M5 bar at index `t` of `bars`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `t` is not an index of `bars`.
     pub fn completed(&self, tf: Tf, t: usize) -> usize {
         self.completed[tf.idx()][t]
     }
 
+    /// Returns the series of the indicator that `key` names, computing and caching it on the first request.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the indicator cache lock is poisoned.
     pub fn indicator(&self, key: IndicatorKey) -> Result<Arc<IndicatorSeries>, SimError> {
         let series = &self.series[key.tf.idx()];
         self.cache
@@ -250,6 +286,7 @@ impl Dataset {
         self.cache.poison_for_test();
     }
 
+    /// Returns the UTC weekdays of the evaluation period on which no evaluation bar opens.
     pub fn missing_weekdays(&self) -> Vec<chrono::NaiveDate> {
         use chrono::{DateTime, Utc};
 

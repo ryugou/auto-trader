@@ -17,9 +17,13 @@ fn is_on_integer_grid(value: i64, min: i64, step: i64) -> bool {
     (value as i128 - min as i128) % step as i128 == 0
 }
 
+/// Script that compiled and declared valid parameters.
 pub struct CompiledScript {
+    /// Source text of the script.
     pub source: String,
+    /// SHA-256 of the source, as lowercase hex.
     pub sha256: String,
+    /// Parameters that the script declares.
     pub params: Vec<ParamSpec>,
     ast: rhai::AST,
 }
@@ -43,6 +47,7 @@ impl CompiledScript {
         &self.ast
     }
 
+    /// Returns the default value of every parameter.
     pub fn default_params(&self) -> ParamSet {
         self.params
             .iter()
@@ -50,6 +55,14 @@ impl CompiledScript {
             .collect()
     }
 
+    /// Returns the value of every parameter, taking `given` where present and the default elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if `given` has a name that the script does not declare.
+    /// - Returns an error if a given value is not an integer (kind `Int`) or not a number (kind `Float`).
+    /// - Returns an error if a given value is out of range.
+    /// - Returns an error if a given value is not on the step grid.
     pub fn resolve_params(
         &self,
         given: &serde_json::Map<String, serde_json::Value>,

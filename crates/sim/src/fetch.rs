@@ -12,9 +12,12 @@ use crate::types::{
     GMO_RETRY_DELAYS, GMO_SYMBOL,
 };
 
+/// Side of the quote that a kline request asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceType {
+    /// Bid prices.
     Bid,
+    /// Ask prices.
     Ask,
 }
 
@@ -33,12 +36,18 @@ impl std::fmt::Display for PriceType {
     }
 }
 
+/// Kline of one side of the quote, with prices in milli units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Kline {
+    /// Open time in Unix seconds.
     pub open_time: i64,
+    /// Open price.
     pub open: i64,
+    /// Highest price.
     pub high: i64,
+    /// Lowest price.
     pub low: i64,
+    /// Close price.
     pub close: i64,
 }
 
@@ -59,6 +68,7 @@ struct KlineRaw {
     close: String,
 }
 
+/// Client of the GMO public kline API that spaces its requests and retries a failed one.
 pub struct GmoKlineClient {
     base_url: String,
     http: reqwest::Client,
@@ -68,6 +78,11 @@ pub struct GmoKlineClient {
 }
 
 impl GmoKlineClient {
+    /// Creates a client for the API at `base_url`, with the request spacing and retry delays of `GMO_MIN_REQUEST_INTERVAL` and `GMO_RETRY_DELAYS`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the HTTP client cannot be built.
     pub fn new(base_url: &str) -> Result<Self, SimError> {
         let http = reqwest::Client::builder()
             .timeout(GMO_HTTP_TIMEOUT)
@@ -86,6 +101,7 @@ impl GmoKlineClient {
         })
     }
 
+    /// Replaces the minimum interval between requests and the delays before the retries; the number of retries equals the number of delays.
     pub fn with_timing(mut self, min_interval: Duration, retry_delays: Vec<Duration>) -> Self {
         self.min_interval = min_interval;
         self.retry_delays = retry_delays;
@@ -135,6 +151,12 @@ impl GmoKlineClient {
         Ok(body)
     }
 
+    /// Fetches the klines of one side of the quote for `date`, skipping entries whose open time is not a non-negative whole second or whose prices do not parse into integer milli units.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error message if the rate limiter state is poisoned.
+    /// - Returns an error message if every attempt fails, whether by a failed request, an unsuccessful HTTP status, an unparseable body or a non-zero API status.
     pub async fn fetch_day(
         &self,
         date: NaiveDate,
@@ -222,13 +244,18 @@ fn decimal_str_to_milli(s: &str) -> Option<i64> {
     data::decimal_to_milli(d).ok()
 }
 
+/// Result of joining bid and ask klines into bars.
 #[derive(Debug)]
 pub struct JoinOutcome {
+    /// Valid bars in ascending open time.
     pub bars: Vec<Bar>,
+    /// Number of open times that only the bid or only the ask klines have.
     pub one_sided: usize,
+    /// Number of open times that were dropped because a side repeats the open time or the prices are inconsistent.
     pub invalid: usize,
 }
 
+/// Joins bid and ask klines of the same open time into bars and counts the open times that cannot be joined.
 pub fn join_and_validate(bid: &[Kline], ask: &[Kline]) -> JoinOutcome {
     use std::collections::BTreeMap;
 
@@ -301,12 +328,18 @@ fn is_valid_pair(bid: &Kline, ask: &Kline) -> bool {
     true
 }
 
+/// Totals of a backfill.
 #[derive(Debug)]
 pub struct BackfillReport {
+    /// Number of dates processed.
     pub days: usize,
+    /// Number of rows affected in `sim_candles`.
     pub saved: u64,
+    /// Total number of open times that only one side of the quote has.
     pub one_sided: usize,
+    /// Total number of open times dropped as invalid.
     pub invalid: usize,
+    /// Dates and sides whose fetch failed, each written as `<date> BID` or `<date> ASK` with the date as `YYYYMMDD`.
     pub failed: Vec<String>,
 }
 
@@ -315,6 +348,7 @@ const GMO_KLINE_MIN_DATE: NaiveDate = match NaiveDate::from_ymd_opt(2023, 10, 28
     None => panic!("2023-10-28 is a valid calendar date"),
 };
 
+/// Returns the earliest date for which GMO provides klines.
 pub fn gmo_kline_min_date() -> NaiveDate {
     GMO_KLINE_MIN_DATE
 }
@@ -402,6 +436,12 @@ async fn save_day_outcome(
     }
 }
 
+/// Fetches the bid and ask klines of each date from `from` to `to` inclusive, joins them into bars and saves the bars to `sim_candles`.
+///
+/// # Errors
+///
+/// - Returns an error if saving the bars of a date fails; the dates after it are not processed.
+/// - Returns an error that lists the failed fetches if any fetch failed; the bars of the other dates are saved.
 pub async fn backfill(
     pool: &sqlx::PgPool,
     client: &GmoKlineClient,

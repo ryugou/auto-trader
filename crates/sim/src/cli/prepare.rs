@@ -14,6 +14,15 @@ use crate::store::{self, BatchStatus, NewBatch};
 use crate::sweep::RunRecord;
 use crate::types::Bar;
 
+/// Returns the evaluation period `[from, to)` in Unix seconds, filling a missing `from` with the earliest possible start and a missing `to` with the day after the last bar.
+///
+/// # Errors
+///
+/// - Returns an error if `all_bars` is empty.
+/// - Returns an error if `from` is missing and fewer than `warmup_bars` bars are loaded.
+/// - Returns an error if `to` is missing and the open time of the last bar is not a representable UTC instant.
+/// - Returns an error if `to` is missing and the day after the last bar overflows the date range.
+/// - Returns an error if the period is empty or inverted.
 pub fn resolve_period(
     all_bars: &[Bar],
     from: Option<NaiveDate>,
