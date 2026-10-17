@@ -6,7 +6,6 @@ mod weekly_batch;
 mod wilson;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use auto_trader::api;
@@ -15,9 +14,7 @@ use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent};
 use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::pool::create_pool;
-use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_notify::Notifier;
-use auto_trader_strategy::engine::StrategyEngine;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
@@ -36,25 +33,6 @@ fn resolve_configured_fx_pairs(config: &AppConfig) -> Vec<Pair> {
         config.pairs.active.iter().map(|s| Pair::new(s)).collect()
     } else {
         config.pairs.fx.iter().map(|s| Pair::new(s)).collect()
-    }
-}
-
-fn parse_live_dry_run_override(raw: Option<&str>, config_dry_run: bool) -> bool {
-    match raw {
-        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => {
-                tracing::warn!(
-                    value = ?raw,
-                    fallback = config_dry_run,
-                    "invalid env var \"LIVE_DRY_RUN\": unrecognized value, accepted values are \
-                     1/true/yes/on/0/false/no/off, falling back to configured value"
-                );
-                config_dry_run
-            }
-        },
-        None => config_dry_run,
     }
 }
 
@@ -110,34 +88,6 @@ fn compute_day_start_balance_net_of_todays_realized_pnl(
     current_balance - day_net
 }
 
-fn spawn_fx_price_drain_since_fx_position_monitor_is_disabled(
-    mut rx: mpsc::Receiver<PriceEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { while rx.recv().await.is_some() {} })
-}
-
-async fn reconcile_live_accounts_before_spawning_any_trading_task(
-    pool: &sqlx::PgPool,
-    db_accounts: &[auto_trader_db::trading_accounts::TradingAccount],
-    exchange_apis: &HashMap<Exchange, Arc<dyn ExchangeApi>>,
-    price_store: Arc<auto_trader::price_store::PriceStore>,
-    notifier: Arc<Notifier>,
-) -> anyhow::Result<()> {
-    startup_reconcile::reconcile_live_accounts_at_startup(
-        pool,
-        db_accounts,
-        exchange_apis,
-        price_store,
-        notifier,
-    )
-    .await
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "failed to reconcile live accounts at startup: {e}; refusing to start with potentially inconsistent state"
-        )
-    })
-}
-
 fn log_swap_freshness_at_startup_leaving_slack_to_the_daily_job(
     gmo_fx_swap_config: &auto_trader_core::config::GmoFxSwapConfig,
     today: chrono::NaiveDate,
@@ -154,25 +104,9 @@ fn log_swap_freshness_at_startup_leaving_slack_to_the_daily_job(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    bootstrap::logging::init();
 
-    let config_path =
-        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
-    let mut config = AppConfig::load(&PathBuf::from(&config_path))?;
-    tracing::info!(config_path = %config_path, "config loaded");
-    if let Some(bf) = config.bitflyer.as_mut() {
-        bf.api_key = std::env::var("BITFLYER_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
-        bf.api_secret = std::env::var("BITFLYER_API_SECRET")
-            .ok()
-            .filter(|s| !s.is_empty());
-    }
+    let config = bootstrap::config::load()?;
 
     let pool = create_pool(&config.database.url).await?;
     tracing::info!("database connected");
@@ -199,34 +133,9 @@ async fn main() -> anyhow::Result<()> {
 
     let knowledge_store = bootstrap::knowledge_store::connect(&config.vegapunk).await;
 
-    let mut engine = StrategyEngine::new(signal_tx);
-    auto_trader::startup::register_strategies(
-        &mut engine,
-        &config.strategies,
-        &pool,
-        &knowledge_store,
-        config.gemini.as_ref(),
-    )
-    .await?;
-
-    match auto_trader_db::strategies::list_strategy_names(&pool).await {
-        Ok(catalog_names) => {
-            let catalog_set: std::collections::HashSet<&str> =
-                catalog_names.iter().map(|s| s.as_str()).collect();
-            for name in engine.registered_names() {
-                if !catalog_set.contains(name) {
-                    tracing::warn!(
-                        strategy_name = %name,
-                        remedy = "add a row to the strategies table (see migrations/20260407000003_strategies.sql)",
-                        "invalid strategy: missing from strategies catalog"
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to check strategy catalog drift");
-        }
-    }
+    let mut engine =
+        bootstrap::strategies::build_engine(&config, &pool, &knowledge_store, signal_tx).await?;
+    bootstrap::strategies::warn_catalog_drift(&pool, &engine).await;
 
     let crypto_pairs_for_warmup: Vec<Pair> =
         bootstrap::feeds::resolve_configured_crypto_pairs(&config);
@@ -245,30 +154,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
-    let registered_strategies: Vec<String> = engine
-        .registered_names()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
+    let registered_strategies = bootstrap::strategies::collect_registered_names(&engine);
 
     let db_accounts =
         bootstrap::accounts::load_and_log(&pool, &registered_strategies, &config.gmo_fx.swap)
             .await?;
 
-    let live_cfg_dry_run = config.live.as_ref().is_some_and(|l| l.dry_run);
-    let live_forces_dry_run: bool = parse_live_dry_run_override(
-        std::env::var("LIVE_DRY_RUN").ok().as_deref(),
-        live_cfg_dry_run,
-    );
-    let live_enabled = config.live.as_ref().is_some_and(|l| l.enabled);
-
-    if let Some(ps) = config.position_sizing.as_ref() {
-        tracing::info!(
-            method = %ps.method,
-            risk_rate = %ps.risk_rate,
-            "position_sizing config is ignored, sizing is now per-strategy via signal allocation_pct"
-        );
-    }
+    let live = bootstrap::live_flags::resolve(&config);
+    bootstrap::live_flags::log_ignored_position_sizing(&config);
 
     let pair_configs: Arc<HashMap<String, auto_trader_core::config::PairConfig>> =
         Arc::new(config.pair_config.clone());
@@ -318,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     let macro_analyst_handle =
         bootstrap::macro_analyst::spawn(&config, &pool, &knowledge_store, macro_tx.clone())?;
 
-    reconcile_live_accounts_before_spawning_any_trading_task(
+    bootstrap::live_accounts::reconcile(
         &pool,
         &db_accounts,
         &exchange_apis,
@@ -331,12 +224,11 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         price_store: price_store.clone(),
         apis: exchange_apis.clone(),
-        live_forces_dry_run,
+        live_forces_dry_run: live.forces_dry_run,
     };
     runtime::balance_drift_loop::check_and_alert(&drift_ctx, &notifier).await;
 
-    let pos_monitor_handle =
-        spawn_fx_price_drain_since_fx_position_monitor_is_disabled(price_monitor_rx);
+    let pos_monitor_handle = runtime::fx_price_drain::spawn(price_monitor_rx);
 
     let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
     let new_close_ctx = || auto_trader::closer::CloseContext {
@@ -350,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let crypto_monitor_handle = tokio::spawn(runtime::crypto_monitor::run(
         new_close_ctx(),
-        live_forces_dry_run,
+        live.forces_dry_run,
         crypto_price_rx,
     ));
 
@@ -371,7 +263,7 @@ async fn main() -> anyhow::Result<()> {
 
     let exit_executor_handle = tokio::spawn(runtime::exit_executor::run(
         new_close_ctx(),
-        live_forces_dry_run,
+        live.forces_dry_run,
         exit_rx,
     ));
 
@@ -384,8 +276,8 @@ async fn main() -> anyhow::Result<()> {
         exchange_pairs: Arc::clone(&exchange_pairs),
         position_sizer: shared_position_sizer.clone(),
         exchange_liquidation_levels: exchange_liquidation_levels.clone(),
-        live_forces_dry_run,
-        live_enabled,
+        live_forces_dry_run: live.forces_dry_run,
+        live_enabled: live.enabled,
         price_freshness_secs,
         daily_loss_limit_pct,
         halt_hours,
@@ -420,7 +312,7 @@ async fn main() -> anyhow::Result<()> {
 
     let stop_fill_handle = tokio::spawn(runtime::stop_fill_loop::run(
         new_close_ctx(),
-        live_forces_dry_run,
+        live.forces_dry_run,
     ));
 
     let balance_drift_handle = tokio::spawn(runtime::balance_drift_loop::run(
