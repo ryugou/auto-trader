@@ -3,6 +3,9 @@ use rust_decimal_macros::dec;
 
 use crate::types::{Direction, Exchange};
 
+/// Returns the estimated SFD charge of a fill: zero for every exchange.
+///
+/// The fill price and the quantity do not change the result.
 pub fn estimate(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Decimal {
     match exchange {
         Exchange::BitflyerCfd => Decimal::ZERO,
@@ -11,6 +14,9 @@ pub fn estimate(exchange: Exchange, _fill_price: Decimal, _qty: Decimal) -> Deci
     }
 }
 
+/// Returns the daily SFD rate for a divergence between the FX and spot prices.
+///
+/// The rate depends on the absolute divergence: 0 below 0.05, 0.0025 below 0.10, 0.005 below 0.15, 0.01 below 0.20 and 0.03 from 0.20 up.
 pub fn sfd_daily_rate(divergence: Decimal) -> Decimal {
     let d = divergence.abs();
     if d < dec!(0.05) {
@@ -26,14 +32,22 @@ pub fn sfd_daily_rate(divergence: Decimal) -> Decimal {
     }
 }
 
+/// Inputs of the hourly SFD computation.
 #[derive(Debug, Clone, Copy)]
 pub struct SfdContext {
+    /// FX price.
     pub fx_price: Decimal,
+    /// Spot price.
     pub spot_price: Decimal,
+    /// Notional value of the position.
     pub position_notional: Decimal,
+    /// Direction of the position.
     pub direction: Direction,
 }
 
+/// Returns the SFD charge of one hour, rounded toward zero to a whole number.
+///
+/// Returns zero when `spot_price` is not positive or the daily rate is zero. Otherwise the result is positive for a long position when `fx_price` is above `spot_price` and for a short position when it is below, and negative in the other cases.
 pub fn compute_hourly_sfd(ctx: SfdContext) -> Decimal {
     if ctx.spot_price <= Decimal::ZERO {
         return Decimal::ZERO;
