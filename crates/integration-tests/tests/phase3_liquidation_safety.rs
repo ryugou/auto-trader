@@ -44,6 +44,7 @@ fn make_signal(pair: &str, direction: Direction, sl_pct: Decimal, alloc_pct: Dec
 
 /// Override the seeded leverage (default 2 from `seed_trading_account`) so
 /// gmo_fx tests can run with the production-realistic 10x leverage.
+#[cfg(test)]
 async fn override_leverage(pool: &sqlx::PgPool, account_id: Uuid, leverage: Decimal) {
     sqlx::query("UPDATE trading_accounts SET leverage = $1 WHERE id = $2")
         .bind(leverage)
@@ -54,6 +55,7 @@ async fn override_leverage(pool: &sqlx::PgPool, account_id: Uuid, leverage: Deci
 }
 
 /// Read the current_balance for "balance at open" assertions.
+#[cfg(test)]
 async fn current_balance(pool: &sqlx::PgPool, account_id: Uuid) -> Decimal {
     let row: (Decimal,) =
         sqlx::query_as("SELECT current_balance FROM trading_accounts WHERE id = $1")
@@ -153,7 +155,8 @@ async fn post_sl_margin_level_above_y_bitflyer_cfd_cap_binding(pool: sqlx::PgPoo
         "liquidation_safety_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trader = build_trader_with_market(
         pool.clone(),
@@ -216,7 +219,8 @@ async fn post_sl_margin_level_at_y_gmo_fx(pool: sqlx::PgPool) {
         "liquidation_safety_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     override_leverage(&pool, account_id, dec!(10)).await;
 
     let trader = build_trader_with_market(
@@ -283,7 +287,8 @@ async fn pre_sl_drawdown_stays_above_y_gmo_fx(pool: sqlx::PgPool) {
         "liquidation_safety_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     override_leverage(&pool, account_id, dec!(10)).await;
 
     let trader = build_trader_with_market(
@@ -384,7 +389,8 @@ async fn gap_through_sl_breaches_y_gmo_fx(pool: sqlx::PgPool) {
         "liquidation_safety_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     override_leverage(&pool, account_id, dec!(10)).await;
 
     let trader = build_trader_with_market(
@@ -461,7 +467,8 @@ async fn post_sl_margin_level_at_y_gmo_fx_with_tight_sl(pool: sqlx::PgPool) {
         "liquidation_safety_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     override_leverage(&pool, account_id, dec!(10)).await;
 
     let trader = build_trader_with_market(
@@ -521,7 +528,8 @@ async fn bitflyer_cfd_max_alloc_capped_at_one_realistic(pool: sqlx::PgPool) {
         "liquidation_safety_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trader = build_trader_with_market(
         pool.clone(),

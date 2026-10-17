@@ -47,6 +47,7 @@ fn make_price_event(pair: &str, close: Decimal) -> PriceEvent {
     }
 }
 
+#[cfg(test)]
 async fn create_strategy(gemini_url: &str, store: Arc<dyn KnowledgeStore>) -> SwingLLMv1 {
     SwingLLMv1::new(
         "swing_llm_v1".to_string(),

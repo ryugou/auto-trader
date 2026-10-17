@@ -168,7 +168,8 @@ async fn resolve_exchange_liquidation_levels_fails_when_active_exchange_missing(
         "donchian_trend_v1",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Config with bitflyer_cfd entry but NO gmo_fx entry.
     let config: auto_trader_core::config::AppConfig = toml::from_str(
@@ -347,7 +348,8 @@ async fn resolve_exchange_liquidation_levels_succeeds_when_all_present(pool: sql
         "donchian_trend_v1",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     db::seed_trading_account(
         &pool,
         "crypto_safe",
@@ -356,7 +358,8 @@ async fn resolve_exchange_liquidation_levels_succeeds_when_all_present(pool: sql
         "bb_mean_revert_v1",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let config: auto_trader_core::config::AppConfig = toml::from_str(
         r#"
@@ -406,7 +409,8 @@ async fn notification_purge_deletes_old_read(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = seed::seed_open_trade(
         &pool,
         account_id,
@@ -419,7 +423,8 @@ async fn notification_purge_deletes_old_read(pool: sqlx::PgPool) {
         dec!(1),
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Old read notification (40 days ago).
     let old_read_at = Utc::now() - chrono::Duration::days(40);
@@ -436,7 +441,8 @@ async fn notification_purge_deletes_old_read(pool: sqlx::PgPool) {
         None,
         Some(old_read_at),
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
 
     // Recent read notification (5 days ago).
     let recent_read_at = Utc::now() - chrono::Duration::days(5);
@@ -453,7 +459,8 @@ async fn notification_purge_deletes_old_read(pool: sqlx::PgPool) {
         None,
         Some(recent_read_at),
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
 
     // Unread notification.
     seed::seed_notification(
@@ -469,7 +476,8 @@ async fn notification_purge_deletes_old_read(pool: sqlx::PgPool) {
         None,
         None,
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
 
     let purged = auto_trader_db::notifications::purge_old_read(&pool)
         .await

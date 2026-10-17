@@ -91,7 +91,8 @@ async fn position_dedup_detects_existing_open_trade(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Seed an open trade
     seed::seed_open_trade(
@@ -106,7 +107,8 @@ async fn position_dedup_detects_existing_open_trade(pool: sqlx::PgPool) {
         dec!(1),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Query for open trades with same strategy + pair
     let open_count: i64 = sqlx::query_scalar(
@@ -160,6 +162,7 @@ use auto_trader_executor::risk_gate::{GateDecision, eval_daily_loss, jst_day_sta
 
 /// Mirror of the entry-path kill switch in `main.rs`. Returns `true` when the
 /// account is halted for this signal (either already-halted or newly halted).
+#[cfg(test)]
 async fn kill_switch_check(
     pool: &sqlx::PgPool,
     account_id: uuid::Uuid,
@@ -207,7 +210,8 @@ async fn kill_switch_halts_on_daily_loss_over_limit(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         94_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     seed::seed_closed_trade(
         &pool,
         account_id,
@@ -223,7 +227,8 @@ async fn kill_switch_halts_on_daily_loss_over_limit(pool: sqlx::PgPool) {
         Utc::now(),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     // No halt initially.
     assert!(
@@ -260,7 +265,8 @@ async fn kill_switch_allows_entry_within_limit(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         96_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     seed::seed_closed_trade(
         &pool,
         account_id,
@@ -276,7 +282,8 @@ async fn kill_switch_allows_entry_within_limit(pool: sqlx::PgPool) {
         Utc::now(),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     let halted = kill_switch_check(&pool, account_id, dec!(0.05)).await;
     assert!(!halted, "4% loss is below the 5% limit; entry allowed");

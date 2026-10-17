@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_gmo_fx_account_with_leverage_30_returns_400(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let resp = client
         .post(app.endpoint("/api/trading-accounts"))
@@ -36,7 +38,9 @@ async fn create_gmo_fx_account_with_leverage_30_returns_400(pool: sqlx::PgPool) 
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_bitflyer_cfd_account_with_leverage_3_returns_400(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let resp = client
         .post(app.endpoint("/api/trading-accounts"))
@@ -59,7 +63,9 @@ async fn create_bitflyer_cfd_account_with_leverage_3_returns_400(pool: sqlx::PgP
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_gmo_fx_account_with_leverage_25_returns_201(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let resp = client
         .post(app.endpoint("/api/trading-accounts"))
@@ -79,7 +85,9 @@ async fn create_gmo_fx_account_with_leverage_25_returns_201(pool: sqlx::PgPool) 
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_gmo_fx_account_to_leverage_30_returns_400(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let create = client
         .post(app.endpoint("/api/trading-accounts"))

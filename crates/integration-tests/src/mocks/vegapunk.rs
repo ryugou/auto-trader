@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use async_trait::async_trait;
 use auto_trader_core::vegapunk_port::{SearchHit, SearchMode, SearchResults, VegapunkApi};
 
+use super::lock_mock_state;
+
 /// Per-method call counters.
 #[derive(Debug, Default)]
 pub struct CallCounters {
@@ -174,7 +176,7 @@ impl MockVegapunkApi {
         self.counters.ingest_raw.fetch_add(1, Ordering::SeqCst);
         Self::check_fail(&self.should_fail, &self.ingest_raw_failures)?;
 
-        self.ingest_raw_calls.lock().unwrap().push(IngestRawCall {
+        lock_mock_state(&self.ingest_raw_calls, "ingest_raw_calls")?.push(IngestRawCall {
             text: text.to_string(),
             source_type: source_type.to_string(),
             channel: channel.to_string(),
@@ -196,13 +198,13 @@ impl MockVegapunkApi {
         let ordinal = self.counters.search.fetch_add(1, Ordering::SeqCst) + 1;
         Self::check_fail(&self.should_fail, &self.search_failures)?;
 
-        self.search_calls.lock().unwrap().push(SearchCall {
+        lock_mock_state(&self.search_calls, "search_calls")?.push(SearchCall {
             query: query.to_string(),
             mode: mode.to_string(),
             top_k,
         });
 
-        let mut results = self.search_results.lock().unwrap().clone();
+        let mut results = lock_mock_state(&self.search_results, "search_results")?.clone();
         let limit = top_k_as_hard_cap_with_negative_as_zero(top_k);
         if limit < results.len() {
             results.truncate(limit);
@@ -219,7 +221,7 @@ impl MockVegapunkApi {
         self.counters.feedback.fetch_add(1, Ordering::SeqCst);
         Self::check_fail(&self.should_fail, &self.feedback_failures)?;
 
-        self.feedback_calls.lock().unwrap().push(FeedbackCall {
+        lock_mock_state(&self.feedback_calls, "feedback_calls")?.push(FeedbackCall {
             search_id: search_id.to_string(),
             rating,
             comment: comment.to_string(),
@@ -232,25 +234,25 @@ impl MockVegapunkApi {
         self.counters.merge.fetch_add(1, Ordering::SeqCst);
         Self::check_fail(&self.should_fail, &self.merge_failures)?;
 
-        self.merge_calls.lock().unwrap().push(());
+        lock_mock_state(&self.merge_calls, "merge_calls")?.push(());
 
         Ok(())
     }
 
-    pub fn ingest_raw_calls(&self) -> Vec<IngestRawCall> {
-        self.ingest_raw_calls.lock().unwrap().clone()
+    pub fn ingest_raw_calls(&self) -> anyhow::Result<Vec<IngestRawCall>> {
+        Ok(lock_mock_state(&self.ingest_raw_calls, "ingest_raw_calls")?.clone())
     }
 
-    pub fn search_calls(&self) -> Vec<SearchCall> {
-        self.search_calls.lock().unwrap().clone()
+    pub fn search_calls(&self) -> anyhow::Result<Vec<SearchCall>> {
+        Ok(lock_mock_state(&self.search_calls, "search_calls")?.clone())
     }
 
-    pub fn feedback_calls(&self) -> Vec<FeedbackCall> {
-        self.feedback_calls.lock().unwrap().clone()
+    pub fn feedback_calls(&self) -> anyhow::Result<Vec<FeedbackCall>> {
+        Ok(lock_mock_state(&self.feedback_calls, "feedback_calls")?.clone())
     }
 
-    pub fn merge_call_count(&self) -> u32 {
-        self.merge_calls.lock().unwrap().len() as u32
+    pub fn merge_call_count(&self) -> anyhow::Result<u32> {
+        Ok(lock_mock_state(&self.merge_calls, "merge_calls")?.len() as u32)
     }
 }
 

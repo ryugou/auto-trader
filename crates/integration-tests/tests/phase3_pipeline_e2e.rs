@@ -16,10 +16,11 @@
 //! `swing_llm` is intentionally excluded — D1 timeframe + Gemini LLM
 //! dependency makes it a separate test concern.
 
-use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, TradeStatus};
+use auto_trader_core::types::{Direction, Exchange, ExitReason, Pair, Signal, Trade, TradeStatus};
 use auto_trader_integration_tests::helpers::pipeline::{PipelineHarness, PipelineHarnessConfig};
 use auto_trader_integration_tests::helpers::sizing_invariants;
 use auto_trader_integration_tests::helpers::trade_flow::{fixtures_dir, load_events_from_csv};
+use auto_trader_market::price_store::FeedKey;
 use auto_trader_strategy::bb_mean_revert::BbMeanRevertV1;
 use auto_trader_strategy::donchian_trend::DonchianTrendV1;
 use auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1;
@@ -45,6 +46,7 @@ const SEED_BALANCE: i64 = 30_000;
 
 /// Override the seeded leverage (default 2 from `seed_trading_account`) so
 /// gmo_fx flow tests can run with the production-realistic 10x leverage.
+#[cfg(test)]
 async fn override_leverage(harness: &mut PipelineHarness, leverage: Decimal) {
     sqlx::query("UPDATE trading_accounts SET leverage = $1 WHERE id = $2")
         .bind(leverage)
@@ -80,16 +82,17 @@ struct Scenario {
     direction: Direction,
 }
 
-/// All tests share this skeleton: build harness → drive strategy → execute
-/// → assert open invariants → close winning → assert exit + balance.
-///
-/// The signal-emission step is parameterised by a closure so each strategy
-/// can plug in its own builder.
-async fn run_pipeline_test<F>(pool: PgPool, scenario: Scenario, account_label: &str, drive: F)
-where
-    F: AsyncFnOnce(&PipelineHarness, &Scenario) -> auto_trader_core::types::Signal,
-{
-    // 1. Build harness
+struct OpenedTrade {
+    trade: Trade,
+    balance_before: Decimal,
+    entry_bid: Decimal,
+    entry_ask: Decimal,
+    expected_margin: Decimal,
+    balance_after_open: Decimal,
+}
+
+#[cfg(test)]
+async fn build_harness(pool: PgPool, scenario: &Scenario, account_label: &str) -> PipelineHarness {
     let mut harness = PipelineHarness::new(
         pool,
         PipelineHarnessConfig {
@@ -102,14 +105,16 @@ where
             min_order_size: scenario.min_lot,
         },
     )
-    .await;
+    .await
+    .expect("failed to build pipeline harness");
 
     if scenario.leverage != harness.leverage {
         override_leverage(&mut harness, scenario.leverage).await;
     }
+    harness
+}
 
-    // 2. Strategy-driven signal — direction must match scenario.
-    let signal = drive(&harness, &scenario).await;
+fn assert_signal_matches_scenario(signal: &Signal, scenario: &Scenario) {
     assert_eq!(
         signal.direction, scenario.direction,
         "strategy {} on {:?} {} should emit {:?}",
@@ -120,30 +125,17 @@ where
         "stop_loss_pct must be in (0, 5%], got {}",
         signal.stop_loss_pct
     );
+}
 
-    // 3. Snapshot balance before open.
-    let balance_before = harness.current_balance().await;
-    assert_eq!(balance_before, Decimal::from(SEED_BALANCE));
-
-    // 4. Execute the signal through the trader.
-    let trade = harness.execute(&signal).await;
-
-    // 5. The hint price (and dry-run fill price) is ask for Long, bid for
-    //    Short. Read from the price store using the same code path.
-    use auto_trader_market::price_store::FeedKey;
-    let feed_key = FeedKey::new(harness.exchange, harness.pair.clone());
-    let (entry_bid, entry_ask) = harness
-        .price_store
-        .latest_bid_ask(&feed_key)
-        .await
-        .expect("price store must have entry bid/ask");
-    let entry_price = match scenario.direction {
-        Direction::Long => entry_ask,
-        Direction::Short => entry_bid,
-    };
-    assert_eq!(trade.entry_price, entry_price, "fill price = bid/ask side");
-
-    // 6. Quantity must match the broker-aware sizing formula.
+#[cfg(test)]
+fn assert_open_trade_fields(
+    harness: &PipelineHarness,
+    scenario: &Scenario,
+    signal: &Signal,
+    trade: &Trade,
+    balance_before: Decimal,
+    entry_price: Decimal,
+) {
     let expected_qty = sizing_invariants::expected_quantity(
         balance_before,
         scenario.leverage,
@@ -164,7 +156,6 @@ where
         "quantity must be positive after sizer truncation"
     );
 
-    // 7. Stop-loss price = entry × (1 ∓ sl_pct).
     assert_eq!(
         trade.stop_loss,
         sizing_invariants::expected_stop_loss_price(
@@ -175,7 +166,6 @@ where
         "stop_loss price must be derived from fill price"
     );
 
-    // 8. Misc trade fields.
     assert_eq!(trade.leverage, scenario.leverage);
     assert_eq!(trade.status, TradeStatus::Open);
     assert_eq!(trade.fees, Decimal::ZERO);
@@ -184,15 +174,20 @@ where
     assert_eq!(trade.direction, scenario.direction);
     assert!(trade.exit_price.is_none());
     assert!(trade.pnl_amount.is_none());
+}
 
-    // 9. account_events must contain a margin_lock with amount = -margin.
+#[cfg(test)]
+async fn assert_margin_lock_recorded(harness: &PipelineHarness, trade: &Trade) -> Decimal {
     let expected_margin =
         sizing_invariants::expected_margin_lock(trade.quantity, trade.entry_price, trade.leverage);
     assert!(
         expected_margin > Decimal::ZERO,
         "expected_margin must be positive"
     );
-    let events = harness.events().await;
+    let events = harness
+        .events()
+        .await
+        .expect("failed to read account events");
     let margin_lock = events
         .iter()
         .find(|e| e.event_type == "margin_lock")
@@ -201,53 +196,106 @@ where
         margin_lock.amount, -expected_margin,
         "margin_lock amount = -expected_margin (signed outflow)"
     );
+    expected_margin
+}
 
-    // 10. current_balance reduced by margin.
-    let balance_after_open = harness.current_balance().await;
+#[cfg(test)]
+async fn execute_and_assert_open(
+    harness: &PipelineHarness,
+    scenario: &Scenario,
+    signal: &Signal,
+) -> OpenedTrade {
+    let balance_before = harness
+        .current_balance()
+        .await
+        .expect("failed to read current balance");
+    assert_eq!(balance_before, Decimal::from(SEED_BALANCE));
+
+    let trade = harness
+        .execute(signal)
+        .await
+        .expect("failed to execute signal");
+
+    let feed_key = FeedKey::new(harness.exchange, harness.pair.clone());
+    let (entry_bid, entry_ask) = harness
+        .price_store
+        .latest_bid_ask(&feed_key)
+        .await
+        .expect("price store must have entry bid/ask");
+    let entry_price = match scenario.direction {
+        Direction::Long => entry_ask,
+        Direction::Short => entry_bid,
+    };
+    assert_eq!(trade.entry_price, entry_price, "fill price = bid/ask side");
+
+    assert_open_trade_fields(
+        harness,
+        scenario,
+        signal,
+        &trade,
+        balance_before,
+        entry_price,
+    );
+    let expected_margin = assert_margin_lock_recorded(harness, &trade).await;
+
+    let balance_after_open = harness
+        .current_balance()
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_open,
         balance_before - expected_margin,
         "balance after open = balance - margin"
     );
 
-    // 11. The new sizing invariant: post-SL margin level must stay >= Y.
     sizing_invariants::assert_post_sl_margin_level_at_least_y(&trade, balance_before, scenario.y);
 
-    // 12. Move the market in the trade's favour and close at TP.
-    //     Use a 1.5% move so the close is clearly in profit but well within
-    //     the SL distance for any reasonable strategy.
+    OpenedTrade {
+        trade,
+        balance_before,
+        entry_bid,
+        entry_ask,
+        expected_margin,
+        balance_after_open,
+    }
+}
+
+#[cfg(test)]
+async fn close_and_assert_exit_and_balance(
+    harness: &PipelineHarness,
+    scenario: &Scenario,
+    opened: &OpenedTrade,
+) {
+    let trade = &opened.trade;
     let exit_move = dec!(0.015);
     let (exit_bid, exit_ask) = match scenario.direction {
-        Direction::Long => {
-            // Long winning: price rises ⇒ both bid and ask rise.
-            let new_bid = entry_bid * (Decimal::ONE + exit_move);
-            let new_ask = entry_ask * (Decimal::ONE + exit_move);
-            (new_bid, new_ask)
-        }
-        Direction::Short => {
-            // Short winning: price falls ⇒ both bid and ask fall.
-            let new_bid = entry_bid * (Decimal::ONE - exit_move);
-            let new_ask = entry_ask * (Decimal::ONE - exit_move);
-            (new_bid, new_ask)
-        }
+        Direction::Long => (
+            opened.entry_bid * (Decimal::ONE + exit_move),
+            opened.entry_ask * (Decimal::ONE + exit_move),
+        ),
+        Direction::Short => (
+            opened.entry_bid * (Decimal::ONE - exit_move),
+            opened.entry_ask * (Decimal::ONE - exit_move),
+        ),
     };
     harness.set_market(exit_bid, exit_ask).await;
 
-    let closed = harness.close(trade.id, ExitReason::TpHit).await;
+    let closed = harness
+        .close(trade.id, ExitReason::TpHit)
+        .await
+        .expect("failed to close trade");
 
-    // 13. Closed trade fields.
     assert_eq!(closed.status, TradeStatus::Closed);
     assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
     let expected_exit_price = match scenario.direction {
-        Direction::Long => exit_bid,  // close-long fills at bid
-        Direction::Short => exit_ask, // close-short fills at ask
+        Direction::Long => exit_bid,
+        Direction::Short => exit_ask,
     };
     assert_eq!(
         closed.exit_price.expect("exit_price must be set"),
         expected_exit_price,
     );
 
-    // 14. PnL = price_diff × qty, truncated to whole yen by the trader.
     let raw_pnl = sizing_invariants::expected_pnl(
         trade.entry_price,
         expected_exit_price,
@@ -265,18 +313,38 @@ where
         "winning close should produce positive pnl, got {expected_pnl}"
     );
 
-    // 15. balance after close = balance_after_open + margin_returned + pnl.
-    let balance_after_close = harness.current_balance().await;
+    let balance_after_close = harness
+        .current_balance()
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
-        balance_after_open + expected_margin + expected_pnl,
+        opened.balance_after_open + opened.expected_margin + expected_pnl,
         "balance after close = balance_after_open + margin + pnl"
     );
     assert_eq!(
         balance_after_close,
-        balance_before + expected_pnl,
+        opened.balance_before + expected_pnl,
         "alternative: balance_after_close = balance_before + pnl"
     );
+}
+
+/// All tests share this skeleton: build harness → drive strategy → execute
+/// → assert open invariants → close winning → assert exit + balance.
+///
+/// The signal-emission step is parameterised by a closure so each strategy
+/// can plug in its own builder.
+async fn run_pipeline_test<F>(pool: PgPool, scenario: Scenario, account_label: &str, drive: F)
+where
+    F: AsyncFnOnce(&PipelineHarness, &Scenario) -> Signal,
+{
+    let harness = build_harness(pool, &scenario, account_label).await;
+
+    let signal = drive(&harness, &scenario).await;
+    assert_signal_matches_scenario(&signal, &scenario);
+
+    let opened = execute_and_assert_open(&harness, &scenario, &signal).await;
+    close_and_assert_exit_and_balance(&harness, &scenario, &opened).await;
 }
 
 // ─── Strategy drivers ──────────────────────────────────────────────────────
@@ -290,6 +358,7 @@ where
 /// — they evaluate %-based bands, ATR-relative breakouts, etc. — so the
 /// scaled candles still trigger the same signals while exercising
 /// realistic min_lot / spread / magnitude paths.
+#[cfg(test)]
 async fn prepare_candles(
     harness: &PipelineHarness,
     scenario: &Scenario,
@@ -343,6 +412,7 @@ async fn prepare_candles(
     (warmup_candles, trigger_event.candle)
 }
 
+#[cfg(test)]
 async fn drive_bb(
     harness: &PipelineHarness,
     scenario: &Scenario,
@@ -358,6 +428,7 @@ async fn drive_bb(
         .expect("bb_mean_revert fixture must produce a signal")
 }
 
+#[cfg(test)]
 async fn drive_donchian(
     harness: &PipelineHarness,
     scenario: &Scenario,
@@ -373,6 +444,7 @@ async fn drive_donchian(
         .expect("donchian_trend fixture must produce a signal")
 }
 
+#[cfg(test)]
 async fn drive_donchian_evolve(
     harness: &PipelineHarness,
     scenario: &Scenario,
@@ -391,6 +463,7 @@ async fn drive_donchian_evolve(
         .expect("donchian_trend_evolve fixture must produce a signal")
 }
 
+#[cfg(test)]
 async fn drive_squeeze(
     harness: &PipelineHarness,
     scenario: &Scenario,

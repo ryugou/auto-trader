@@ -165,7 +165,8 @@ async fn live_open_accumulates_commission_into_fees(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let api: Arc<dyn ExchangeApi> = Arc::new(CommissionMockApi {
         commission: dec!(123),
     });
@@ -193,7 +194,8 @@ async fn paper_open_uses_estimate_commission_zero(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     // mock は live commission を返すが、paper 経路では API を呼ばないので使われない
     let api: Arc<dyn ExchangeApi> = Arc::new(CommissionMockApi {
         commission: dec!(999),
@@ -222,7 +224,8 @@ async fn live_close_accumulates_commission_on_top_of_open(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let api: Arc<dyn ExchangeApi> = Arc::new(CommissionMockApi {
         commission: dec!(50),
     });

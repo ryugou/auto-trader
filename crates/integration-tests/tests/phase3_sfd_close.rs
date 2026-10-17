@@ -195,7 +195,8 @@ async fn live_close_accumulates_sfd_into_fees(pool: sqlx::PgPool) {
         "sfd_test",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let api: Arc<dyn ExchangeApi> = Arc::new(SfdMockApi {
         fee_commission: dec!(10),
         sfd: Ok(dec!(100)),
@@ -237,7 +238,8 @@ async fn live_close_with_zero_sfd_leaves_fees_unchanged(pool: sqlx::PgPool) {
         "sfd_test",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let api: Arc<dyn ExchangeApi> = Arc::new(SfdMockApi {
         fee_commission: dec!(5),
         sfd: Ok(Decimal::ZERO),
@@ -268,7 +270,8 @@ async fn paper_close_uses_sfd_estimate_zero(pool: sqlx::PgPool) {
         "sfd_test",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     // paper 経路では fetch_close_sfd は呼ばれない (estimate=0 が使われる)。
     // mock の sfd=999 を返したとしても無視されることを assert で確認。
     let api: Arc<dyn ExchangeApi> = Arc::new(SfdMockApi {
@@ -305,7 +308,8 @@ async fn live_close_continues_when_sfd_fetch_fails(pool: sqlx::PgPool) {
         "sfd_test",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let api: Arc<dyn ExchangeApi> = Arc::new(SfdMockApi {
         fee_commission: dec!(7),
         sfd: Err("simulated 503 from getpositions"),

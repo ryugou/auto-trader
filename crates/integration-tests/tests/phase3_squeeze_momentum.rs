@@ -251,6 +251,7 @@ fn make_position(
 /// Warm up with long entry CSV, get signal, then feed additional bars
 /// at elevated prices to get past the delay phase and build Chandelier Exit history.
 /// Returns (strategy, entry_ts) where entry_ts is the timestamp of the entry bar.
+#[cfg(test)]
 async fn warmup_long_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<Utc>) {
     let mut strategy = new_strategy();
     let events = load_events_from_csv(
@@ -298,6 +299,7 @@ async fn warmup_long_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<U
 }
 
 /// Same for short entry.
+#[cfg(test)]
 async fn warmup_short_with_chandelier_history() -> (SqueezeMomentumV1, DateTime<Utc>) {
     let mut strategy = new_strategy();
     let events = load_events_from_csv(

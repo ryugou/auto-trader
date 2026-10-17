@@ -184,7 +184,8 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
@@ -223,7 +224,9 @@ async fn fill_open_live_calls_exchange_api(pool: sqlx::PgPool) {
     )
     .with_poll_timeout(Duration::from_secs(5));
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader
         .execute(&signal)
@@ -295,7 +298,8 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
@@ -333,7 +337,9 @@ async fn fill_close_live_calls_exchange_api(pool: sqlx::PgPool) {
     )
     .with_poll_timeout(Duration::from_secs(5));
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
@@ -543,7 +549,8 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
@@ -565,7 +572,9 @@ async fn live_paper_split_dry_run_uses_price_store(pool: sqlx::PgPool) {
         true, // dry_run=true → paper path
     );
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader
         .execute(&signal)
@@ -631,7 +640,8 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
@@ -669,7 +679,9 @@ async fn live_paper_split_live_uses_exchange_api(pool: sqlx::PgPool) {
     )
     .with_poll_timeout(Duration::from_secs(5));
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader
         .execute(&signal)

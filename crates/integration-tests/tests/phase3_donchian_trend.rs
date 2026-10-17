@@ -249,6 +249,7 @@ fn make_position(
 
 /// Warm up with long breakout CSV, get entry signal, then feed more
 /// candles at elevated levels to build exit channel history.
+#[cfg(test)]
 async fn warmup_long_with_exit_channel() -> (DonchianTrendV1, Decimal) {
     let mut strategy = new_strategy();
     let events = load_events_from_csv(
@@ -289,6 +290,7 @@ async fn warmup_long_with_exit_channel() -> (DonchianTrendV1, Decimal) {
 
 /// Warm up with short breakout CSV, get entry signal, then feed more
 /// candles at depressed levels to build exit channel history.
+#[cfg(test)]
 async fn warmup_short_with_exit_channel() -> (DonchianTrendV1, Decimal) {
     let mut strategy = new_strategy();
     let events = load_events_from_csv(

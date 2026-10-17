@@ -32,6 +32,7 @@ use rust_decimal_macros::dec;
 
 /// bot_equity を deterministic に組む共通 seed。live gmo_fx 口座 +
 /// Long USD_JPY open trade + PriceStore bid/ask を用意して ctx を返す。
+#[cfg(test)]
 async fn setup(pool: sqlx::PgPool, collateral: Collateral) -> (BalanceDriftContext, uuid::Uuid) {
     let account_id = seed_trading_account(
         &pool,
@@ -41,7 +42,8 @@ async fn setup(pool: sqlx::PgPool, collateral: Collateral) -> (BalanceDriftConte
         "donchian_trend_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     seed_open_trade(
         &pool,
@@ -55,7 +57,8 @@ async fn setup(pool: sqlx::PgPool, collateral: Collateral) -> (BalanceDriftConte
         dec!(1000), // quantity
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // PriceStore: gmo_fx USD_JPY bid=151, ask=151.02 → Long は bid=151。
     let feed_key = FeedKey::new(Exchange::GmoFx, Pair::new("USD_JPY"));

@@ -57,8 +57,7 @@ pub fn compute_raw_quantity(
         liquidation_margin_level,
         entry_price,
     )?;
-    let max_alloc = compute_max_alloc(leverage, stop_loss_pct, liquidation_margin_level)
-        .expect("invalid max_alloc inputs: non-positive");
+    let max_alloc = compute_max_alloc(leverage, stop_loss_pct, liquidation_margin_level)?;
     let risk_alloc = max_alloc.min(allocation_pct);
     Some(balance * leverage * risk_alloc / entry_price)
 }

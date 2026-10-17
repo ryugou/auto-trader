@@ -13,6 +13,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+#[cfg(test)]
 async fn insert_btc_open_trade(
     pool: &sqlx::PgPool,
     account_id: uuid::Uuid,
@@ -37,6 +38,7 @@ async fn insert_btc_open_trade(
         Utc::now(),
     )
     .await
+    .expect("failed to seed open trade")
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -49,7 +51,8 @@ async fn paper_bitflyer_10pct_long_pays_hourly_sfd(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     // notional = 3_600_000 × 1 = 3_600_000 → hourly fee (rate 0.005) = 750
     // truncate を反映した非自明な fee が出る大きさにする (notional=360 だと
     // 0.075 → truncate 0 になる)。
@@ -99,7 +102,8 @@ async fn paper_bitflyer_10pct_short_receives_sfd(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = insert_btc_open_trade(
         &pool,
         account_id,
@@ -142,7 +146,8 @@ async fn apply_sfd_fee_returns_none_when_trade_closed(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id =
         insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
     sqlx::query("UPDATE trades SET status='closed' WHERE id=$1")
@@ -172,7 +177,8 @@ async fn account_event_row_recorded_with_sfd_fee_type(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id =
         insert_btc_open_trade(&pool, account_id, Direction::Long, dec!(36000), dec!(0.01)).await;
 

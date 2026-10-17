@@ -7,7 +7,9 @@ use serde_json::Value;
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn strategies_list(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -35,7 +37,9 @@ async fn strategies_list(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn strategies_list_with_category_filter(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -53,7 +57,9 @@ async fn strategies_list_with_category_filter(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn strategies_list_with_fx_category_filter(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -73,7 +79,9 @@ async fn strategies_list_with_fx_category_filter(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn strategies_get_one(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -89,7 +97,9 @@ async fn strategies_get_one(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn strategies_get_one_not_found(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client

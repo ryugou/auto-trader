@@ -11,7 +11,9 @@ use serde_json::Value;
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn notifications_list_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -37,7 +39,8 @@ async fn notifications_list_with_kind_filter(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = seed::seed_open_trade(
         &pool,
         account_id,
@@ -50,7 +53,8 @@ async fn notifications_list_with_kind_filter(pool: sqlx::PgPool) {
         dec!(1),
         Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     seed::seed_notification(
         &pool,
@@ -65,9 +69,12 @@ async fn notifications_list_with_kind_filter(pool: sqlx::PgPool) {
         None,
         None,
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Filter by kind=trade_opened.
@@ -92,7 +99,9 @@ async fn notifications_list_with_kind_filter(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn notifications_invalid_kind_returns_400(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -108,7 +117,9 @@ async fn notifications_invalid_kind_returns_400(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn notifications_invalid_date_returns_400(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -124,7 +135,9 @@ async fn notifications_invalid_date_returns_400(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn notifications_date_filter(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Valid date filter should succeed (even if no notifications match).
@@ -149,7 +162,8 @@ async fn notifications_pagination(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = seed::seed_open_trade(
         &pool,
         account_id,
@@ -162,7 +176,8 @@ async fn notifications_pagination(pool: sqlx::PgPool) {
         dec!(1),
         Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Insert 5 notifications.
     for _ in 0..5 {
@@ -179,10 +194,13 @@ async fn notifications_pagination(pool: sqlx::PgPool) {
             None,
             None,
         )
-        .await;
+        .await
+        .expect("failed to seed notification");
     }
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Page 1, limit=2.
@@ -220,7 +238,8 @@ async fn notifications_mark_all_read(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = seed::seed_open_trade(
         &pool,
         account_id,
@@ -233,7 +252,8 @@ async fn notifications_mark_all_read(pool: sqlx::PgPool) {
         dec!(1),
         Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     seed::seed_notification(
         &pool,
@@ -248,7 +268,8 @@ async fn notifications_mark_all_read(pool: sqlx::PgPool) {
         None,
         None,
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
     seed::seed_notification(
         &pool,
         "trade_opened",
@@ -262,9 +283,12 @@ async fn notifications_mark_all_read(pool: sqlx::PgPool) {
         None,
         None,
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -299,7 +323,8 @@ async fn notifications_unread_count(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = seed::seed_open_trade(
         &pool,
         account_id,
@@ -312,7 +337,8 @@ async fn notifications_unread_count(pool: sqlx::PgPool) {
         dec!(1),
         Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // 2 unread, 1 read.
     seed::seed_notification(
@@ -328,7 +354,8 @@ async fn notifications_unread_count(pool: sqlx::PgPool) {
         None,
         None,
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
     seed::seed_notification(
         &pool,
         "trade_opened",
@@ -342,7 +369,8 @@ async fn notifications_unread_count(pool: sqlx::PgPool) {
         None,
         None,
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
     seed::seed_notification(
         &pool,
         "trade_opened",
@@ -356,9 +384,12 @@ async fn notifications_unread_count(pool: sqlx::PgPool) {
         None,
         Some(Utc::now()),
     )
-    .await;
+    .await
+    .expect("failed to seed notification");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -377,7 +408,9 @@ async fn notifications_unread_count(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn health_market_feed_no_expected_feeds(pool: sqlx::PgPool) {
     // Default spawn_test_app has empty expected feeds.
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -413,7 +446,9 @@ async fn health_market_feed_with_expected_feeds(pool: sqlx::PgPool) {
         )
         .await;
 
-    let app = app::spawn_test_app_with_price_store(pool, price_store).await;
+    let app = app::spawn_test_app_with_price_store(pool, price_store)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -442,7 +477,9 @@ async fn health_market_feed_with_expected_feeds(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn market_prices_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -473,7 +510,9 @@ async fn market_prices_snapshot(pool: sqlx::PgPool) {
         )
         .await;
 
-    let app = app::spawn_test_app_with_price_store(pool, price_store).await;
+    let app = app::spawn_test_app_with_price_store(pool, price_store)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -498,7 +537,9 @@ async fn market_prices_snapshot(pool: sqlx::PgPool) {
 /// ServeDir は GET のみサポートするため PUT に対して 405 Method Not Allowed を返す。
 #[sqlx::test(migrations = "../../migrations")]
 async fn notification_mark_read_nonexistent_id(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let fake_id = uuid::Uuid::new_v4();
 

@@ -41,6 +41,7 @@ fn make_signal(pair: &str, direction: Direction, sl_pct: Decimal, alloc_pct: Dec
 
 /// Override the seeded leverage (default 2 from `seed_trading_account`) so
 /// gmo_fx boundary tests can run with the production-realistic 10x leverage.
+#[cfg(test)]
 async fn override_leverage(pool: &sqlx::PgPool, account_id: Uuid, leverage: Decimal) {
     sqlx::query("UPDATE trading_accounts SET leverage = $1 WHERE id = $2")
         .bind(leverage)
@@ -51,6 +52,7 @@ async fn override_leverage(pool: &sqlx::PgPool, account_id: Uuid, leverage: Deci
 }
 
 /// Read the current_balance for assertions in multi-execute scenarios.
+#[cfg(test)]
 async fn current_balance(pool: &sqlx::PgPool, account_id: Uuid) -> Decimal {
     let row: (Decimal,) =
         sqlx::query_as("SELECT current_balance FROM trading_accounts WHERE id = $1")
@@ -130,7 +132,8 @@ async fn account_too_small_rejects_signal(pool: sqlx::PgPool) {
         "boundary_strategy",
         10_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trader = build_trader_with_market(
         pool.clone(),
@@ -193,7 +196,8 @@ async fn min_lot_truncation_realistic_bitflyer(pool: sqlx::PgPool) {
         "boundary_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trader = build_trader_with_market(
         pool.clone(),
@@ -252,7 +256,8 @@ async fn lc_constraint_binds_at_extreme_sl_gmo_fx(pool: sqlx::PgPool) {
         "boundary_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     override_leverage(&pool, account_id, dec!(10)).await;
 
     let trader = build_trader_with_market(
@@ -327,7 +332,8 @@ async fn multiple_open_positions_share_balance_correctly(pool: sqlx::PgPool) {
         "boundary_strategy",
         30_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     override_leverage(&pool, account_id, dec!(10)).await;
 
     let trader = build_trader_with_market(

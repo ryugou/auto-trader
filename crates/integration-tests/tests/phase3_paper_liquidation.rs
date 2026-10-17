@@ -104,6 +104,7 @@ fn levels() -> HashMap<Exchange, Decimal> {
 
 /// trade を seed して margin_lock する共通 helper。
 /// balance はその分 (entry * qty / leverage) 減る。
+#[cfg(test)]
 async fn seed_and_lock(pool: &sqlx::PgPool, trade: &Trade) {
     auto_trader_db::trades::insert_trade(pool, trade)
         .await
@@ -127,7 +128,8 @@ async fn liquidation_fires_when_maintenance_drops_below_threshold(pool: sqlx::Pg
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -184,7 +186,8 @@ async fn liquidation_does_not_fire_at_exact_threshold(pool: sqlx::PgPool) {
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -229,7 +232,8 @@ async fn liquidation_does_not_fire_above_threshold(pool: sqlx::PgPool) {
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -274,7 +278,8 @@ async fn live_account_skips_liquidation_judgment(pool: sqlx::PgPool) {
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -319,7 +324,8 @@ async fn missing_price_skips_judgment(pool: sqlx::PgPool) {
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -367,7 +373,8 @@ async fn liquidation_returns_all_trades_in_breached_account(pool: sqlx::PgPool) 
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // trade1: USD_JPY Long, entry=150, qty=5000, lev=25 → required=30k
     let trade1 = make_trade(
@@ -469,7 +476,8 @@ async fn close_trade_with_liquidation_reason_persists_and_emits_event(pool: sqlx
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,

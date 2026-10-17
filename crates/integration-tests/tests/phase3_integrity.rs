@@ -106,13 +106,16 @@ async fn balance_after_trade(pool: sqlx::PgPool) {
         "test_strategy",
         initial_balance,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Entry: bid=150, ask=151
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     let entry_price = trade.entry_price; // 151
@@ -223,13 +226,16 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
         "test_strategy",
         10_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps.clone());
 
     // Trade 1: Long, close with profit
-    let balance_before_t1 = read_current_balance(&pool, account_id).await;
+    let balance_before_t1 = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal1 = make_signal("USD_JPY", Direction::Long);
     let trade1 = trader
         .execute(&signal1)
@@ -310,7 +316,9 @@ async fn daily_summary_accuracy(pool: sqlx::PgPool) {
     )
     .await;
 
-    let balance_before_t2 = read_current_balance(&pool, account_id).await;
+    let balance_before_t2 = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal2 = make_signal("USD_JPY", Direction::Short);
     let trade2 = trader
         .execute(&signal2)
@@ -528,13 +536,16 @@ async fn jpy_truncation_on_pnl(pool: sqlx::PgPool) {
         "test_strategy",
         initial_balance,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Entry: bid=150.333, ask=150.777 → Long fills at ask=150.777
     let ps = make_price_store(exchange, "USD_JPY", dec!(150.333), dec!(150.777)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     let entry_price = trade.entry_price;
@@ -629,7 +640,8 @@ async fn overnight_fee_applied_to_open_trade(pool: sqlx::PgPool) {
         "test_strategy",
         initial_balance,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trade_id = auto_trader_integration_tests::helpers::seed::seed_open_trade(
         &pool,
@@ -643,7 +655,8 @@ async fn overnight_fee_applied_to_open_trade(pool: sqlx::PgPool) {
         dec!(100),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     let fee_amount = dec!(50);
     let mut tx = pool.begin().await.expect("begin tx");
@@ -691,7 +704,8 @@ async fn overnight_fee_skips_closed_trade(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trade_id = auto_trader_integration_tests::helpers::seed::seed_closed_trade(
         &pool,
@@ -708,7 +722,8 @@ async fn overnight_fee_skips_closed_trade(pool: sqlx::PgPool) {
         Utc::now() - chrono::Duration::hours(2),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     let fee_amount = dec!(50);
     let mut tx = pool.begin().await.expect("begin tx");
@@ -740,7 +755,8 @@ async fn daily_batch_backfill(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Use a specific past date
     let target_date = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
@@ -764,7 +780,8 @@ async fn daily_batch_backfill(pool: sqlx::PgPool) {
         entry_at,
         exit_at1,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     // Trade 2: loss (-300)
     auto_trader_integration_tests::helpers::seed::seed_closed_trade(
@@ -782,7 +799,8 @@ async fn daily_batch_backfill(pool: sqlx::PgPool) {
         entry_at,
         exit_at2,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     // First rebuild the daily_summary so rows exist
     auto_trader_db::summary::rebuild_daily_summary(&pool, target_date)
@@ -835,12 +853,15 @@ async fn account_events_margin_lock_release(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps);
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
@@ -916,7 +937,9 @@ async fn account_events_margin_lock_release(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(closed.pnl_amount, Some(expected_pnl));
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -961,7 +984,8 @@ async fn entry_indicators_jsonb_stored(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let trade_id = auto_trader_integration_tests::helpers::seed::seed_open_trade(
         &pool,
@@ -975,7 +999,8 @@ async fn entry_indicators_jsonb_stored(pool: sqlx::PgPool) {
         dec!(100),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Write entry_indicators JSONB
     let indicators = serde_json::json!({

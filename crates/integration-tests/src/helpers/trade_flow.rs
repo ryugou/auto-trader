@@ -13,7 +13,7 @@ struct CsvRow {
     high: Decimal,
     low: Decimal,
     close: Decimal,
-    volume: i64,
+    volume: u64,
     bid: Option<Decimal>,
     ask: Option<Decimal>,
 }
@@ -48,7 +48,7 @@ pub fn load_events_from_csv(
             high: row.high,
             low: row.low,
             close: row.close,
-            volume: Some(u64::try_from(row.volume).expect("invalid fixture volume: negative")),
+            volume: Some(row.volume),
             best_bid: row.bid,
             best_ask: row.ask,
             timestamp: ts,

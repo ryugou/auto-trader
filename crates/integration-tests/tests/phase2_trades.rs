@@ -9,7 +9,9 @@ use serde_json::Value;
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn trades_list_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -36,7 +38,8 @@ async fn trades_list_filter_by_status(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     let t2 = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
@@ -56,7 +59,8 @@ async fn trades_list_filter_by_status(pool: sqlx::PgPool) {
         t1,
         t2,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     seed::seed_open_trade(
         &pool,
@@ -70,9 +74,12 @@ async fn trades_list_filter_by_status(pool: sqlx::PgPool) {
         dec!(0.01),
         t1,
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Filter by status=closed.
@@ -97,7 +104,8 @@ async fn trades_list_filter_by_pair(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     let t2 = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
@@ -117,7 +125,8 @@ async fn trades_list_filter_by_pair(pool: sqlx::PgPool) {
         t1,
         t2,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     seed::seed_open_trade(
         &pool,
@@ -131,9 +140,12 @@ async fn trades_list_filter_by_pair(pool: sqlx::PgPool) {
         dec!(0.01),
         t1,
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -157,7 +169,8 @@ async fn trades_list_filter_by_exchange(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     let t2 = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
@@ -177,7 +190,8 @@ async fn trades_list_filter_by_exchange(pool: sqlx::PgPool) {
         t1,
         t2,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     seed::seed_open_trade(
         &pool,
@@ -191,9 +205,12 @@ async fn trades_list_filter_by_exchange(pool: sqlx::PgPool) {
         dec!(0.01),
         t1,
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -215,7 +232,8 @@ async fn trades_list_filter_by_account(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
 
@@ -231,9 +249,12 @@ async fn trades_list_filter_by_account(pool: sqlx::PgPool) {
         dec!(1),
         t1,
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -255,7 +276,8 @@ async fn trades_list_filter_by_strategy(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
 
@@ -271,9 +293,12 @@ async fn trades_list_filter_by_strategy(pool: sqlx::PgPool) {
         dec!(1),
         t1,
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Existing strategy returns the trade.
@@ -305,7 +330,8 @@ async fn trades_list_pagination(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let base_time = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     // Insert 5 closed trades.
@@ -327,10 +353,13 @@ async fn trades_list_pagination(pool: sqlx::PgPool) {
             entry_at,
             exit_at,
         )
-        .await;
+        .await
+        .expect("failed to seed closed trade");
     }
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Page 1, per_page=2.
@@ -366,7 +395,8 @@ async fn trades_list_total_count_accuracy(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let base_time = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     for i in 0..7 {
@@ -387,10 +417,13 @@ async fn trades_list_total_count_accuracy(pool: sqlx::PgPool) {
             entry_at,
             exit_at,
         )
-        .await;
+        .await
+        .expect("failed to seed closed trade");
     }
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Total should be 7 regardless of page size.
@@ -406,7 +439,9 @@ async fn trades_list_total_count_accuracy(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn trades_list_page_zero_treated_as_one(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -432,7 +467,8 @@ async fn trade_events_for_existing_trade(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     let t2 = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
     let trade_id = seed::seed_closed_trade(
@@ -450,9 +486,12 @@ async fn trade_events_for_existing_trade(pool: sqlx::PgPool) {
         t1,
         t2,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -468,7 +507,9 @@ async fn trade_events_for_existing_trade(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn trade_events_not_found(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let fake_id = uuid::Uuid::new_v4();
 
@@ -485,7 +526,9 @@ async fn trade_events_not_found(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn positions_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -509,7 +552,8 @@ async fn positions_lists_open_trades(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     seed::seed_open_trade(
         &pool,
@@ -523,9 +567,12 @@ async fn positions_lists_open_trades(pool: sqlx::PgPool) {
         dec!(1),
         Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -552,7 +599,8 @@ async fn positions_excludes_closed_trades(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
     let t2 = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
@@ -573,9 +621,12 @@ async fn positions_excludes_closed_trades(pool: sqlx::PgPool) {
         t1,
         t2,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client

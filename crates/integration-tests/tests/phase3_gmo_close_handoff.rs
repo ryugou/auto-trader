@@ -168,6 +168,7 @@ fn make_trader(
     .with_poll_timeout(std::time::Duration::from_millis(500))
 }
 
+#[cfg(test)]
 async fn seed_open_trade(
     pool: &sqlx::PgPool,
     account_id: Uuid,
@@ -220,7 +221,8 @@ async fn live_close_propagates_exchange_position_id_to_api(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let mock = Arc::new(CaptureCloseMockApi::new(true));
     let api: Arc<dyn ExchangeApi> = mock.clone();
     let ps = make_price_store(Exchange::GmoFx, "USD_JPY").await;
@@ -252,7 +254,8 @@ async fn live_close_refuses_when_required_position_id_is_missing(pool: sqlx::PgP
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let mock = Arc::new(CaptureCloseMockApi::new(true));
     let api: Arc<dyn ExchangeApi> = mock.clone();
     let ps = make_price_store(Exchange::GmoFx, "USD_JPY").await;

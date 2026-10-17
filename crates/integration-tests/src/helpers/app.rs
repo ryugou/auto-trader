@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Context;
 use auto_trader::api::{self, AppState};
 use auto_trader_core::types::Exchange;
 use auto_trader_market::price_store::PriceStore;
@@ -50,7 +51,7 @@ fn liquidation_levels_covering_every_exchange() -> Arc<HashMap<Exchange, rust_de
 /// The server uses the given DB pool and an empty PriceStore (no expected
 /// feeds). Tests that need price data should call `price_store.update()`
 /// before making requests.
-pub async fn spawn_test_app(pool: PgPool) -> TestApp {
+pub async fn spawn_test_app(pool: PgPool) -> anyhow::Result<TestApp> {
     spawn_test_app_with_price_store(pool, PriceStore::new(vec![])).await
 }
 
@@ -59,7 +60,7 @@ pub async fn spawn_test_app(pool: PgPool) -> TestApp {
 pub async fn spawn_test_app_with_price_store(
     pool: PgPool,
     price_store: Arc<PriceStore>,
-) -> TestApp {
+) -> anyhow::Result<TestApp> {
     spawn_test_app_with_levels(
         pool,
         price_store,
@@ -75,7 +76,7 @@ pub async fn spawn_test_app_with_levels(
     pool: PgPool,
     price_store: Arc<PriceStore>,
     exchange_liquidation_levels: Arc<HashMap<Exchange, rust_decimal::Decimal>>,
-) -> TestApp {
+) -> anyhow::Result<TestApp> {
     let state = AppState {
         pool,
         price_store: price_store.clone(),
@@ -86,23 +87,23 @@ pub async fn spawn_test_app_with_levels(
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("failed to bind ephemeral port");
-    let addr = listener.local_addr().expect("failed to get local addr");
+        .context("failed to bind ephemeral port")?;
+    let addr = listener.local_addr().context("failed to get local addr")?;
     let url = format!("http://{addr}");
 
     let handle = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .await
-            .expect("failed to serve test app");
+        if let Err(e) = axum::serve(listener, router).await {
+            panic!("failed to serve test app: {e}");
+        }
     });
 
     wait_until_accepting_connections(addr).await;
 
-    TestApp {
+    Ok(TestApp {
         url,
         handle,
         price_store,
-    }
+    })
 }
 
 async fn wait_until_accepting_connections(addr: SocketAddr) {

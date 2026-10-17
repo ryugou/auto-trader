@@ -112,6 +112,7 @@ fn levels() -> HashMap<Exchange, Decimal> {
 }
 
 /// trade を seed して margin_lock する共通 helper (balance がその分減る)。
+#[cfg(test)]
 async fn seed_and_lock(pool: &sqlx::PgPool, trade: &Trade) {
     auto_trader_db::trades::insert_trade(pool, trade)
         .await
@@ -127,6 +128,7 @@ async fn seed_and_lock(pool: &sqlx::PgPool, trade: &Trade) {
 
 /// live account を seed し、指定 current price で `detect_margin_alerts` を
 /// 走らせて返す小さな共通 runner。
+#[cfg(test)]
 async fn run_for_price(
     pool: &sqlx::PgPool,
     account_type: &str,
@@ -134,7 +136,9 @@ async fn run_for_price(
     current: Decimal,
 ) -> Vec<auto_trader::margin_alert::MarginAlert> {
     let account_id =
-        seed_trading_account(pool, name, account_type, "gmo_fx", "test_strategy", 100_000).await;
+        seed_trading_account(pool, name, account_type, "gmo_fx", "test_strategy", 100_000)
+            .await
+            .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,
@@ -214,7 +218,8 @@ async fn missing_price_skips_alert(pool: sqlx::PgPool) {
         "test_strategy",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade = make_trade(
         account_id,
         Exchange::GmoFx,

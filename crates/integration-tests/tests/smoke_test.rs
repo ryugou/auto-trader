@@ -18,7 +18,9 @@ async fn db_helper_snapshot_returns_table_contents(pool: sqlx::PgPool) {
     .await
     .unwrap();
 
-    let snapshot = db::snapshot_tables(&pool, &["trading_accounts"]).await;
+    let snapshot = db::snapshot_tables(&pool, &["trading_accounts"])
+        .await
+        .expect("failed to snapshot tables");
     assert!(
         snapshot.contains("smoke"),
         "snapshot must contain seeded account name: {snapshot}"
@@ -229,7 +231,9 @@ async fn mock_slack_webhook_captures_body() {
         .await
         .unwrap();
 
-    let bodies = mock.captured_bodies();
+    let bodies = mock
+        .captured_bodies()
+        .expect("failed to read captured bodies");
     assert_eq!(bodies.len(), 1);
     assert!(bodies[0].contains("hello"));
 }
@@ -346,17 +350,21 @@ async fn mock_vegapunk_tracks_calls() {
     assert_eq!(mock.counters.merge.load(Ordering::SeqCst), 1);
 
     // Verify captured arguments
-    let ingest_calls = mock.ingest_raw_calls();
+    let ingest_calls = mock
+        .ingest_raw_calls()
+        .expect("failed to read ingest_raw calls");
     assert_eq!(ingest_calls.len(), 1);
     assert_eq!(ingest_calls[0].text, "test data");
     assert_eq!(ingest_calls[0].source_type, "trading_log");
 
-    let search_calls = mock.search_calls();
+    let search_calls = mock.search_calls().expect("failed to read search calls");
     assert_eq!(search_calls[0].query, "BTC sentiment");
     assert_eq!(search_calls[0].mode, "local");
     assert_eq!(search_calls[0].top_k, 5);
 
-    let feedback_calls = mock.feedback_calls();
+    let feedback_calls = mock
+        .feedback_calls()
+        .expect("failed to read feedback calls");
     assert_eq!(feedback_calls[0].search_id, "search-001");
     assert_eq!(feedback_calls[0].rating, 4);
 }
@@ -407,7 +415,9 @@ async fn mock_bitflyer_ws_sends_ticks() {
         TickData::new(11_100_000, 11_099_000, 11_101_000).with_timestamp("2026-04-28T00:00:02.000"),
     ];
 
-    let mock = MockBitflyerWs::normal_ticks("FX_BTC_JPY", ticks).await;
+    let mock = MockBitflyerWs::normal_ticks("FX_BTC_JPY", ticks)
+        .await
+        .expect("failed to start mock bitflyer ws");
 
     let (ws, _) = tokio_tungstenite::connect_async(mock.url())
         .await
@@ -446,7 +456,9 @@ async fn mock_bitflyer_ws_disconnect_after() {
         TickData::new(11_100_000, 11_099_000, 11_101_000),
     ];
 
-    let mock = MockBitflyerWs::disconnect_after("FX_BTC_JPY", ticks, 2).await;
+    let mock = MockBitflyerWs::disconnect_after("FX_BTC_JPY", ticks, 2)
+        .await
+        .expect("failed to start mock bitflyer ws");
 
     let (ws, _) = tokio_tungstenite::connect_async(mock.url())
         .await
@@ -475,7 +487,9 @@ async fn mock_bitflyer_ws_invalid_message() {
     use auto_trader_integration_tests::mocks::bitflyer_ws::MockBitflyerWs;
     use futures_util::StreamExt;
 
-    let mock = MockBitflyerWs::invalid_message().await;
+    let mock = MockBitflyerWs::invalid_message()
+        .await
+        .expect("failed to start mock bitflyer ws");
 
     let (ws, _) = tokio_tungstenite::connect_async(mock.url())
         .await
@@ -513,7 +527,9 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
     use tracing_subscriber::prelude::*;
 
     // 1. Seed accounts
-    let accounts = db::seed_standard_accounts(&pool).await;
+    let accounts = db::seed_standard_accounts(&pool)
+        .await
+        .expect("failed to seed standard accounts");
     assert_ne!(accounts.bitflyer_cfd_account_id, accounts.gmo_fx_account_id);
 
     // 2. Load fixtures
@@ -524,7 +540,9 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
     assert_eq!(count, 3);
 
     // 3. Verify DB state via snapshot
-    let snapshot = db::snapshot_tables(&pool, &["trading_accounts", "price_candles"]).await;
+    let snapshot = db::snapshot_tables(&pool, &["trading_accounts", "price_candles"])
+        .await
+        .expect("failed to snapshot tables");
     assert!(
         snapshot.contains("test_bitflyer_cfd"),
         "snapshot must contain bitflyer account: {snapshot}"
@@ -562,7 +580,9 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
         .send()
         .await
         .unwrap();
-    let bodies = mock_slack.captured_bodies();
+    let bodies = mock_slack
+        .captured_bodies()
+        .expect("failed to read captured bodies");
     assert_eq!(bodies.len(), 1);
     assert!(bodies[0].contains("smoke"));
 
@@ -658,7 +678,8 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
                 min_order_size: dec!(0.001),
             },
         )
-        .await;
+        .await
+        .expect("failed to build pipeline harness");
 
         let mut strategy =
             BbMeanRevertV1::new("bb_mean_revert_v1".to_string(), vec![harness.pair.clone()]);
@@ -709,8 +730,14 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
             .expect("smoke: bb_mean_revert should emit a Long signal");
         assert_eq!(signal.direction, Direction::Long);
 
-        let balance_before = harness.current_balance().await;
-        let trade = harness.execute(&signal).await;
+        let balance_before = harness
+            .current_balance()
+            .await
+            .expect("failed to read current balance");
+        let trade = harness
+            .execute(&signal)
+            .await
+            .expect("failed to execute signal");
         assert_eq!(trade.status, TradeStatus::Open);
         assert_eq!(trade.direction, Direction::Long);
         assert_eq!(trade.exchange, Exchange::BitflyerCfd);
@@ -732,7 +759,10 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
         let exit_ask = entry_ask * (Decimal::ONE + exit_move);
         harness.set_market(exit_bid, exit_ask).await;
 
-        let closed = harness.close(trade.id, ExitReason::TpHit).await;
+        let closed = harness
+            .close(trade.id, ExitReason::TpHit)
+            .await
+            .expect("failed to close trade");
         assert_eq!(closed.status, TradeStatus::Closed);
         assert_eq!(closed.exit_reason, Some(ExitReason::TpHit));
         // Long closes at bid.
@@ -760,7 +790,10 @@ async fn full_integration_smoke_test(pool: sqlx::PgPool) {
         // is currently always 0 for paper trades but kept in the formula so
         // the smoke test catches a future fee model regression).
         assert_eq!(closed.fees, Decimal::ZERO, "paper trade fees must be 0");
-        let balance_after_close = harness.current_balance().await;
+        let balance_after_close = harness
+            .current_balance()
+            .await
+            .expect("failed to read current balance");
         assert_eq!(
             balance_after_close,
             balance_before + expected_pnl - closed.fees,

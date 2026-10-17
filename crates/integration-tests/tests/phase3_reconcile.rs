@@ -142,6 +142,7 @@ fn empty_price_store() -> Arc<PriceStore> {
     PriceStore::new(vec![])
 }
 
+#[cfg(test)]
 async fn seed_live_account(pool: &PgPool) -> Uuid {
     seed_trading_account(
         pool,
@@ -152,8 +153,10 @@ async fn seed_live_account(pool: &PgPool) -> Uuid {
         30_000,
     )
     .await
+    .expect("failed to seed trading account")
 }
 
+#[cfg(test)]
 async fn seed_open_trade_btc(pool: &PgPool, account_id: Uuid) -> Uuid {
     seed::seed_open_trade(
         pool,
@@ -168,8 +171,10 @@ async fn seed_open_trade_btc(pool: &PgPool, account_id: Uuid) -> Uuid {
         Utc::now(),
     )
     .await
+    .expect("failed to seed open trade")
 }
 
+#[cfg(test)]
 async fn seed_closing_trade_btc(pool: &PgPool, account_id: Uuid) -> Uuid {
     let trade_id = seed_open_trade_btc(pool, account_id).await;
     sqlx::query("UPDATE trades SET status = 'closing', closing_started_at = NOW() WHERE id = $1")
