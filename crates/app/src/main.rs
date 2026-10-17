@@ -13,10 +13,8 @@ use auto_trader::price_store;
 use auto_trader::spawn_system_alerts;
 use auto_trader_core::config::AppConfig;
 use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
-use auto_trader_core::executor::OrderExecutor;
-use auto_trader_core::types::{Direction, Exchange, Pair};
+use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::pool::create_pool;
-use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_market::market_feed::MarketFeed;
@@ -909,185 +907,23 @@ async fn main() -> anyhow::Result<()> {
     let pos_monitor_handle =
         spawn_fx_price_drain_since_fx_position_monitor_is_disabled(price_monitor_rx);
 
-    let (crypto_price_tx, mut crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
-    let crypto_monitor_pool = pool.clone();
-    let crypto_monitor_trade_tx = trade_tx.clone();
-    let crypto_monitor_exchange_apis = exchange_apis.clone();
-    let crypto_monitor_price_store = price_store.clone();
-    let crypto_monitor_notifier = notifier.clone();
-    let crypto_monitor_position_sizer = shared_position_sizer.clone();
-    let crypto_monitor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
-    let crypto_monitor_live_forces_dry_run = live_forces_dry_run;
-    let crypto_monitor_handle = tokio::spawn(async move {
-        let close_ctx = auto_trader::closer::CloseContext {
-            pool: crypto_monitor_pool.clone(),
-            apis: crypto_monitor_exchange_apis.clone(),
-            price_store: crypto_monitor_price_store.clone(),
-            notifier: crypto_monitor_notifier.clone(),
-            position_sizer: crypto_monitor_position_sizer.clone(),
-            liquidation_levels: crypto_monitor_exchange_liquidation_levels.clone(),
-            trade_tx: crypto_monitor_trade_tx.clone(),
-        };
-        let liq_ctx = auto_trader::liquidation::LiquidationContext {
-            pool: crypto_monitor_pool.clone(),
-            price_store: crypto_monitor_price_store.clone(),
-            exchange_liquidation_levels: crypto_monitor_exchange_liquidation_levels.clone(),
-            live_forces_dry_run: crypto_monitor_live_forces_dry_run,
-        };
-        let mut margin_alert_last_sent_persisted_across_ticks: HashMap<
-            (uuid::Uuid, &'static str),
-            std::time::Instant,
-        > = HashMap::new();
-        while let Some(event) = crypto_price_rx.recv().await {
-            let current_price = event.candle.close;
-            let open_trades = match auto_trader_db::trades::list_open_with_account_name(
-                &crypto_monitor_pool,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to list open trades for crypto monitor");
-                    continue;
-                }
-            };
+    let (crypto_price_tx, crypto_price_rx) = mpsc::channel::<PriceEvent>(256);
+    let new_close_ctx = || auto_trader::closer::CloseContext {
+        pool: pool.clone(),
+        apis: exchange_apis.clone(),
+        price_store: price_store.clone(),
+        notifier: notifier.clone(),
+        position_sizer: shared_position_sizer.clone(),
+        liquidation_levels: exchange_liquidation_levels.clone(),
+        trade_tx: trade_tx.clone(),
+    };
+    let crypto_monitor_handle = tokio::spawn(runtime::crypto_monitor::run(
+        new_close_ctx(),
+        live_forces_dry_run,
+        crypto_price_rx,
+    ));
 
-            let liq_targets = auto_trader::liquidation::detect_liquidation_targets(
-                &liq_ctx,
-                &open_trades,
-                &event,
-            )
-            .await;
-            for (account_id, trade_ids) in liq_targets {
-                for trade_id in trade_ids {
-                    let owned = match open_trades.iter().find(|t| t.trade.id == trade_id) {
-                        Some(o) => o,
-                        None => continue,
-                    };
-                    let account_name = owned
-                        .account_name
-                        .clone()
-                        .unwrap_or_else(|| account_id.to_string());
-                    let account_type = owned
-                        .account_type
-                        .clone()
-                        .unwrap_or_else(|| "paper".to_string());
-                    let close_as_dry_run_for_paper_only_liquidation = true;
-                    auto_trader::closer::close_trade(
-                        &close_ctx,
-                        &owned.trade,
-                        account_name,
-                        account_type,
-                        close_as_dry_run_for_paper_only_liquidation,
-                        auto_trader_core::types::ExitReason::Liquidation,
-                        current_price,
-                    )
-                    .await;
-                }
-            }
-
-            let margin_alerts =
-                auto_trader::margin_alert::detect_margin_alerts(&liq_ctx, &open_trades, &event)
-                    .await;
-            for alert in margin_alerts {
-                let key = (alert.account_id, alert.level.as_str());
-                let now = std::time::Instant::now();
-                let should_send = margin_alert_last_sent_persisted_across_ticks
-                    .get(&key)
-                    .is_none_or(|last| {
-                        now.duration_since(*last) > std::time::Duration::from_secs(1800)
-                    });
-                if !should_send {
-                    continue;
-                }
-                margin_alert_last_sent_persisted_across_ticks.insert(key, now);
-                let ev = auto_trader_notify::NotifyEvent::SystemAlert(
-                    auto_trader_notify::SystemAlertEvent {
-                        title: format!("margin {}", alert.level.as_str()),
-                        account_name: alert.account_name.clone(),
-                        exchange: event.exchange,
-                        body: format!(
-                            "maintenance ratio {} approaching liquidation level {} \
-                             (live account — exchange will liquidate below threshold)",
-                            alert.ratio.round_dp(4),
-                            alert.threshold
-                        ),
-                    },
-                );
-                let notifier = crypto_monitor_notifier.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = notifier.send(ev).await {
-                        tracing::warn!(error = %e, "failed to send margin alert notification");
-                    }
-                });
-            }
-
-            for owned in open_trades {
-                let trade = owned.trade;
-                if trade.exchange != event.exchange || trade.pair != event.pair {
-                    continue;
-                }
-                let account_id = trade.account_id;
-                let account_type = match owned.account_type.as_deref() {
-                    Some(t) => t.to_owned(),
-                    None => {
-                        tracing::warn!(
-                            trade_id = %trade.id,
-                            account_id = %account_id,
-                            "invalid account: not found"
-                        );
-                        continue;
-                    }
-                };
-                let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-                let dry_run = auto_trader::startup::effective_dry_run(
-                    &account_type,
-                    crypto_monitor_live_forces_dry_run,
-                );
-                let now = chrono::Utc::now();
-                let time_limit_hit = trade.max_hold_until.is_some_and(|deadline| now >= deadline);
-
-                let mut exit_reason = match trade.direction {
-                    Direction::Long => {
-                        if current_price <= trade.stop_loss {
-                            Some(auto_trader_core::types::ExitReason::SlHit)
-                        } else if trade.take_profit.is_some_and(|tp| current_price >= tp) {
-                            Some(auto_trader_core::types::ExitReason::TpHit)
-                        } else {
-                            None
-                        }
-                    }
-                    Direction::Short => {
-                        if current_price >= trade.stop_loss {
-                            Some(auto_trader_core::types::ExitReason::SlHit)
-                        } else if trade.take_profit.is_some_and(|tp| current_price <= tp) {
-                            Some(auto_trader_core::types::ExitReason::TpHit)
-                        } else {
-                            None
-                        }
-                    }
-                };
-                if exit_reason.is_none() && time_limit_hit {
-                    exit_reason = Some(auto_trader_core::types::ExitReason::StrategyTimeLimit);
-                }
-                if let Some(reason) = exit_reason {
-                    auto_trader::closer::close_trade(
-                        &close_ctx,
-                        &trade,
-                        account_name,
-                        account_type.clone(),
-                        dry_run,
-                        reason,
-                        current_price,
-                    )
-                    .await;
-                }
-            }
-        }
-        tracing::info!("price channel closed, stopping crypto position monitor");
-    });
-
-    let (exit_tx, mut exit_rx) = mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
+    let (exit_tx, exit_rx) = mpsc::channel::<auto_trader_core::strategy::ExitSignal>(64);
     let engine_pool = pool.clone();
     let price_store_for_engine = price_store.clone();
 
@@ -1173,124 +1009,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let exit_pool = pool.clone();
-    let exit_trade_tx = trade_tx.clone();
-    let exit_exchange_apis = exchange_apis.clone();
-    let exit_price_store = price_store.clone();
-    let exit_notifier = notifier.clone();
-    let exit_position_sizer = shared_position_sizer.clone();
-    let exit_exchange_liquidation_levels = exchange_liquidation_levels.clone();
-    let exit_live_forces_dry_run = live_forces_dry_run;
-    let exit_executor_handle = tokio::spawn(async move {
-        while let Some(exit) = exit_rx.recv().await {
-            let owned = match auto_trader_db::trades::get_open_trade_with_account(
-                &exit_pool,
-                exit.trade_id,
-            )
-            .await
-            {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    tracing::debug!(
-                        trade_id = %exit.trade_id,
-                        "invalid trade: missing or closed"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(trade_id = %exit.trade_id, error = %e, "failed to load trade");
-                    continue;
-                }
-            };
-            let trade = owned.trade;
-            let account_id = trade.account_id;
-            let account_type = match owned.account_type.as_deref() {
-                Some(t) => t.to_owned(),
-                None => {
-                    tracing::warn!(
-                        trade_id = %trade.id,
-                        account_id = %account_id,
-                        "invalid account: not found"
-                    );
-                    continue;
-                }
-            };
-            let account_name = owned.account_name.unwrap_or_else(|| account_id.to_string());
-            let dry_run =
-                auto_trader::startup::effective_dry_run(&account_type, exit_live_forces_dry_run);
-            let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
-                match exit_exchange_apis.get(&trade.exchange) {
-                    Some(a) => a.clone(),
-                    None => {
-                        if !dry_run {
-                            tracing::warn!(
-                                exchange = %trade.exchange,
-                                trade_id = %exit.trade_id,
-                                "unsupported exchange"
-                            );
-                            continue;
-                        }
-                        std::sync::Arc::new(auto_trader_market::null_exchange_api::NullExchangeApi)
-                    }
-                };
-            let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
-                &exit_exchange_liquidation_levels,
-                trade.exchange,
-                || format!("strategy exit on trade {}", trade.id),
-            ) {
-                Some(y) => y,
-                None => continue,
-            };
-            let trader = UnifiedTrader::new(
-                exit_pool.clone(),
-                trade.exchange,
-                account_id,
-                account_name,
-                api.clone(),
-                exit_price_store.clone(),
-                exit_notifier.clone(),
-                exit_position_sizer.clone(),
-                liquidation_margin_level,
-                dry_run,
-            );
-            let reason = exit.reason.to_exit_reason();
-            match trader.close_position(&trade.id.to_string(), reason).await {
-                Ok(closed) => {
-                    tracing::info!(
-                        strategy_name = %closed.strategy_name,
-                        pair = %closed.pair,
-                        direction = ?closed.direction,
-                        strategy_exit_reason = exit.reason.as_tag(),
-                        entry_price = %closed.entry_price,
-                        exit_price = %closed.exit_price.unwrap_or_default(),
-                        "strategy exit closed position"
-                    );
-                    let exit_price = closed.exit_price.unwrap_or(exit.close_price);
-                    if exit_trade_tx
-                        .send(auto_trader_core::event::TradeEvent {
-                            trade: closed,
-                            action: auto_trader_core::event::TradeAction::Closed {
-                                exit_price,
-                                exit_reason: reason,
-                            },
-                            account_type: Some(account_type.clone()),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("failed to send trade event: channel closed");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        trade_id = %trade.id,
-                        error = %e,
-                        "failed to close trade for strategy exit"
-                    );
-                }
-            }
-        }
-    });
+    let exit_executor_handle = tokio::spawn(runtime::exit_executor::run(
+        new_close_ctx(),
+        live_forces_dry_run,
+        exit_rx,
+    ));
 
     let ctx = runtime::executor_loop::ExecutorLoopContext {
         pool: pool.clone(),
