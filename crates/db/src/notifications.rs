@@ -7,22 +7,40 @@ use uuid::Uuid;
 
 use crate::jst_day_start::{jst_day_start_utc, jst_next_day_start_utc};
 
+/// Row of the `notifications` table: a notification about an opened or closed trade.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Notification {
+    /// Identifier of the notification.
     pub id: Uuid,
+    /// Kind of the notification: `trade_opened` or `trade_closed`.
     pub kind: String,
+    /// Identifier of the trade.
     pub trade_id: Uuid,
+    /// Identifier of the account that holds the trade.
     pub account_id: Uuid,
+    /// Name of the strategy of the trade.
     pub strategy_name: String,
+    /// Currency pair of the trade.
     pub pair: String,
+    /// Direction of the trade as text.
     pub direction: String,
+    /// Entry price for `trade_opened` and exit price for `trade_closed`.
     pub price: Decimal,
+    /// Profit or loss of the trade; `None` for `trade_opened`.
     pub pnl_amount: Option<Decimal>,
+    /// Reason the trade was closed; `None` for `trade_opened`.
     pub exit_reason: Option<String>,
+    /// Time the notification was created.
     pub created_at: DateTime<Utc>,
+    /// Time the notification was marked as read; `None` while it is unread.
     pub read_at: Option<DateTime<Utc>>,
 }
 
+/// Inserts a `trade_opened` notification for `trade` with its entry price.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn insert_trade_opened<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -45,6 +63,14 @@ where
     Ok(())
 }
 
+/// Inserts a `trade_closed` notification for `trade` with its exit price, profit or loss and exit reason.
+///
+/// # Errors
+///
+/// - Returns an error if `trade` has no exit price.
+/// - Returns an error if `trade` has no profit or loss.
+/// - Returns an error if `trade` has no exit reason.
+/// - Returns an error if the database query fails.
 pub async fn insert_trade_closed<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -78,6 +104,12 @@ where
     Ok(())
 }
 
+/// Returns a page of notifications, newest first, together with the number of notifications that match the filters. `unread_only` keeps only unread notifications and `kind_filter` keeps one kind. `from` and `to` keep the notifications created from the start of the JST day of `from` up to the end of the JST day of `to`.
+///
+/// # Errors
+///
+/// - Returns an error if the JST day of `from` or `to` is out of range.
+/// - Returns an error if the database query fails.
 pub async fn list(
     pool: &PgPool,
     limit: i64,
@@ -135,6 +167,11 @@ pub async fn list(
     Ok((items, total))
 }
 
+/// Returns the number of notifications that have not been read.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn unread_count(pool: &PgPool) -> anyhow::Result<i64> {
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL")
         .fetch_one(pool)
@@ -142,6 +179,11 @@ pub async fn unread_count(pool: &PgPool) -> anyhow::Result<i64> {
     Ok(n)
 }
 
+/// Marks every unread notification as read at the current time and returns the number of notifications changed.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn mark_all_read(pool: &PgPool) -> anyhow::Result<u64> {
     let result = sqlx::query("UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL")
         .execute(pool)
@@ -149,6 +191,11 @@ pub async fn mark_all_read(pool: &PgPool) -> anyhow::Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Deletes the notifications that were read more than 30 days ago and returns the number deleted.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn purge_old_read(pool: &PgPool) -> anyhow::Result<u64> {
     let result = sqlx::query(
         "DELETE FROM notifications

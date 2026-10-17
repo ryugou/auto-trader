@@ -2,6 +2,11 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Inserts a macro event under a newly generated identifier and returns that identifier.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn insert_macro_event(
     pool: &PgPool,
     summary: &str,

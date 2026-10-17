@@ -14,10 +14,20 @@ use super::model::{ACCOUNT_COLUMNS, AccountRow, TradingAccount};
 const ATOMIC_DEACTIVATION_GUARD_WHERE: &str = "$5 IS DISTINCT FROM FALSE OR NOT active OR NOT EXISTS (\
      SELECT 1 FROM trades t WHERE t.account_id = $1 AND t.status IN ('open', 'closing'))";
 
+/// Returns the trading account with the given identifier, or `None` if there is none.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<TradingAccount>> {
     get_account(pool, id).await
 }
 
+/// Returns the trading account with the given identifier, or `None` if there is none.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<TradingAccount>> {
     let row = sqlx::query_as::<_, AccountRow>(&format!(
         "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts WHERE id = $1"
@@ -28,6 +38,11 @@ pub async fn get_account(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Tradi
     Ok(row.map(TradingAccount::from))
 }
 
+/// Returns all trading accounts, oldest first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn list_all(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     let rows = sqlx::query_as::<_, AccountRow>(&format!(
         "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts ORDER BY created_at ASC"
@@ -37,6 +52,11 @@ pub async fn list_all(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     Ok(rows.into_iter().map(TradingAccount::from).collect())
 }
 
+/// Returns the active trading accounts, oldest first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn list_active(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     let rows = sqlx::query_as::<_, AccountRow>(&format!(
         "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts WHERE active ORDER BY created_at ASC"
@@ -46,6 +66,11 @@ pub async fn list_active(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     Ok(rows.into_iter().map(TradingAccount::from).collect())
 }
 
+/// Returns the trading accounts that are active or have an open or closing trade, oldest first.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn list_active_or_with_open_trades(pool: &PgPool) -> anyhow::Result<Vec<TradingAccount>> {
     let rows = sqlx::query_as::<_, AccountRow>(&format!(
         "SELECT {ACCOUNT_COLUMNS} FROM trading_accounts ta
@@ -61,6 +86,12 @@ pub async fn list_active_or_with_open_trades(pool: &PgPool) -> anyhow::Result<Ve
     Ok(rows.into_iter().map(TradingAccount::from).collect())
 }
 
+/// Sets the current balance of the account to `new_balance`.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the account does not exist.
 pub async fn update_balance(pool: &PgPool, id: Uuid, new_balance: Decimal) -> anyhow::Result<()> {
     let result = sqlx::query("UPDATE trading_accounts SET current_balance = $2 WHERE id = $1")
         .bind(id)
@@ -73,6 +104,11 @@ pub async fn update_balance(pool: &PgPool, id: Uuid, new_balance: Decimal) -> an
     Ok(())
 }
 
+/// Returns the time until which the account is halted and the reason for the halt, or `None` if the account does not exist or has no halt time.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn get_halt(
     pool: &PgPool,
     id: Uuid,
@@ -85,6 +121,11 @@ pub async fn get_halt(
     Ok(row.and_then(|(until, reason)| until.map(|u| (u, reason))))
 }
 
+/// Sets the halt time and the halt reason of the account. It changes nothing if the account does not exist.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn set_halt(
     pool: &PgPool,
     id: Uuid,
@@ -100,18 +141,31 @@ pub async fn set_halt(
     Ok(())
 }
 
+/// Fields of a trading account to change. A field left as `None` keeps its current value.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateTradingAccount {
+    /// New name of the account.
     pub name: Option<String>,
+    /// New leverage, checked against the cap of the exchange.
     pub leverage: Option<Decimal>,
+    /// New strategy name of the account.
     pub strategy: Option<String>,
+    /// New active flag. Deactivating fails while the account has an open or closing trade, and activating a live account fails while another live account of the same exchange is active.
     pub active: Option<bool>,
 }
 
+/// Error returned when a trading account cannot be updated.
 #[derive(Debug)]
 pub enum UpdateAccountError {
-    OpenTrades { account_id: Uuid, count: usize },
+    /// The account cannot be deactivated because it has open or closing trades.
+    OpenTrades {
+        /// Identifier of the account.
+        account_id: Uuid,
+        /// Number of open and closing trades of the account.
+        count: usize,
+    },
+    /// Any other failure, such as an invalid request or a database error.
     Other(anyhow::Error),
 }
 
@@ -141,6 +195,16 @@ impl From<sqlx::Error> for UpdateAccountError {
     }
 }
 
+/// Applies the fields of `req` that are not `None` to the account and returns the updated account, or `None` if no account was updated.
+///
+/// # Errors
+///
+/// - Returns `UpdateAccountError::OpenTrades` if `active` is `Some(false)`, the account is active and it has an open or closing trade.
+/// - Returns `UpdateAccountError::Other` if `leverage` is set and the stored exchange of the account is not supported.
+/// - Returns `UpdateAccountError::Other` if `leverage` exceeds the cap of the exchange.
+/// - Returns `UpdateAccountError::Other` if `active` is `Some(true)` for a live account and another live account of the same exchange is active.
+/// - Returns `UpdateAccountError::Other` if the database query fails, including when the update violates the limit of one live account per exchange.
+/// - Returns `UpdateAccountError::Other` if a stored trade of the account has an exchange, direction, status or exit reason that is not supported, while its open trades are counted.
 pub async fn update_account(
     pool: &PgPool,
     id: Uuid,
@@ -236,6 +300,11 @@ async fn reject_if_other_live_account_active(
     Ok(())
 }
 
+/// Deletes the account and returns whether an account was deleted.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
     let result = sqlx::query("DELETE FROM trading_accounts WHERE id = $1")
         .bind(id)
@@ -244,6 +313,13 @@ pub async fn delete_account(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
+/// Sets the current balance of the account to its initial balance plus the profit or loss minus the fees of its closed trades, and returns the new balance.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the account has an open or closing trade.
+/// - Returns an error if the account does not exist.
 pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
     let (active_count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM trades WHERE account_id = $1 AND status IN ('open', 'closing')",
@@ -285,6 +361,11 @@ pub async fn recalculate_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Res
     Ok(new_balance)
 }
 
+/// Sets the current balance of every account that has no open or closing trade to its initial balance plus the profit or loss minus the fees of its closed trades, and returns the identifier and new balance of each updated account ordered by identifier.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn recalculate_all_balances(pool: &PgPool) -> anyhow::Result<Vec<(Uuid, Decimal)>> {
     let results: Vec<(Uuid, Decimal)> = sqlx::query_as(
         r#"WITH recalculated AS (

@@ -15,6 +15,12 @@ struct AcquireLockRow {
     old_closing_started_at: Option<DateTime<Utc>>,
 }
 
+/// Returns the open trade with the given identifier that belongs to the account, or `None` if there is none.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn get_trade_for_close<'e, E>(
     executor: E,
     trade_id: Uuid,
@@ -39,13 +45,23 @@ where
     row.map(|r| r.try_into()).transpose()
 }
 
+/// Number of seconds after which a trade that is still closing counts as stale and its close lock can be taken again.
 pub const STALE_CLOSING_THRESHOLD_SECS: i64 = 300;
 
+/// Result of taking the close lock of a trade.
 pub struct CloseLockAcquired {
+    /// Trade whose close lock was taken.
     pub trade: Trade,
+    /// Whether the lock was taken over from an earlier close attempt that had not finished.
     pub was_stale_recovery: bool,
 }
 
+/// Moves the trade of the account to the closing status and returns it, if it is open or has been closing for longer than `STALE_CLOSING_THRESHOLD_SECS`. Returns `None` otherwise.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the stored row has an exchange, direction, status or exit reason that is not supported.
 pub async fn acquire_close_lock(
     pool: &PgPool,
     trade_id: Uuid,
@@ -97,6 +113,11 @@ pub async fn acquire_close_lock(
     .transpose()
 }
 
+/// Returns the trade from the closing status to open. It changes nothing if the trade is not closing.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn release_close_lock<'e, E>(executor: E, trade_id: Uuid) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -113,6 +134,12 @@ where
     Ok(())
 }
 
+/// Marks an open or closing trade as closed with the given exit price, exit time, profit or loss, exit reason and fees.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
+/// - Returns an error if the trade does not exist or is already closed.
 pub async fn update_trade_closed<'e, E>(
     executor: E,
     trade_id: Uuid,
@@ -150,6 +177,17 @@ where
     Ok(())
 }
 
+/// Marks an open or closing trade as closed at the current time with the given exit price, profit or loss and exit reason, and in the same transaction adds its margin and `pnl_amount` to the balance of the account and records a `margin_release` and a `trade_close` account event.
+///
+/// # Errors
+///
+/// - Returns an error if the database query or transaction fails.
+/// - Returns an error if the trade does not exist or is already closed.
+/// - Returns an error if the stored row has an exchange, direction, status or exit reason that is not supported.
+///
+/// # Panics
+///
+/// Panics if the leverage of the stored trade is zero.
 pub async fn close_trade_reconciled(
     pool: &PgPool,
     trade_id: Uuid,

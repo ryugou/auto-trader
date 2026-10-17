@@ -1,5 +1,10 @@
 use auto_trader_core::types::Trade;
 
+/// Inserts `trade` with all its fields into the `trades` table.
+///
+/// # Errors
+///
+/// - Returns an error if the database query fails.
 pub async fn insert_trade<'e, E>(executor: E, trade: &Trade) -> anyhow::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
