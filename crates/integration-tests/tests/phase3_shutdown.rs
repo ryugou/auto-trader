@@ -136,7 +136,8 @@ async fn open_positions_preserved_after_shutdown(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Seed open trades
     let trade_id_1 = auto_trader_integration_tests::helpers::seed::seed_open_trade(
@@ -151,7 +152,8 @@ async fn open_positions_preserved_after_shutdown(pool: sqlx::PgPool) {
         dec!(0.01),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     let trade_id_2 = auto_trader_integration_tests::helpers::seed::seed_open_trade(
         &pool,
@@ -165,7 +167,8 @@ async fn open_positions_preserved_after_shutdown(pool: sqlx::PgPool) {
         dec!(0.02),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Simulate shutdown by creating and dropping channels
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(16);

@@ -9,7 +9,9 @@ use serde_json::Value;
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_summary_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -35,7 +37,8 @@ async fn dashboard_summary_with_data(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let date = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
     seed::seed_daily_summary(
@@ -51,9 +54,12 @@ async fn dashboard_summary_with_data(pool: sqlx::PgPool) {
         dec!(5000),
         dec!(1000),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -79,7 +85,8 @@ async fn dashboard_summary_with_date_filter(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     seed::seed_daily_summary(
         &pool,
@@ -94,7 +101,8 @@ async fn dashboard_summary_with_date_filter(pool: sqlx::PgPool) {
         dec!(1000),
         dec!(500),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
     seed::seed_daily_summary(
         &pool,
         account_id,
@@ -108,9 +116,12 @@ async fn dashboard_summary_with_date_filter(pool: sqlx::PgPool) {
         dec!(2000),
         dec!(300),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Filter to only March 10-20 (should only include March 15).
@@ -137,7 +148,8 @@ async fn dashboard_pnl_history(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     seed::seed_daily_summary(
         &pool,
@@ -152,7 +164,8 @@ async fn dashboard_pnl_history(pool: sqlx::PgPool) {
         dec!(1000),
         dec!(500),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
     seed::seed_daily_summary(
         &pool,
         account_id,
@@ -166,9 +179,12 @@ async fn dashboard_pnl_history(pool: sqlx::PgPool) {
         dec!(-500),
         dec!(800),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -186,7 +202,9 @@ async fn dashboard_pnl_history(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_pnl_history_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -204,7 +222,9 @@ async fn dashboard_pnl_history_empty(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_balance_history(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -232,14 +252,17 @@ async fn dashboard_balance_history_excludes_inactive_accounts(pool: sqlx::PgPool
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     sqlx::query("UPDATE trading_accounts SET active = FALSE WHERE id = $1")
         .bind(account_id)
         .execute(&pool)
         .await
         .expect("retire account");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -271,7 +294,8 @@ async fn dashboard_strategy_stats(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     seed::seed_daily_summary(
         &pool,
@@ -286,9 +310,12 @@ async fn dashboard_strategy_stats(pool: sqlx::PgPool) {
         dec!(5000),
         dec!(1000),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -308,7 +335,9 @@ async fn dashboard_strategy_stats(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_strategy_stats_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -334,7 +363,8 @@ async fn dashboard_pair_stats(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     seed::seed_daily_summary(
         &pool,
@@ -349,9 +379,12 @@ async fn dashboard_pair_stats(pool: sqlx::PgPool) {
         dec!(3000),
         dec!(500),
     )
-    .await;
+    .await
+    .expect("failed to seed daily summary");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -379,7 +412,8 @@ async fn dashboard_hourly_winrate(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         100_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Seed closed trades at different hours to get hourly data.
     let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
@@ -399,9 +433,12 @@ async fn dashboard_hourly_winrate(pool: sqlx::PgPool) {
         t1,
         t1_exit,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -426,7 +463,9 @@ async fn dashboard_hourly_winrate(pool: sqlx::PgPool) {
 /// (notifications の parse_opt_date とは異なり、400 にはならない)
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_pnl_history_bad_date_returns_200(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -442,7 +481,9 @@ async fn dashboard_pnl_history_bad_date_returns_200(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn dashboard_hourly_winrate_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client

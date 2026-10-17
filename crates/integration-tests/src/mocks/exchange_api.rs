@@ -11,6 +11,8 @@ use auto_trader_market::exchange_api::{ExchangeApi, StopOrderStatus};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+use super::lock_mock_state;
+
 const STOP_ORDER_STATUS_DRIVING_CLOSE_THROUGH_CANCEL: StopOrderStatus = StopOrderStatus::Active;
 
 /// Per-method call counters exposed via `Arc<AtomicU32>`.
@@ -160,16 +162,13 @@ impl ExchangeApi for MockExchangeApi {
         self.counters
             .place_stop_order
             .fetch_add(1, Ordering::SeqCst);
-        self.place_stop_calls
-            .lock()
-            .expect("failed to lock place_stop_calls: mutex poisoned")
-            .push(StopOrderCall {
-                product_code: product_code.to_string(),
-                close_side,
-                size,
-                trigger_price,
-                position_id: position_id.map(|s| s.to_string()),
-            });
+        lock_mock_state(&self.place_stop_calls, "place_stop_calls")?.push(StopOrderCall {
+            product_code: product_code.to_string(),
+            close_side,
+            size,
+            trigger_price,
+            position_id: position_id.map(|s| s.to_string()),
+        });
         self.place_stop_order_cfg.try_respond()
     }
 
@@ -192,11 +191,8 @@ impl ExchangeApi for MockExchangeApi {
         self.counters
             .stop_order_status
             .fetch_add(1, Ordering::SeqCst);
-        if let Some(next) = self
-            .stop_order_status_seq
-            .lock()
-            .expect("failed to lock stop_order_status_seq: mutex poisoned")
-            .pop_front()
+        if let Some(next) =
+            lock_mock_state(&self.stop_order_status_seq, "stop_order_status_seq")?.pop_front()
         {
             return Ok(next);
         }

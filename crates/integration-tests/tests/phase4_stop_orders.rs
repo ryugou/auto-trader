@@ -99,7 +99,8 @@ async fn live_open_places_stop_with_rounded_trigger(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
     // Open fill price = 150.335 → Long SL = 150.335 × 0.98 = 147.3283.
@@ -184,7 +185,8 @@ async fn close_cancels_active_stop_then_market_closes(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
     let api = MockExchangeApiBuilder::new()
@@ -258,7 +260,8 @@ async fn close_proceeds_when_cancel_errors_but_stop_gone(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
     let api = MockExchangeApiBuilder::new()
@@ -332,7 +335,8 @@ async fn close_records_executed_stop_without_new_order(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
     let api = MockExchangeApiBuilder::new()
@@ -406,7 +410,8 @@ async fn stop_placement_failure_does_not_fail_open_and_alerts(pool: sqlx::PgPool
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let price_store = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
     let (slack, webhook_url) = MockSlackWebhook::start().await;
@@ -456,7 +461,9 @@ async fn stop_placement_failure_does_not_fail_open_and_alerts(pool: sqlx::PgPool
     // The OrderFailed alert is fired fire-and-forget; poll for it.
     let mut saw_alert = false;
     for _ in 0..40 {
-        let bodies = slack.captured_bodies();
+        let bodies = slack
+            .captured_bodies()
+            .expect("failed to read captured bodies");
         if bodies.iter().any(|b| b.contains("stop order")) {
             saw_alert = true;
             break;
@@ -466,6 +473,8 @@ async fn stop_placement_failure_does_not_fail_open_and_alerts(pool: sqlx::PgPool
     assert!(
         saw_alert,
         "a stop-placement-failure alert must be sent to Slack. bodies={:?}",
-        slack.captured_bodies()
+        slack
+            .captured_bodies()
+            .expect("failed to read captured bodies")
     );
 }

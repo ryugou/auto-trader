@@ -255,6 +255,7 @@ fn make_position(
 
 /// Warm up strategy using the bb_long_entry CSV and obtain the Long entry signal.
 /// Returns the strategy and signal for further exit testing.
+#[cfg(test)]
 async fn warmup_and_get_long_entry() -> (BbMeanRevertV1, auto_trader_core::types::Signal) {
     let mut strategy = new_strategy();
     let events = load_events_from_csv(
@@ -274,6 +275,7 @@ async fn warmup_and_get_long_entry() -> (BbMeanRevertV1, auto_trader_core::types
 }
 
 /// Warm up strategy using the bb_short_entry CSV and obtain the Short entry signal.
+#[cfg(test)]
 async fn warmup_and_get_short_entry() -> (BbMeanRevertV1, auto_trader_core::types::Signal) {
     let mut strategy = new_strategy();
     let events = load_events_from_csv(

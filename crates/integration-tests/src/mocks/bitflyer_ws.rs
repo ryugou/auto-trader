@@ -1,3 +1,4 @@
+use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
@@ -65,7 +66,7 @@ pub struct MockBitflyerWs {
 
 impl MockBitflyerWs {
     /// Start a mock that sends a series of ticker messages at the given interval.
-    pub async fn normal_ticks(pair: &str, ticks: Vec<TickData>) -> Self {
+    pub async fn normal_ticks(pair: &str, ticks: Vec<TickData>) -> anyhow::Result<Self> {
         Self::normal_ticks_with_interval(pair, ticks, std::time::Duration::from_millis(10)).await
     }
 
@@ -74,7 +75,7 @@ impl MockBitflyerWs {
         pair: &str,
         ticks: Vec<TickData>,
         interval: std::time::Duration,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::start(Scenario::NormalTicks {
             pair: pair.to_string(),
             ticks,
@@ -84,7 +85,11 @@ impl MockBitflyerWs {
     }
 
     /// Start a mock that sends `n` ticks then closes the connection.
-    pub async fn disconnect_after(pair: &str, ticks: Vec<TickData>, n: usize) -> Self {
+    pub async fn disconnect_after(
+        pair: &str,
+        ticks: Vec<TickData>,
+        n: usize,
+    ) -> anyhow::Result<Self> {
         Self::start(Scenario::DisconnectAfter {
             pair: pair.to_string(),
             ticks,
@@ -95,7 +100,7 @@ impl MockBitflyerWs {
     }
 
     /// Start a mock that sends a single invalid (non-JSON) message.
-    pub async fn invalid_message() -> Self {
+    pub async fn invalid_message() -> anyhow::Result<Self> {
         Self::start(Scenario::InvalidMessage).await
     }
 
@@ -104,19 +109,24 @@ impl MockBitflyerWs {
         self.url.clone()
     }
 
-    async fn start(scenario: Scenario) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+    async fn start(scenario: Scenario) -> anyhow::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind ephemeral port")?;
+        let port = listener
+            .local_addr()
+            .context("failed to get local addr")?
+            .port();
         let url = format!("ws://127.0.0.1:{port}");
 
         let handle = tokio::spawn(serve_scenario_to_every_reconnecting_client(
             listener, scenario,
         ));
 
-        Self {
+        Ok(Self {
             url,
             _handle: handle,
-        }
+        })
     }
 }
 

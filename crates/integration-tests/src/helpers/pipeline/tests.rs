@@ -14,7 +14,8 @@ async fn harness_initializes_with_seeded_account(pool: PgPool) {
             min_order_size: dec!(1),
         },
     )
-    .await;
+    .await
+    .expect("failed to build pipeline harness");
 
     let row: (Decimal,) =
         sqlx::query_as("SELECT current_balance FROM trading_accounts WHERE id = $1")

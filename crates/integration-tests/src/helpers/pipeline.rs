@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Context;
 use auto_trader_core::event::PriceEvent;
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::strategy::Strategy;
@@ -48,7 +49,7 @@ pub struct PipelineHarnessConfig {
 impl PipelineHarness {
     /// Seed an account, build a price store with the given pair and a
     /// trader configured for `dry_run` paper trading.
-    pub async fn new(pool: PgPool, cfg: PipelineHarnessConfig) -> Self {
+    pub async fn new(pool: PgPool, cfg: PipelineHarnessConfig) -> anyhow::Result<Self> {
         use crate::helpers::db::seed_trading_account;
 
         let account_id = seed_trading_account(
@@ -59,7 +60,7 @@ impl PipelineHarness {
             &cfg.strategy,
             cfg.balance,
         )
-        .await;
+        .await?;
 
         let pair = Pair::new(&cfg.pair_str);
         let feed_key = FeedKey::new(cfg.exchange, pair.clone());
@@ -85,7 +86,7 @@ impl PipelineHarness {
             PAPER_TRADING_DRY_RUN,
         );
 
-        Self {
+        Ok(Self {
             pool,
             account_id,
             account_name: cfg.account_name,
@@ -96,7 +97,7 @@ impl PipelineHarness {
             liquidation_margin_level: cfg.liquidation_margin_level,
             price_store,
             trader,
-        }
+        })
     }
 
     /// Push a tick (bid/ask) into the price store so `trader.execute` can
@@ -135,11 +136,11 @@ impl PipelineHarness {
     }
 
     /// Execute a signal through the full trader path. Asserts success.
-    pub async fn execute(&self, signal: &Signal) -> Trade {
+    pub async fn execute(&self, signal: &Signal) -> anyhow::Result<Trade> {
         self.trader
             .execute(signal)
             .await
-            .expect("failed to execute signal")
+            .context("failed to execute signal")
     }
 
     /// Close a trade through `trader.close_position`. Asserts success.
@@ -147,26 +148,26 @@ impl PipelineHarness {
         &self,
         trade_id: Uuid,
         reason: auto_trader_core::types::ExitReason,
-    ) -> Trade {
+    ) -> anyhow::Result<Trade> {
         self.trader
             .close_position(&trade_id.to_string(), reason)
             .await
-            .expect("failed to close position")
+            .context("failed to close position")
     }
 
     /// Read `account.current_balance` from DB.
-    pub async fn current_balance(&self) -> Decimal {
+    pub async fn current_balance(&self) -> anyhow::Result<Decimal> {
         let row: (Decimal,) =
             sqlx::query_as("SELECT current_balance FROM trading_accounts WHERE id = $1")
                 .bind(self.account_id)
                 .fetch_one(&self.pool)
                 .await
-                .expect("failed to read current balance");
-        row.0
+                .context("failed to read current balance")?;
+        Ok(row.0)
     }
 
     /// Read `account_events` for this account, ordered by `occurred_at`.
-    pub async fn events(&self) -> Vec<AccountEvent> {
+    pub async fn events(&self) -> anyhow::Result<Vec<AccountEvent>> {
         sqlx::query_as::<_, AccountEvent>(
             r#"SELECT event_type, amount, balance_after
                FROM account_events
@@ -176,7 +177,7 @@ impl PipelineHarness {
         .bind(self.account_id)
         .fetch_all(&self.pool)
         .await
-        .expect("failed to read account events")
+        .context("failed to read account events")
     }
 }
 

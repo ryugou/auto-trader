@@ -156,12 +156,15 @@ async fn fill_open_long_uses_ask_price(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
     let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader
         .execute(&signal)
@@ -224,12 +227,15 @@ async fn fill_open_short_uses_bid_price(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
     let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader
         .execute(&signal)
@@ -290,12 +296,15 @@ async fn fill_close_long_uses_bid_price(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
     let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // まず Long ポジションを開く
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader
@@ -367,7 +376,9 @@ async fn fill_close_long_uses_bid_price(pool: sqlx::PgPool) {
         "pnl_amount = TRUNC((exit - entry) × qty, 0)"
     );
     // Balance reflects the realised PnL (margin already released).
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -387,12 +398,15 @@ async fn fill_close_short_uses_ask_price(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let price_store = price_store_with_bid_ask(exchange, "USD_JPY").await;
     let trader = make_dry_run_trader(pool.clone(), exchange, account_id, price_store).await;
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // まず Short ポジションを開く
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader
@@ -462,7 +476,9 @@ async fn fill_close_short_uses_ask_price(pool: sqlx::PgPool) {
         Some(expected_pnl),
         "pnl_amount = TRUNC((entry - exit) × qty, 0) for Short"
     );
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,

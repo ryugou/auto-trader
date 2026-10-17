@@ -1,3 +1,4 @@
+use anyhow::Context;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -10,7 +11,7 @@ pub struct StandardAccounts {
 
 /// 指定テーブルの全行を JSON 文字列としてダンプする。
 /// テスト失敗時の診断ログに使う想定。
-pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
+pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> anyhow::Result<String> {
     const ALLOWED_TABLES: &[&str] = &[
         "trading_accounts",
         "trades",
@@ -34,19 +35,22 @@ pub async fn snapshot_tables(pool: &PgPool, tables: &[&str]) -> String {
         let row: (Option<serde_json::Value>,) = sqlx::query_as(&query)
             .fetch_one(pool)
             .await
-            .unwrap_or_else(|e| panic!("failed to query table \"{table}\": {e}"));
+            .with_context(|| format!("failed to query table \"{table}\""))?;
 
         out.push_str(&format!("=== {table} ===\n"));
         match row.0 {
-            Some(val) => out.push_str(&serde_json::to_string_pretty(&val).unwrap()),
+            Some(val) => out.push_str(
+                &serde_json::to_string_pretty(&val)
+                    .with_context(|| format!("failed to serialize table \"{table}\""))?,
+            ),
             None => out.push_str("(empty)"),
         }
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
-async fn ensure_strategy_for_foreign_key(pool: &PgPool, name: &str) {
+async fn ensure_strategy_for_foreign_key(pool: &PgPool, name: &str) -> anyhow::Result<()> {
     sqlx::query(
         r#"INSERT INTO strategies (name, display_name, category, risk_level, description, default_params)
            VALUES ($1, $1, 'test', 'low', 'test strategy', '{}'::jsonb)
@@ -55,7 +59,8 @@ async fn ensure_strategy_for_foreign_key(pool: &PgPool, name: &str) {
     .bind(name)
     .execute(pool)
     .await
-    .expect("failed to insert strategy");
+    .context("failed to insert strategy")?;
+    Ok(())
 }
 
 /// テスト用 trading_account を 1 行挿入し、生成された UUID を返す。
@@ -66,8 +71,8 @@ pub async fn seed_trading_account(
     exchange: &str,
     strategy: &str,
     initial_balance: i64,
-) -> Uuid {
-    ensure_strategy_for_foreign_key(pool, strategy).await;
+) -> anyhow::Result<Uuid> {
+    ensure_strategy_for_foreign_key(pool, strategy).await?;
 
     let id = Uuid::new_v4();
     sqlx::query(
@@ -84,25 +89,25 @@ pub async fn seed_trading_account(
     .bind(initial_balance)
     .execute(pool)
     .await
-    .expect("failed to insert trading account");
+    .context("failed to insert trading account")?;
 
-    id
+    Ok(id)
 }
 
 /// 指定 account の `current_balance` を直接読む。
 ///
 /// 残高更新を assert する flow テスト用の小さな共有ヘルパー。
 /// `Trader::execute` / `close_position` 前後で値を比較するときに使う。
-pub async fn read_current_balance(pool: &PgPool, account_id: Uuid) -> Decimal {
+pub async fn read_current_balance(pool: &PgPool, account_id: Uuid) -> anyhow::Result<Decimal> {
     sqlx::query_scalar("SELECT current_balance FROM trading_accounts WHERE id = $1")
         .bind(account_id)
         .fetch_one(pool)
         .await
-        .expect("failed to read current balance")
+        .context("failed to read current balance")
 }
 
 /// BitflyerCfd + GmoFx の paper アカウントを seed する。
-pub async fn seed_standard_accounts(pool: &PgPool) -> StandardAccounts {
+pub async fn seed_standard_accounts(pool: &PgPool) -> anyhow::Result<StandardAccounts> {
     let bitflyer_cfd_account_id = seed_trading_account(
         pool,
         "test_bitflyer_cfd",
@@ -111,7 +116,7 @@ pub async fn seed_standard_accounts(pool: &PgPool) -> StandardAccounts {
         "bb_mean_revert_v1",
         30_000,
     )
-    .await;
+    .await?;
 
     let gmo_fx_account_id = seed_trading_account(
         pool,
@@ -121,10 +126,10 @@ pub async fn seed_standard_accounts(pool: &PgPool) -> StandardAccounts {
         "donchian_trend_v1",
         30_000,
     )
-    .await;
+    .await?;
 
-    StandardAccounts {
+    Ok(StandardAccounts {
         bitflyer_cfd_account_id,
         gmo_fx_account_id,
-    }
+    })
 }

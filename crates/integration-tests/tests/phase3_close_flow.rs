@@ -103,7 +103,8 @@ async fn cas_lock_rejects_closing_trade(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Seed an open trade, then manually set it to 'closing'
     let trade_id = seed::seed_open_trade(
@@ -118,7 +119,8 @@ async fn cas_lock_rejects_closing_trade(pool: sqlx::PgPool) {
         dec!(1),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Manually transition to 'closing'
     sqlx::query("UPDATE trades SET status = 'closing', closing_started_at = NOW() WHERE id = $1")
@@ -163,12 +165,15 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps);
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // Open and close a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
@@ -226,7 +231,9 @@ async fn closed_trade_cannot_be_closed_again(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(closed.pnl_amount, Some(expected_pnl));
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -255,13 +262,16 @@ async fn concurrent_close_only_one_succeeds(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader1 = make_trader(pool.clone(), exchange, account_id, ps.clone());
     let trader2 = make_trader(pool.clone(), exchange, account_id, ps);
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader1.execute(&signal).await.expect("open should succeed");
@@ -336,7 +346,8 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
@@ -365,7 +376,9 @@ async fn phase2_failure_releases_lock(pool: sqlx::PgPool) {
         true, // dry_run to open easily
     );
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = open_trader
         .execute(&signal)
@@ -459,12 +472,15 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, ps);
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // Open a trade
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
@@ -529,7 +545,9 @@ async fn close_position_creates_notification(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(closed.pnl_amount, Some(expected_pnl));
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -561,7 +579,8 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
 
@@ -587,7 +606,9 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
         true, // dry_run
     );
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
@@ -644,7 +665,9 @@ async fn close_position_sends_slack_notification(pool: sqlx::PgPool) {
     // Wait for fire-and-forget close notification
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let bodies = slack.captured_bodies();
+    let bodies = slack
+        .captured_bodies()
+        .expect("failed to read captured bodies");
     // At least 2 notifications: one for open, one for close
     assert!(
         bodies.len() >= 2,

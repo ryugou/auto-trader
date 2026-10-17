@@ -57,7 +57,9 @@ async fn never_ticked_feed_triggers_slack_stale_notification() {
 
     let mut saw_alert = false;
     for _ in 0..50 {
-        let bodies = slack.captured_bodies();
+        let bodies = slack
+            .captured_bodies()
+            .expect("failed to read captured bodies");
         if bodies
             .iter()
             .any(|b| b.contains("feed stale") && b.contains("gmo_fx"))
@@ -72,7 +74,9 @@ async fn never_ticked_feed_triggers_slack_stale_notification() {
     assert!(
         saw_alert,
         "expected a 'feed stale' Slack notification for the never-ticked gmo_fx/USD_JPY feed, got bodies={:?}",
-        slack.captured_bodies()
+        slack
+            .captured_bodies()
+            .expect("failed to read captured bodies")
     );
 }
 
@@ -118,7 +122,9 @@ async fn excluded_exchange_never_ticked_does_not_trigger_stale_notification() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     handle.abort();
 
-    let bodies = slack.captured_bodies();
+    let bodies = slack
+        .captured_bodies()
+        .expect("failed to read captured bodies");
     assert!(
         !bodies.iter().any(|b| b.contains("feed stale")),
         "oanda should be excluded from freshness monitoring, got bodies={bodies:?}"
@@ -152,9 +158,15 @@ impl MarketFeed for ScriptedFeed {
 
 /// `captured_bodies()` を `needle` を含むものが現れるまでポーリングする。
 /// 既存テストのインライン待機ループと同じ方式 (固定スリープ + 上限回数)。
+#[cfg(test)]
 async fn wait_for_body(slack: &MockSlackWebhook, needle: &str) -> bool {
     for _ in 0..50 {
-        if slack.captured_bodies().iter().any(|b| b.contains(needle)) {
+        if slack
+            .captured_bodies()
+            .expect("failed to read captured bodies")
+            .iter()
+            .any(|b| b.contains(needle))
+        {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -176,7 +188,9 @@ async fn spawn_feed_supervisor_notifies_on_normal_exit() {
     assert!(
         wait_for_body(&slack, "normally").await,
         "expected a 'feed task exited ... normally' notification, got bodies={:?}",
-        slack.captured_bodies()
+        slack
+            .captured_bodies()
+            .expect("failed to read captured bodies")
     );
 }
 
@@ -194,7 +208,9 @@ async fn spawn_feed_supervisor_notifies_on_error_exit() {
     assert!(
         wait_for_body(&slack, "scripted error").await,
         "expected a notification containing the scripted error, got bodies={:?}",
-        slack.captured_bodies()
+        slack
+            .captured_bodies()
+            .expect("failed to read captured bodies")
     );
 }
 
@@ -212,7 +228,9 @@ async fn spawn_feed_supervisor_notifies_on_panic() {
     assert!(
         wait_for_body(&slack, "scripted panic").await,
         "expected a notification containing the scripted panic message, got bodies={:?}",
-        slack.captured_bodies()
+        slack
+            .captured_bodies()
+            .expect("failed to read captured bodies")
     );
 }
 
@@ -234,7 +252,9 @@ async fn spawn_feed_supervisor_does_not_notify_on_abort() {
 
     // 通知が無いことの確認なのでポジティブ待機ではなく固定スリープで様子を見る。
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let bodies = slack.captured_bodies();
+    let bodies = slack
+        .captured_bodies()
+        .expect("failed to read captured bodies");
     assert!(
         bodies.is_empty(),
         "abort must not trigger a feed-exit notification, got bodies={bodies:?}"
@@ -294,9 +314,13 @@ async fn stale_notification_is_delivered_after_transient_webhook_failures_recove
     //    Slack モックへ届くのを確認する。
     let mut saw_failed_attempt = false;
     for _ in 0..50 {
-        if target_requests(&slack.captured_requests())
-            .iter()
-            .any(|r| r.status != 200)
+        if target_requests(
+            &slack
+                .captured_requests()
+                .expect("failed to read captured requests"),
+        )
+        .iter()
+        .any(|r| r.status != 200)
         {
             saw_failed_attempt = true;
             break;
@@ -306,7 +330,9 @@ async fn stale_notification_is_delivered_after_transient_webhook_failures_recove
     assert!(
         saw_failed_attempt,
         "expected at least one failing stale-notification attempt before the webhook recovers, got requests={:?}",
-        slack.captured_requests()
+        slack
+            .captured_requests()
+            .expect("failed to read captured requests")
     );
 
     // 2. webhook を復旧させ、再送が最終的に 200 を受け取ることを確認する。
@@ -316,7 +342,9 @@ async fn stale_notification_is_delivered_after_transient_webhook_failures_recove
 
     let mut saw_success_after_failure = false;
     for _ in 0..50 {
-        let requests = slack.captured_requests();
+        let requests = slack
+            .captured_requests()
+            .expect("failed to read captured requests");
         let matching = target_requests(&requests);
         if let Some(success_pos) = matching.iter().position(|r| r.status == 200)
             && matching[..success_pos].iter().any(|r| r.status != 200)
@@ -332,6 +360,8 @@ async fn stale_notification_is_delivered_after_transient_webhook_failures_recove
         saw_success_after_failure,
         "expected the stale notification to eventually receive a 200 response after a prior \
          failure, got requests={:?}",
-        slack.captured_requests()
+        slack
+            .captured_requests()
+            .expect("failed to read captured requests")
     );
 }

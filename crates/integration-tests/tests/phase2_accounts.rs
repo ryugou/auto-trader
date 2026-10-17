@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_paper_account(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -39,7 +41,9 @@ async fn create_paper_account(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_live_account(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -66,7 +70,9 @@ async fn create_live_account(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_paper_account_oanda(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -92,7 +98,9 @@ async fn create_paper_account_oanda(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_invalid_account_type(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -118,7 +126,9 @@ async fn create_account_invalid_account_type(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_duplicate_name(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -153,7 +163,9 @@ async fn create_account_duplicate_name(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_invalid_exchange(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -191,8 +203,9 @@ async fn create_account_rejected_when_exchange_missing_from_margin_config(pool: 
     // Levels map intentionally only contains bitflyer_cfd — gmo_fx is missing.
     let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
     levels.insert(Exchange::BitflyerCfd, dec!(0.50));
-    let app =
-        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels))
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -240,8 +253,9 @@ async fn create_account_rejected_when_liquidation_margin_level_non_positive(pool
     let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
     levels.insert(Exchange::BitflyerCfd, dec!(0.50));
     levels.insert(Exchange::GmoFx, dec!(0));
-    let app =
-        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels))
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -281,7 +295,9 @@ async fn create_account_rejected_when_liquidation_margin_level_non_positive(pool
 /// validate_initial_balance は JPY の場合のみ最低残高チェックを行う。
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_invalid_currency_low_balance(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // JPY with balance below minimum (10000) → 400
@@ -312,7 +328,9 @@ async fn create_account_invalid_currency_low_balance(pool: sqlx::PgPool) {
 /// 将来的に通貨ホワイトリストを導入する場合はこのテストを更新する。
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_unknown_currency_accepted(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -340,7 +358,9 @@ async fn create_account_unknown_currency_accepted(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_nonexistent_strategy(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -366,7 +386,9 @@ async fn create_account_nonexistent_strategy(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_account_insufficient_balance(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -393,7 +415,9 @@ async fn create_account_insufficient_balance(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn create_live_account_duplicate_exchange(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let body = json!({
@@ -437,7 +461,9 @@ async fn create_live_account_duplicate_exchange(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn list_accounts_empty(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -453,7 +479,9 @@ async fn list_accounts_empty(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn list_accounts_includes_evaluated_balance(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Create an account via API.
@@ -502,7 +530,9 @@ async fn list_accounts_includes_evaluated_balance(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn get_account_by_id(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Create account.
@@ -539,7 +569,9 @@ async fn get_account_by_id(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn get_account_not_found(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let fake_id = uuid::Uuid::new_v4();
 
@@ -556,7 +588,9 @@ async fn get_account_not_found(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_account(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Create account.
@@ -601,7 +635,9 @@ async fn update_account(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_account_not_found(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let fake_id = uuid::Uuid::new_v4();
 
@@ -619,7 +655,9 @@ async fn update_account_not_found(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn delete_account(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Create account.
@@ -661,7 +699,9 @@ async fn delete_account(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn delete_account_not_found(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
     let fake_id = uuid::Uuid::new_v4();
 
@@ -676,7 +716,9 @@ async fn delete_account_not_found(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn delete_account_with_trades_fails(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     // Create account via API.
@@ -713,7 +755,8 @@ async fn delete_account_with_trades_fails(pool: sqlx::PgPool) {
         dec!(1),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Delete should fail due to FK constraint.
     let resp = client
@@ -729,6 +772,7 @@ async fn delete_account_with_trades_fails(pool: sqlx::PgPool) {
 
 // ── active / retirement (#102, #100) ─────────────────────────────────────
 
+#[cfg(test)]
 async fn create_test_account(client: &reqwest::Client, app: &app::TestApp, body: Value) -> Value {
     client
         .post(app.endpoint("/api/trading-accounts"))
@@ -744,7 +788,9 @@ async fn create_test_account(client: &reqwest::Client, app: &app::TestApp, body:
 /// GET /api/trading-accounts and GET /:id must report `active` on every row.
 #[sqlx::test(migrations = "../../migrations")]
 async fn account_responses_include_active_field(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(
@@ -791,7 +837,9 @@ async fn account_responses_include_active_field(pool: sqlx::PgPool) {
 /// Default list hides a retired account; `include_inactive=true` reveals it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn list_accounts_hides_inactive_unless_requested(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(
@@ -850,7 +898,9 @@ async fn list_accounts_hides_inactive_unless_requested(pool: sqlx::PgPool) {
 /// (`active: true`); each response must reflect the new `active` value.
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_account_can_retire_and_reinstate(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(
@@ -895,7 +945,9 @@ async fn update_account_can_retire_and_reinstate(pool: sqlx::PgPool) {
 /// reports how many open trades are blocking it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_account_retire_rejected_with_open_trades(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(
@@ -926,7 +978,8 @@ async fn update_account_retire_rejected_with_open_trades(pool: sqlx::PgPool) {
         dec!(1),
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     let resp = client
         .put(app.endpoint(&format!("/api/trading-accounts/{id_str}")))
@@ -950,7 +1003,9 @@ async fn update_account_retire_rejected_with_open_trades(pool: sqlx::PgPool) {
 /// so this inserts the row directly to get a `closing` status.
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_account_retire_rejected_with_closing_trade(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(
@@ -1003,7 +1058,9 @@ async fn update_account_retire_rejected_with_closing_trade(pool: sqlx::PgPool) {
 /// account is already active on the same exchange.
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_account_reactivate_live_rejected_when_another_is_active(pool: sqlx::PgPool) {
-    let app = app::spawn_test_app(pool).await;
+    let app = app::spawn_test_app(pool)
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let live_body = |name: &str| {
@@ -1076,7 +1133,9 @@ async fn update_account_reactivate_rejected_when_exchange_missing_from_margin_co
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    let app = app::spawn_test_app(pool.clone()).await;
+    let app = app::spawn_test_app(pool.clone())
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(
@@ -1106,8 +1165,9 @@ async fn update_account_reactivate_rejected_when_exchange_missing_from_margin_co
     // Levels map intentionally only contains bitflyer_cfd — gmo_fx is missing.
     let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
     levels.insert(Exchange::BitflyerCfd, dec!(0.50));
-    let app =
-        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels))
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let resp = client
@@ -1145,8 +1205,9 @@ async fn update_account_reactivate_allowed_when_liquidation_margin_level_configu
 
     let mut levels: HashMap<Exchange, rust_decimal::Decimal> = HashMap::new();
     levels.insert(Exchange::GmoFx, dec!(1.00));
-    let app =
-        app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels)).await;
+    let app = app::spawn_test_app_with_levels(pool, PriceStore::new(vec![]), Arc::new(levels))
+        .await
+        .expect("failed to spawn test app");
     let client = app.client();
 
     let created = create_test_account(

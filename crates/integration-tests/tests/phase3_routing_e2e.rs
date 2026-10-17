@@ -91,12 +91,20 @@ async fn seed_price(price_store: &PriceStore, exchange: Exchange, pair: &Pair, m
         .await;
 }
 
+#[cfg(test)]
+async fn seed_routing_account(pool: &PgPool, name: &str, exchange: &str, strategy: &str) -> Uuid {
+    seed_trading_account(pool, name, "paper", exchange, strategy, 30_000)
+        .await
+        .expect("failed to seed trading account")
+}
+
 /// Build the standard 2-account fan-out:
 /// - bitflyer_cfd / FX_BTC_JPY / bb_mean_revert_v1
 /// - gmo_fx       / USD_JPY    / donchian_trend_v1
 ///
 /// Both share a single `PriceStore` carrying ticks for both feeds, exactly
 /// as the production executor task does.
+#[cfg(test)]
 async fn build_two_account_fanout(pool: PgPool) -> Vec<RoutedAccount> {
     let bitflyer_pair = Pair::new(BTC_PAIR);
     let gmo_pair = Pair::new(USD_PAIR);
@@ -122,25 +130,15 @@ async fn build_two_account_fanout(pool: PgPool) -> Vec<RoutedAccount> {
     let sizer = Arc::new(PositionSizer::new(min_sizes, rust_decimal::Decimal::ZERO));
     let notifier = Arc::new(Notifier::new_disabled());
 
-    let bitflyer_account_id = seed_trading_account(
+    let bitflyer_account_id = seed_routing_account(
         &pool,
         "routing_bitflyer",
-        "paper",
         "bitflyer_cfd",
         "bb_mean_revert_v1",
-        30_000,
     )
     .await;
-
-    let gmo_account_id = seed_trading_account(
-        &pool,
-        "routing_gmo",
-        "paper",
-        "gmo_fx",
-        "donchian_trend_v1",
-        30_000,
-    )
-    .await;
+    let gmo_account_id =
+        seed_routing_account(&pool, "routing_gmo", "gmo_fx", "donchian_trend_v1").await;
 
     let api: Arc<dyn auto_trader_market::exchange_api::ExchangeApi> = Arc::new(NullExchangeApi);
 
@@ -202,6 +200,7 @@ fn make_signal(pair: &str, direction: Direction, strategy_name: &str) -> Signal 
     }
 }
 
+#[cfg(test)]
 async fn count_trades_for_account(pool: &PgPool, account_id: Uuid) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM trades WHERE account_id = $1")
         .bind(account_id)

@@ -48,7 +48,8 @@ async fn weekly_batch_updates_strategy_params(pool: sqlx::PgPool) {
         "donchian_trend_evolve_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     for i in 0..6 {
         sqlx::query(
             r#"INSERT INTO trades
@@ -159,7 +160,8 @@ async fn weekly_batch_skips_low_sample_strategy(pool: sqlx::PgPool) {
         "donchian_trend_evolve_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     for _ in 0..2 {
         sqlx::query(
             r#"INSERT INTO trades
@@ -307,7 +309,8 @@ async fn daily_batch_backfill_creates_summary(pool: sqlx::PgPool) {
         "bb_mean_revert_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // Insert closed trades for yesterday
     let yesterday = Utc::now() - Duration::days(1);
@@ -328,7 +331,8 @@ async fn daily_batch_backfill_creates_summary(pool: sqlx::PgPool) {
         yesterday - Duration::hours(2),
         yesterday,
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     auto_trader_integration_tests::helpers::seed::seed_closed_trade(
         &pool,
@@ -345,7 +349,8 @@ async fn daily_batch_backfill_creates_summary(pool: sqlx::PgPool) {
         yesterday - Duration::hours(1),
         yesterday + Duration::minutes(30),
     )
-    .await;
+    .await
+    .expect("failed to seed closed trade");
 
     // Run the backfill
     auto_trader_db::summary::update_daily_max_drawdown(&pool, yesterday_date)
@@ -381,7 +386,8 @@ async fn overnight_fee_job_applies_to_paper_bitflyer_trades(pool: sqlx::PgPool) 
         "bb_mean_revert_v1",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let initial_balance: Decimal = dec!(1_000_000);
     let entry_price = dec!(5_000_000);
@@ -400,7 +406,8 @@ async fn overnight_fee_job_applies_to_paper_bitflyer_trades(pool: sqlx::PgPool) 
         quantity,
         Utc::now(),
     )
-    .await;
+    .await
+    .expect("failed to seed open trade");
 
     // Replicate the job logic: list accounts, filter paper+BitflyerCfd,
     // list open trades, compute fee, apply. main.rs's overnight loop uses

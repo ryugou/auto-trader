@@ -100,13 +100,16 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     // entry: bid=150, ask=151
     let entry_ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, entry_ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     assert_eq!(trade.entry_price, dec!(151));
@@ -191,7 +194,9 @@ async fn sl_hit_long(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(pnl, expected_pnl, "pnl = TRUNC((exit - entry) × qty)");
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -211,12 +216,15 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let entry_ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, entry_ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     assert_eq!(trade.entry_price, dec!(150));
@@ -302,7 +310,9 @@ async fn sl_hit_short(pool: sqlx::PgPool) {
         pnl, expected_pnl,
         "pnl = TRUNC((entry - exit) × qty) for Short"
     );
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -326,12 +336,15 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let entry_ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, entry_ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Long);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 151 → 12735 (Long@ask=151)
@@ -410,7 +423,9 @@ async fn tp_hit_long(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(pnl, expected_pnl);
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -430,12 +445,15 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let entry_ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, entry_ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     let signal = make_signal("USD_JPY", Direction::Short);
     let trade = trader.execute(&signal).await.expect("open should succeed");
     // qty: 1M × 2 × (1/1.04) / 150 → 12820 (Short@bid=150)
@@ -514,7 +532,9 @@ async fn tp_hit_short(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(pnl, expected_pnl);
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,
@@ -537,12 +557,15 @@ async fn time_limit_closes_expired_trade(pool: sqlx::PgPool) {
         "test_strategy",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
 
     let entry_ps = make_price_store(exchange, "USD_JPY", dec!(150), dec!(151)).await;
     let trader = make_trader(pool.clone(), exchange, account_id, entry_ps.clone());
 
-    let balance_before_open = read_current_balance(&pool, account_id).await;
+    let balance_before_open = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     // max_hold_until を過去に設定したシグナル
     let signal = Signal {
         strategy_name: "test_strategy".to_string(),
@@ -613,7 +636,9 @@ async fn time_limit_closes_expired_trade(pool: sqlx::PgPool) {
     )
     .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
     assert_eq!(closed.pnl_amount, Some(expected_pnl));
-    let balance_after_close = read_current_balance(&pool, account_id).await;
+    let balance_after_close = read_current_balance(&pool, account_id)
+        .await
+        .expect("failed to read current balance");
     assert_eq!(
         balance_after_close,
         balance_before_open + expected_pnl - closed.fees,

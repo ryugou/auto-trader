@@ -19,6 +19,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+#[cfg(test)]
 async fn insert_usdjpy_trade(
     pool: &sqlx::PgPool,
     account_id: uuid::Uuid,
@@ -42,6 +43,7 @@ async fn insert_usdjpy_trade(
         Utc::now(),
     )
     .await
+    .expect("failed to seed open trade")
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -54,7 +56,8 @@ async fn paper_gmo_long_pays_swap(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = insert_usdjpy_trade(&pool, account_id, Direction::Long, dec!(10_000)).await;
 
     // config: USD_JPY long = +100 (paper 払い), short = -120 (paper 受取)
@@ -88,7 +91,8 @@ async fn paper_gmo_short_receives_swap(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = insert_usdjpy_trade(&pool, account_id, Direction::Short, dec!(10_000)).await;
 
     // Short 1 lot → fee = -120 (paper 受取)
@@ -125,7 +129,8 @@ async fn apply_swap_fee_returns_none_when_trade_closed(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = insert_usdjpy_trade(&pool, account_id, Direction::Long, dec!(10_000)).await;
     sqlx::query("UPDATE trades SET status='closed' WHERE id=$1")
         .bind(trade_id)
@@ -154,7 +159,8 @@ async fn account_event_row_recorded_with_swap_fee_type(pool: sqlx::PgPool) {
         "test_strat",
         1_000_000,
     )
-    .await;
+    .await
+    .expect("failed to seed trading account");
     let trade_id = insert_usdjpy_trade(&pool, account_id, Direction::Long, dec!(10_000)).await;
 
     let mut tx = pool.begin().await.unwrap();

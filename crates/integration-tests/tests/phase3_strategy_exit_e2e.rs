@@ -109,6 +109,7 @@ fn make_m5_event(close: Decimal, high: Decimal, low: Decimal, ts: DateTime<Utc>)
 
 /// Build a `PipelineHarness` configured for GmoFx + USD_JPY at 10x leverage —
 /// the production-realistic FX setting also used by `phase3_pipeline_e2e.rs`.
+#[cfg(test)]
 async fn build_harness(pool: PgPool, account_label: &str) -> PipelineHarness {
     let mut harness = PipelineHarness::new(
         pool,
@@ -122,7 +123,8 @@ async fn build_harness(pool: PgPool, account_label: &str) -> PipelineHarness {
             min_order_size: MIN_LOT,
         },
     )
-    .await;
+    .await
+    .expect("failed to build pipeline harness");
     // Override seeded leverage (default 2) → 10x to mirror gmo_fx production.
     sqlx::query("UPDATE trading_accounts SET leverage = $1 WHERE id = $2")
         .bind(dec!(10))
@@ -145,6 +147,7 @@ fn position_from_trade(trade: &Trade) -> Position {
 /// `direction` is the original entry direction so we can pick the
 /// expected exit-side (Long closes at bid, Short closes at ask).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn assert_closed_trade(
     closed: &Trade,
     direction: Direction,
@@ -205,6 +208,7 @@ fn assert_closed_trade(
 
 /// Load CSV fixture, set price store from the trigger candle's bid/ask,
 /// drive strategy with warmup + trigger, return entry signal.
+#[cfg(test)]
 async fn drive_bb_entry(harness: &PipelineHarness, fixture: &str) -> (BbMeanRevertV1, Signal) {
     let mut strategy = BbMeanRevertV1::new("test_strategy".to_string(), vec![Pair::new(PAIR)]);
     let events = load_events_from_csv(&fixtures_dir().join(fixture), EXCHANGE, PAIR, "M5");
@@ -227,6 +231,7 @@ async fn drive_bb_entry(harness: &PipelineHarness, fixture: &str) -> (BbMeanReve
     (strategy, signal)
 }
 
+#[cfg(test)]
 async fn drive_donchian_entry(
     harness: &PipelineHarness,
     fixture: &str,
@@ -252,6 +257,7 @@ async fn drive_donchian_entry(
     (strategy, signal)
 }
 
+#[cfg(test)]
 async fn drive_donchian_evolve_entry(
     harness: &PipelineHarness,
     fixture: &str,
@@ -281,6 +287,7 @@ async fn drive_donchian_evolve_entry(
     (strategy, signal)
 }
 
+#[cfg(test)]
 async fn drive_squeeze_entry(
     harness: &PipelineHarness,
     fixture: &str,
@@ -317,11 +324,20 @@ async fn bb_mean_revert_long_mean_reached_closes_with_correct_pnl(pool: PgPool) 
     // Drive Long entry from CSV fixture; trader fills @ ask=147.205.
     let (mut strategy, signal) = drive_bb_entry(&harness, "bb_long_entry.csv").await;
     assert_eq!(signal.direction, Direction::Long);
-    let balance_before_open = harness.current_balance().await;
-    let trade = harness.execute(&signal).await;
+    let balance_before_open = harness
+        .current_balance()
+        .await
+        .expect("failed to read current balance");
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price;
     let qty = trade.quantity;
-    let balance_after_open = harness.current_balance().await;
+    let balance_after_open = harness
+        .current_balance()
+        .await
+        .expect("failed to read current balance");
 
     // Move market well above BB midline (~150) and past 1R distance.
     // SL distance = entry × stop_loss_pct ≤ entry × 0.03 ≈ 4.4 yen.
@@ -354,7 +370,10 @@ async fn bb_mean_revert_long_mean_reached_closes_with_correct_pnl(pool: PgPool) 
     // trade_id (so a wrong id from the strategy would fail the close).
     let exit_reason = exits[0].reason.to_exit_reason();
     assert_eq!(exit_reason, ExitReason::StrategyMeanReached);
-    let closed = harness.close(exits[0].trade_id, exit_reason).await;
+    let closed = harness
+        .close(exits[0].trade_id, exit_reason)
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -372,7 +391,10 @@ async fn bb_mean_revert_long_mean_reached_closes_with_correct_pnl(pool: PgPool) 
     // phase3_pipeline_e2e). fees is asserted == 0 explicitly so a future
     // non-zero fee model regression surfaces here.
     assert_eq!(closed.fees, dec!(0), "paper trade fees must be 0");
-    let balance_after_close = harness.current_balance().await;
+    let balance_after_close = harness
+        .current_balance()
+        .await
+        .expect("failed to read current balance");
     let pnl = closed.pnl_amount.expect("pnl_amount must be set");
     assert_eq!(
         balance_after_close,
@@ -383,7 +405,10 @@ async fn bb_mean_revert_long_mean_reached_closes_with_correct_pnl(pool: PgPool) 
         balance_after_close > balance_after_open,
         "winning close must restore margin and add positive pnl"
     );
-    let events = harness.events().await;
+    let events = harness
+        .events()
+        .await
+        .expect("failed to read account events");
     assert!(
         events.iter().any(|e| e.event_type == "margin_lock"),
         "margin_lock event must exist after open"
@@ -400,7 +425,10 @@ async fn bb_mean_revert_short_mean_reached_closes_with_correct_pnl(pool: PgPool)
 
     let (mut strategy, signal) = drive_bb_entry(&harness, "bb_short_entry.csv").await;
     assert_eq!(signal.direction, Direction::Short);
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price; // bid = 152.795
     let qty = trade.quantity;
 
@@ -428,7 +456,8 @@ async fn bb_mean_revert_short_mean_reached_closes_with_correct_pnl(pool: PgPool)
 
     let closed = harness
         .close(exits[0].trade_id, exits[0].reason.to_exit_reason())
-        .await;
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -452,7 +481,10 @@ async fn donchian_long_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
 
     let (mut strategy, signal) = drive_donchian_entry(&harness, "donchian_long_breakout.csv").await;
     assert_eq!(signal.direction, Direction::Long);
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price; // ask = 152.005
     let qty = trade.quantity;
 
@@ -503,7 +535,8 @@ async fn donchian_long_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
 
     let closed = harness
         .close(exits[0].trade_id, exits[0].reason.to_exit_reason())
-        .await;
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -524,7 +557,10 @@ async fn donchian_short_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
     let (mut strategy, signal) =
         drive_donchian_entry(&harness, "donchian_short_breakout.csv").await;
     assert_eq!(signal.direction, Direction::Short);
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price; // bid = 147.995
     let qty = trade.quantity;
 
@@ -567,7 +603,8 @@ async fn donchian_short_trailing_channel_closes_with_correct_pnl(pool: PgPool) {
 
     let closed = harness
         .close(exits[0].trade_id, exits[0].reason.to_exit_reason())
-        .await;
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -592,7 +629,10 @@ async fn donchian_evolve_long_trailing_channel_closes_with_correct_pnl(pool: PgP
     let (mut strategy, signal) =
         drive_donchian_evolve_entry(&harness, "donchian_long_breakout.csv").await;
     assert_eq!(signal.direction, Direction::Long);
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price;
     let qty = trade.quantity;
 
@@ -636,7 +676,8 @@ async fn donchian_evolve_long_trailing_channel_closes_with_correct_pnl(pool: PgP
 
     let closed = harness
         .close(exits[0].trade_id, exits[0].reason.to_exit_reason())
-        .await;
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -660,7 +701,10 @@ async fn squeeze_long_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
 
     let (mut strategy, signal) = drive_squeeze_entry(&harness, "squeeze_long_entry.csv").await;
     assert_eq!(signal.direction, Direction::Long);
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price; // ask = 151.505
     let qty = trade.quantity;
 
@@ -728,7 +772,8 @@ async fn squeeze_long_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
 
     let closed = harness
         .close(exits[0].trade_id, exits[0].reason.to_exit_reason())
-        .await;
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -748,7 +793,10 @@ async fn squeeze_short_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
 
     let (mut strategy, signal) = drive_squeeze_entry(&harness, "squeeze_short_entry.csv").await;
     assert_eq!(signal.direction, Direction::Short);
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price; // bid = 148.495
     let qty = trade.quantity;
 
@@ -806,7 +854,8 @@ async fn squeeze_short_trailing_ma_closes_with_correct_pnl(pool: PgPool) {
 
     let closed = harness
         .close(exits[0].trade_id, exits[0].reason.to_exit_reason())
-        .await;
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -855,7 +904,10 @@ async fn time_limit_close_persists_reason_and_market_bid(pool: PgPool) {
         // tripped on before this close fires.
         max_hold_until: Some(Utc::now() - Duration::hours(1)),
     };
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price;
     let qty = trade.quantity;
     assert_eq!(trade.max_hold_until, signal.max_hold_until);
@@ -869,7 +921,10 @@ async fn time_limit_close_persists_reason_and_market_bid(pool: PgPool) {
     // The mapping that the position monitor performs in production:
     let exit_reason = StrategyExitReason::TimeLimit.to_exit_reason();
     assert_eq!(exit_reason, ExitReason::StrategyTimeLimit);
-    let closed = harness.close(trade.id, exit_reason).await;
+    let closed = harness
+        .close(trade.id, exit_reason)
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,
@@ -911,7 +966,10 @@ async fn sl_hit_close_persists_reason_and_market_bid(pool: PgPool) {
         allocation_pct: dec!(1.0),
         max_hold_until: None,
     };
-    let trade = harness.execute(&signal).await;
+    let trade = harness
+        .execute(&signal)
+        .await
+        .expect("failed to execute signal");
     let entry_price = trade.entry_price; // 150.005
     let qty = trade.quantity;
     // entry × (1 - 0.005) = 150.005 × 0.995 = 149.254975 (no rounding;
@@ -925,7 +983,10 @@ async fn sl_hit_close_persists_reason_and_market_bid(pool: PgPool) {
     let exit_ask = sl + dec!(0.000);
     harness.set_market(exit_bid, exit_ask).await;
 
-    let closed = harness.close(trade.id, ExitReason::SlHit).await;
+    let closed = harness
+        .close(trade.id, ExitReason::SlHit)
+        .await
+        .expect("failed to close trade");
 
     assert_closed_trade(
         &closed,

@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+use super::lock_mock_state;
+
 /// One captured POST request: the body text and the HTTP status this mock
 /// responded with to that specific request. Kept together (rather than as
 /// two parallel `Vec`s) so callers checking "which status did the request
@@ -23,10 +25,10 @@ impl Respond for CapturingResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body = String::from_utf8_lossy(&request.body).to_string();
         let status = self.error_code.unwrap_or(200);
-        self.requests
-            .lock()
-            .unwrap()
-            .push(CapturedRequest { body, status });
+        match lock_mock_state(&self.requests, "requests") {
+            Ok(mut requests) => requests.push(CapturedRequest { body, status }),
+            Err(e) => return ResponseTemplate::new(500).set_body_string(e.to_string()),
+        }
         if let Some(code) = self.error_code {
             ResponseTemplate::new(code)
         } else {
@@ -57,13 +59,9 @@ impl MockSlackWebhook {
     }
 
     /// Return all captured POST bodies.
-    pub fn captured_bodies(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|r| r.body.clone())
-            .collect()
+    pub fn captured_bodies(&self) -> anyhow::Result<Vec<String>> {
+        let requests = lock_mock_state(&self.requests, "requests")?;
+        Ok(requests.iter().map(|r| r.body.clone()).collect())
     }
 
     /// Return all captured requests, each paired with the HTTP status this
@@ -71,8 +69,9 @@ impl MockSlackWebhook {
     /// test needs to distinguish a request that got a failure response from
     /// one that got a success response, e.g. to confirm a retry eventually
     /// succeeded rather than merely being re-attempted.
-    pub fn captured_requests(&self) -> Vec<CapturedRequest> {
-        self.requests.lock().unwrap().clone()
+    pub fn captured_requests(&self) -> anyhow::Result<Vec<CapturedRequest>> {
+        let requests = lock_mock_state(&self.requests, "requests")?;
+        Ok(requests.clone())
     }
 
     /// Replace the mounted mock so subsequent requests return an error.

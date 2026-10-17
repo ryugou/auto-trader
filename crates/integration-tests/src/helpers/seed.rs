@@ -1,3 +1,4 @@
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -19,7 +20,7 @@ pub async fn seed_closed_trade(
     fees: Decimal,
     entry_at: DateTime<Utc>,
     exit_at: DateTime<Utc>,
-) -> Uuid {
+) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     let stop_loss = if direction == "long" {
         entry_price - Decimal::from(100)
@@ -51,8 +52,8 @@ pub async fn seed_closed_trade(
     .bind(exit_at)
     .execute(pool)
     .await
-    .expect("failed to insert closed trade");
-    id
+    .context("failed to insert closed trade")?;
+    Ok(id)
 }
 
 /// Insert an open trade. Returns the trade ID.
@@ -68,7 +69,7 @@ pub async fn seed_open_trade(
     stop_loss: Decimal,
     quantity: Decimal,
     entry_at: DateTime<Utc>,
-) -> Uuid {
+) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO trades
@@ -91,8 +92,8 @@ pub async fn seed_open_trade(
     .bind(entry_at)
     .execute(pool)
     .await
-    .expect("failed to insert open trade");
-    id
+    .context("failed to insert open trade")?;
+    Ok(id)
 }
 
 /// Insert a notification row. Returns the notification ID.
@@ -109,7 +110,7 @@ pub async fn seed_notification(
     pnl_amount: Option<Decimal>,
     exit_reason: Option<&str>,
     read_at: Option<DateTime<Utc>>,
-) -> Uuid {
+) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO notifications
@@ -130,8 +131,8 @@ pub async fn seed_notification(
     .bind(read_at)
     .execute(pool)
     .await
-    .expect("failed to insert notification");
-    id
+    .context("failed to insert notification")?;
+    Ok(id)
 }
 
 /// Insert a daily_summary row.
@@ -148,7 +149,7 @@ pub async fn seed_daily_summary(
     win_count: i64,
     total_pnl: Decimal,
     max_drawdown: Decimal,
-) {
+) -> anyhow::Result<()> {
     sqlx::query(
         r#"INSERT INTO daily_summary
                (account_id, date, strategy_name, pair, exchange,
@@ -167,5 +168,6 @@ pub async fn seed_daily_summary(
     .bind(max_drawdown)
     .execute(pool)
     .await
-    .expect("failed to insert daily summary");
+    .context("failed to insert daily summary")?;
+    Ok(())
 }
