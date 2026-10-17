@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use auto_trader_core::config::{AppConfig, GeminiConfig, StrategyConfig};
 use auto_trader_core::knowledge::KnowledgeStore;
+use auto_trader_core::strategy::Strategy;
 use auto_trader_core::types::{Exchange, Pair};
 use auto_trader_db::trading_accounts::TradingAccount;
 use auto_trader_strategy::engine::StrategyEngine;
@@ -39,11 +40,14 @@ pub fn resolve_exchange_liquidation_levels(
             }
         }
     }
-    let mut missing: Vec<&str> = required
-        .iter()
-        .filter(|ex| !map.contains_key(*ex))
-        .map(|ex| ex.as_str())
-        .collect();
+    let mut missing: Vec<&str> = Vec::new();
+    let mut in_use: Vec<(Exchange, Decimal)> = Vec::new();
+    for ex in &required {
+        match map.get(ex) {
+            Some(value) => in_use.push((*ex, *value)),
+            None => missing.push(ex.as_str()),
+        }
+    }
     missing.sort();
     if !missing.is_empty() {
         let quoted_missing: Vec<String> = missing
@@ -55,18 +59,14 @@ pub fn resolve_exchange_liquidation_levels(
             quoted_missing.join(", ")
         );
     }
-    reject_non_positive_margin_for_exchanges_in_use(&required, &map)?;
+    reject_non_positive_margin_for_exchanges_in_use(&in_use)?;
     Ok(map)
 }
 
 fn reject_non_positive_margin_for_exchanges_in_use(
-    required: &HashSet<Exchange>,
-    map: &HashMap<Exchange, Decimal>,
+    in_use: &[(Exchange, Decimal)],
 ) -> anyhow::Result<()> {
-    for ex in required {
-        let value = map
-            .get(ex)
-            .expect("required entries are present after the missing check");
+    for (ex, value) in in_use {
         if *value <= Decimal::ZERO {
             anyhow::bail!(
                 "invalid option \"exchange_margin.{}.liquidation_margin_level\": must be positive, got {value}",
@@ -186,148 +186,179 @@ pub async fn register_strategies(
         if !sc.enabled {
             continue;
         }
-        match sc.name.as_str() {
-            name if name.starts_with("swing_llm") => {
-                let holding_days_max = sc
-                    .params
-                    .get("holding_days_max")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(14) as u32;
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
+        register_one_strategy(engine, sc, pool, knowledge, gemini_config).await?;
+    }
+    Ok(())
+}
 
-                let gemini_api_key = match std::env::var("GEMINI_API_KEY") {
-                    Ok(value) if !value.trim().is_empty() => value,
-                    _ => {
-                        tracing::warn!(
-                            strategy_name = %sc.name,
-                            "gemini api key not set or empty, skipping strategy"
-                        );
-                        continue;
-                    }
-                };
-                let gemini = match gemini_config {
-                    Some(c) => c,
-                    None => {
-                        tracing::warn!(strategy_name = %sc.name, "gemini config missing, skipping strategy");
-                        continue;
-                    }
-                };
-
-                let store = match knowledge {
-                    Some(s) => Arc::clone(s),
-                    None => {
-                        tracing::warn!(strategy_name = %sc.name, "knowledge_store unavailable, skipping strategy");
-                        continue;
-                    }
-                };
-
-                let strategy = auto_trader_strategy::swing_llm::SwingLLMv1::new(
+async fn register_one_strategy(
+    engine: &mut StrategyEngine,
+    sc: &StrategyConfig,
+    pool: &PgPool,
+    knowledge: &Option<Arc<dyn KnowledgeStore>>,
+    gemini_config: Option<&GeminiConfig>,
+) -> anyhow::Result<()> {
+    match sc.name.as_str() {
+        name if name.starts_with("swing_llm") => {
+            if let Some(strategy) = build_swing_llm(sc, knowledge, gemini_config)? {
+                add_strategy_and_log(engine, sc, strategy);
+            }
+        }
+        name if name.starts_with("bb_mean_revert") => {
+            add_strategy_and_log(
+                engine,
+                sc,
+                Box::new(auto_trader_strategy::bb_mean_revert::BbMeanRevertV1::new(
                     sc.name.clone(),
-                    pairs,
-                    holding_days_max,
-                    store,
-                    gemini.api_url.clone(),
-                    gemini_api_key,
-                    gemini.model.clone(),
-                )
-                .with_context(|| format!("failed to build strategy {}", sc.name))?;
-                engine.add_strategy(Box::new(strategy), sc.mode.clone());
-                log_strategy_registered(&sc.name, &sc.mode);
-            }
-            name if name.starts_with("bb_mean_revert") => {
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                engine.add_strategy(
-                    Box::new(auto_trader_strategy::bb_mean_revert::BbMeanRevertV1::new(
+                    collect_pairs(sc),
+                )),
+            );
+        }
+        name if name.starts_with("donchian_trend_evolve") => {
+            let params = load_donchian_evolve_params(pool, &sc.name).await;
+            add_strategy_and_log(
+                engine,
+                sc,
+                Box::new(
+                    auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(
                         sc.name.clone(),
-                        pairs,
-                    )),
-                    sc.mode.clone(),
-                );
-                log_strategy_registered(&sc.name, &sc.mode);
-            }
-            name if name.starts_with("donchian_trend_evolve") => {
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                let params: serde_json::Value = match sqlx::query_scalar::<
-                    _,
-                    sqlx::types::Json<serde_json::Value>,
-                >(
-                    "SELECT params FROM strategy_params WHERE strategy_name = $1",
-                )
-                .bind(&sc.name)
-                .fetch_optional(pool)
-                .await
-                {
-                    Ok(Some(j)) => j.0,
-                    Ok(None) => {
-                        tracing::warn!(strategy_name = %sc.name, "no strategy_params row, using defaults");
-                        serde_json::json!({
-                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
-                        })
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            strategy_name = %sc.name,
-                            error = %e,
-                            "failed to load strategy_params, using defaults"
-                        );
-                        serde_json::json!({
-                            "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
-                        })
-                    }
-                };
-                engine.add_strategy(
-                    Box::new(
-                        auto_trader_strategy::donchian_trend_evolve::DonchianTrendEvolveV1::new(
-                            sc.name.clone(),
-                            pairs,
-                            params,
-                        ),
+                        collect_pairs(sc),
+                        params,
                     ),
-                    sc.mode.clone(),
-                );
-                log_strategy_registered(&sc.name, &sc.mode);
-            }
-            name if name.starts_with("donchian_trend") => {
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                engine.add_strategy(
-                    Box::new(auto_trader_strategy::donchian_trend::DonchianTrendV1::new(
+                ),
+            );
+        }
+        name if name.starts_with("donchian_trend") => {
+            add_strategy_and_log(
+                engine,
+                sc,
+                Box::new(auto_trader_strategy::donchian_trend::DonchianTrendV1::new(
+                    sc.name.clone(),
+                    collect_pairs(sc),
+                )),
+            );
+        }
+        name if name.starts_with("squeeze_momentum") => {
+            add_strategy_and_log(
+                engine,
+                sc,
+                Box::new(
+                    auto_trader_strategy::squeeze_momentum::SqueezeMomentumV1::new(
                         sc.name.clone(),
-                        pairs,
-                    )),
-                    sc.mode.clone(),
-                );
-                log_strategy_registered(&sc.name, &sc.mode);
-            }
-            name if name.starts_with("squeeze_momentum") => {
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                engine.add_strategy(
-                    Box::new(
-                        auto_trader_strategy::squeeze_momentum::SqueezeMomentumV1::new(
-                            sc.name.clone(),
-                            pairs,
-                        ),
+                        collect_pairs(sc),
                     ),
-                    sc.mode.clone(),
-                );
-                log_strategy_registered(&sc.name, &sc.mode);
-            }
-            name if is_fx_new_strategy(name) => {
-                let pairs = sc.pairs.iter().map(|s| Pair::new(s)).collect();
-                engine.add_strategy(
-                    Box::new(auto_trader_strategy::fx_new::FxNewV1::new(
-                        sc.name.clone(),
-                        pairs,
-                    )),
-                    sc.mode.clone(),
-                );
-                log_strategy_registered(&sc.name, &sc.mode);
-            }
-            other => {
-                tracing::warn!(strategy_name = %other, "unknown strategy, skipping");
-            }
+                ),
+            );
+        }
+        name if is_fx_new_strategy(name) => {
+            add_strategy_and_log(
+                engine,
+                sc,
+                Box::new(auto_trader_strategy::fx_new::FxNewV1::new(
+                    sc.name.clone(),
+                    collect_pairs(sc),
+                )),
+            );
+        }
+        other => {
+            tracing::warn!(strategy_name = %other, "unknown strategy, skipping");
         }
     }
     Ok(())
+}
+
+fn build_swing_llm(
+    sc: &StrategyConfig,
+    knowledge: &Option<Arc<dyn KnowledgeStore>>,
+    gemini_config: Option<&GeminiConfig>,
+) -> anyhow::Result<Option<Box<dyn Strategy>>> {
+    let holding_days_max = sc
+        .params
+        .get("holding_days_max")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(14) as u32;
+    let pairs = collect_pairs(sc);
+
+    let gemini_api_key = match std::env::var("GEMINI_API_KEY") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            tracing::warn!(
+                strategy_name = %sc.name,
+                "gemini api key not set or empty, skipping strategy"
+            );
+            return Ok(None);
+        }
+    };
+    let gemini = match gemini_config {
+        Some(c) => c,
+        None => {
+            tracing::warn!(strategy_name = %sc.name, "gemini config missing, skipping strategy");
+            return Ok(None);
+        }
+    };
+
+    let store = match knowledge {
+        Some(s) => Arc::clone(s),
+        None => {
+            tracing::warn!(strategy_name = %sc.name, "knowledge_store unavailable, skipping strategy");
+            return Ok(None);
+        }
+    };
+
+    let strategy = auto_trader_strategy::swing_llm::SwingLLMv1::new(
+        sc.name.clone(),
+        pairs,
+        holding_days_max,
+        store,
+        gemini.api_url.clone(),
+        gemini_api_key,
+        gemini.model.clone(),
+    )
+    .with_context(|| format!("failed to build strategy {}", sc.name))?;
+    Ok(Some(Box::new(strategy)))
+}
+
+async fn load_donchian_evolve_params(pool: &PgPool, strategy_name: &str) -> serde_json::Value {
+    match sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
+        "SELECT params FROM strategy_params WHERE strategy_name = $1",
+    )
+    .bind(strategy_name)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(j)) => j.0,
+        Ok(None) => {
+            tracing::warn!(strategy_name = %strategy_name, "no strategy_params row, using defaults");
+            build_default_donchian_evolve_params()
+        }
+        Err(e) => {
+            tracing::warn!(
+                strategy_name = %strategy_name,
+                error = %e,
+                "failed to load strategy_params, using defaults"
+            );
+            build_default_donchian_evolve_params()
+        }
+    }
+}
+
+fn build_default_donchian_evolve_params() -> serde_json::Value {
+    serde_json::json!({
+        "entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50
+    })
+}
+
+fn collect_pairs(sc: &StrategyConfig) -> Vec<Pair> {
+    sc.pairs.iter().map(|s| Pair::new(s)).collect()
+}
+
+fn add_strategy_and_log(
+    engine: &mut StrategyEngine,
+    sc: &StrategyConfig,
+    strategy: Box<dyn Strategy>,
+) {
+    engine.add_strategy(strategy, sc.mode.clone());
+    log_strategy_registered(&sc.name, &sc.mode);
 }
 
 #[cfg(test)]
