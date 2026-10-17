@@ -5,7 +5,7 @@
 | 目的 | workspace 全体を `~/.claude/specs/conventions.md` と `conventions-rust.md` に適合させる作業の、順序・単位・各 run の完了条件を決める |
 | 読者 | 各 run の spec を書くオーケストレーター、実装する kaneko、判定する reviewer |
 | 扱う範囲 | 適合の順序、1 run の単位と上限、段階的に lint を有効にする方法、コメント禁止を強制するテストの仕様、crate ごとの作業の型 |
-| 関連文書 | `~/.claude/specs/conventions.md`、`~/.claude/specs/conventions-rust.md`(判定基準)、`~/.claude/specs/ci-copilot-review.md`(PR の大きさの上限)、`~/.claude/specs/vibepod.md`(run の実行手順)、`CLAUDE.md`(commit 前の `./scripts/test-all.sh`) |
+| 関連文書 | `~/.claude/specs/conventions.md`、`~/.claude/specs/conventions-rust.md`(判定基準)、`~/.claude/specs/ci-copilot-review.md`(PR の大きさの上限)、`~/.claude/specs/vibepod.md`(run の実行手順)、`CLAUDE.md`(commit 前の `./scripts/test-all.sh`)、`docs/superpowers/plans/2026-10-17-rustdoc-conventions.md`(rustdoc と doc 系 lint の定義元) |
 
 > **For agentic workers:** 各 run は vibepod コンテナで kaneko が実装し、reviewer が Stage 1 を判定する。Stage 2 と `./scripts/test-all.sh` はホストで行う。手順は `~/.claude/specs/vibepod.md` に従う。
 
@@ -42,15 +42,15 @@
 
 ## 決定
 
-- D-1 lint の定義: `Cargo.toml` の `[workspace.lints.clippy]` に `too_many_lines`、`cognitive_complexity`、`fn_params_excessive_bools`、`unwrap_used`、`expect_used` を `"warn"` で置き、`./scripts/test-all.sh` の `-D warnings` で失敗させる。しきい値は `clippy.toml` の `too-many-lines-threshold = 80`、テストの `unwrap` / `expect` は `allow-unwrap-in-tests = true` と `allow-expect-in-tests = true` で許す
+- D-1 lint の定義: `Cargo.toml` の `[workspace.lints.clippy]` に `too_many_lines`、`cognitive_complexity`、`fn_params_excessive_bools`、`unwrap_used`、`expect_used` を `"warn"` で置き、`./scripts/test-all.sh` の `-D warnings` で失敗させる。しきい値は `clippy.toml` の `too-many-lines-threshold = 80`、テストの `unwrap` / `expect` は `allow-unwrap-in-tests = true` と `allow-expect-in-tests = true` で許す。doc 系 lint(`missing_docs`、`clippy::missing_errors_doc`、`clippy::missing_panics_doc`)は `2026-10-17-rustdoc-conventions.md` の Task 5 で加える
 - D-2 段階的な有効化: crate が適合を終えた run で、その crate の `Cargo.toml` に `[lints] workspace = true` を加え、`crates/core/tests/no_comments.rs` の `CHECKED_CRATES` にその crate のディレクトリ名を加える。未適合の crate には lint を適用しない
-- D-3 crate の順序: core → notify → vegapunk-client → macro-analyst → backtest → db → executor → market → strategy → app → sim → integration-tests(依存の少ない順)
+- D-3 crate の順序: core → notify → vegapunk-client → macro-analyst → backtest → db → executor → market → strategy → app → sim → integration-tests(依存の少ない順)。integration-tests の run を始める時期は `2026-10-17-rustdoc-conventions.md` の D-R6 に従う
 - D-4 テストの置き場所: `src/<module>.rs` の末尾の `#[cfg(test)] mod <name> { ... }` は、`src/<module>.rs` に `#[cfg(test)] mod tests;` を置き、`src/<module>/tests.rs` に移す。1 ファイルに複数のテストモジュールがある場合は、1 つの `tests.rs` の中で `mod <name> { ... }` として残す。`tests.rs` の `use` も SC-3 の順(標準ライブラリ → サードパーティ → 同じ crate)に並べ、`use super::*;` は同じ crate のグループに置く
 - D-5 ログ(SC-12): 共通のログ関数は `tracing` のマクロとし、出力の形は `crates/app/src/main.rs` の subscriber の設定 1 か所で決める。本文は小文字で始め、末尾にピリオドを付けず、識別子・件数は構造化フィールド(`key = value`)で渡す。本文の書き換えは、その crate の「コメントの除去」run で行う
-- D-6 doc コメント(SC-9)の内容の移し先: 受け付けない入力の説明はテスト(FF-5)に、理由の説明は関数名・定数名に移す。移し先が無い説明(型の用途の説明など)は削除する
+- D-6 doc コメント(SC-9、KM-7)の扱い: R-b では `//!` の行と、`missing_docs` が報告しない項目(`pub(crate)` や private の項目)の `///` を除く。除く行の内容は、受け付けない入力の説明ならテスト(FF-5)に、理由の説明なら関数名・定数名に移し、移し先が無いもの(型の用途の説明など)は削除する。`missing_docs` が報告する項目の `///` は残し、R-c の Step 5 で SC-9 の形に書き直す。rustdoc の書き方は `2026-10-17-rustdoc-conventions.md` の Global Constraints と D-R3〜D-R5 に従う
 - D-7 run の 3 種類と順序(crate ごと): R-a テストの分離と `use` の整列 → R-b コメントの除去と SC-6・SC-12 への文言の統一 → R-c ファイルと関数の分割、`unwrap` / `expect` の除去、lint の有効化。R-a と R-b は本体の追加行が少ないため 1 run にまとめてよい
 - D-8 `scripts/test-all.sh` の変更: 先頭に `cargo build --workspace --locked` を加え、clippy と test に `--locked` を付ける
-- D-9 コメントの検出範囲: Phase 0 のテストは行頭が `//` または `/*` の行だけを検出する。core の R-b で、文字列リテラル(`"..."`、`r"..."`、`r#"..."#`)の外にある `//` と `/*` をすべて検出する `line_has_comment` に置き換え、行末コメントも対象にする。`// SAFETY:` で始まる行だけを許す
+- D-9 コメントの検出範囲: Phase 0 のテストは行頭が `//` または `/*` の行だけを検出する。core の R-b で、文字列リテラル(`"..."`、`r"..."`、`r#"..."#`)の外にある `//` と `/*` をすべて検出する `comment_line_numbers` に置き換え、行末コメントも対象にする。許すのは、`// SAFETY:` で始まる行と、SC-11 が許す rustdoc の行(`2026-10-17-rustdoc-conventions.md` の Task 1)だけとする
 
 ---
 
@@ -157,12 +157,6 @@ fn line_comment_is_forbidden() {
 }
 
 #[test]
-fn doc_comment_is_forbidden() {
-    assert!(is_forbidden_comment_line("/// doc"));
-    assert!(is_forbidden_comment_line("//! module doc"));
-}
-
-#[test]
 fn block_comment_start_is_forbidden() {
     assert!(is_forbidden_comment_line("/* block */"));
 }
@@ -180,7 +174,7 @@ fn url_inside_string_literal_is_not_a_comment() {
 
 - [ ] **Step 2: `cargo test -p auto-trader-core --test no_comments` が通ることを確認する**
 
-Expected: 7 passed(Unix では symlink を辿らないことのテストを含めて 8 passed)。
+Expected: 6 passed(Unix では symlink を辿らないことのテストを含めて 7 passed)。doc コメントのテストは `2026-10-17-rustdoc-conventions.md` の Task 1 が定める
 
 - [ ] **Step 3: `CHECKED_CRATES` を一時的に `&["core"]` にして実行し、`checked_crates_have_no_comment_lines_in_src` が現在の `crates/core/src` のコメントを列挙して失敗することを確認し、`&[]` に戻す(RH-8)**
 
@@ -268,6 +262,7 @@ Run: `grep -nE '^\s*(//|/\*)' -r crates/<crate>/src | grep -v 'SAFETY:'`
 - 受け付けない入力の説明 → 対象ファイルの `tests.rs` に、その入力がエラーになるテスト(FF-5)
 - 理由の説明(順序への依存、外部仕様の癖、対策) → 理由を名前に持つ関数・定数・型
 - 型や関数の用途の説明、作業の経緯 → 削除
+- `///` と `//!` → D-6 に従う
 
 - [ ] **Step 3: エラーメッセージを SC-6 の 3 定型(`invalid <対象>: <理由>`、`unsupported <対象>: <値>`、`failed to <動作>: <原因>`)に揃える。小文字で始め、末尾にピリオドを付けない。`#[source]` と `{source}` の両方で原因を出していれば一方にする**
 
@@ -297,7 +292,7 @@ Run: `find crates/<crate>/src -name '*.rs' -not -name tests.rs -exec awk 'END { 
 
 - [ ] **Step 4: テスト外の `unwrap` / `expect` を除く。失敗し得るものは `Result` で呼び出し元に返し、FF-6 に従って呼び出し元でも捨てない。失敗し得ないもの(定数の parse など)は `const` か、起動時に 1 回検証して保持する値に置き換える**
 
-- [ ] **Step 5: `crates/<crate>/Cargo.toml` に次を加える**
+- [ ] **Step 5: D-6 に従って `missing_docs` が報告する項目に rustdoc を書き、crate ルートに `#![doc = "..."]` を付けてから、`crates/<crate>/Cargo.toml` に次を加える**
 
 ```toml
 [lints]
