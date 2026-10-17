@@ -40,23 +40,19 @@ fn group_pairs_by_exchange_returns_empty_map_for_empty_input() {
     assert!(actual.is_empty());
 }
 
-fn config_with_crypto_pairs(crypto: Option<&[&str]>) -> AppConfig {
-    let pairs_json = match crypto {
-        Some(pairs) => serde_json::json!({ "crypto": pairs }),
-        None => serde_json::json!({}),
-    };
+fn config_with_pairs(pairs_json: serde_json::Value) -> AppConfig {
     let config_json = serde_json::json!({
         "vegapunk": {"endpoint": "http://x", "schema": "y"},
         "database": {"url": "postgresql://x"},
         "monitor": {"interval_secs": 60},
         "pairs": pairs_json,
     });
-    serde_json::from_value(config_json).expect("config_with_crypto_pairs must parse")
+    serde_json::from_value(config_json).expect("config_with_pairs must parse")
 }
 
 #[test]
 fn resolve_configured_crypto_pairs_returns_pairs_from_config_when_set() {
-    let config = config_with_crypto_pairs(Some(&["BTC_JPY", "ETH_JPY"]));
+    let config = config_with_pairs(serde_json::json!({ "crypto": ["BTC_JPY", "ETH_JPY"] }));
 
     let actual = resolve_configured_crypto_pairs(&config);
 
@@ -65,9 +61,27 @@ fn resolve_configured_crypto_pairs_returns_pairs_from_config_when_set() {
 
 #[test]
 fn resolve_configured_crypto_pairs_returns_empty_when_not_configured() {
-    let config = config_with_crypto_pairs(None);
+    let config = config_with_pairs(serde_json::json!({}));
 
     let actual = resolve_configured_crypto_pairs(&config);
 
     assert!(actual.is_empty());
+}
+
+#[test]
+fn resolve_configured_fx_pairs_prefers_active_pairs_when_set() {
+    let config = config_with_pairs(serde_json::json!({ "active": ["USD_JPY"], "fx": ["EUR_USD"] }));
+
+    let actual = resolve_configured_fx_pairs(&config);
+
+    assert_eq!(actual, vec![Pair::new("USD_JPY")]);
+}
+
+#[test]
+fn resolve_configured_fx_pairs_falls_back_to_fx_pairs_when_active_is_empty() {
+    let config = config_with_pairs(serde_json::json!({ "active": [], "fx": ["EUR_USD"] }));
+
+    let actual = resolve_configured_fx_pairs(&config);
+
+    assert_eq!(actual, vec![Pair::new("EUR_USD")]);
 }

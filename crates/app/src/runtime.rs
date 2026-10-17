@@ -5,6 +5,7 @@ use auto_trader_db::trading_accounts::TradingAccount;
 pub(crate) mod api_server;
 pub(crate) mod background;
 pub(crate) mod balance_drift_loop;
+pub(crate) mod channels;
 pub(crate) mod crypto_monitor;
 pub(crate) mod daily_batch;
 pub(crate) mod dependencies;
@@ -46,7 +47,7 @@ pub(crate) fn resolve_trade_account(owned: &OpenTradeWithAccount) -> Option<Trad
 }
 
 pub(crate) fn resolve_account_exchange(pac: &TradingAccount) -> Option<Exchange> {
-    let Some(exchange) = crate::exchange_from_str(&pac.exchange) else {
+    let Some(exchange) = exchange_from_str(&pac.exchange) else {
         tracing::warn!(
             account_name = %pac.name,
             account_id = %pac.id,
@@ -56,6 +57,10 @@ pub(crate) fn resolve_account_exchange(pac: &TradingAccount) -> Option<Exchange>
         return None;
     };
     Some(exchange)
+}
+
+pub(crate) fn exchange_from_str(s: &str) -> Option<Exchange> {
+    s.parse().ok()
 }
 
 #[cfg(test)]

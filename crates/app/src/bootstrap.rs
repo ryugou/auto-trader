@@ -1,7 +1,14 @@
 use auto_trader_core::config::AppConfig;
 
+pub(crate) const CRYPTO_TIMEFRAME: &str = "M5";
+pub(crate) const H1_TIMEFRAME: &str = "H1";
+pub(crate) const FX_TIMEFRAME: &str = "M5";
+pub(crate) const WARMUP_LIMIT: i64 = 200;
+
+pub(crate) mod account_setup;
 pub(crate) mod accounts;
 pub(crate) mod config;
+pub(crate) mod engine_setup;
 pub(crate) mod exchange_apis;
 pub(crate) mod feeds;
 pub(crate) mod fx_monitor;
@@ -12,6 +19,8 @@ pub(crate) mod live_flags;
 pub(crate) mod logging;
 pub(crate) mod macro_analyst;
 pub(crate) mod position_sizer;
+pub(crate) mod services;
+pub(crate) mod startup_checks;
 pub(crate) mod strategies;
 
 pub(crate) fn resolve_oanda_account_id(config: &AppConfig) -> Option<String> {

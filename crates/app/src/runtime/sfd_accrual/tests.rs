@@ -79,3 +79,24 @@ fn mid_price_averages_bid_and_ask() {
 
     assert_eq!(mid, dec!(101));
 }
+
+#[test]
+fn sfd_applies_only_to_fx_btc_jpy() {
+    assert!(trade_is_subject_to_bitflyer_sfd("FX_BTC_JPY"));
+    assert!(!trade_is_subject_to_bitflyer_sfd("ETH_JPY"));
+}
+
+#[test]
+fn trade_not_yet_open_at_event_time_is_excluded_from_catchup_billing() {
+    let event_at = chrono::Utc::now();
+    let entry_after_event = event_at + chrono::Duration::minutes(1);
+    let entry_before_event = event_at - chrono::Duration::minutes(1);
+    assert!(trade_was_not_yet_open_at_event_time(
+        entry_after_event,
+        event_at
+    ));
+    assert!(!trade_was_not_yet_open_at_event_time(
+        entry_before_event,
+        event_at
+    ));
+}

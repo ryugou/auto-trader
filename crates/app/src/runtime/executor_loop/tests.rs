@@ -48,35 +48,3 @@ fn allows_new_live_order_when_live_enabled() {
 fn allows_new_paper_order_regardless_of_live_enabled() {
     assert!(!live_order_blocked_when_live_disabled_leaving_close_paths_unaffected("paper", false));
 }
-
-#[test]
-fn overnight_fee_applies_to_bitflyer_cfd_and_gmo_fx() {
-    assert!(overnight_fee_applies_to_exchange(Exchange::BitflyerCfd));
-    assert!(overnight_fee_applies_to_exchange(Exchange::GmoFx));
-}
-
-#[test]
-fn overnight_fee_does_not_apply_to_oanda() {
-    assert!(!overnight_fee_applies_to_exchange(Exchange::Oanda));
-}
-
-#[test]
-fn sfd_applies_only_to_fx_btc_jpy() {
-    assert!(trade_is_subject_to_bitflyer_sfd("FX_BTC_JPY"));
-    assert!(!trade_is_subject_to_bitflyer_sfd("ETH_JPY"));
-}
-
-#[test]
-fn trade_not_yet_open_at_event_time_is_excluded_from_catchup_billing() {
-    let event_at = chrono::Utc::now();
-    let entry_after_event = event_at + chrono::Duration::minutes(1);
-    let entry_before_event = event_at - chrono::Duration::minutes(1);
-    assert!(trade_was_not_yet_open_at_event_time(
-        entry_after_event,
-        event_at
-    ));
-    assert!(!trade_was_not_yet_open_at_event_time(
-        entry_before_event,
-        event_at
-    ));
-}

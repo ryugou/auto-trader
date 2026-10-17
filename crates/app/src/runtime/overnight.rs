@@ -82,10 +82,17 @@ fn resolve_overnight_fee_exchange(pac: &TradingAccount) -> Option<Exchange> {
         return None;
     }
     let exchange = super::resolve_account_exchange(pac)?;
-    if !crate::overnight_fee_applies_to_exchange(exchange) {
+    if !overnight_fee_applies_to_exchange(exchange) {
         return None;
     }
     Some(exchange)
+}
+
+fn overnight_fee_applies_to_exchange(exchange: Exchange) -> bool {
+    match exchange {
+        Exchange::BitflyerCfd | Exchange::GmoFx => true,
+        Exchange::Oanda => false,
+    }
 }
 
 async fn apply_fees_to_account(

@@ -74,3 +74,14 @@ fn compute_fee_gmo_fx_returns_none_when_rate_not_configured() {
 
     assert_eq!(fee, None);
 }
+
+#[test]
+fn overnight_fee_applies_to_bitflyer_cfd_and_gmo_fx() {
+    assert!(overnight_fee_applies_to_exchange(Exchange::BitflyerCfd));
+    assert!(overnight_fee_applies_to_exchange(Exchange::GmoFx));
+}
+
+#[test]
+fn overnight_fee_does_not_apply_to_oanda() {
+    assert!(!overnight_fee_applies_to_exchange(Exchange::Oanda));
+}
