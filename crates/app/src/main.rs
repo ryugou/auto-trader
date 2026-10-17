@@ -1,4 +1,5 @@
 mod regime;
+mod runtime;
 mod startup_reconcile;
 mod weekly_batch;
 mod wilson;
@@ -15,7 +16,6 @@ use auto_trader_core::event::{PriceEvent, SignalEvent, TradeAction, TradeEvent};
 use auto_trader_core::executor::OrderExecutor;
 use auto_trader_core::types::{Direction, Exchange, Pair};
 use auto_trader_db::pool::create_pool;
-use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::bitflyer_private::BitflyerPrivateApi;
 use auto_trader_market::exchange_api::ExchangeApi;
@@ -274,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (price_tx, mut price_rx) = mpsc::channel::<PriceEvent>(256);
     let (price_monitor_tx, price_monitor_rx) = mpsc::channel::<PriceEvent>(256);
-    let (signal_tx, mut signal_rx) = mpsc::channel::<SignalEvent>(256);
+    let (signal_tx, signal_rx) = mpsc::channel::<SignalEvent>(256);
     let (trade_tx, mut trade_rx) = mpsc::channel::<TradeEvent>(256);
 
     const CRYPTO_TIMEFRAME: &str = "M5";
@@ -1292,375 +1292,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let executor_pool = pool.clone();
-    let trade_tx_clone = trade_tx.clone();
-    let executor_exchange_apis = exchange_apis.clone();
-    let executor_price_store = price_store.clone();
-    let executor_notifier = notifier.clone();
-    let executor_exchange_pairs = Arc::clone(&exchange_pairs);
-    let executor_position_sizer = shared_position_sizer.clone();
-    let executor_exchange_liquidation_levels = exchange_liquidation_levels.clone();
-    let executor_live_forces_dry_run = live_forces_dry_run;
-    let executor_live_enabled = live_enabled;
-    let executor_price_freshness_secs = price_freshness_secs;
-    let executor_daily_loss_limit_pct = daily_loss_limit_pct;
-    let executor_halt_hours = halt_hours;
-    let knowledge_store_exec = knowledge_store.clone();
-    let executor_handle = tokio::spawn(async move {
-        while let Some(signal_event) = signal_rx.recv().await {
-            let signal = &signal_event.signal;
-
-            let active_accounts_for_new_dispatch =
-                match auto_trader_db::trading_accounts::list_active(&executor_pool).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "failed to list active trading accounts, skipping signal dispatch"
-                        );
-                        continue;
-                    }
-                };
-
-            let mut matched_strategy = false;
-            let mut dispatched = false;
-            for pac in &active_accounts_for_new_dispatch {
-                if pac.strategy != signal.strategy_name {
-                    continue;
-                }
-                matched_strategy = true;
-                let exchange = match exchange_from_str(&pac.exchange) {
-                    Some(e) => e,
-                    None => {
-                        tracing::warn!(
-                            account_name = %pac.name,
-                            account_id = %pac.id,
-                            exchange = %pac.exchange,
-                            "unsupported exchange"
-                        );
-                        continue;
-                    }
-                };
-                if !auto_trader::startup::fx_new_dispatch_allowed(&signal.strategy_name, exchange) {
-                    tracing::warn!(
-                        account_name = %pac.name,
-                        account_id = %pac.id,
-                        strategy_name = %signal.strategy_name,
-                        expected_exchange = %auto_trader_strategy::fx_new::FX_NEW_EXCHANGE,
-                        account_exchange = %exchange,
-                        "invalid exchange: mismatch with fx_new"
-                    );
-                    continue;
-                }
-                if !executor_exchange_pairs
-                    .get(&exchange)
-                    .is_some_and(|pairs| pairs.contains(&signal.pair.0))
-                {
-                    tracing::debug!(
-                        pair = %signal.pair.0,
-                        exchange = %exchange,
-                        account_name = %pac.name,
-                        "unsupported pair"
-                    );
-                    continue;
-                }
-                if live_order_blocked_when_live_disabled_leaving_close_paths_unaffected(
-                    &pac.account_type,
-                    executor_live_enabled,
-                ) {
-                    tracing::warn!(
-                        account_name = %pac.name,
-                        account_id = %pac.id,
-                        "live trading disabled via [live].enabled=false config, skipping signal \
-                         for live account"
-                    );
-                    continue;
-                }
-
-                let now = chrono::Utc::now();
-                match auto_trader_db::trading_accounts::get_halt(&executor_pool, pac.id).await {
-                    Ok(Some((until, reason))) if until > now => {
-                        tracing::warn!(
-                            account_name = %pac.name,
-                            account_id = %pac.id,
-                            halted_until = %until,
-                            halt_reason = %reason.as_deref().unwrap_or("no reason"),
-                            "account halted by kill switch, skipping entry"
-                        );
-                        continue;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(
-                            account_name = %pac.name,
-                            account_id = %pac.id,
-                            error = %e,
-                            "failed to check kill switch halt status, skipping account (fail-closed)"
-                        );
-                        continue;
-                    }
-                }
-
-                let day_start = auto_trader_executor::risk_gate::jst_day_start(now);
-                let day_net = match auto_trader_db::trades::realized_net_since(
-                    &executor_pool,
-                    pac.id,
-                    day_start,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            account_name = %pac.name,
-                            account_id = %pac.id,
-                            error = %e,
-                            "failed to compute realized pnl for kill switch, skipping account \
-                             (fail-closed)"
-                        );
-                        continue;
-                    }
-                };
-                let day_start_balance = compute_day_start_balance_net_of_todays_realized_pnl(
-                    pac.current_balance,
-                    day_net,
-                );
-                if let auto_trader_executor::risk_gate::GateDecision::Reject(reason) =
-                    auto_trader_executor::risk_gate::eval_daily_loss(
-                        day_net,
-                        day_start_balance,
-                        executor_daily_loss_limit_pct,
-                    )
-                {
-                    let until = now + chrono::Duration::hours(executor_halt_hours as i64);
-                    let halt_reason = format!(
-                        "daily loss limit: day_net={day_net} start_balance={day_start_balance} limit_pct={executor_daily_loss_limit_pct}"
-                    );
-                    tracing::warn!(
-                        account_name = %pac.name,
-                        account_id = %pac.id,
-                        halted_until = %until,
-                        halt_reason = %halt_reason,
-                        gate_reason = ?reason,
-                        "kill switch halting account due to daily loss limit"
-                    );
-                    if let Err(e) = auto_trader_db::trading_accounts::set_halt(
-                        &executor_pool,
-                        pac.id,
-                        until,
-                        &halt_reason,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            account_name = %pac.name,
-                            account_id = %pac.id,
-                            error = %e,
-                            "failed to persist kill switch halt"
-                        );
-                    }
-                    let notifier = executor_notifier.clone();
-                    let account_name = pac.name.clone();
-                    let strategy_name = signal.strategy_name.clone();
-                    let pair = signal.pair.clone();
-                    let notify_reason = halt_reason.clone();
-                    tokio::spawn(async move {
-                        let ev = auto_trader_notify::NotifyEvent::OrderFailed(
-                            auto_trader_notify::OrderFailedEvent {
-                                account_name,
-                                exchange,
-                                strategy_name,
-                                pair,
-                                reason: format!(
-                                    "Kill Switch 発火 (新規エントリー停止): {notify_reason}"
-                                ),
-                            },
-                        );
-                        if let Err(e) = notifier.send(ev).await {
-                            tracing::warn!(error = %e, "failed to send kill switch halt notification");
-                        }
-                    });
-                    continue;
-                }
-
-                let dry_run = auto_trader::startup::effective_dry_run(
-                    &pac.account_type,
-                    executor_live_forces_dry_run,
-                );
-                let api: std::sync::Arc<dyn auto_trader_market::exchange_api::ExchangeApi> =
-                    match executor_exchange_apis.get(&exchange) {
-                        Some(a) => a.clone(),
-                        None => {
-                            if !dry_run {
-                                tracing::warn!(
-                                    exchange = %exchange,
-                                    account_name = %pac.name,
-                                    account_id = %pac.id,
-                                    "unsupported exchange"
-                                );
-                                continue;
-                            }
-                            std::sync::Arc::new(
-                                auto_trader_market::null_exchange_api::NullExchangeApi,
-                            )
-                        }
-                    };
-
-                let feed_key = price_store::FeedKey::new(exchange, signal.pair.clone());
-                let last_tick_age = executor_price_store
-                    .last_tick_age_for(&feed_key)
-                    .await
-                    .unwrap_or(u64::MAX);
-                match eval_price_freshness(executor_price_freshness_secs, last_tick_age) {
-                    GateDecision::Pass => {}
-                    GateDecision::Reject(reason) => {
-                        tracing::warn!(
-                            account_name = %pac.name,
-                            gate_reason = ?reason,
-                            "invalid signal: rejected by freshness gate"
-                        );
-                        continue;
-                    }
-                }
-
-                let liquidation_margin_level = match auto_trader::startup::liquidation_level_or_log(
-                    &executor_exchange_liquidation_levels,
-                    exchange,
-                    || format!("signal for account {} (id={})", pac.name, pac.id),
-                ) {
-                    Some(y) => y,
-                    None => continue,
-                };
-                let trader = UnifiedTrader::new(
-                    executor_pool.clone(),
-                    exchange,
-                    pac.id,
-                    pac.name.clone(),
-                    api.clone(),
-                    executor_price_store.clone(),
-                    executor_notifier.clone(),
-                    executor_position_sizer.clone(),
-                    liquidation_margin_level,
-                    dry_run,
-                );
-                let name = pac.name.clone();
-
-                let still_active =
-                    match reconfirm_account_active_before_marking_dispatched(&executor_pool, pac)
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!(
-                                account_id = %pac.id,
-                                account_name = %pac.name,
-                                error = %e,
-                                "failed to re-check account state"
-                            );
-                            continue;
-                        }
-                    };
-                if !still_active {
-                    tracing::warn!(
-                        account_id = %pac.id,
-                        account_name = %pac.name,
-                        strategy_name = %signal.strategy_name,
-                        pair = %signal.pair,
-                        "invalid account: not active"
-                    );
-                    continue;
-                }
-
-                dispatched = true;
-                let positions = trader.open_positions().await.unwrap_or_default();
-                let has_position = positions.iter().any(|p| {
-                    p.trade.strategy_name == signal.strategy_name && p.trade.pair == signal.pair
-                });
-                if has_position {
-                    tracing::debug!(
-                        strategy_name = %signal.strategy_name,
-                        pair = %signal.pair,
-                        account_name = %name,
-                        "signal skipped, account already has open position"
-                    );
-                    continue;
-                }
-
-                match trader.execute(signal).await {
-                    Ok(trade) => {
-                        let trade_clone = trade.clone();
-                        let indicators_clone = signal_event.indicators.clone();
-                        let alloc_pct = signal.allocation_pct;
-                        let exec_pool = executor_pool.clone();
-                        let store_opt = knowledge_store_exec.clone();
-                        tokio::spawn(async move {
-                            let mut ind_map = indicators_clone
-                                .iter()
-                                .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
-                                .collect::<serde_json::Map<_, _>>();
-                            ind_map.insert(
-                                "regime".to_string(),
-                                serde_json::Value::String(
-                                    crate::regime::classify(&indicators_clone)
-                                        .as_str()
-                                        .to_string(),
-                                ),
-                            );
-                            let ind_json = serde_json::Value::Object(ind_map);
-                            if let Err(e) =
-                                sqlx::query("UPDATE trades SET entry_indicators = $1 WHERE id = $2")
-                                    .bind(&ind_json)
-                                    .bind(trade_clone.id)
-                                    .execute(&exec_pool)
-                                    .await
-                            {
-                                tracing::warn!(error = %e, "failed to save entry_indicators");
-                            }
-
-                            if let Some(store) = store_opt
-                                && let Err(e) = store
-                                    .record_trade_open(
-                                        &trade_clone,
-                                        &indicators_clone,
-                                        Some(alloc_pct),
-                                    )
-                                    .await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "failed to record trade open in knowledge store"
-                                );
-                            }
-                        });
-                        if let Err(e) = trade_tx_clone
-                            .send(TradeEvent {
-                                trade,
-                                action: TradeAction::Opened,
-                                account_type: Some(pac.account_type.clone()),
-                            })
-                            .await
-                        {
-                            tracing::error!(error = %e, "failed to send trade event to trade channel");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(account_name = %name, error = %e, "failed to execute signal");
-                    }
-                }
-            }
-            if !matched_strategy {
-                tracing::warn!(
-                    strategy_name = %signal.strategy_name,
-                    "invalid signal: no matching trading account"
-                );
-            } else if !dispatched {
-                tracing::debug!(
-                    strategy_name = %signal.strategy_name,
-                    "signal matched strategy on account(s) but no account passed pre-dispatch gates"
-                );
-            }
-        }
-    });
+    let ctx = runtime::executor_loop::ExecutorLoopContext {
+        pool: pool.clone(),
+        trade_tx: trade_tx.clone(),
+        exchange_apis: exchange_apis.clone(),
+        price_store: price_store.clone(),
+        notifier: notifier.clone(),
+        exchange_pairs: Arc::clone(&exchange_pairs),
+        position_sizer: shared_position_sizer.clone(),
+        exchange_liquidation_levels: exchange_liquidation_levels.clone(),
+        live_forces_dry_run,
+        live_enabled,
+        price_freshness_secs,
+        daily_loss_limit_pct,
+        halt_hours,
+        knowledge_store: knowledge_store.clone(),
+    };
+    let executor_handle = tokio::spawn(runtime::executor_loop::run(ctx, signal_rx));
 
     let recorder_pool = pool.clone();
     let knowledge_store_recorder = knowledge_store.clone();
