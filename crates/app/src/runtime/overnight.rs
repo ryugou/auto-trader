@@ -81,15 +81,7 @@ fn resolve_overnight_fee_exchange(pac: &TradingAccount) -> Option<Exchange> {
     if pac.account_type != "paper" {
         return None;
     }
-    let Some(exchange) = crate::exchange_from_str(&pac.exchange) else {
-        tracing::warn!(
-            account_name = %pac.name,
-            account_id = %pac.id,
-            exchange = %pac.exchange,
-            "unsupported exchange"
-        );
-        return None;
-    };
+    let exchange = super::resolve_account_exchange(pac)?;
     if !crate::overnight_fee_applies_to_exchange(exchange) {
         return None;
     }

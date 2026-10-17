@@ -765,88 +765,24 @@ async fn main() -> anyhow::Result<()> {
         trade_rx,
     ));
 
-    let knowledge_store_daily = knowledge_store.clone();
-    let knowledge_store_weekly = knowledge_store.clone();
-    let gemini_api_url = config
-        .gemini
-        .as_ref()
-        .map(|g| g.api_url.clone())
-        .unwrap_or_default();
-    let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-    let gemini_model = config
-        .gemini
-        .as_ref()
-        .map(|g| g.model.clone())
-        .unwrap_or_default();
-    let daily_pool = pool.clone();
-    let daily_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let today = chrono::Utc::now().date_naive();
-
-        let backfill_days: i64 = config.monitor.backfill_days.unwrap_or(7) as i64;
-        for i in (1..=backfill_days).rev() {
-            let d = today - chrono::Duration::days(i);
-            tracing::info!(date = %d, "running daily batch backfill at startup");
-            if let Err(e) = auto_trader_db::summary::update_daily_max_drawdown(&daily_pool, d).await
-            {
-                tracing::error!(date = %d, error = %e, "failed to run daily batch backfill");
-            }
-        }
-
-        match auto_trader_db::notifications::purge_old_read(&daily_pool).await {
-            Ok(n) if n > 0 => tracing::info!(purged_count = n, "purged old read notifications"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "failed to purge old read notifications"),
-        }
-
-        let mut last_date = today;
-        loop {
-            interval.tick().await;
-            let now_date = chrono::Utc::now().date_naive();
-            if now_date != last_date {
-                tracing::info!(date = %last_date, "running daily batch");
-                if let Err(e) =
-                    auto_trader_db::summary::update_daily_max_drawdown(&daily_pool, last_date).await
-                {
-                    tracing::error!(error = %e, "failed to run daily batch");
-                }
-                match auto_trader_db::notifications::purge_old_read(&daily_pool).await {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(purged_count = n, "purged old read notifications")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "failed to purge old read notifications"),
-                }
-
-                if let Some(store) = knowledge_store_daily.clone() {
-                    tokio::spawn(async move {
-                        if let Err(e) = store.run_merge().await {
-                            tracing::warn!(error = %e, "failed to run daily knowledge store merge");
-                        } else {
-                            tracing::info!("daily knowledge store merge completed");
-                        }
-                    });
-                }
-
-                use chrono::Datelike as _;
-                let jst_weekday = (chrono::Utc::now() + chrono::Duration::hours(9)).weekday();
-                if jst_weekday == chrono::Weekday::Sun
-                    && let Err(e) = crate::weekly_batch::run(
-                        &daily_pool,
-                        knowledge_store_weekly.as_ref(),
-                        &gemini_api_url,
-                        &gemini_api_key,
-                        &gemini_model,
-                    )
-                    .await
-                {
-                    tracing::error!(error = %e, "failed to run weekly evolution batch");
-                }
-
-                last_date = now_date;
-            }
-        }
-    });
+    let daily_handle = tokio::spawn(runtime::daily_batch::run(
+        runtime::daily_batch::DailyBatchContext {
+            pool: pool.clone(),
+            knowledge_store: knowledge_store.clone(),
+            gemini_api_url: config
+                .gemini
+                .as_ref()
+                .map(|g| g.api_url.clone())
+                .unwrap_or_default(),
+            gemini_api_key: std::env::var("GEMINI_API_KEY").unwrap_or_default(),
+            gemini_model: config
+                .gemini
+                .as_ref()
+                .map(|g| g.model.clone())
+                .unwrap_or_default(),
+            backfill_days: config.monitor.backfill_days,
+        },
+    ));
 
     let stop_fill_pool = pool.clone();
     let stop_fill_apis = exchange_apis.clone();
@@ -929,213 +865,7 @@ async fn main() -> anyhow::Result<()> {
         notifier.clone(),
     ));
 
-    let sfd_pool = pool.clone();
-    let sfd_price_store = price_store.clone();
-    let sfd_handle = tokio::spawn(async move {
-        use auto_trader_core::sfd;
-        use auto_trader_market::price_store::FeedKey;
-        use chrono::Timelike as _;
-        const SFD_MAX_CATCH_UP_HOURS: i64 = 24;
-        const SFD_STALE_THRESHOLD_SECS: u64 = 300;
-
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let mut last_hour: Option<chrono::DateTime<chrono::Utc>> = None;
-        loop {
-            interval.tick().await;
-            let now = chrono::Utc::now();
-            let current_hour = now
-                .date_naive()
-                .and_hms_opt(now.hour(), 0, 0)
-                .expect("hms_opt(now.hour(), 0, 0) is always valid")
-                .and_utc();
-            let Some(mut lh) = last_hour else {
-                last_hour = Some(current_hour);
-                continue;
-            };
-            if lh + chrono::Duration::hours(1) > current_hour {
-                continue;
-            }
-
-            let mut pending = (current_hour - lh).num_hours();
-            if pending > SFD_MAX_CATCH_UP_HOURS {
-                let dropped = pending - SFD_MAX_CATCH_UP_HOURS;
-                tracing::warn!(
-                    missed_hours = pending,
-                    dropped_hours = dropped,
-                    max_catch_up = SFD_MAX_CATCH_UP_HOURS,
-                    remedy = "audit the balance, a long ws outage likely dropped older accruals",
-                    "invalid sfd catch-up: too many missed hours"
-                );
-                lh = current_hour - chrono::Duration::hours(SFD_MAX_CATCH_UP_HOURS);
-                pending = SFD_MAX_CATCH_UP_HOURS;
-            }
-
-            let accounts =
-                match auto_trader_db::trading_accounts::list_active_or_with_open_trades(&sfd_pool)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "failed to list trading accounts for sfd accrual, retrying next tick"
-                        );
-                        continue;
-                    }
-                };
-            let has_paper_bitflyer = accounts.iter().any(|pac| {
-                pac.account_type == "paper"
-                    && exchange_from_str(&pac.exchange) == Some(Exchange::BitflyerCfd)
-            });
-            if !has_paper_bitflyer {
-                last_hour = Some(current_hour);
-                continue;
-            }
-
-            let open_target_count = match count_open_bitflyer_paper_fx_btc_jpy_trades(&sfd_pool)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "failed to count open fx_btc_jpy trades for sfd accrual, retrying next tick"
-                    );
-                    continue;
-                }
-            };
-            if open_target_count == 0 {
-                last_hour = Some(current_hour);
-                continue;
-            }
-
-            let fx_key = FeedKey::new(
-                Exchange::BitflyerCfd,
-                auto_trader_core::types::Pair::new("FX_BTC_JPY"),
-            );
-            let spot_key = FeedKey::new(
-                Exchange::BitflyerCfd,
-                auto_trader_core::types::Pair::new("BTC_JPY"),
-            );
-            let fx_age = sfd_price_store.last_tick_age_for(&fx_key).await;
-            let spot_age = sfd_price_store.last_tick_age_for(&spot_key).await;
-            let fresh = matches!(fx_age, Some(a) if a <= SFD_STALE_THRESHOLD_SECS)
-                && matches!(spot_age, Some(a) if a <= SFD_STALE_THRESHOLD_SECS);
-            if !fresh {
-                tracing::warn!(
-                    fx_age_secs = ?fx_age,
-                    spot_age_secs = ?spot_age,
-                    stale_threshold_secs = SFD_STALE_THRESHOLD_SECS,
-                    "invalid sfd hourly tick: stale"
-                );
-                continue;
-            }
-
-            let fx_ba = sfd_price_store.latest_bid_ask(&fx_key).await;
-            let spot_ba = sfd_price_store.latest_bid_ask(&spot_key).await;
-            let (fx_mid_fixed_for_every_catchup_hour, spot_mid_fixed_for_every_catchup_hour) =
-                match (fx_ba, spot_ba) {
-                    (Some((b1, a1)), Some((b2, a2))) => {
-                        ((b1 + a1) / Decimal::from(2), (b2 + a2) / Decimal::from(2))
-                    }
-                    _ => {
-                        tracing::warn!("invalid sfd hourly tick: missing bid/ask");
-                        continue;
-                    }
-                };
-
-            for _ in 0..pending {
-                for pac in &accounts {
-                    if pac.account_type != "paper" {
-                        continue;
-                    }
-                    let exchange = match exchange_from_str(&pac.exchange) {
-                        Some(e) => e,
-                        None => {
-                            tracing::warn!(
-                                account_name = %pac.name,
-                                account_id = %pac.id,
-                                exchange = %pac.exchange,
-                                "unsupported exchange"
-                            );
-                            continue;
-                        }
-                    };
-                    if exchange != Exchange::BitflyerCfd {
-                        continue;
-                    }
-                    let open_trades =
-                        match auto_trader_db::trades::get_open_trades_by_account(&sfd_pool, pac.id)
-                            .await
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::error!(
-                                    account_name = %pac.name,
-                                    error = %e,
-                                    "failed to list open trades for sfd hourly"
-                                );
-                                continue;
-                            }
-                        };
-                    for trade in &open_trades {
-                        if !trade_is_subject_to_bitflyer_sfd(&trade.pair.0) {
-                            continue;
-                        }
-                        let notional = trade.entry_price * trade.quantity;
-                        let fee = sfd::compute_hourly_sfd(sfd::SfdContext {
-                            fx_price: fx_mid_fixed_for_every_catchup_hour,
-                            spot_price: spot_mid_fixed_for_every_catchup_hour,
-                            position_notional: notional,
-                            direction: trade.direction,
-                        });
-                        if fee.is_zero() {
-                            continue;
-                        }
-                        let event_at = lh + chrono::Duration::hours(1);
-                        if trade_was_not_yet_open_at_event_time(trade.entry_at, event_at) {
-                            continue;
-                        }
-                        let result = async {
-                            let mut tx = sfd_pool.begin().await?;
-                            let applied = auto_trader_db::trades::apply_sfd_fee(
-                                &mut tx, pac.id, trade.id, fee, event_at,
-                            )
-                            .await?;
-                            tx.commit().await?;
-                            anyhow::Ok(applied)
-                        }
-                        .await;
-                        match result {
-                            Ok(Some(_)) => {
-                                tracing::info!(
-                                    trade_id = %trade.id,
-                                    fee = %fee,
-                                    notional = %notional,
-                                    "sfd applied"
-                                );
-                            }
-                            Ok(None) => {
-                                tracing::debug!(
-                                    trade_id = %trade.id,
-                                    "sfd skipped, trade closed mid-tick"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    trade_id = %trade.id,
-                                    error = %e,
-                                    "failed to apply sfd fee"
-                                );
-                            }
-                        }
-                    }
-                }
-                lh += chrono::Duration::hours(1);
-            }
-            last_hour = Some(lh);
-        }
-    });
+    let sfd_handle = tokio::spawn(runtime::sfd_accrual::run(pool.clone(), price_store.clone()));
 
     let api_state = api::AppState {
         pool: pool.clone(),
