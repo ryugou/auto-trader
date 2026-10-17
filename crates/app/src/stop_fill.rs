@@ -7,12 +7,14 @@ use rust_decimal::Decimal;
 use crate::closer::{CloseContext, close_trade};
 use crate::startup::effective_dry_run;
 
+/// Returns whether `t` has a stop order and its account is not dry run; an account with no type counts as paper.
 pub fn is_stop_detection_target(t: &OpenTradeWithAccount, live_forces_dry_run: bool) -> bool {
     let account_type = t.account_type.as_deref().unwrap_or("paper");
     let dry_run = effective_dry_run(account_type, live_forces_dry_run);
     !dry_run && t.trade.stop_order_id.is_some()
 }
 
+/// Asks the exchange for the stop order status of each of `open_trades` that `is_stop_detection_target` accepts, and closes with `close_trade` as a stop loss hit each trade whose stop order has been executed, passing the latest bid of its feed, or its stop loss if there is none, as `current_price`. Logs a warning, and closes nothing, for a trade whose exchange has no API in `ctx`, whose stop order is gone, or whose status cannot be read.
 pub async fn detect_and_close_stop_fills(
     ctx: &CloseContext,
     open_trades: &[OpenTradeWithAccount],

@@ -1,3 +1,5 @@
+#![doc = "Entry point of the trading application: loads the configuration, connects the services, starts the feeds, the pipeline and the background tasks, and shuts them down on Ctrl+C."]
+
 mod bootstrap;
 mod regime;
 mod runtime;
