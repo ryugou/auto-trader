@@ -6,6 +6,7 @@ use sqlx::PgPool;
 
 mod gemini;
 mod params_validation;
+mod proposals;
 
 struct StrategyStats {
     total_trades: i64,
@@ -30,8 +31,10 @@ const MIN_TRADES_FOR_EVOLUTION: i64 = 5;
 
 /// Evolves the parameters of each strategy that has a row in `strategy_params`, then triggers a merge of `knowledge` if it is given, and returns once all strategies are processed. Does nothing if there is no row. For each strategy, the closed trades of the past 7 days are counted:
 /// - with fewer than 5 trades, the parameters are kept and a system notification says so;
-/// - otherwise Gemini at `gemini_api_url` is asked for a proposal using the statistics of those trades, the current parameters, the win rate lower bound of each regime and, if available, the strategy outcomes from `knowledge`; the validated proposal is saved to `strategy_params` and announced in a system notification;
-/// - if the Gemini call fails or the proposal does not validate, the parameters are kept and a system notification gives the reason.
+/// - otherwise Gemini at `gemini_api_url` is asked for a proposal using the statistics of those trades, the current parameters, the win rate lower bound of each regime and, if available, the strategy outcomes from `knowledge`; the proposal is recorded in `strategy_param_proposals` (validated or rejected) and announced in a system notification as not applied;
+/// - if the Gemini call fails the parameters are kept and a system notification gives the reason; if the proposal does not validate, the rejection is recorded and a system notification gives the reason.
+///
+/// The weekly batch never writes to `strategy_params`: proposals are only recorded and never applied.
 ///
 /// A failure for one strategy is logged as an error and does not stop the others, and a failure of the knowledge merge is logged as a warning.
 ///
@@ -157,24 +160,22 @@ async fn run_for_strategy(
         None => return Ok(()),
     };
 
-    let normalized = match params_validation::validate_params(
+    let validation = params_validation::validate_params(
         strategy_name,
         &proposal.params,
         &evidence.current_params,
-    ) {
-        Ok(normalized) => normalized,
-        Err(err) => {
-            return keep_params_after_rejected_proposal(
-                pool,
-                strategy_name,
-                &proposal.params,
-                &err,
-            )
-            .await;
-        }
+    );
+    let record = proposals::ProposalRecord {
+        strategy_name,
+        proposal: &proposal,
+        evidence: proposals::evidence_json(&stats, &evidence),
+        llm_model: gemini_model,
+        base_params: &evidence.current_params,
     };
-
-    apply_proposal(pool, strategy_name, &proposal, &normalized).await
+    match &validation {
+        Ok(normalized) => proposals::record_proposal(pool, &record, normalized).await,
+        Err(err) => proposals::keep_params_after_rejected_proposal(pool, &record, err).await,
+    }
 }
 
 async fn gather_evidence(
@@ -266,48 +267,6 @@ async fn keep_params_after_gemini_failure(
     Ok(())
 }
 
-async fn keep_params_after_rejected_proposal(
-    pool: &PgPool,
-    strategy_name: &str,
-    proposed: &serde_json::Value,
-    err: &anyhow::Error,
-) -> anyhow::Result<()> {
-    tracing::warn!(strategy_name = %strategy_name, error = %err, "validation failed");
-    tracing::warn!(strategy_name = %strategy_name, params = %proposed, "rejected params");
-    let msg = format!(
-        "週次進化バッチ: {strategy_name} は LLM 提案の検証に失敗したため現状パラメータを維持します。理由: {err} 提案パラメータ: {}",
-        proposed
-    );
-    insert_system_notification(pool, &msg)
-        .await
-        .context("failed to insert system notification for validation failure")?;
-    Ok(())
-}
-
-async fn apply_proposal(
-    pool: &PgPool,
-    strategy_name: &str,
-    proposal: &gemini::GeminiProposal,
-    normalized: &serde_json::Value,
-) -> anyhow::Result<()> {
-    persist_params(pool, strategy_name, normalized)
-        .await
-        .context("failed to persist params")?;
-
-    let notification_message = format!(
-        "週次進化バッチ完了: {strategy_name}\n\
-         根拠: {}\n\
-         期待効果: {}\n\
-         新パラメータ: {}",
-        proposal.rationale, proposal.expected_effect, normalized,
-    );
-    insert_system_notification(pool, &notification_message)
-        .await
-        .context("failed to insert system notification")?;
-
-    Ok(())
-}
-
 async fn list_evolvable_strategies(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT strategy_name FROM strategy_params ORDER BY strategy_name")
@@ -391,27 +350,6 @@ async fn load_current_params(pool: &PgPool, strategy: &str) -> anyhow::Result<se
             .with_context(|| format!("failed to query strategy_params for strategy {strategy}"))?;
 
     Ok(row.map(|j| j.0).unwrap_or_else(|| serde_json::json!({})))
-}
-
-async fn persist_params(
-    pool: &PgPool,
-    strategy: &str,
-    params: &serde_json::Value,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO strategy_params (strategy_name, params, updated_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (strategy_name)
-        DO UPDATE SET params = EXCLUDED.params, updated_at = NOW()
-        "#,
-    )
-    .bind(strategy)
-    .bind(sqlx::types::Json(params))
-    .execute(pool)
-    .await
-    .with_context(|| format!("failed to upsert strategy_params for strategy {strategy}"))?;
-    Ok(())
 }
 
 async fn insert_system_notification(pool: &PgPool, message: &str) -> anyhow::Result<()> {
