@@ -19,6 +19,20 @@ async fn seed_paper_account(pool: &PgPool, strategy_name: &str) -> Uuid {
     id
 }
 
+async fn seed_strategy_params(pool: &PgPool, strategy_name: &str, params: &serde_json::Value) {
+    sqlx::query(
+        r#"INSERT INTO strategy_params (strategy_name, params, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (strategy_name)
+           DO UPDATE SET params = EXCLUDED.params, updated_at = NOW()"#,
+    )
+    .bind(strategy_name)
+    .bind(sqlx::types::Json(params))
+    .execute(pool)
+    .await
+    .expect("seed_strategy_params failed");
+}
+
 fn gemini_url_refused_without_reaching_the_network() -> &'static str {
     "http://127.0.0.1:1"
 }
@@ -46,9 +60,7 @@ async fn seed_closed_trades(pool: &PgPool, account_id: Uuid, strategy_name: &str
 #[sqlx::test(migrations = "../../migrations")]
 async fn run_for_strategy_skips_evaluation_below_min_trades_for_evolution(pool: PgPool) {
     let initial_params = serde_json::json!({"window": 20});
-    persist_params(&pool, "bb_mean_revert_v1", &initial_params)
-        .await
-        .expect("persist_params failed");
+    seed_strategy_params(&pool, "bb_mean_revert_v1", &initial_params).await;
 
     let account_id = seed_paper_account(&pool, "bb_mean_revert_v1").await;
     seed_closed_trades(
@@ -97,9 +109,7 @@ async fn run_for_strategy_skips_evaluation_below_min_trades_for_evolution(pool: 
 #[sqlx::test(migrations = "../../migrations")]
 async fn gemini_failure_records_system_notification_and_keeps_params(pool: PgPool) {
     let initial_params = serde_json::json!({"window": 20});
-    persist_params(&pool, "bb_mean_revert_v1", &initial_params)
-        .await
-        .expect("persist_params failed");
+    seed_strategy_params(&pool, "bb_mean_revert_v1", &initial_params).await;
 
     let account_id = seed_paper_account(&pool, "bb_mean_revert_v1").await;
     seed_closed_trades(
@@ -172,9 +182,7 @@ async fn validation_failure_records_rejected_params_in_system_notification(pool:
     let strategy = "donchian_trend_evolve_v1";
     let initial_params =
         serde_json::json!({"entry_channel": 20, "exit_channel": 10, "atr_baseline_bars": 50});
-    persist_params(&pool, strategy, &initial_params)
-        .await
-        .expect("persist_params failed");
+    seed_strategy_params(&pool, strategy, &initial_params).await;
 
     let account_id = seed_paper_account(&pool, strategy).await;
     seed_closed_trades(&pool, account_id, strategy, MIN_TRADES_FOR_EVOLUTION).await;
@@ -211,6 +219,26 @@ async fn validation_failure_records_rejected_params_in_system_notification(pool:
         message.contains(r#""entry_channel":100"#),
         "notification must carry the rejected proposal params: {message}"
     );
+
+    let rows: Vec<(Option<serde_json::Value>, Option<String>, serde_json::Value)> = sqlx::query_as(
+        "SELECT normalized_params, validation_error, proposed_params
+             FROM strategy_param_proposals WHERE strategy_name = $1",
+    )
+    .bind(strategy)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one rejected-proposal row expected");
+    assert!(rows[0].0.is_none(), "normalized_params must be NULL");
+    assert!(
+        rows[0]
+            .1
+            .as_deref()
+            .is_some_and(|e| e.contains("entry_channel")),
+        "validation_error must carry the reason: {:?}",
+        rows[0].1
+    );
+    assert_eq!(rows[0].2["entry_channel"], 100);
 
     assert!(
         !server.is_finished(),
