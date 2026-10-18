@@ -18,10 +18,13 @@ struct CsvRow {
     ask: Option<Decimal>,
 }
 
-/// CSV ファイルからキャンドルを読み込み、PriceEvent のベクタに変換する。
+/// Reads the candles of a CSV file and returns one price event per row, in file order, for the given exchange, pair and timeframe.
 ///
-/// `exchange` と `pair` は呼び出し側が指定する。`timeframe` は戦略に応じて
-/// "M5" や "H1" を指定する。
+/// # Panics
+///
+/// - Panics if the CSV file cannot be opened.
+/// - Panics if a CSV row cannot be parsed.
+/// - Panics if the timestamp of a row is not in RFC 3339 format.
 pub fn load_events_from_csv(
     csv_path: &Path,
     exchange: Exchange,
@@ -66,7 +69,7 @@ pub fn load_events_from_csv(
     events
 }
 
-/// フィクスチャディレクトリのパスを返す。
+/// Returns the path `fixtures/phase3` under the directory in `CARGO_MANIFEST_DIR`, or under the current directory if that variable is not set.
 pub fn fixtures_dir() -> std::path::PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(manifest)

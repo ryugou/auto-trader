@@ -4,18 +4,23 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Tick data for the mock BitFlyer WebSocket server.
+/// Ticker message that the mock bitFlyer WebSocket server sends.
 #[derive(Clone, Debug)]
 pub struct TickData {
+    /// Last traded price.
     pub ltp: i64,
+    /// Best bid price.
     pub best_bid: i64,
+    /// Best ask price.
     pub best_ask: i64,
+    /// Traded volume.
     pub volume: f64,
+    /// Timestamp of the tick, as the string that the message carries.
     pub timestamp: String,
 }
 
 impl TickData {
-    /// Create a simple tick with default volume and a fixed timestamp.
+    /// Returns a tick with a volume of 0.01 and the timestamp `2026-04-28T00:00:00.000`.
     pub fn new(ltp: i64, best_bid: i64, best_ask: i64) -> Self {
         Self {
             ltp,
@@ -26,13 +31,13 @@ impl TickData {
         }
     }
 
-    /// Create a tick with a custom timestamp.
+    /// Sets the timestamp of the tick.
     pub fn with_timestamp(mut self, ts: &str) -> Self {
         self.timestamp = ts.to_string();
         self
     }
 
-    /// Create a tick with a custom volume.
+    /// Sets the volume of the tick.
     pub fn with_volume(mut self, v: f64) -> Self {
         self.volume = v;
         self
@@ -55,22 +60,29 @@ enum Scenario {
     InvalidMessage,
 }
 
-/// A mock WebSocket server that simulates the BitFlyer lightning WebSocket API.
-///
-/// Starts on an ephemeral port and runs in a background tokio task.
-/// Cleaned up when dropped (the task is aborted).
+/// Mock of the bitFlyer lightning WebSocket API that plays one scenario to every client that connects, on an ephemeral port in a background task that is aborted on drop.
 pub struct MockBitflyerWs {
     url: String,
     _handle: tokio::task::JoinHandle<()>,
 }
 
 impl MockBitflyerWs {
-    /// Start a mock that sends a series of ticker messages at the given interval.
+    /// Starts a mock that sends the ticks as ticker messages of `pair`, 10 ms apart, and then keeps the connection open.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if binding the port fails.
+    /// - Returns an error if reading the local address of the listener fails.
     pub async fn normal_ticks(pair: &str, ticks: Vec<TickData>) -> anyhow::Result<Self> {
         Self::normal_ticks_with_interval(pair, ticks, std::time::Duration::from_millis(10)).await
     }
 
-    /// Start a mock that sends ticks at a configurable interval.
+    /// Starts a mock that sends the ticks as ticker messages of `pair`, one per `interval`, and then keeps the connection open.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if binding the port fails.
+    /// - Returns an error if reading the local address of the listener fails.
     pub async fn normal_ticks_with_interval(
         pair: &str,
         ticks: Vec<TickData>,
@@ -84,7 +96,12 @@ impl MockBitflyerWs {
         .await
     }
 
-    /// Start a mock that sends `n` ticks then closes the connection.
+    /// Starts a mock that sends the first `n` of the ticks as ticker messages of `pair`, 10 ms apart, and then closes the connection.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if binding the port fails.
+    /// - Returns an error if reading the local address of the listener fails.
     pub async fn disconnect_after(
         pair: &str,
         ticks: Vec<TickData>,
@@ -99,12 +116,17 @@ impl MockBitflyerWs {
         .await
     }
 
-    /// Start a mock that sends a single invalid (non-JSON) message.
+    /// Starts a mock that sends one message that is not valid JSON and then keeps the connection open.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if binding the port fails.
+    /// - Returns an error if reading the local address of the listener fails.
     pub async fn invalid_message() -> anyhow::Result<Self> {
         Self::start(Scenario::InvalidMessage).await
     }
 
-    /// Returns the `ws://127.0.0.1:{port}` URL for connecting to this mock.
+    /// Returns the URL `ws://127.0.0.1:{port}` that clients connect to.
     pub fn url(&self) -> String {
         self.url.clone()
     }

@@ -19,12 +19,16 @@ struct CandleRow {
     ask: Option<Decimal>,
 }
 
-/// CSV ファイルからローソク足データを読み込み、`price_candles` テーブルに挿入する。
+/// Reads the candles of a CSV file and upserts them into `price_candles` for the given exchange, pair and timeframe.
 ///
-/// 同一 `(exchange, pair, timeframe, timestamp)` の行が既に存在する場合は
-/// `ON CONFLICT ... DO UPDATE` で上書きする。
+/// A candle whose exchange, pair, timeframe and timestamp match an existing row overwrites its prices and volume. Returns the number of candles upserted.
 ///
-/// 挿入(または更新)した行数を返す。
+/// # Errors
+///
+/// - Returns an error if the CSV file cannot be opened.
+/// - Returns an error if a CSV row cannot be parsed.
+/// - Returns an error if the timestamp of a row is not in RFC 3339 format.
+/// - Returns an error if the upsert of a candle fails.
 pub async fn load_price_candles(
     pool: &PgPool,
     exchange: &str,

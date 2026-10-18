@@ -10,23 +10,23 @@ use rust_decimal_macros::dec;
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
 
-/// A running test API server.
+/// API server that runs in the test process on an ephemeral port.
 pub struct TestApp {
-    /// Base URL including scheme and port, e.g. `http://127.0.0.1:12345`.
+    /// Base URL of the server, made of the scheme, the host and the port.
     pub url: String,
-    /// Handle to the background server task. Drop or abort to shut down.
+    /// Handle of the background task that serves the API; dropping the `TestApp` aborts the task.
     pub handle: JoinHandle<()>,
-    /// Shared PriceStore — tests can insert ticks before making requests.
+    /// Price store that the server reads; tests insert ticks into it before they send requests.
     pub price_store: Arc<PriceStore>,
 }
 
 impl TestApp {
-    /// Convenience: build a reqwest client pre-configured with the base URL.
+    /// Returns a new `reqwest::Client` with the default settings.
     pub fn client(&self) -> reqwest::Client {
         reqwest::Client::new()
     }
 
-    /// Build a full endpoint URL, e.g. `self.endpoint("/api/trading-accounts")`.
+    /// Returns the URL of `path` on the server, built by appending `path` to `url`.
     pub fn endpoint(&self, path: &str) -> String {
         format!("{}{}", self.url, path)
     }
@@ -46,17 +46,30 @@ fn liquidation_levels_covering_every_exchange() -> Arc<HashMap<Exchange, rust_de
     Arc::new(m)
 }
 
-/// Start the API server in-process on an ephemeral port.
+/// Starts the API server in the test process on an ephemeral port, with the given database pool, an empty price store and liquidation levels for every exchange.
 ///
-/// The server uses the given DB pool and an empty PriceStore (no expected
-/// feeds). Tests that need price data should call `price_store.update()`
-/// before making requests.
+/// # Errors
+///
+/// - Returns an error if binding the port fails.
+/// - Returns an error if reading the local address of the listener fails.
+///
+/// # Panics
+///
+/// Panics if the server does not accept a connection within 250 ms.
 pub async fn spawn_test_app(pool: PgPool) -> anyhow::Result<TestApp> {
     spawn_test_app_with_price_store(pool, PriceStore::new(vec![])).await
 }
 
-/// Start the API server with a custom PriceStore (for health endpoint tests
-/// that need expected feeds).
+/// Starts the API server as `spawn_test_app` does, with the given price store.
+///
+/// # Errors
+///
+/// - Returns an error if binding the port fails.
+/// - Returns an error if reading the local address of the listener fails.
+///
+/// # Panics
+///
+/// Panics if the server does not accept a connection within 250 ms.
 pub async fn spawn_test_app_with_price_store(
     pool: PgPool,
     price_store: Arc<PriceStore>,
@@ -69,9 +82,16 @@ pub async fn spawn_test_app_with_price_store(
     .await
 }
 
-/// Start the API server with a custom liquidation-levels map. Used by tests
-/// that exercise the `accounts::create` validation against a constrained
-/// (e.g. single-exchange) config.
+/// Starts the API server as `spawn_test_app` does, with the given price store and the given liquidation level of each exchange.
+///
+/// # Errors
+///
+/// - Returns an error if binding the port fails.
+/// - Returns an error if reading the local address of the listener fails.
+///
+/// # Panics
+///
+/// Panics if the server does not accept a connection within 250 ms.
 pub async fn spawn_test_app_with_levels(
     pool: PgPool,
     price_store: Arc<PriceStore>,

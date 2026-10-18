@@ -1,3 +1,5 @@
+#![doc = "Smoke tests of the helpers and mocks of the integration test crate, and a full integration smoke test that uses them together."]
+
 use auto_trader_integration_tests::helpers::{db, fixture_loader};
 
 #[sqlx::test(migrations = "../../migrations")]

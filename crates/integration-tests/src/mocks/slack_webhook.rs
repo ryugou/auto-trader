@@ -5,13 +5,12 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use super::lock_mock_state;
 
-/// One captured POST request: the body text and the HTTP status this mock
-/// responded with to that specific request. Kept together (rather than as
-/// two parallel `Vec`s) so callers checking "which status did the request
-/// with this body get" cannot get the two lists out of sync.
+/// POST request that the mock received, together with the status it answered with.
 #[derive(Debug, Clone)]
 pub struct CapturedRequest {
+    /// Body of the request.
     pub body: String,
+    /// HTTP status of the response to the request.
     pub status: u16,
 }
 
@@ -37,13 +36,14 @@ impl Respond for CapturingResponder {
     }
 }
 
+/// Mock of a Slack webhook that records the POST requests it receives to `/webhook`.
 pub struct MockSlackWebhook {
     server: MockServer,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
 impl MockSlackWebhook {
-    /// Start the mock webhook server. Returns `(Self, webhook_url)`.
+    /// Starts the mock, which answers with status 200, and returns it together with the URL of its webhook.
     pub async fn start() -> (Self, String) {
         let server = MockServer::start().await;
         let requests: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -53,35 +53,37 @@ impl MockSlackWebhook {
         (this, url)
     }
 
-    /// Base URL of the mock server.
+    /// Returns the base URL of the server.
     pub fn url(&self) -> String {
         self.server.uri()
     }
 
-    /// Return all captured POST bodies.
+    /// Returns the bodies of the captured requests, in the order they arrived.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the lock on the captured requests is poisoned.
     pub fn captured_bodies(&self) -> anyhow::Result<Vec<String>> {
         let requests = lock_mock_state(&self.requests, "requests")?;
         Ok(requests.iter().map(|r| r.body.clone()).collect())
     }
 
-    /// Return all captured requests, each paired with the HTTP status this
-    /// mock responded with. Use this (instead of `captured_bodies`) when a
-    /// test needs to distinguish a request that got a failure response from
-    /// one that got a success response, e.g. to confirm a retry eventually
-    /// succeeded rather than merely being re-attempted.
+    /// Returns the captured requests with the status of each response, in the order they arrived.
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the lock on the captured requests is poisoned.
     pub fn captured_requests(&self) -> anyhow::Result<Vec<CapturedRequest>> {
         let requests = lock_mock_state(&self.requests, "requests")?;
         Ok(requests.clone())
     }
 
-    /// Replace the mounted mock so subsequent requests return an error.
-    /// Use [`Self::with_success_response`] to switch back (e.g. to simulate
-    /// a transient webhook outage that later recovers).
+    /// Makes the webhook answer subsequent requests with the status `code`.
     pub async fn with_error_response(&self, code: u16) {
         self.mount_responder(Some(code)).await;
     }
 
-    /// Replace the mounted mock so subsequent requests succeed again.
+    /// Makes the webhook answer subsequent requests with the status 200.
     pub async fn with_success_response(&self) {
         self.mount_responder(None).await;
     }
