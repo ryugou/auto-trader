@@ -166,27 +166,6 @@ pub async fn get_open_trade_with_account(
     row.map(OpenTradeWithAccount::try_from).transpose()
 }
 
-/// Returns the sum of the profit or loss minus the fees of the closed trades of the account whose exit time is at or after `since`, or zero if there are none.
-///
-/// # Errors
-///
-/// - Returns an error if the database query fails.
-pub async fn realized_net_since(
-    pool: &PgPool,
-    account_id: Uuid,
-    since: DateTime<Utc>,
-) -> anyhow::Result<Decimal> {
-    let row: (Option<Decimal>,) = sqlx::query_as(
-        "SELECT SUM(pnl_amount - fees) FROM trades \
-         WHERE account_id = $1 AND status = 'closed' AND exit_at >= $2",
-    )
-    .bind(account_id)
-    .bind(since)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.0.unwrap_or(Decimal::ZERO))
-}
-
 /// Kind of an event in the history of a trade.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -436,6 +415,3 @@ pub async fn list_trades(
 
     Ok((trades, total))
 }
-
-#[cfg(test)]
-mod tests;

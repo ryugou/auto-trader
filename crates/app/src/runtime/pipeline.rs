@@ -5,7 +5,6 @@ use auto_trader_core::event::{PriceEvent, SignalEvent, TradeEvent};
 use auto_trader_core::strategy::{ExitSignal, MacroUpdate};
 use auto_trader_core::types::Exchange;
 use auto_trader_strategy::engine::StrategyEngine;
-use rust_decimal::Decimal;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
@@ -17,8 +16,6 @@ use crate::bootstrap::live_flags::LiveFlags;
 
 pub(crate) struct RiskLimits {
     pub(crate) price_freshness_secs: u64,
-    pub(crate) daily_loss_limit_pct: Decimal,
-    pub(crate) halt_hours: u64,
 }
 
 pub(crate) struct PipelineChannels {
@@ -126,8 +123,6 @@ fn spawn_executor(
         live_forces_dry_run: live.forces_dry_run,
         live_enabled: live.enabled,
         price_freshness_secs: limits.price_freshness_secs,
-        daily_loss_limit_pct: limits.daily_loss_limit_pct,
-        halt_hours: limits.halt_hours,
         knowledge_store: dependencies.knowledge_store.clone(),
     };
     tokio::spawn(executor_loop::run(ctx, signal_rx))

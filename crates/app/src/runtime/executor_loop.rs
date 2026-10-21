@@ -12,11 +12,8 @@ use auto_trader_executor::risk_gate::{GateDecision, eval_price_freshness};
 use auto_trader_executor::trader::Trader as UnifiedTrader;
 use auto_trader_market::exchange_api::ExchangeApi;
 use auto_trader_notify::Notifier;
-use chrono::Utc;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
-
-mod kill_switch;
 
 pub(crate) struct ExecutorLoopContext {
     pub(crate) pool: sqlx::PgPool,
@@ -30,8 +27,6 @@ pub(crate) struct ExecutorLoopContext {
     pub(crate) live_forces_dry_run: bool,
     pub(crate) live_enabled: bool,
     pub(crate) price_freshness_secs: u64,
-    pub(crate) daily_loss_limit_pct: Decimal,
-    pub(crate) halt_hours: u64,
     pub(crate) knowledge_store: Option<Arc<dyn KnowledgeStore>>,
 }
 
@@ -104,11 +99,6 @@ async fn dispatch_to_account(
     let Some(exchange) = check_static_account_gates(ctx, pac, signal) else {
         return false;
     };
-
-    let now = Utc::now();
-    if !kill_switch::check_kill_switch(ctx, pac, signal, exchange, now).await {
-        return false;
-    }
 
     let dry_run =
         auto_trader::startup::effective_dry_run(&pac.account_type, ctx.live_forces_dry_run);

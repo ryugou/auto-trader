@@ -274,37 +274,9 @@ price_freshness_secs = 60
 fn risk_validate_rejects_zero_freshness() {
     let r = crate::config::RiskConfig {
         price_freshness_secs: 0,
-        daily_loss_limit_pct: rust_decimal_macros::dec!(0.05),
-        halt_hours: 24,
         sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
     };
     assert!(r.validate().is_err());
-}
-
-#[test]
-fn risk_defaults_apply_when_kill_switch_fields_omitted() {
-    let toml_str = r#"
-[vegapunk]
-endpoint = "http://localhost:3000"
-schema = "fx-trading"
-
-[database]
-url = "postgresql://u:p@localhost/auto_trader"
-
-[monitor]
-interval_secs = 60
-
-[pairs]
-active = ["USD_JPY"]
-
-[risk]
-price_freshness_secs = 60
-"#;
-    let cfg: AppConfig = toml::from_str(toml_str).unwrap();
-    let risk = cfg.risk.expect("risk section should parse");
-    assert_eq!(risk.daily_loss_limit_pct, rust_decimal_macros::dec!(0.05));
-    assert_eq!(risk.halt_hours, 24);
-    risk.validate().unwrap();
 }
 
 #[test]
@@ -334,43 +306,9 @@ price_freshness_secs = 60
         from_serde.price_freshness_secs
     );
     assert_eq!(
-        default.daily_loss_limit_pct,
-        from_serde.daily_loss_limit_pct
-    );
-    assert_eq!(default.halt_hours, from_serde.halt_hours);
-    assert_eq!(
         default.sizing_margin_buffer,
         from_serde.sizing_margin_buffer
     );
-}
-
-#[test]
-fn risk_validate_rejects_out_of_range_loss_pct() {
-    let too_big = crate::config::RiskConfig {
-        price_freshness_secs: 60,
-        daily_loss_limit_pct: rust_decimal_macros::dec!(1),
-        halt_hours: 24,
-        sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
-    };
-    assert!(too_big.validate().is_err());
-    let zero = crate::config::RiskConfig {
-        price_freshness_secs: 60,
-        daily_loss_limit_pct: rust_decimal_macros::dec!(0),
-        halt_hours: 24,
-        sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
-    };
-    assert!(zero.validate().is_err());
-}
-
-#[test]
-fn risk_validate_rejects_zero_halt_hours() {
-    let r = crate::config::RiskConfig {
-        price_freshness_secs: 60,
-        daily_loss_limit_pct: rust_decimal_macros::dec!(0.05),
-        halt_hours: 0,
-        sizing_margin_buffer: rust_decimal_macros::dec!(0.10),
-    };
-    assert!(r.validate().is_err());
 }
 
 #[test]
