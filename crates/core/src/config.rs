@@ -393,23 +393,9 @@ pub struct PositionSizingConfig {
 pub struct RiskConfig {
     /// Maximum age of the latest price tick, in seconds.
     pub price_freshness_secs: u64,
-    /// Daily loss ratio of the day's starting balance at which trading stops; 0.05 when absent.
-    #[serde(default = "default_daily_loss_limit_pct")]
-    pub daily_loss_limit_pct: Decimal,
-    /// Hours that trading stays halted; 24 when absent.
-    #[serde(default = "default_halt_hours")]
-    pub halt_hours: u64,
     /// Margin buffer used in position sizing; 0.10 when absent.
     #[serde(default = "default_sizing_margin_buffer")]
     pub sizing_margin_buffer: Decimal,
-}
-
-fn default_daily_loss_limit_pct() -> Decimal {
-    Decimal::new(5, 2)
-}
-
-fn default_halt_hours() -> u64 {
-    24
 }
 
 fn default_sizing_margin_buffer() -> Decimal {
@@ -420,31 +406,21 @@ impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             price_freshness_secs: 60,
-            daily_loss_limit_pct: default_daily_loss_limit_pct(),
-            halt_hours: default_halt_hours(),
             sizing_margin_buffer: default_sizing_margin_buffer(),
         }
     }
 }
 
 impl RiskConfig {
-    /// Checks the freshness, the daily loss limit, the halt hours and the margin buffer.
+    /// Checks the freshness and the margin buffer.
     ///
     /// # Errors
     ///
     /// - Returns an error if `price_freshness_secs` is zero.
-    /// - Returns an error if `daily_loss_limit_pct` is not in the open interval from 0 to 1.
-    /// - Returns an error if `halt_hours` is zero.
     /// - Returns an error if `sizing_margin_buffer` is negative.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.price_freshness_secs == 0 {
             anyhow::bail!("invalid option \"risk.price_freshness_secs\": must be > 0");
-        }
-        if self.daily_loss_limit_pct <= Decimal::ZERO || self.daily_loss_limit_pct >= Decimal::ONE {
-            anyhow::bail!("invalid option \"risk.daily_loss_limit_pct\": must be in (0, 1)");
-        }
-        if self.halt_hours == 0 {
-            anyhow::bail!("invalid option \"risk.halt_hours\": must be > 0");
         }
         if self.sizing_margin_buffer < Decimal::ZERO {
             anyhow::bail!("invalid option \"risk.sizing_margin_buffer\": must be >= 0");

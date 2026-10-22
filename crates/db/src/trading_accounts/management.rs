@@ -1,5 +1,4 @@
 use auto_trader_core::types::Exchange;
-use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -101,43 +100,6 @@ pub async fn update_balance(pool: &PgPool, id: Uuid, new_balance: Decimal) -> an
     if result.rows_affected() == 0 {
         anyhow::bail!("failed to update balance for account: not found");
     }
-    Ok(())
-}
-
-/// Returns the time until which the account is halted and the reason for the halt, or `None` if the account does not exist or has no halt time.
-///
-/// # Errors
-///
-/// - Returns an error if the database query fails.
-pub async fn get_halt(
-    pool: &PgPool,
-    id: Uuid,
-) -> anyhow::Result<Option<(DateTime<Utc>, Option<String>)>> {
-    let row: Option<(Option<DateTime<Utc>>, Option<String>)> =
-        sqlx::query_as("SELECT halted_until, halt_reason FROM trading_accounts WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|(until, reason)| until.map(|u| (u, reason))))
-}
-
-/// Sets the halt time and the halt reason of the account. It changes nothing if the account does not exist.
-///
-/// # Errors
-///
-/// - Returns an error if the database query fails.
-pub async fn set_halt(
-    pool: &PgPool,
-    id: Uuid,
-    until: DateTime<Utc>,
-    reason: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("UPDATE trading_accounts SET halted_until = $2, halt_reason = $3 WHERE id = $1")
-        .bind(id)
-        .bind(until)
-        .bind(reason)
-        .execute(pool)
-        .await?;
     Ok(())
 }
 

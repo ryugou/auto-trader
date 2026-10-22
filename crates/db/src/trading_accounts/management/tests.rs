@@ -447,34 +447,6 @@ async fn migration_retires_legacy_fx_accounts_and_seeds_fx_new(pool: sqlx::PgPoo
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn set_and_get_halt_roundtrip(pool: sqlx::PgPool) {
-    use chrono::TimeZone;
-    let account = list_all(&pool)
-        .await
-        .expect("list accounts")
-        .into_iter()
-        .next()
-        .expect("migrations seed at least one account");
-
-    assert!(
-        get_halt(&pool, account.id).await.unwrap().is_none(),
-        "no halt set initially"
-    );
-
-    let until = chrono::Utc.with_ymd_and_hms(2026, 7, 8, 0, 0, 0).unwrap();
-    set_halt(&pool, account.id, until, "daily loss limit")
-        .await
-        .expect("set_halt");
-
-    let (got_until, got_reason) = get_halt(&pool, account.id)
-        .await
-        .expect("get_halt")
-        .expect("halt should be set");
-    assert_eq!(got_until, until);
-    assert_eq!(got_reason.as_deref(), Some("daily loss limit"));
-}
-
-#[sqlx::test(migrations = "../../migrations")]
 async fn recalculate_balance_rejects_when_open_trades_exist(pool: sqlx::PgPool) {
     let account = create_account(&pool, &paper_req("recalc_open_trade", "gmo_fx"))
         .await

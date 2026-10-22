@@ -51,8 +51,6 @@ pub(crate) async fn resolve(
         position_sizer,
         limits: RiskLimits {
             price_freshness_secs: risk.price_freshness_secs,
-            daily_loss_limit_pct: risk.daily_loss_limit_pct,
-            halt_hours: risk.halt_hours,
         },
     })
 }
